@@ -33,6 +33,10 @@ from lithos_loom.plugins.story_develop.config import (
     parse_parity_command,
     parse_test_command,
 )
+from lithos_loom.plugins.story_develop.generated import (
+    parse_generated_paths,
+    parse_regenerate_command,
+)
 from lithos_loom.plugins.story_develop.merge_gate import (
     MergeGateResult,
     run_merge_gate,
@@ -99,6 +103,22 @@ def merge_gate_command(
         None,
         "--parity-command",
         help="Repo-parity command run as a required raw-exit check.",
+    ),
+    generated_path: list[str] | None = typer.Option(
+        None,
+        "--generated-path",
+        help="Repo-relative path whose content is GENERATED (repeatable; PRD S4). A "
+        "conflict there is taken from the base and rebuilt on the composed tree "
+        "with --regenerate-command, never merged; a clean merge regenerates too. "
+        "Without --story this is the only source; with it, the story's "
+        "develop_generated_paths.",
+    ),
+    regenerate_command: str | None = typer.Option(
+        None,
+        "--regenerate-command",
+        help="Command that rebuilds every --generated-path on the composed tree, "
+        "run in the gate container before the check-set. Required with "
+        "--generated-path.",
     ),
     image: str | None = typer.Option(
         None,
@@ -170,6 +190,17 @@ def merge_gate_command(
     try:
         test_command = parse_test_command(test_command, where="--test-command")
         parity_command = parse_parity_command(parity_command, where="--parity-command")
+        generated_paths = parse_generated_paths(
+            generated_path or None, where="--generated-path"
+        )
+        regenerate_command = parse_regenerate_command(
+            regenerate_command, where="--regenerate-command"
+        )
+        if generated_paths and not regenerate_command:
+            raise ValueError(
+                "--generated-path needs --regenerate-command: paths nothing "
+                "regenerates would take a side and ship stale output"
+            )
         # `is not None`, not truthiness: a blank --image must fail closed like
         # every other blank value, never fall through to the story / default
         explicit_image = (
@@ -231,10 +262,19 @@ def merge_gate_command(
         for k, v in {
             "test_command": test_command,
             "parity_command": parity_command,
+            "regenerate_command": regenerate_command,
         }.items()
         if v is not None
     }
-    gate_keys = ("test_gate", "test_command", "parity_command")
+    if generated_paths:
+        explicit["generated_paths"] = generated_paths
+    gate_keys = (
+        "test_gate",
+        "test_command",
+        "parity_command",
+        "generated_paths",
+        "regenerate_command",
+    )
     gate_settings: dict = {
         "test_timeout": test_timeout,
         **{k: story_layer[k] for k in gate_keys if k in story_layer},

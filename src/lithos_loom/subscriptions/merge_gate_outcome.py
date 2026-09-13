@@ -163,6 +163,18 @@ async def post_conflict(
 ) -> None:
     raw = data.get("conflicting_paths")
     paths = [p for p in (raw if isinstance(raw, list) else []) if isinstance(p, str)]
+    # PRD S4: generated paths the run set aside (taken from the base, to be
+    # regenerated) are named apart, so nobody hand-merges one
+    raw_gen = data.get("generated_conflicts")
+    generated = [
+        p for p in (raw_gen if isinstance(raw_gen, list) else []) if isinstance(p, str)
+    ]
+    aside = (
+        f" ({len(generated)} generated path(s) set aside, regenerated on the "
+        f"merge: {', '.join(generated)})"
+        if generated
+        else ""
+    )
     await post_finding_then_mark(
         ctx,
         task_id=story_id,
@@ -170,7 +182,7 @@ async def post_conflict(
             f"{PR_CONFLICTED} merge-gate: delivered PR {spec.pr_url} conflicts "
             f"with {base_ref} @ {record.base_sha[:12]} (head "
             f"{record.head_sha[:12]}) in {len(paths)} path(s): "
-            f"{', '.join(paths) or '(unnamed)'}; story {story_id} remains "
+            f"{', '.join(paths) or '(unnamed)'}{aside}; story {story_id} remains "
             f"blocked on gate {gate_id}. Resolve by merging {base_ref} into the "
             f"PR branch (never rebase a delivered branch) and pushing; the next "
             f"sweep re-evaluates at the new head."

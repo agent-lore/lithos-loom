@@ -809,6 +809,25 @@ edges would have prevented all of them.
   changes for the consuming project, which is why this sits in prevention and
   not in loom.
 
+  *Amended 2026-09-13 — shipped as loom code after all.* Neither repo-policy
+  shape exists in git: a merge driver runs **per file, mid-merge, before the
+  sources are combined** (a generator run inside it computes from a
+  half-merged tree), and a post-merge hook never fires on the `--no-commit`
+  merges loom's intakes are — nor on GitHub's. Both are also per-clone
+  configuration. And lens #84 (2026-09-13) was the argument in one PR: its
+  *only* conflicts were `docs/generated/metrics.*`, resolved by a $6.69,
+  33-minute coder run that then got the regeneration wrong once. So the
+  policy lives where the merges happen: a project declares
+  `develop_generated_paths` + `develop_regenerate_command`; the S3 merge-gate
+  takes either side of a generated-only conflict, regenerates on the composed
+  tree in the gate container (a clean merge too) and commits once with fresh
+  outputs — zero tokens; the S5 intake sets generated paths aside and hands
+  the coder only the real conflicts. Generic to any committed generated
+  artifact, not just the guardrail kit. The `blocks`-edge half stands as
+  written, and S6's serial admission now covers most of its conflict motive
+  (a second story on one project starts after the first PR closes, cut from
+  the merged main); what an edge still encodes is *order*.
+
 ### S8 — measure the autonomous paths before trusting them
 
 This PRD proposes the largest autonomous mechanism loom has, and none of it is

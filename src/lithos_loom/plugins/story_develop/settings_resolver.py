@@ -38,6 +38,7 @@ from .config import (
     parse_review_profile,
     parse_test_command,
 )
+from .generated import parse_generated_paths, parse_regenerate_command
 
 # A config parser: ``(value, *, where) -> parsed | None``, raising ``ValueError`` on
 # a malformed value (the shared contract of parse_model / parse_image / … in config).
@@ -80,6 +81,11 @@ class ScalarSettings:
     # #273 slice 3: the aggregate repo-parity command (e.g. "make check"), project-then-
     # task. None = no parity check.
     parity_command: str | None = None
+    # PRD pr-reconciliation S4: the generated-paths policy (project + per-task,
+    # ``develop_generated_paths`` / ``develop_regenerate_command``). Declared
+    # together: paths without a command are dropped with a friction.
+    generated_paths: tuple[str, ...] = ()
+    regenerate_command: str | None = None
     # The `develop_*` keys whose value a parser rejected (bare key, either
     # layer), in resolution order — the structural twin of the friction text.
     rejected_keys: tuple[str, ...] = ()
@@ -434,6 +440,34 @@ def resolve_scalar_settings(
         frictions,
         rejected,
     )
+    # PRD S4: the two halves of the generated-paths policy, then the pair rule
+    # — paths that nothing regenerates would take a side and ship stale output.
+    generated_raw = _resolve_project_then_task(
+        _ProjectThenTaskField(
+            "generated_paths", "develop_generated_paths", parse_generated_paths
+        ),
+        meta,
+        task_metadata,
+        frictions,
+        rejected,
+    )
+    generated_paths: tuple[str, ...] = tuple(generated_raw or ())
+    regenerate_command = _resolve_project_then_task(
+        _ProjectThenTaskField(
+            "regenerate_command", "develop_regenerate_command", parse_regenerate_command
+        ),
+        meta,
+        task_metadata,
+        frictions,
+        rejected,
+    )
+    if generated_paths and not regenerate_command:
+        frictions.append(
+            "develop_generated_paths declared without develop_regenerate_command "
+            "— nothing would rebuild them after a merge; ignoring"
+        )
+        rejected.append("develop_generated_paths")
+        generated_paths = ()
     return ScalarSettings(
         coder=coder,
         coder_model=coder_model,
@@ -450,6 +484,8 @@ def resolve_scalar_settings(
         check_commands=check_commands,
         check_states=check_states,
         parity_command=parity_command,
+        generated_paths=generated_paths,
+        regenerate_command=regenerate_command,
         copilot_review=copilot_review,
         rejected_keys=tuple(dict.fromkeys(rejected)),
     )

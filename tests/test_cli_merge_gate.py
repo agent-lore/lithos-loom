@@ -212,6 +212,12 @@ def test_flags_reach_the_develop_config(stubs: dict, tmp_path: Path) -> None:
             "make test",
             "--parity-command",
             "make parity",
+            "--generated-path",
+            "docs/generated/",
+            "--generated-path",
+            "api/client.py",
+            "--regenerate-command",
+            "make gen",
             "--image",
             "custom:img",
             "--test-timeout",
@@ -228,6 +234,8 @@ def test_flags_reach_the_develop_config(stubs: dict, tmp_path: Path) -> None:
     assert cfg.check_states == {"lint": "required"}
     assert cfg.test_command == "make test"
     assert cfg.parity_command == "make parity"
+    assert cfg.generated_paths == ("docs/generated", "api/client.py")
+    assert cfg.regenerate_command == "make gen"
     assert cfg.image == "custom:img"
     assert cfg.test_timeout == 90
     assert cfg.work_dir == tmp_path / "work" / "merge-gate"
@@ -369,6 +377,8 @@ def story_stubs(stubs: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
             image="ralph-sandbox:lens",
             test_command="make check",
             parity_command="make parity",
+            generated_paths=("docs/generated",),
+            regenerate_command="make diagrams",
             check_states={"lint": "informational"},
             review_profile_task=meta.get("develop_review_profile"),
         ),
@@ -399,6 +409,8 @@ def test_story_resolves_the_projects_current_check_set(story_stubs: dict) -> Non
     assert cfg.image == "ralph-sandbox:lens"
     assert cfg.test_command == "make check"
     assert cfg.parity_command == "make parity"
+    assert cfg.generated_paths == ("docs/generated",)
+    assert cfg.regenerate_command == "make diagrams"
     assert cfg.check_states == {"lint": "informational"}
 
 
@@ -743,3 +755,18 @@ def test_a_degraded_project_reports_its_reason_once(
     assert result.exit_code == 4
     assert result.output.count("no project-context doc") == 1
     assert "built-in defaults would apply" not in result.output
+
+
+def test_generated_path_flags_fail_closed_on_garbage(
+    stubs: dict, tmp_path: Path
+) -> None:
+    for argv in (
+        ["--generated-path", "/abs", "--regenerate-command", "make gen"],
+        ["--generated-path", "docs/generated"],  # paths without a command
+        ["--regenerate-command", "   ", "--generated-path", "docs"],
+    ):
+        result = runner.invoke(
+            develop_app, ["merge-gate", "#7", "--repo", str(tmp_path), *argv]
+        )
+        assert result.exit_code == 2, argv
+        assert "config" not in stubs

@@ -23,6 +23,7 @@ from pathlib import Path
 
 from ...runner import git, worktree
 from .config import DevelopConfig
+from .generated import partition_conflicts, take_base_side
 from .review_resolve import ResolvedChange
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,13 @@ _LANDED_COMMITS = 40
 
 @dataclass(frozen=True)
 class ConflictIntake:
-    """A merge in progress, ready for the resolution round."""
+    """A merge in progress, ready for the resolution round.
+
+    ``paths`` are the conflicts the coder resolves — and the markers guard
+    checks. ``generated_paths`` (PRD S4) were conflicted too but are not the
+    coder's: resolved to the base's copy at intake, they are rebuilt by the
+    project's generator, which the brief tells the coder to run.
+    """
 
     worktree: Path
     base_ref: str
@@ -112,6 +119,7 @@ class ConflictIntake:
     merge_base: str
     paths: tuple[str, ...]
     brief: str
+    generated_paths: tuple[str, ...] = ()
 
 
 def prepare_conflict_intake(
@@ -137,7 +145,13 @@ def prepare_conflict_intake(
         parent=config.worktree_parent,
     )
     try:
-        paths = git.merge_no_commit(wt, base_sha)
+        conflicted = git.merge_no_commit(wt, base_sha)
+        # PRD S4: a conflict in a declared generated path is not the coder's
+        # — take the base's copy now; the generator rebuilds it. A merge that
+        # conflicts ONLY there is clean for the resolver (the merge-gate
+        # regenerates and pushes it, zero tokens).
+        generated, real = partition_conflicts(conflicted, config.generated_paths)
+        paths = list(real)
         if not paths:
             git.abort_merge(wt)
             raise _CleanMerge
@@ -145,8 +159,16 @@ def prepare_conflict_intake(
         if unsupported:
             git.abort_merge(wt)
             raise UnsupportedConflict(unsupported, base_sha=base_sha)
+        if generated:
+            take_base_side(wt, generated)
         brief = render_conflict_brief(
-            wt, change, base_ref=base_ref, base_sha=base_sha, paths=paths
+            wt,
+            change,
+            base_ref=base_ref,
+            base_sha=base_sha,
+            paths=paths,
+            generated=generated,
+            regenerate_command=config.regenerate_command,
         )
     except _CleanMerge:
         _discard(config, wt)
@@ -170,6 +192,7 @@ def prepare_conflict_intake(
         merge_base=change.base_sha,
         paths=tuple(paths),
         brief=brief,
+        generated_paths=generated,
     )
 
 
@@ -193,9 +216,12 @@ def render_conflict_brief(
     base_ref: str,
     base_sha: str,
     paths: list[str],
+    generated: tuple[str, ...] = (),
+    regenerate_command: str | None = None,
 ) -> str:
     """The round-1 brief: the PR's intent, what landed on the base since the
-    merge-base, and the conflicted hunks (bounded per path)."""
+    merge-base, the conflicted hunks (bounded per path) and, under the PRD S4
+    policy, the generated paths set aside with the command that rebuilds them."""
     landed = git.log_between(wt, change.base_sha, base_sha).splitlines()
     if len(landed) > _LANDED_COMMITS:
         landed = landed[:_LANDED_COMMITS] + [
@@ -231,6 +257,33 @@ def render_conflict_brief(
         label = fence(path)
         body = fence("\n".join(hunk))
         lines += ["#### path:", label, path, label, "", body, *hunk, body, ""]
+    if generated:
+        gen_fence = fence("\n".join(generated))
+        cmd = regenerate_command or "the project's generator"
+        cmd_fence = fence(cmd)
+        lines += [
+            "### Generated paths set aside (not yours to merge)",
+            "",
+            (
+                f"{len(generated)} conflicted path(s) are GENERATED output. They "
+                "were resolved to the base's copy and staged for you — do not "
+                "hand-merge them. Once the conflicts above are resolved, "
+                "regenerate them on the composed tree by running, in /workspace:"
+            ),
+            "",
+            cmd_fence,
+            cmd,
+            cmd_fence,
+            "",
+            "as the LAST step before you hand off (after any formatting — the "
+            "project's drift check compares the committed copy to what the "
+            "generator produces). The paths, one per line:",
+            "",
+            gen_fence,
+            *generated,
+            gen_fence,
+            "",
+        ]
     return "\n".join(lines)
 
 

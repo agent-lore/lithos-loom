@@ -775,3 +775,199 @@ def test_required_timeout_is_red_with_a_red_verdict(
     result = mg.run_merge_gate(fx.config(), fx.change())
     assert result.status == "red" and result.verdict == "RED"
     assert result.pushed is False
+
+
+# ── PRD S4: generated paths are regenerated on the merge, never merged ───────
+
+
+def _add_generated(fx: Fixture) -> None:
+    """Both sides rewrite ``docs/generated/metrics.json`` (a conflict no
+    generator would resolve by text) — on top of the fixture's own state."""
+    _git(fx.repo, "switch", "-q", "feature")
+    (fx.repo / "docs" / "generated").mkdir(parents=True, exist_ok=True)
+    (fx.repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 1}\n')
+    fx.head = _commit(
+        fx.repo, "docs/generated/metrics.json", '{"lines": 12}\n', "story: metrics"
+    )
+    _git(fx.repo, "switch", "-q", "main")
+    (fx.repo / "docs" / "generated").mkdir(parents=True, exist_ok=True)
+    (fx.repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 1}\n')
+    _git(fx.repo, "add", "-A")
+    _git(fx.repo, "commit", "-q", "-m", "base: seed metrics")
+    _git(fx.repo, "push", "-q", "origin", "main", "feature")
+    # the story was cut from a base that already had the seed
+    fx.base_start = _git(fx.repo, "rev-parse", "main")
+
+
+def _stub_regenerate(monkeypatch: pytest.MonkeyPatch, *, ok: bool = True) -> list[dict]:
+    from lithos_loom.plugins.story_develop.generated import RegenerateResult
+
+    calls: list[dict] = []
+
+    def fake(config, wt, *, label, run_container=None):
+        # what the generator sees: the composed tree, merge in progress
+        calls.append(
+            {
+                "wt": wt,
+                "label": label,
+                "merging": git.merge_head(wt) is not None,
+                "metrics": (wt / "docs/generated/metrics.json").read_text(),
+            }
+        )
+        if not ok:
+            return RegenerateResult(
+                ok=False, exit_code=2, output_tail="generator broke"
+            )
+        (wt / "docs" / "generated" / "metrics.json").write_text('{"lines": 23}\n')
+        git.stage_paths(wt, config.generated_paths)
+        return RegenerateResult(
+            ok=True,
+            exit_code=0,
+            output_tail="ok",
+            changed=("docs/generated/metrics.json",),
+        )
+
+    monkeypatch.setattr(mg, "regenerate", fake)
+    return calls
+
+
+_POLICY = {"generated_paths": ("docs/generated",), "regenerate_command": "make gen"}
+
+
+def test_generated_only_conflict_is_regenerated_gated_and_pushed(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_generated(fx)
+    _git(fx.repo, "switch", "-q", "main")
+    (fx.repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 11}\n')
+    tip = _commit(fx.repo, "base.txt", "landed\n", "base: other PR landed")
+    _git(fx.repo, "push", "-q", "origin", "main")
+    _git(fx.repo, "fetch", "-q", "origin")
+    cap = _stub_checks(monkeypatch)
+    regen = _stub_regenerate(monkeypatch)
+
+    result = mg.run_merge_gate(fx.config(**_POLICY), fx.change())
+
+    assert result.status == "green", result.message
+    assert result.conflicting_paths == ()
+    assert result.regenerated == ("docs/generated/metrics.json",)
+    # the generator ran on the composed tree with the merge still in
+    # progress, the base's copy taken for the conflicted generated file
+    assert len(regen) == 1 and regen[0]["merging"] and regen[0]["label"] == "merge"
+    assert regen[0]["metrics"] == '{"lines": 11}\n'
+    # ONE merge commit carries the regenerated output; the check-set gated it
+    parents = _git(fx.repo, "log", "-1", "--format=%P", result.merge_sha).split()
+    assert parents == [fx.head, tip]
+    assert (
+        _git(fx.repo, "show", f"{result.merge_sha}:docs/generated/metrics.json")
+        == '{"lines": 23}'
+    )
+    assert cap["run"]["sha"] == result.merge_sha
+    assert result.pushed and _remote_sha(fx.bare, "feature") == result.merge_sha
+
+
+def test_a_clean_merge_still_regenerates_under_the_policy(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # composition moves generated output even when the files auto-merge
+    _add_generated(fx)
+    tip = fx.advance_base()
+    _stub_checks(monkeypatch)
+    regen = _stub_regenerate(monkeypatch)
+    result = mg.run_merge_gate(fx.config(**_POLICY), fx.change())
+    assert result.status == "green" and len(regen) == 1
+    parents = _git(fx.repo, "log", "-1", "--format=%P", result.merge_sha).split()
+    assert parents == [fx.head, tip]
+    assert (
+        _git(fx.repo, "show", f"{result.merge_sha}:docs/generated/metrics.json")
+        == '{"lines": 23}'
+    )
+
+
+def test_a_real_conflict_is_reported_without_the_generated_noise(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_generated(fx)
+    _git(fx.repo, "switch", "-q", "main")
+    (fx.repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 11}\n')
+    (fx.repo / "shared.txt").write_text("base\n")
+    _commit(fx.repo, "base.txt", "landed\n", "base: conflicting PR landed")
+    _git(fx.repo, "push", "-q", "origin", "main")
+    _git(fx.repo, "fetch", "-q", "origin")
+    cap = _stub_checks(monkeypatch)
+    regen = _stub_regenerate(monkeypatch)
+    result = mg.run_merge_gate(fx.config(**_POLICY), fx.change())
+    assert result.status == "conflict"
+    assert result.conflicting_paths == ("shared.txt",)
+    assert result.generated_conflicts == ("docs/generated/metrics.json",)
+    assert "shared.txt" in result.message and "generated" in result.message
+    assert regen == [] and "run" not in cap
+    assert _remote_sha(fx.bare, "feature") == fx.head
+
+
+def test_a_generator_that_fails_is_a_red_regenerate_check(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_generated(fx)
+    fx.advance_base()
+    cap = _stub_checks(monkeypatch)
+    _stub_regenerate(monkeypatch, ok=False)
+    result = mg.run_merge_gate(fx.config(**_POLICY), fx.change())
+    assert result.status == "red" and result.verdict == "RED"
+    assert [c.name for c in result.checks] == ["regenerate"]
+    assert result.checks[0].passed is False and result.checks[0].exit_code == 2
+    assert "generator broke" in result.checks[0].output_tail
+    assert "regenerate" in result.message
+    assert "run" not in cap  # the check-set never ran on a tree that could not be built
+    assert result.pushed is False and _remote_sha(fx.bare, "feature") == fx.head
+    assert _worktrees(fx.repo) == []
+
+
+def test_without_a_policy_the_merge_gate_is_unchanged(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_generated(fx)
+    _git(fx.repo, "switch", "-q", "main")
+    (fx.repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 11}\n')
+    _commit(fx.repo, "base.txt", "landed\n", "base: other PR landed")
+    _git(fx.repo, "push", "-q", "origin", "main")
+    _git(fx.repo, "fetch", "-q", "origin")
+    _stub_checks(monkeypatch)
+    regen = _stub_regenerate(monkeypatch)
+    result = mg.run_merge_gate(fx.config(), fx.change())
+    assert result.status == "conflict"
+    assert result.conflicting_paths == ("docs/generated/metrics.json",)
+    assert result.generated_conflicts == () and regen == []
+
+
+def test_settings_fingerprint_tracks_the_generated_policy(tmp_path: Path) -> None:
+    base = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path / "w")
+    with_policy = DevelopConfig(
+        repo=tmp_path, description="x", work_dir=tmp_path / "w", **_POLICY
+    )
+    other_cmd = DevelopConfig(
+        repo=tmp_path,
+        description="x",
+        work_dir=tmp_path / "w",
+        generated_paths=("docs/generated",),
+        regenerate_command="make other",
+    )
+    assert mg.settings_fingerprint(base) != mg.settings_fingerprint(with_policy)
+    assert mg.settings_fingerprint(with_policy) != mg.settings_fingerprint(other_cmd)
+
+
+def test_to_json_carries_the_generated_fields(tmp_path: Path) -> None:
+    change = ResolvedChange(
+        base_sha="b" * 40, head_sha="h" * 40, head_ref="#1", head_branch="f"
+    )
+    r = mg.MergeGateResult(
+        status="conflict",
+        change=change,
+        head_sha="h" * 40,
+        conflicting_paths=("a.py",),
+        generated_conflicts=("docs/generated/m.json",),
+        regenerated=(),
+    )
+    payload = r.to_json()
+    assert payload["generated_conflicts"] == ["docs/generated/m.json"]
+    assert payload["regenerated"] == []

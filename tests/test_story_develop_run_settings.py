@@ -64,10 +64,14 @@ def test_overrides_carry_only_what_the_story_pinned() -> None:
             check_commands={"lint": "ruff"},
             check_states={"lint": "required"},
             parity_command="make parity",
+            generated_paths=("docs/generated",),
+            regenerate_command="make diagrams",
             image="img:x",
             fallback_chain=("codex",),
         )
     )
+    assert pinned["generated_paths"] == ("docs/generated",)
+    assert pinned["regenerate_command"] == "make diagrams"
     assert pinned["max_rounds"] == 8
     assert pinned["max_cost_usd"] == 20.0
     assert pinned["test_gate"] is False

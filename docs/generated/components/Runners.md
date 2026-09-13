@@ -14,7 +14,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | M | 1 | 22 |
+| `lithos_loom.runner.git` | M | 1 | 25 |
 | `lithos_loom.runner.worktree` | S | 0 | 5 |
 
 ## Public API
@@ -49,6 +49,9 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `unmerged_entries` — *path*'s unmerged index entries while a merge is in progress: stage (1 = base, 2 = ours, 3 = theirs) → blob mode (``100644`` / ``100755`` a file, ``120000`` a symlink, ``160000`` a submodule). A modify/delete lacks stage 2 or 3; a symlink conflict never carries textual markers (and the worktree path FOLLOWS the link), so the mode is what to judge.
 - def `unmerged_stages` — The index stages *path* has while unmerged — see :func:`unmerged_entries`.
 - def `abort_merge` — Abandon an in-progress merge, restoring the pre-merge tree.
+- def `take_their_side` — Resolve conflicted *paths* of an in-progress merge to the MERGED-IN side (``MERGE_HEAD``'s copy) and stage them — PRD S4: a conflict in a generated artifact is not merged, either side is taken and the generator runs on the composed tree. Pathspec magic is disabled: the paths come from ``git``'s own unmerged list, never from a prompt.
+- def `stage_paths` — ``git add -A`` limited to *paths* (files or directory prefixes): additions, modifications and deletions under them, nothing else.
+- def `write_tree` — The tree object of the INDEX — what a commit made now would contain.
 - def `merge_head` — The sha an in-progress merge is merging (``MERGE_HEAD``), else None.
 - def `merge_in_progress` — Whether *worktree* has a merge in progress (``MERGE_HEAD`` set) — resolved through ``--git-path`` so a linked worktree's private git dir is the one consulted.
 - def `conflict_markers` — Of *paths*, those whose working-tree content still carries conflict markers — the pre-commit guard for a resolution round (``git commit`` does not refuse markers; the guard must). A path deleted as its resolution carries none.

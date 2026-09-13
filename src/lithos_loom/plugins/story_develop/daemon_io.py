@@ -165,6 +165,10 @@ class ProjectDevelopSettings:
     # #273 slice 3: the aggregate repo-parity command (``develop_parity_command``,
     # project + per-task). None = no parity check.
     parity_command: str | None = None
+    # PRD pr-reconciliation S4: the generated-paths policy (``develop_generated_paths``
+    # + ``develop_regenerate_command``). Threaded onto ``DevelopConfig``.
+    generated_paths: tuple[str, ...] = ()
+    regenerate_command: str | None = None
     # Review Profile (#139). ``review_profile_project`` is the project-layer name
     # (context-doc ``develop_review_profile``), ``review_profile_task`` the
     # per-task one (task ``develop_review_profile``) — both parsed by the
@@ -306,6 +310,8 @@ def _degraded_settings(
         check_commands=scalars.check_commands,
         check_states=scalars.check_states,
         parity_command=scalars.parity_command,
+        generated_paths=scalars.generated_paths,
+        regenerate_command=scalars.regenerate_command,
         review_profile_project=scalars.review_profile_project,
         review_profile_task=scalars.review_profile_task,
         context_read_failed=context_read_failed,
@@ -386,6 +392,8 @@ def resolve_project_settings(
         check_commands=scalars.check_commands,
         check_states=scalars.check_states,
         parity_command=scalars.parity_command,
+        generated_paths=scalars.generated_paths,
+        regenerate_command=scalars.regenerate_command,
         review_profile_project=scalars.review_profile_project,
         review_profile_task=scalars.review_profile_task,
         frictions=tuple(frictions),
@@ -934,6 +942,10 @@ def story_config_overrides(settings: ProjectDevelopSettings) -> dict[str, Any]:
         overrides["check_states"] = settings.check_states
     if settings.parity_command is not None:
         overrides["parity_command"] = settings.parity_command
+    if settings.generated_paths:
+        overrides["generated_paths"] = settings.generated_paths
+    if settings.regenerate_command is not None:
+        overrides["regenerate_command"] = settings.regenerate_command
     if settings.image:
         overrides["image"] = settings.image
     if settings.fallback_chain:
