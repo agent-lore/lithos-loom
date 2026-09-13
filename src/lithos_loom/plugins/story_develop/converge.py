@@ -72,6 +72,7 @@ ConvergeStatus = Literal[
     "converged",
     "triage_rejected",
     "not_converged",
+    "infra_failed",
     "fork_unsupported",
     "merged",
     "merge_race",
@@ -109,8 +110,12 @@ class ConvergeResult:
     * ``converged`` — the loop approved; the fixed branch was pushed (unless
       ``no_push``).
     * ``not_converged`` — the loop stopped without approval (``max_rounds`` /
-      ``disputed`` / ``stalled`` / ``cost_exceeded`` / ``infra_failed``); the fixes
-      are left in the local worktree, nothing pushed.
+      ``disputed`` / ``stalled`` / ``cost_exceeded``); the fixes are left in the
+      local worktree, nothing pushed.
+    * ``infra_failed`` — the loop died on the host (an auth / transport / spawn
+      failure persisted through the reaction table's retries, slice B): NOT a
+      verdict on the change, so the watcher refunds the S5b round and keeps the
+      conflict-resolve pair armed (#377); ``host_action`` rides the JSON.
     * ``fork_unsupported`` — the PR head is on a fork loom cannot push to.
     * ``merged`` — the PR has already landed; there is nothing to converge and
       any fix commit would be unlandable on it.
@@ -220,6 +225,8 @@ class ConvergeResult:
             "head_sha": self.change.head_sha,
             "rounds": dev.rounds if dev is not None else 0,
             "develop_status": dev.status if dev is not None else None,
+            # #377: what to fix on the host when the loop ended `infra_failed`
+            "host_action": dev.host_action if dev is not None else "",
             "fixer_commits": len(self.fixer_commits),
             "pushed": self.pushed,
             "pushed_sha": self.pushed_sha or None,
@@ -681,7 +688,9 @@ def _loop_and_deliver(
 
     if not result.approved:
         return ConvergeResult(
-            status="not_converged",
+            status="infra_failed"
+            if result.status == "infra_failed"
+            else "not_converged",
             change=change,
             develop_result=result,
             fixer_commits=fixer_commits,

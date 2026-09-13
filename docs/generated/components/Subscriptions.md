@@ -52,7 +52,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.reconciliation_state` | M | 3 | 3 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
-| `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 8 |
+| `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 9 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -271,6 +271,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `settled_refusal` — The kind of refusal (``repo_mismatch`` / ``checkout_unresolved``) already recorded for exactly this key — no spawn, no re-post until the mapping or the read moves — or ``None``.
 - def `post_checkout_unresolved_refusal` — The sweep could not resolve the mapped checkout's origin (PR #362 re-review 3 F1): no spawn, no round spent, the parked trigger kept, one ``[Friction]`` naming why; settled on (path, "") until the path changes or the read starts to answer.
 - def `post_repo_mismatch_refusal` — The sweep's own origin read refused the checkout: one ``[Friction]`` on the story per settle key, de-duped by a marker on the gate. Nothing else is written — no round spent, the parked trigger kept.
+- def `refund_infra_failed` — The run ended ``infra_failed`` (#377): the host, not the change, is broken — refund the reserved round, re-park the review trigger, and say what to fix. No exhaustion escalation (the change was never judged) and no settle key: the dispatcher holds the PR in memory for the rest of this boot, and a daemon restart — the operator's fix attempt — retries once.
 - def `refund_repo_mismatch` — The CLI's authoritative ``--expect-repo`` check refused where the sweep's origin read passed: refund the reserved round, re-park the review trigger (the reservation consumed it), record the settle key so the sweep does not spawn again until the mapping or the remote url moves, and say so.
 
 ### `lithos_loom.subscriptions.retry`

@@ -20,8 +20,10 @@ three may push to the branch). Outcomes, each a one-shot record on the gate:
   push sinks, ``[NeedsHuman]``, once per sha pair;
 * ``no_conflict`` / ``merge_race`` / ``merged`` — the world moved on; record
   only, the sweep's other halves own what comes next;
-* a crash, a repo-mismatch refusal — ``[Friction]`` on the story, a crash
-  re-armed once per daemon boot (a restart is the operator's fix attempt).
+* a crash, an ``infra_failed`` run (#377: the host died under the coder — no
+  verdict on the merge, so no human gate), a repo-mismatch refusal —
+  ``[Friction]`` on the story; a crash or an infra failure is re-armed once per
+  daemon boot (a restart is the operator's fix attempt).
 
 Host dial ``[github_watcher] conflict_resolve_enabled``; per-project opt-out
 ``develop_conflict_resolve = false`` on the context doc (fail-closed when the
@@ -107,6 +109,8 @@ _OUTPUT_TAIL_CHARS = 600
 _ESCALATE: frozenset[str] = frozenset(
     {"not_converged", "failed", "conflict_unsupported"}
 )
+# Run outcomes the next daemon boot retries: the run never reached a verdict.
+_REARM_ON_BOOT: frozenset[str] = frozenset({"crashed", "running", "infra_failed"})
 
 
 async def spawn_resolve(cmd: list[str]) -> tuple[int, str]:
@@ -242,7 +246,7 @@ class ConflictResolveDispatch:
             # operator's fix attempt), or — decided below, once the sweep has
             # observed the checkout — a repo-mismatch refusal whose settle key
             # moved (PR #366 review F4).
-            rebooted = prior.status in ("crashed", "running") and (
+            rebooted = prior.status in _REARM_ON_BOOT and (
                 prior.boot_id != self._boot_id
             )
             if not rebooted and prior.status != "repo_mismatch":
@@ -521,6 +525,19 @@ class ConflictResolveDispatch:
         elif status == "converged" and data.get("pushed") is True:
             await self._record_resolved(
                 gate_id, story_id, spec, record, data, budget, ctx
+            )
+        elif status == "infra_failed":
+            # #377: the host failed under the coder — no verdict, no gate; the
+            # pair stays armed for the next boot (the record's status + boot
+            # id are the re-arm key), the breadcrumb names the host action.
+            action = str(data.get("host_action") or "fix the host")
+            await post_friction(
+                gate_id,
+                story_id,
+                record,
+                f"stopped on an infrastructure failure, not a verdict on the "
+                f"merge ({record.message}); {action}, then restart loom",
+                ctx,
             )
         elif status in _ESCALATE:
             await escalate(

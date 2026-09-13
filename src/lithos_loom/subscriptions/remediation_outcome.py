@@ -293,6 +293,82 @@ async def post_repo_mismatch_refusal(
     )
 
 
+async def refund_infra_failed(
+    ctx: SubscriptionContext,
+    *,
+    gate_id: str,
+    story_id: str,
+    spec: PrGateSpec,
+    budget: RemediationBudget,
+    budget_limit: int,
+    data: dict[str, Any],
+) -> None:
+    """The run ended ``infra_failed`` (#377): the host, not the change, is
+    broken — refund the reserved round, re-park the review trigger, and say
+    what to fix. No exhaustion escalation (the change was never judged) and
+    no settle key: the dispatcher holds the PR in memory for the rest of this
+    boot, and a daemon restart — the operator's fix attempt — retries once.
+
+    The state write is STRICT, as for a repo-mismatch refund: it is what
+    keeps the round and the review debt.
+    """
+    action = str(data.get("host_action") or "fix the host")
+    detail = str(data.get("message") or "infrastructure failure")[:300]
+    refund = dataclasses.replace(budget, rounds_used=max(0, budget.rounds_used - 1))
+    marker = {
+        REMEDIATION_KEY: refund.as_marker(),
+        PENDING_KEY: {"pr_url": spec.pr_url},
+    }
+    failure: LithosClientError | None = None
+    for delay in (0.0, *REFUND_RETRY_DELAYS):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await ctx.lithos.task_update(task_id=gate_id, metadata=marker)
+            failure = None
+            break
+        except LithosClientError as exc:
+            failure = exc
+    if failure is None:
+        ctx.logger.warning(
+            "[Friction] external-remediation: converge for %s stopped on an "
+            "infrastructure failure (%s); round refunded, trigger re-parked, "
+            "held until the next daemon boot",
+            spec.pr_url,
+            detail,
+        )
+        await post_finding(
+            ctx,
+            story_id,
+            f"[Friction] external-remediation: converge --from-github for "
+            f"{spec.pr_url} stopped on an infrastructure failure, not a verdict "
+            f"on the change ({detail}). The round is refunded "
+            f"({refund.rounds_used}/{budget_limit}) and the review trigger "
+            f"re-parked; loom will not retry this PR until the daemon restarts. "
+            f"{action} — then restart loom.",
+        )
+        return
+    ctx.logger.warning(
+        "[Friction] external-remediation: infra refund for %s did not land after "
+        "%d attempts (%s); round %d/%d remains spent",
+        spec.pr_url,
+        1 + len(REFUND_RETRY_DELAYS),
+        failure,
+        budget.rounds_used,
+        budget_limit,
+    )
+    await post_finding(
+        ctx,
+        story_id,
+        f"[Friction] external-remediation: converge --from-github for "
+        f"{spec.pr_url} stopped on an infrastructure failure ({detail}), but "
+        f"recording the refund did not land ({failure}): round "
+        f"{budget.rounds_used}/{budget_limit} remains spent and the review "
+        f"trigger is not re-parked. {action} — then restart loom and re-run "
+        f"`develop converge --from-github` for the material.",
+    )
+
+
 async def refund_repo_mismatch(
     ctx: SubscriptionContext,
     *,

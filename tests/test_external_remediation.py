@@ -1797,3 +1797,73 @@ async def test_a_refund_that_never_lands_is_reported_honestly_and_escalates(
     assert any("did not land" in f and "not re-parked" in f for f in findings)
     # the last round is spent with nothing done: a human decides
     assert len(await _human_gates(client)) == 1
+
+
+# ── #377: an infra failure is not a spent round ──────────────────────────
+
+
+def _infra_failed_payload() -> dict:
+    return {
+        "status": "infra_failed",
+        "succeeded": False,
+        "pushed": False,
+        "pushed_sha": "",
+        "rounds": 1,
+        "develop_status": "infra_failed",
+        "total_cost_usd": 0.0,
+        "message": (
+            "INFRA FAILURE: round 1: coder auth_failed persisted after 2 attempts: "
+            "Failed to authenticate — re-authenticate the agent CLI on the host"
+        ),
+        "host_action": "re-authenticate the agent CLI on the host, then restart loom",
+    }
+
+
+async def test_an_infra_failed_run_refunds_re_parks_and_holds_until_a_restart(
+    tmp_path: Path,
+) -> None:
+    # The host, not the change, is broken: the round is refunded, the review
+    # trigger re-parked, no exhaustion escalation even on the last round, and
+    # this boot does not spawn for the PR again (an outage would otherwise
+    # burn the budget one sweep at a time). A restart — the operator's fix
+    # attempt — retries once.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(_infra_failed_payload(), rc=1)
+    rem = ExternalRemediation(
+        _settings(tmp_path, notifier=_RecordingNotifier()), spawn=spawn
+    )
+    assert await _consider(client, gate, story, rem, rounds_used=1) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1  # refunded
+    assert marker["needs_human_gate_id"] == ""
+    assert await _human_gates(client) == []
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}  # re-parked
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] external-remediation")
+    assert "infrastructure" in finding and "re-authenticate the agent CLI" in finding
+    assert "refunded" in finding and "restart" in finding
+    # held for the rest of this boot: the parked trigger does not fire again
+    assert len(calls) == 1
+    spec = parse_pr_gate(refreshed)
+    assert spec is not None
+    label = await rem.resume_pending(
+        refreshed, spec, story, read_budget(refreshed, _PR_URL), _github(), _ctx(client)
+    )
+    assert label == "held_infra" and len(calls) == 1
+    # a restart is the operator's fix attempt: the new boot fires the trigger
+    restarted = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    label = await restarted.resume_pending(
+        refreshed, spec, story, read_budget(refreshed, _PR_URL), _github(), _ctx(client)
+    )
+    assert label == "dispatched"
+    assert restarted._task is not None
+    await restarted._task
+    assert len(calls) == 2

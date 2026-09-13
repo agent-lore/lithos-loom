@@ -74,6 +74,7 @@ _EXIT_CODES = {
     "fork_unsupported": 2,
     "merged": 2,
     "not_converged": 1,
+    "infra_failed": 1,
     "merge_race": 1,
     "failed": 1,
     "no_conflict": 0,

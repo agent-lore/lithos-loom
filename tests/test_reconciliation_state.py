@@ -182,6 +182,14 @@ def test_resolving_conflict_outranks_reconciling() -> None:
     assert d.state == "resolving_conflict"
 
 
+def test_an_infra_failed_conflict_resolver_is_reconciling_not_needs_human() -> None:
+    # #377: the resolver did not judge the merge — the host failed under it.
+    # A daemon restart retries the pair; the operator has no decision to make.
+    d = _derive(_conflict("infra_failed"), pr=_PR(mergeable_state="dirty"))
+    assert d.state == "reconciling"
+    assert "infrastructure" in d.detail and "restart" in d.detail
+
+
 def test_an_escalated_conflict_is_needs_human_naming_the_gate() -> None:
     meta = _conflict("not_converged", needs_human_gate_id="gate-h")
     d = _derive(meta, pr=_PR(mergeable=False, mergeable_state="dirty"))

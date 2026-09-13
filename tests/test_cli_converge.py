@@ -399,6 +399,7 @@ def test_json_summary_written(stubs: dict, tmp_path: Path) -> None:
         ("already_clean", 0),
         ("converged", 0),
         ("not_converged", 1),
+        ("infra_failed", 1),
         ("merge_race", 1),
         ("failed", 1),
         ("fork_unsupported", 2),

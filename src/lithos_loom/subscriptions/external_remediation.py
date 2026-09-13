@@ -87,6 +87,7 @@ from lithos_loom.subscriptions.remediation_outcome import (
     post_finding,
     post_repo_mismatch_refusal,
     record_result,
+    refund_infra_failed,
     refund_repo_mismatch,
     settled_refusal,
 )
@@ -158,6 +159,10 @@ class ExternalRemediation:
         self._hold = hold
         self._task: asyncio.Task[None] | None = None
         self._in_flight_pr_url = ""
+        # #377: PR urls whose last run this boot ended `infra_failed` — held
+        # from re-dispatch (an outage must not spend a round per sweep); a
+        # daemon restart is the operator's fix attempt and starts empty.
+        self._infra_held: set[str] = set()
 
     @property
     def busy(self) -> bool:
@@ -415,6 +420,13 @@ class ExternalRemediation:
             )
             await self._clear_pending(gate.id, ctx)
             return "project_disabled"
+        if spec.pr_url in self._infra_held:
+            ctx.logger.info(
+                "external-remediation: %s is held after an infrastructure "
+                "failure this boot; the parked trigger resumes after a restart",
+                spec.pr_url,
+            )
+            return "held_infra"
         if self._hold is not None and self._hold(spec.pr_url):
             # PRD S3: a merge-gate run on this PR may push its merge commit
             # at any moment; a converge dispatched beside it would lose its
@@ -623,12 +635,12 @@ class ExternalRemediation:
         except Exception as exc:  # noqa: BLE001 — the slot must always free cleanly
             ctx.logger.exception("external-remediation: run for %s raised", spec.pr_url)
             detail = f"{type(exc).__name__}: {exc}"
-            await self._post_finding(
+            await post_finding(
+                ctx,
                 story_id,
                 f"[Friction] external-remediation: converge --from-github for "
                 f"{spec.pr_url} crashed before recording a result ({detail}); "
                 f"the round is spent ({budget.rounds_used}/{self._settings.budget})",
-                ctx,
             )
             await self._escalate_if_exhausted(
                 gate_id,
@@ -685,8 +697,31 @@ class ExternalRemediation:
                 data=data,
             )
             return
+        if data is not None and data.get("status") == "infra_failed":
+            # #377: the host failed under the run — not a verdict on the
+            # change. Refund, re-park, hold this boot; never exhaustion.
+            self._infra_held.add(spec.pr_url)
+            await refund_infra_failed(
+                ctx,
+                gate_id=gate_id,
+                story_id=story_id,
+                spec=spec,
+                budget=budget,
+                budget_limit=self._settings.budget,
+                data=data,
+            )
+            return
         if data is not None:
-            await self._record_result(gate_id, story_id, spec, budget, data, ctx)
+            await record_result(
+                ctx,
+                gate_id=gate_id,
+                story_id=story_id,
+                spec=spec,
+                budget=budget,
+                budget_limit=self._settings.budget,
+                notifier=self._settings.notifier,
+                data=data,
+            )
             return
         if rc == 0:
             # "nothing to ingest": no agent time spent — give the round back.
@@ -714,13 +749,13 @@ class ExternalRemediation:
             budget.rounds_used,
             self._settings.budget,
         )
-        await self._post_finding(
+        await post_finding(
+            ctx,
             story_id,
             f"[Friction] external-remediation: converge --from-github for "
             f"{spec.pr_url} failed (exit {rc}) without a result; the round is "
             f"spent ({budget.rounds_used}/{self._settings.budget}). Output "
             f"tail: {tail}",
-            ctx,
         )
         await self._escalate_if_exhausted(
             gate_id,
@@ -730,26 +765,6 @@ class ExternalRemediation:
             last_status="failed",
             detail=f"converge exited {rc} without a result",
             ctx=ctx,
-        )
-
-    async def _record_result(
-        self,
-        gate_id: str,
-        story_id: str,
-        spec: PrGateSpec,
-        budget: RemediationBudget,
-        data: dict[str, Any],
-        ctx: SubscriptionContext,
-    ) -> None:
-        await record_result(
-            ctx,
-            gate_id=gate_id,
-            story_id=story_id,
-            spec=spec,
-            budget=budget,
-            budget_limit=self._settings.budget,
-            notifier=self._settings.notifier,
-            data=data,
         )
 
     async def _escalate_if_exhausted(
@@ -776,8 +791,3 @@ class ExternalRemediation:
             detail=detail,
             cost=cost,
         )
-
-    async def _post_finding(
-        self, story_id: str, summary: str, ctx: SubscriptionContext
-    ) -> None:
-        await post_finding(ctx, story_id, summary)

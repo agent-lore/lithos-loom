@@ -865,3 +865,51 @@ async def test_an_unavailable_escalation_lookup_is_named_not_assumed(
 
     assert await _consider(client, gate, story, dispatch) == "escalation_unknown"
     assert calls == []
+
+
+# ── #377: an infra failure is not a settled verdict ──────────────────────
+
+
+async def test_an_infra_failure_posts_friction_and_re_arms_on_a_restart(
+    tmp_path: Path,
+) -> None:
+    # `not_converged` is the panel's verdict on the composed tree and spends
+    # the once-per-sha-pair attempt; an infra death is neither — no human
+    # gate, the pair stays armed for the next boot, the breadcrumb names the
+    # host action.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _with_conflict(client, gate)
+    notifier = _Notifier()
+    spawn, calls = _spawner(
+        _result(
+            "infra_failed",
+            succeeded=False,
+            pushed=False,
+            pushed_sha=None,
+            develop_status="infra_failed",
+            message="INFRA FAILURE: round 1: coder auth_failed persisted",
+            host_action="re-authenticate the agent CLI on the host",
+        ),
+        rc=1,
+    )
+    first = ConflictResolveDispatch(_settings(tmp_path, notifier=notifier), spawn=spawn)
+
+    assert await _consider(client, gate, story, first) == "dispatched"
+    await first.drain()
+    assert await _human_gates(client) == [] and notifier.notices == []
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] conflict-resolve")
+    assert "infrastructure" in finding
+    assert "re-authenticate the agent CLI" in finding
+    gate = await _refresh(client, gate.id)
+    record = read_record(gate, _PR_URL)
+    assert record is not None and record.status == "infra_failed"
+    assert record.needs_human_gate_id == ""
+    assert await _consider(client, gate, story, first) == "unchanged"  # not a loop
+    await first.drain()
+
+    second = ConflictResolveDispatch(_settings(tmp_path), spawn=spawn)  # a restart
+    assert await _consider(client, gate, story, second) == "dispatched"
+    await second.drain()
+    assert len(calls) == 2

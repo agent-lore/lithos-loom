@@ -153,6 +153,9 @@ _REGATE_IN_PROGRESS = frozenset({"deferred_busy", "deferred_remediation", "dispa
 _REGATE_CONFIRMS = frozenset({"unchanged"})
 # A conflict-resolver outcome that is settled and handed to the operator.
 _CONFLICT_SETTLED = frozenset({"not_converged", "failed", "conflict_unsupported"})
+# A conflict-resolver run that died on the host (#377): no verdict on the
+# merge, no decision for the operator — the next daemon boot retries the pair.
+_CONFLICT_INFRA = frozenset({"infra_failed"})
 
 
 @dataclass(frozen=True)
@@ -229,6 +232,12 @@ def _derive(
         return Derived(
             "needs_human",
             f"conflict unresolved ({conflict['status']}); handed to the operator",
+        )
+    if conflict_now and _str(conflict.get("status")) in _CONFLICT_INFRA:
+        return Derived(
+            "reconciling",
+            "conflict resolver stopped on an infrastructure failure; a daemon "
+            "restart retries it",
         )
 
     budget = _record(meta, _REMEDIATION, pr_url)

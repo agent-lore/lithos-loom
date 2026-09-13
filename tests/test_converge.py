@@ -79,7 +79,11 @@ def _dev_result(
         coder_cost_usd=0.6,  # nonzero loop spend so total_cost = intake + loop
         review_cost_usd=0.4,
         message=f"loop ended {status}",
+        host_action=_HOST_ACTION if status == "infra_failed" else "",
     )
+
+
+_HOST_ACTION = "re-authenticate the agent CLI on the host, then complete the gate"
 
 
 _UNSET = object()
@@ -506,6 +510,7 @@ def test_converge_result_json_round_trips_the_documented_shape(
         "head_sha": _HEAD,
         "rounds": 2,
         "develop_status": "approved",
+        "host_action": "",
         "fixer_commits": 1,
         "pushed": True,
         "external_outcomes": [],
@@ -959,3 +964,32 @@ def test_resolve_mode_reports_a_moved_base_without_spending(
     )
     assert result.status == "base_moved" and not result.succeeded
     assert "entry" not in captured and "push" not in captured
+
+
+def test_infra_failed_loop_is_its_own_verdict_with_the_host_action(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#377: a loop that died on infrastructure is not "reviewed and did not
+    converge" — the watcher's budget and reservation accounting key on the
+    status, so it must be distinguishable, and the host action must ride the
+    JSON for the watcher's breadcrumb."""
+    captured = _install(monkeypatch, blocking=True)
+    captured["develop_status"] = "infra_failed"
+    result = converge_pr(_config(tmp_path), _change())
+    assert result.status == "infra_failed"
+    assert not result.succeeded
+    assert "push" not in captured
+    data = result.to_json()
+    assert data["status"] == "infra_failed" and data["succeeded"] is False
+    assert data["develop_status"] == "infra_failed"
+    assert data["host_action"] == _HOST_ACTION
+
+
+def test_other_unapproved_loops_carry_no_host_action(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True)
+    captured["develop_status"] = "stalled"
+    result = converge_pr(_config(tmp_path), _change())
+    assert result.status == "not_converged"
+    assert result.to_json()["host_action"] == ""
