@@ -134,6 +134,9 @@ class MergeGateResult:
     # `conflicting_paths`); `regenerated` lists what the generator moved.
     generated_conflicts: tuple[str, ...] = ()
     regenerated: tuple[str, ...] = ()
+    # the command the policy regenerates with — so a `[PRConflicted]` on a
+    # real conflict can tell the human what to run after taking a side
+    regenerate_command: str = ""
     checks: tuple[MergeGateCheck, ...] = ()
     verdict: str | None = None
     config_fingerprint: str = ""
@@ -159,6 +162,7 @@ class MergeGateResult:
             "conflicting_paths": list(self.conflicting_paths),
             "generated_conflicts": list(self.generated_conflicts),
             "regenerated": list(self.regenerated),
+            "regenerate_command": self.regenerate_command,
             "checks": [c.to_json() for c in self.checks],
             "verdict": self.verdict,
             "config_fingerprint": self.config_fingerprint,
@@ -345,14 +349,14 @@ def _merge_regenerating(
                 outcome="ran" if regen.exit_code is not None else "errored",
                 passed=False,
                 exit_code=regen.exit_code,
+                timed_out=regen.timed_out,
                 output_tail=regen.output_tail or regen.error,
             )
         )
-    if git.commit_all(wt, message) is None:
-        # nothing to commit means the merge brought nothing in — cannot
-        # happen for a behind head, but never leave MERGE_HEAD dangling
-        git.abort_merge(wt)
-    return _RegeneratingMerge(regenerated=regen.changed)
+    # a merge in progress always commits (MERGE_HEAD makes the commit, even
+    # with an unchanged tree), so this is never None for a behind head
+    git.commit_all(wt, message)
+    return _RegeneratingMerge(regenerated=regen.changed, generated=generated)
 
 
 def run_merge_gate(
@@ -419,6 +423,7 @@ def run_merge_gate(
     try:
         merge_sha = head_sha
         regenerated: tuple[str, ...] = ()
+        taken: tuple[str, ...] = ()
         regen_row: MergeGateCheck | None = None
         if behind:
             merge_message = f"Merge {base_ref} into {change.head_branch}"
@@ -437,6 +442,7 @@ def run_merge_gate(
                         behind=True,
                         conflicting_paths=real,
                         generated_conflicts=generated,
+                        regenerate_command=config.regenerate_command or "",
                         worktree=kept,
                         message=(
                             f"{change.head_ref} conflicts with {base_ref} @ "
@@ -453,6 +459,7 @@ def run_merge_gate(
                     )
                 regen_row = merged.failed
                 regenerated = merged.regenerated
+                taken = merged.generated
             else:
                 conflicts = git.merge(wt, base_sha, message=merge_message)
                 if conflicts:
@@ -506,7 +513,9 @@ def run_merge_gate(
             head_sha=head_sha,
             merge_sha=merge_sha,
             behind=behind,
+            generated_conflicts=taken,
             regenerated=regenerated,
+            regenerate_command=config.regenerate_command or "",
             config_fingerprint=fingerprint,
             worktree=kept,
         )

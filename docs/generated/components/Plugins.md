@@ -37,7 +37,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
-| `lithos_loom.plugins.story_develop.generated` | S | 1 | 6 |
+| `lithos_loom.plugins.story_develop.generated` | M | 1 | 7 |
 | `lithos_loom.plugins.story_develop.github_access` | XS | 0 | 2 |
 | `lithos_loom.plugins.story_develop.handoff` | M | 3 | 13 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
@@ -243,6 +243,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `take_base_side` — Resolve conflicted generated *paths* of the in-progress merge to the base's copy and stage them. Which side is immaterial — the generator overwrites the content — but the base's is the one a clean merge would have carried, so the diff the panel later reads stays honest.
 - class `RegenerateResult` — What :func:`regenerate` did. ``changed`` lists the declared-path files whose content the generator moved (added, rewritten or deleted), now staged; ``exit_code`` is ``None`` when the container never ran.
 - def `regenerate` — Run the project's generator on the COMPOSED tree and copy the declared paths back into *wt*, staged.
+- def `post_commit_regenerate` — The round's post-commit pass for a loop that composes trees (the S5 resolve mode): after the coder's commit (and the auto-format pass), run the generator on HEAD and commit what it moved as its own commit — ``story-develop r<n>: regenerate`` — so the gate and the panel judge a tree whose generated output is the generator's, whatever the coder ran. ``None`` when the project declares no policy. Best-effort like the format pass: a generator that fails leaves the tree as committed (the project's drift check, where it has one, is the backstop) and is logged.
 
 ### `lithos_loom.plugins.story_develop.github_access`
 - def `github_call` — Run one GitHub REST operation against a typed client, synchronously.

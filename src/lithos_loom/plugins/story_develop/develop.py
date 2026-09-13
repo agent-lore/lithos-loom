@@ -496,6 +496,7 @@ def develop(
         ),
         coder_init_extra=entry.coder_init_extra if entry is not None else {},
         pre_commit_guard=entry.pre_commit_guard if entry is not None else None,
+        post_commit_pass=entry.post_commit_pass if entry is not None else None,
         review_context=entry.review_context if entry is not None else "",
     )
 

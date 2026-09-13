@@ -811,15 +811,20 @@ def _stub_regenerate(monkeypatch: pytest.MonkeyPatch, *, ok: bool = True) -> lis
                 "wt": wt,
                 "label": label,
                 "merging": git.merge_head(wt) is not None,
-                "metrics": (wt / "docs/generated/metrics.json").read_text(),
+                "metrics": (
+                    (wt / "docs/generated/metrics.json").read_text()
+                    if (wt / "docs/generated/metrics.json").exists()
+                    else None
+                ),
             }
         )
         if not ok:
             return RegenerateResult(
                 ok=False, exit_code=2, output_tail="generator broke"
             )
+        (wt / "docs" / "generated").mkdir(parents=True, exist_ok=True)
         (wt / "docs" / "generated" / "metrics.json").write_text('{"lines": 23}\n')
-        git.stage_paths(wt, config.generated_paths)
+        git.stage_paths(wt, ("docs/generated/metrics.json",))
         return RegenerateResult(
             ok=True,
             exit_code=0,
@@ -850,7 +855,9 @@ def test_generated_only_conflict_is_regenerated_gated_and_pushed(
 
     assert result.status == "green", result.message
     assert result.conflicting_paths == ()
+    assert result.generated_conflicts == ("docs/generated/metrics.json",)
     assert result.regenerated == ("docs/generated/metrics.json",)
+    assert result.regenerate_command == "make gen"
     # the generator ran on the composed tree with the merge still in
     # progress, the base's copy taken for the conflicted generated file
     assert len(regen) == 1 and regen[0]["merging"] and regen[0]["label"] == "merge"
@@ -882,6 +889,42 @@ def test_a_clean_merge_still_regenerates_under_the_policy(
         _git(fx.repo, "show", f"{result.merge_sha}:docs/generated/metrics.json")
         == '{"lines": 23}'
     )
+
+
+def test_a_generated_file_the_base_deleted_is_taken_not_crashed(
+    fx: Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # review round 1: a modify/delete in a generated path (main removed a
+    # component page the PR regenerated) has no "theirs" blob — it is removed,
+    # and the generator recreates it if the composed tree still wants it
+    # the merge base must CONTAIN the file for a modify/delete: seed it on
+    # main, bring that into feature, then modify (feature) and delete (main)
+    _git(fx.repo, "switch", "-q", "main")
+    (fx.repo / "docs" / "generated").mkdir(parents=True, exist_ok=True)
+    (fx.repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 1}\n')
+    _git(fx.repo, "add", "-A")
+    _git(fx.repo, "commit", "-q", "-m", "base: seed metrics")
+    _git(fx.repo, "switch", "-q", "feature")
+    _git(fx.repo, "merge", "-q", "--no-edit", "main")
+    fx.head = _commit(
+        fx.repo, "docs/generated/metrics.json", '{"lines": 12}\n', "story: metrics"
+    )
+    _git(fx.repo, "switch", "-q", "main")
+    fx.base_start = _git(fx.repo, "rev-parse", "HEAD")
+    (fx.repo / "docs" / "generated" / "metrics.json").unlink()
+    _git(fx.repo, "add", "-A")
+    tip = _commit(fx.repo, "base.txt", "landed\n", "base: drops the metrics page")
+    _git(fx.repo, "push", "-q", "origin", "main", "feature")
+    _git(fx.repo, "fetch", "-q", "origin")
+    cap = _stub_checks(monkeypatch)
+    regen = _stub_regenerate(monkeypatch)
+    result = mg.run_merge_gate(fx.config(**_POLICY), fx.change())
+    assert result.status == "green", result.message
+    assert result.generated_conflicts == ("docs/generated/metrics.json",)
+    assert len(regen) == 1 and regen[0]["merging"]
+    parents = _git(fx.repo, "log", "-1", "--format=%P", result.merge_sha).split()
+    assert parents == [fx.head, tip]
+    assert cap["run"]["sha"] == result.merge_sha
 
 
 def test_a_real_conflict_is_reported_without_the_generated_noise(
@@ -971,3 +1014,4 @@ def test_to_json_carries_the_generated_fields(tmp_path: Path) -> None:
     payload = r.to_json()
     assert payload["generated_conflicts"] == ["docs/generated/m.json"]
     assert payload["regenerated"] == []
+    assert payload["regenerate_command"] == ""

@@ -169,9 +169,11 @@ async def post_conflict(
     generated = [
         p for p in (raw_gen if isinstance(raw_gen, list) else []) if isinstance(p, str)
     ]
+    command = data.get("regenerate_command")
+    regen = f"`{command}`" if isinstance(command, str) and command else "the generator"
     aside = (
-        f" ({len(generated)} generated path(s) set aside, regenerated on the "
-        f"merge: {', '.join(generated)})"
+        f" ({len(generated)} generated path(s) set aside — take either side and "
+        f"run {regen} on the merged tree before pushing: {', '.join(generated)})"
         if generated
         else ""
     )

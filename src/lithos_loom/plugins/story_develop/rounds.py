@@ -176,6 +176,7 @@ class RoundContext:
     coder_init_template: str = "converge_coder_init.md"
     coder_init_extra: Mapping[str, str] = field(default_factory=dict)
     pre_commit_guard: Callable[[Path], str | None] | None = None
+    post_commit_pass: Callable[[Path, int], str | None] | None = None
     review_context: str = ""
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
@@ -430,6 +431,14 @@ def commit_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         )
         if format_sha is not None:
             new_commit = format_sha
+        # PRD S4: the entry's post-commit pass (resolve mode regenerates the
+        # project's generated paths) runs AFTER formatting — the generator's
+        # output counts what the formatter moved — and its commit supersedes
+        # the round's like the format commit does.
+        if ctx.post_commit_pass is not None:
+            regenerated_sha = ctx.post_commit_pass(ctx.wt, round_no)
+            if regenerated_sha is not None:
+                new_commit = regenerated_sha
         # Track the latest committed tree so the approval-candidate gate (#140)
         # can run candidate-staged checks against it even on a later round that
         # produced no fresh commit.

@@ -59,6 +59,7 @@ from .external_reviews import (
 )
 from .external_triage import triage_external_findings
 from .findings import DeferredFinding
+from .generated import post_commit_regenerate
 from .loop_entry import LoopEntry
 from .pr_delivery import ForkPushUnsupported, MergeRaceDetected, push_to_pr_ref
 from .review_resolve import ResolvedChange
@@ -621,11 +622,13 @@ def _resolve_conflicts(
         pre_commit_guard=markers_guard(
             intake.paths, head_sha=change.head_sha, base_sha=intake.base_sha
         ),
+        post_commit_pass=post_commit_regenerate(config),  # PRD S4, after formatting
         review_context=render_review_context(
             intake.paths,
             head_sha=change.head_sha,
             base_sha=intake.base_sha,
             base_ref=intake.base_ref,
+            generated=intake.generated_paths,
         ),
     )
     result = _loop_and_deliver(
@@ -644,10 +647,9 @@ def _resolve_conflicts(
 
 
 def _contains_base(base_sha: str) -> Callable[[DevelopResult], str | None]:
-    """Resolve mode's delivery precondition (PR #364 review F2): the push
-    epilogue proves descent from the PR head only, so before pushing an
-    approved tree prove the intended base is an ancestor of it — a loop that
-    somehow approved a tree without the merge is `failed`, never pushed."""
+    """Resolve mode's delivery precondition (PR #364 review F2): the push epilogue
+    proves descent from the PR head only, so prove the intended base is an ancestor
+    of the approved tree first — approved without the merge = `failed`, not pushed."""
 
     def check(result: DevelopResult) -> str | None:
         head = git.commit_sha(result.worktree)

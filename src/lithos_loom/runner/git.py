@@ -349,15 +349,22 @@ def take_their_side(worktree: Path, paths: Sequence[str]) -> None:
     generated artifact is not merged, either side is taken and the generator
     runs on the composed tree. Pathspec magic is disabled: the paths come
     from ``git``'s own unmerged list, never from a prompt."""
-    if not paths:
-        return
-    _git(worktree, "--literal-pathspecs", "checkout", "--theirs", "--", *paths)
-    _git(worktree, "--literal-pathspecs", "add", "--", *paths)
+    for path in paths:
+        if 3 in unmerged_entries(worktree, path):
+            _git(worktree, "--literal-pathspecs", "checkout", "--theirs", "--", path)
+            _git(worktree, "--literal-pathspecs", "add", "--", path)
+        else:
+            # a modify/delete where THEIR side is the deletion: no stage-3
+            # blob to check out — remove it; the generator recreates the
+            # file if the composed tree still wants it
+            _git(worktree, "--literal-pathspecs", "rm", "-q", "--", path)
 
 
 def stage_paths(worktree: Path, paths: Sequence[str]) -> None:
-    """``git add -A`` limited to *paths* (files or directory prefixes):
-    additions, modifications and deletions under them, nothing else."""
+    """``git add -A`` limited to *paths* (files, or directory prefixes):
+    additions, modifications and deletions under them, nothing else. A path
+    that matches nothing in the index or on disk is a hard error from git —
+    pass concrete paths that exist on one side or the other."""
     if not paths:
         return
     _git(worktree, "--literal-pathspecs", "add", "-A", "--", *paths)

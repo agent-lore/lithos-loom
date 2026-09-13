@@ -289,3 +289,138 @@ def test_export_or_container_errors_are_a_failed_result_not_an_exception(
     )
     assert not result.ok and result.exit_code is None
     assert "docker: not found" in result.error
+
+
+# --- the post-commit pass (resolve mode regenerates deterministically) --------
+
+
+def _committed_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "docs" / "generated").mkdir(parents=True)
+    (repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 10}\n')
+    (repo / "src.py").write_text("x = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "round commit")
+    return repo
+
+
+def test_post_commit_regenerate_commits_what_the_generator_moved(
+    tmp_path: Path,
+) -> None:
+    repo = _committed_repo(tmp_path)
+    before = _git(repo, "rev-parse", "HEAD")
+    calls: list[dict] = []
+
+    def mutate(tree: Path) -> None:
+        (tree / "docs/generated/metrics.json").write_text('{"lines": 99}\n')
+
+    passer = gen.post_commit_regenerate(
+        _config(repo, tmp_path), run_container=_fake_runner(calls, mutate=mutate)
+    )
+    assert passer is not None
+    sha = passer(repo, 2)
+    assert sha is not None and sha != before
+    assert _git(repo, "rev-parse", "HEAD") == sha
+    assert _git(repo, "log", "-1", "--format=%s") == "story-develop r2: regenerate"
+    assert _git(repo, "show", "HEAD:docs/generated/metrics.json") == '{"lines": 99}'
+    assert calls[0]["name"].endswith("-regenerate-r2")
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_post_commit_regenerate_is_a_no_op_when_nothing_moves(tmp_path: Path) -> None:
+    repo = _committed_repo(tmp_path)
+    before = _git(repo, "rev-parse", "HEAD")
+    passer = gen.post_commit_regenerate(
+        _config(repo, tmp_path), run_container=_fake_runner([])
+    )
+    assert passer is not None
+    assert passer(repo, 1) is None
+    assert _git(repo, "rev-parse", "HEAD") == before
+
+
+def test_post_commit_regenerate_never_commits_a_failed_generator(
+    tmp_path: Path,
+) -> None:
+    repo = _committed_repo(tmp_path)
+    before = _git(repo, "rev-parse", "HEAD")
+    passer = gen.post_commit_regenerate(
+        _config(repo, tmp_path),
+        run_container=_fake_runner([], passed=False, mutate=_regen_mutation),
+    )
+    assert passer is not None
+    assert passer(repo, 1) is None
+    assert _git(repo, "rev-parse", "HEAD") == before
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_post_commit_regenerate_is_absent_without_a_policy(tmp_path: Path) -> None:
+    repo = _committed_repo(tmp_path)
+    config = DevelopConfig(repo=repo, description="t", work_dir=tmp_path / "w")
+    assert gen.post_commit_regenerate(config) is None
+
+
+# --- modify/delete + absent prefixes (review round 1) ------------------------
+
+
+def test_take_base_side_removes_a_generated_file_the_base_deleted(
+    tmp_path: Path,
+) -> None:
+    # theirs = the deletion: no stage-3 blob to check out; the path goes and
+    # the generator recreates it if the composed tree still wants it
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "docs" / "generated").mkdir(parents=True)
+    (repo / "docs" / "generated" / "old.md").write_text("v0\n")
+    (repo / "docs" / "generated" / "keep.md").write_text("v0\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "switch", "-q", "-c", "feature")
+    (repo / "docs" / "generated" / "old.md").write_text("feature\n")
+    (repo / "docs" / "generated" / "keep.md").write_text("feature\n")
+    _git(repo, "commit", "-q", "-am", "feature")
+    _git(repo, "switch", "-q", "main")
+    (repo / "docs" / "generated" / "old.md").unlink()
+    (repo / "docs" / "generated" / "keep.md").write_text("main\n")
+    _git(repo, "commit", "-q", "-am", "main removes old, edits keep")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", "feature")
+    conflicts = git.merge_no_commit(repo, base)
+    assert sorted(conflicts) == ["docs/generated/keep.md", "docs/generated/old.md"]
+    gen.take_base_side(repo, tuple(conflicts))
+    assert not (repo / "docs/generated/old.md").exists()
+    assert (repo / "docs/generated/keep.md").read_text() == "main\n"
+    assert git.unmerged_paths(repo) == []
+    assert git.write_tree(repo)  # the index is whole again
+
+
+def test_regenerate_survives_a_declared_prefix_absent_from_both_trees(
+    tmp_path: Path,
+) -> None:
+    repo = _committed_repo(tmp_path)
+    config = DevelopConfig(
+        repo=repo,
+        description="t",
+        work_dir=tmp_path / "work",
+        generated_paths=("docs/generated", "api/client.py", "never/here"),
+        regenerate_command="make gen",
+    )
+    result = gen.regenerate(config, repo, label="r1", run_container=_fake_runner([]))
+    assert result.ok and result.changed == ()
+
+    # ...and a prefix the generator brings into being is staged as an addition
+    def mutate(tree: Path) -> None:
+        (tree / "api").mkdir()
+        (tree / "api" / "client.py").write_text("# generated\n")
+
+    result = gen.regenerate(
+        config, repo, label="r2", run_container=_fake_runner([], mutate=mutate)
+    )
+    assert result.ok and result.changed == ("api/client.py",)
+    assert "api/client.py" in _git(repo, "diff", "--cached", "--name-only")

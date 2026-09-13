@@ -643,6 +643,19 @@ def test_a_non_gate_friction_does_not_skip_the_gate(
             "task metadata.develop_test_command: must be a non-empty string; "
             + "keeping project default",
         ),
+        # PRD S4: the policy decides what a trial merge IS — a rejected half of
+        # it must not gate without it (a generated-only conflict would become
+        # a paid resolver dispatch, a clean merge a stale push)
+        (
+            "develop_generated_paths",
+            "develop_generated_paths: declared without develop_regenerate_command "
+            + "— nothing would rebuild them after a merge; ignoring",
+        ),
+        (
+            "develop_regenerate_command",
+            "develop_regenerate_command: regenerate_command must be a non-empty "
+            + "string (got ''); ignoring",
+        ),
     ],
 )
 def test_a_rejected_gate_setting_skips_the_gate(

@@ -575,6 +575,53 @@ def test_resumed_run_reads_provenance_from_disk(tmp_path: Path) -> None:
     assert ctx.artifact_capture_notice is None
 
 
+def test_commit_phase_runs_the_post_commit_pass_after_formatting(
+    tmp_path: Path, tmp_git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRD S4: the entry's post-commit pass (resolve mode's regenerate) runs
+    after the round commit AND the format pass, and its commit is the one the
+    gate sees; a pass that changes nothing leaves the format commit in place."""
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = tmp_git_repo
+    (tmp_git_repo / "src.py").write_text("x = 1\n")
+    order: list[str] = []
+
+    def fake_format(config, wt, round_no, formatters):
+        order.append("format")
+        return None
+
+    def regen(wt: Path, round_no: int) -> str | None:
+        order.append(f"regen r{round_no}")
+        (wt / "gen.json").write_text("{}\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "regenerate"], cwd=wt, check=True)
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=wt, capture_output=True, text=True
+        ).stdout.strip()
+
+    monkeypatch.setattr(rounds_mod.autoformat, "run_format_pass", fake_format)
+    ctx.post_commit_pass = regen
+
+    exit_ = rounds_mod.commit_phase(ctx, 3)
+
+    assert exit_ is None
+    assert order == ["format", "regen r3"]
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_git_repo, capture_output=True, text=True
+    ).stdout.strip()
+    assert ctx.new_commit == head and ctx.gated_sha == head
+    assert (tmp_git_repo / "gen.json").exists()
+
+    # a no-op pass keeps the round commit as the gated tree
+    ctx.post_commit_pass = lambda wt, n: None
+    (tmp_git_repo / "src.py").write_text("x = 2\n")
+    assert rounds_mod.commit_phase(ctx, 4) is None
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_git_repo, capture_output=True, text=True
+    ).stdout.strip()
+    assert ctx.new_commit == head
+
+
 def test_commit_phase_honours_the_pre_commit_guard(
     tmp_path: Path, tmp_git_repo: Path
 ) -> None:

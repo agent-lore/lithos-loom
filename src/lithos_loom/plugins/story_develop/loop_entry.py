@@ -56,6 +56,11 @@ class LoopEntry:
     coder_init_template: str = "converge_coder_init.md"
     coder_init_extra: Mapping[str, str] = field(default_factory=dict)
     pre_commit_guard: Callable[[Path], str | None] | None = None
+    # PRD S4: a pass run after every round commit (and the auto-format pass),
+    # ``(worktree, round_no) -> commit sha | None`` — resolve mode regenerates
+    # the project's generated paths deterministically and commits the result,
+    # so the gate + panel never judge a hand-merged or stale generated file.
+    post_commit_pass: Callable[[Path, int], str | None] | None = None
     # ...and the panel's merge-shaped context (PR #364 review F1): the
     # conflicted paths and both parents, so a reviewer can see a resolution
     # that took the base version — invisible in the fork-point diff.

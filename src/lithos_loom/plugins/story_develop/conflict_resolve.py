@@ -380,7 +380,12 @@ def markers_guard(
 
 
 def render_review_context(
-    paths: tuple[str, ...], *, head_sha: str, base_sha: str, base_ref: str
+    paths: tuple[str, ...],
+    *,
+    head_sha: str,
+    base_sha: str,
+    base_ref: str,
+    generated: tuple[str, ...] = (),
 ) -> str:
     """The panel's merge-shaped context (PR #364 review F1). The fork-point
     diff the reviewers start from runs base tip → HEAD, so a conflicted path
@@ -455,4 +460,19 @@ def render_review_context(
         "",
         "Approve only if both intents survive, correctly composed.",
     ]
+    if generated:
+        gen_fence = fence("\n".join(generated))
+        lines += [
+            "",
+            (
+                f"{len(generated)} conflicted path(s) are GENERATED output and were "
+                "not hand-merged: taken from the base at intake and rebuilt by the "
+                "project's generator after the round commit. Judge them as "
+                "generated — stale output is a defect, a hand edit is one too:"
+            ),
+            "",
+            gen_fence,
+            *generated,
+            gen_fence,
+        ]
     return "\n".join(lines)

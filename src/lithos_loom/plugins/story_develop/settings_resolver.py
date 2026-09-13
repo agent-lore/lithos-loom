@@ -463,7 +463,7 @@ def resolve_scalar_settings(
     )
     if generated_paths and not regenerate_command:
         frictions.append(
-            "develop_generated_paths declared without develop_regenerate_command "
+            "develop_generated_paths: declared without develop_regenerate_command "
             "— nothing would rebuild them after a merge; ignoring"
         )
         rejected.append("develop_generated_paths")

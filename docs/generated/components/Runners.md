@@ -50,7 +50,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `unmerged_stages` — The index stages *path* has while unmerged — see :func:`unmerged_entries`.
 - def `abort_merge` — Abandon an in-progress merge, restoring the pre-merge tree.
 - def `take_their_side` — Resolve conflicted *paths* of an in-progress merge to the MERGED-IN side (``MERGE_HEAD``'s copy) and stage them — PRD S4: a conflict in a generated artifact is not merged, either side is taken and the generator runs on the composed tree. Pathspec magic is disabled: the paths come from ``git``'s own unmerged list, never from a prompt.
-- def `stage_paths` — ``git add -A`` limited to *paths* (files or directory prefixes): additions, modifications and deletions under them, nothing else.
+- def `stage_paths` — ``git add -A`` limited to *paths* (files, or directory prefixes): additions, modifications and deletions under them, nothing else. A path that matches nothing in the index or on disk is a hard error from git — pass concrete paths that exist on one side or the other.
 - def `write_tree` — The tree object of the INDEX — what a commit made now would contain.
 - def `merge_head` — The sha an in-progress merge is merging (``MERGE_HEAD``), else None.
 - def `merge_in_progress` — Whether *worktree* has a merge in progress (``MERGE_HEAD`` set) — resolved through ``--git-path`` so a linked worktree's private git dir is the one consulted.

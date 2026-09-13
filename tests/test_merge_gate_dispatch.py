@@ -710,6 +710,7 @@ async def test_conflict_names_the_generated_paths_set_aside(tmp_path: Path) -> N
     story, gate = await _gate_with_story(client)
     record = _record("conflict", paths=["src/a.py"])
     record["generated_conflicts"] = ["docs/generated/metrics.json"]
+    record["regenerate_command"] = "make diagrams"
     spawn, _calls = _spawner(record, probe=_probe(_FP))
     dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
     assert await _consider(client, gate, story, dispatch) == "dispatched"
@@ -717,6 +718,7 @@ async def test_conflict_names_the_generated_paths_set_aside(tmp_path: Path) -> N
     (finding,) = _findings(client)
     assert "in 1 path(s): src/a.py" in finding
     assert "1 generated path(s) set aside" in finding
+    assert "run `make diagrams` on the merged tree before pushing" in finding
     assert "docs/generated/metrics.json" in finding
 
 

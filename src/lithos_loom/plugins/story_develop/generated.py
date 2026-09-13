@@ -39,7 +39,7 @@ from pathlib import Path, PurePosixPath
 from ...runner import git
 from . import containers, test_gate
 from .autoformat import within_tree
-from .config import DevelopConfig
+from .config import HANDOFF_DIRNAME, DevelopConfig
 from .test_gate import GateResult
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ __all__ = [
     "parse_generated_paths",
     "parse_regenerate_command",
     "partition_conflicts",
+    "post_commit_regenerate",
     "regenerate",
     "take_base_side",
 ]
@@ -154,6 +155,7 @@ class RegenerateResult:
     output_tail: str
     changed: tuple[str, ...] = ()
     error: str = ""
+    timed_out: bool = False
 
 
 def regenerate(
@@ -196,15 +198,6 @@ def regenerate(
         result = run_container(
             cmd, name=name, command=command, timeout=config.test_timeout
         )
-    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning(
-            "story-develop %s: regenerate (%s) errored: %s", config.run_id, label, exc
-        )
-        shutil.rmtree(export, ignore_errors=True)
-        return RegenerateResult(
-            ok=False, exit_code=None, output_tail="", error=str(exc)
-        )
-    try:
         if not result.passed:
             logger.warning(
                 "story-develop %s: regenerate (%s) `%s` exited %s — output discarded",
@@ -214,26 +207,86 @@ def regenerate(
                 result.exit_code,
             )
             return RegenerateResult(
-                ok=False, exit_code=result.exit_code, output_tail=result.output_tail
+                ok=False,
+                exit_code=result.exit_code,
+                output_tail=result.output_tail,
+                timed_out=result.timed_out,
             )
+        # the sync and the staging are the generator's effect on the tree —
+        # a failure there (a file/dir shape change, a path git cannot stage)
+        # is the generator's failure, never the caller's crash
         changed = tuple(_sync_generated(export, wt, config.generated_paths))
-        git.stage_paths(wt, config.generated_paths)
-        logger.info(
-            "story-develop %s: regenerate (%s) `%s` (exit %d): %d path(s) moved",
-            config.run_id,
-            label,
-            command,
-            result.exit_code,
-            len(changed),
+        git.stage_paths(wt, changed)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            "story-develop %s: regenerate (%s) errored: %s", config.run_id, label, exc
         )
         return RegenerateResult(
-            ok=True,
-            exit_code=result.exit_code,
-            output_tail=result.output_tail,
-            changed=changed,
+            ok=False, exit_code=None, output_tail="", error=str(exc)
         )
     finally:
-        shutil.rmtree(export, ignore_errors=True)
+        _remove_export(config, label, export)
+    logger.info(
+        "story-develop %s: regenerate (%s) `%s` (exit %d): %d path(s) moved",
+        config.run_id,
+        label,
+        command,
+        result.exit_code,
+        len(changed),
+    )
+    return RegenerateResult(
+        ok=True,
+        exit_code=result.exit_code,
+        output_tail=result.output_tail,
+        changed=changed,
+    )
+
+
+def post_commit_regenerate(
+    config: DevelopConfig,
+    *,
+    run_container: RunContainer = test_gate.run_gate_container,
+) -> Callable[[Path, int], str | None] | None:
+    """The round's post-commit pass for a loop that composes trees (the S5
+    resolve mode): after the coder's commit (and the auto-format pass), run
+    the generator on HEAD and commit what it moved as its own commit —
+    ``story-develop r<n>: regenerate`` — so the gate and the panel judge a
+    tree whose generated output is the generator's, whatever the coder ran.
+    ``None`` when the project declares no policy. Best-effort like the
+    format pass: a generator that fails leaves the tree as committed (the
+    project's drift check, where it has one, is the backstop) and is logged.
+    """
+    if not config.generated_paths or not config.regenerate_command:
+        return None
+
+    def run(wt: Path, round_no: int) -> str | None:
+        result = regenerate(
+            config, wt, label=f"r{round_no}", run_container=run_container
+        )
+        if not result.ok or not result.changed:
+            return None
+        return git.commit_all(
+            wt, f"story-develop r{round_no}: regenerate", exclude=[HANDOFF_DIRNAME]
+        )
+
+    return run
+
+
+def _remove_export(config: DevelopConfig, label: str, export: Path) -> None:
+    """Remove the export; an undeletable remnant (root-owned files from a
+    gate image without ``--user``) is logged, never raised — like the gate's."""
+    if not export.exists():
+        return
+    try:
+        shutil.rmtree(export)
+    except OSError as exc:
+        logger.warning(
+            "story-develop %s: regenerate (%s) export dir not cleaned (%s): %s",
+            config.run_id,
+            label,
+            export,
+            exc,
+        )
 
 
 def _files_under(root: Path, prefix: str) -> dict[str, Path]:
@@ -251,7 +304,10 @@ def _files_under(root: Path, prefix: str) -> dict[str, Path]:
     for path in sorted(top.rglob("*")):
         if path.is_symlink() or not path.is_file():
             continue
-        if any(parent.is_symlink() for parent in path.relative_to(top).parents):
+        # a symlinked directory between `top` and the file is never followed
+        # (rglob does not descend into one today; this keeps it so)
+        between = [top / p for p in path.relative_to(top).parents if str(p) != "."]
+        if any(a.is_symlink() for a in between):
             continue
         rel = path.relative_to(root).as_posix()
         found[rel] = path
