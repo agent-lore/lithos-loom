@@ -863,6 +863,61 @@ def test_external_mode_every_id_no_change_needed_is_already_clean(
     assert result.to_json()["succeeded"] is True
 
 
+def test_external_mode_an_infra_death_after_no_change_acks_stays_infra_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """opus round 1: a coder that wrote its no-change acks and then died on
+    the host (auth expiry mid-stream) committed nothing too — but the loop's
+    verdict is `infra_failed`, and that must win: the host action reaches
+    the operator and the watcher refunds + re-parks, never a success."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _no_commit_round_one(captured)
+    captured["develop_status"] = "infra_failed"
+    captured["develop_failure_reason"] = "round 1: coder auth_failed persisted"
+    _install_triage(monkeypatch, captured, proceed=("f-001",))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nx\n"
+        "## External findings\n- f-001: NO CHANGE NEEDED — an approval\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(config, _change(), external_findings=(_ext_finding(7),))
+
+    assert result.status == "infra_failed" and not result.succeeded
+    assert result.host_action == _HOST_ACTION
+
+
+def test_external_mode_a_dispute_beside_no_change_is_not_already_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a dispute is a disagreement the reviewer may answer — reported as
+    # before, the round spent; only refuted + not-a-defect is "nothing to do"
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _no_commit_round_one(captured)
+    _install_triage(monkeypatch, captured, proceed=("f-001", "f-002"))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nx\n"
+        "## External findings\n"
+        "- f-001: DISPUTED — the claim is wrong\n"
+        "- f-002: NO CHANGE NEEDED — an approval\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config, _change(), external_findings=(_ext_finding(7), _ext_finding(8))
+    )
+
+    assert result.status == "not_converged"
+
+
 def test_external_mode_a_fixed_claim_with_no_commit_is_not_already_clean(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -917,6 +972,7 @@ def test_external_mode_rejected_plus_no_change_needed_is_already_clean(
     )
 
     assert result.status == "already_clean"
+    assert "f-002" in result.message and "refuted" in result.message
 
 
 def test_external_mode_a_final_round_without_acks_claims_nothing(

@@ -639,8 +639,9 @@ def _post_external_replies(
             body = reply_body(fixed=False, sha=None, coder_response=o.detail)
         elif o.disposition == "no_change_needed":
             # #380: the coder agreed nothing should change — say so, in words
+            why = o.detail.strip() or "(no further detail given)"
             body = reply_body(
-                fixed=False, sha=None, coder_response=f"no change needed: {o.detail}"
+                fixed=False, sha=None, coder_response=f"no change needed: {why}"
             )
         elif o.disposition == "reverted":
             # #387: a fix the loop made and then undid — never "Fixed in"

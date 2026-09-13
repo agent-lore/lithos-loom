@@ -1358,31 +1358,7 @@ async def test_an_already_clean_run_refunds_the_round_and_never_escalates(
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     notifier = _RecordingNotifier()
-    spawn, _calls = _spawner(
-        {
-            "status": "already_clean",
-            "succeeded": True,
-            "pushed": False,
-            "pushed_sha": "",
-            "rounds": 1,
-            "develop_status": "failed",
-            "total_cost_usd": 1.04,
-            "message": "every external finding needed no change (f-001)",
-            "external_outcomes": [
-                {
-                    "finding_id": "f-001",
-                    "author": "davesnowdon",
-                    "source": "conversation",
-                    "stream": "issue_comment",
-                    "activity_id": 9,
-                    "reply_mode": "conversation",
-                    "thread_url": "https://github.com/o/r/pull/142#issuecomment-9",
-                    "disposition": "no_change_needed",
-                    "detail": "an approval verdict, not a defect",
-                }
-            ],
-        }
-    )
+    spawn, _calls = _spawner(_already_clean_payload())
     rem = ExternalRemediation(
         _settings(tmp_path, budget=1, notifier=notifier), spawn=spawn
     )
@@ -1399,6 +1375,125 @@ async def test_an_already_clean_run_refunds_the_round_and_never_escalates(
     assert "already_clean" in outcome
     assert "f-001 by davesnowdon: no_change_needed" in outcome
     assert "refunded" in outcome
+
+
+def _already_clean_payload() -> dict:
+    return {
+        "status": "already_clean",
+        "succeeded": True,
+        "pushed": False,
+        "pushed_sha": "",
+        "rounds": 1,
+        "develop_status": "failed",
+        "total_cost_usd": 1.04,
+        "message": "every external finding needed no change (f-001)",
+        "external_outcomes": [
+            {
+                "finding_id": "f-001",
+                "author": "davesnowdon",
+                "source": "conversation",
+                "stream": "issue_comment",
+                "activity_id": 9,
+                "reply_mode": "conversation",
+                "thread_url": "https://github.com/o/r/pull/142#issuecomment-9",
+                "disposition": "no_change_needed",
+                "detail": "an approval verdict, not a defect",
+            }
+        ],
+    }
+
+
+async def test_the_no_change_refund_is_granted_once_per_budget(tmp_path: Path) -> None:
+    """opus round 1 (Medium): an already_clean run is a PAID run (triage +
+    a coder turn), so an unbounded refund removes the S5b spend bound —
+    five "thanks" comments would be five paid runs at 0/2. One refund per
+    budget: the common case (one approval comment) stays free, the second
+    keeps its round, and a human push (a fresh budget) re-grants it."""
+    from lithos_loom.subscriptions.remediation_outcome import record_result
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    first = RemediationBudget(pr_url=_PR_URL, rounds_used=1)
+    await record_result(
+        _ctx(client),
+        gate_id=gate.id,
+        story_id=story,
+        spec=spec,
+        budget=first,
+        budget_limit=2,
+        notifier=None,
+        data=_already_clean_payload(),
+    )
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 0 and marker["no_change_refunded"] is True
+
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    second = dataclasses.replace(read_budget(refreshed, _PR_URL), rounds_used=1)
+    # the reservation a dispatch would have written before the second run
+    await client.task_update(
+        task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: second.as_marker()}
+    )
+    await record_result(
+        _ctx(client),
+        gate_id=gate.id,
+        story_id=story,
+        spec=spec,
+        budget=second,
+        budget_limit=2,
+        notifier=None,
+        data=_already_clean_payload(),
+    )
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1  # kept
+    outcomes = [f for f in _findings(client) if "remediation outcome" in f]
+    assert "refunded" in outcomes[0] and "already used" in outcomes[1]
+    assert await _human_gates(client) == []
+
+
+async def test_a_no_change_refund_that_cannot_land_never_raises_a_false_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opus round 1 (High): the refund write must not escape into the crash
+    handler, which re-reads the reserved budget and would raise the very
+    `remediation_exhausted` gate #380 exists to prevent. A transport error
+    (not a LithosClientError) during the refund: the write is retried like
+    the other refunds, the outcome finding is still posted, the round is
+    reported as kept, no gate."""
+    from lithos_loom.subscriptions import remediation_outcome as ro
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    real_update = client.task_update
+    attempts: list[int] = []
+
+    async def failing_update(**kw):
+        meta = kw.get("metadata") or {}
+        if kw.get("task_id") == gate.id and REMEDIATION_KEY in meta:
+            attempts.append(1)
+            raise RuntimeError("mcp session closed")  # a raw transport error
+        return await real_update(**kw)
+
+    monkeypatch.setattr(client, "task_update", failing_update)
+    monkeypatch.setattr(ro, "REFUND_RETRY_DELAYS", ())  # no sleeping in the test
+    await ro.record_result(
+        _ctx(client),
+        gate_id=gate.id,
+        story_id=story,
+        spec=spec,
+        budget=RemediationBudget(pr_url=_PR_URL, rounds_used=2),
+        budget_limit=2,
+        notifier=None,
+        data=_already_clean_payload(),
+    )
+    assert attempts  # it tried
+    outcome = next(f for f in _findings(client) if "remediation outcome" in f)
+    assert "did not land" in outcome and "stays spent" in outcome
+    assert await _human_gates(client) == []  # succeeded: never the exhaustion gate
 
 
 async def test_rounds_remaining_after_an_unconverged_run_does_not_escalate(

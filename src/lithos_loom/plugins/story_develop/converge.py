@@ -482,6 +482,18 @@ def _contains_base(base_sha: str) -> Callable[[DevelopResult], str | None]:
     return check
 
 
+def _nothing_to_change_message(outcomes: tuple[ExternalOutcome, ...]) -> str:
+    no_change = [o.finding_id for o in outcomes if o.disposition == "no_change_needed"]
+    refuted = [o.finding_id for o in outcomes if o.disposition == "rejected"]
+    parts = []
+    if no_change:
+        parts.append(f"no change needed for {', '.join(no_change)}")
+    if refuted:
+        parts.append(f"{', '.join(refuted)} refuted by triage")
+    why = "; ".join(parts)
+    return f"every external finding needed no change ({why}) — nothing to converge"
+
+
 def _loop_and_deliver(
     config: DevelopConfig,
     change: ResolvedChange,
@@ -532,7 +544,7 @@ def _loop_and_deliver(
     fixer_commits = tuple(git.commits_since(result.worktree, change.head_sha))
 
     if (
-        not result.approved
+        result.status == "failed"  # exit C: round 1, no commit — never an infra death
         and not fixer_commits
         and nothing_to_change(external_outcomes)
     ):
@@ -541,7 +553,6 @@ def _loop_and_deliver(
         # ingested as a finding) and said so per id — reported, not
         # remediated: a success, never the `not_converged` that spent the
         # last budget round and raised a needs-human gate on a mergeable PR.
-        ids = ", ".join(o.finding_id for o in external_outcomes)
         return ConvergeResult(
             status="already_clean",
             change=change,
@@ -549,9 +560,7 @@ def _loop_and_deliver(
             intake_cost_usd=pre_loop_cost,
             intake_deferred=intake_deferred,
             external_outcomes=external_outcomes,
-            message=(
-                f"every external finding needed no change ({ids}) — nothing to converge"
-            ),
+            message=_nothing_to_change_message(external_outcomes),
         )
     if not result.approved:
         return ConvergeResult(
