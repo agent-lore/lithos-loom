@@ -14,7 +14,6 @@ import dataclasses
 from pathlib import Path
 from typing import Any
 
-from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import PrGateSpec
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
@@ -35,6 +34,7 @@ __all__ = [
     "post_finding",
     "post_repo_mismatch_refusal",
     "record_result",
+    "refund_infra_failed",
     "refund_repo_mismatch",
     "refusal_key",
     "settled_refusal",
@@ -45,13 +45,23 @@ REFUND_RETRY_DELAYS: tuple[float, ...] = (0.5, 2.0, 5.0)
 
 
 async def post_finding(ctx: SubscriptionContext, story_id: str, summary: str) -> None:
-    """Best-effort finding post (the story may have completed mid-run)."""
+    """Best-effort finding post (the story may have completed mid-run).
+
+    Genuinely best-effort (PR #379 review): a raw transport error — which
+    propagates past the client's own recovery — is swallowed here too. Every
+    caller posts the breadcrumb AFTER its durable write landed, and an
+    exception escaping from here would reach ``ExternalRemediation._run``'s
+    crash handler, which re-reads the ORIGINAL reserved budget and can raise
+    a false ``remediation_exhausted`` gate over a round that was refunded.
+    """
     try:
         await ctx.lithos.finding_post(task_id=story_id, summary=summary)
-    except LithosClientError as exc:
+    except Exception as exc:  # noqa: BLE001 — see the docstring
         ctx.logger.warning(
-            "[Friction] external-remediation: posting outcome for story %s failed (%s)",
+            "[Friction] external-remediation: posting outcome for story %s failed "
+            "(%s: %s); the breadcrumb is lost, the recorded state stands",
             story_id,
+            type(exc).__name__,
             exc,
         )
 
@@ -293,6 +303,97 @@ async def post_repo_mismatch_refusal(
     )
 
 
+async def refund_infra_failed(
+    ctx: SubscriptionContext,
+    *,
+    gate_id: str,
+    story_id: str,
+    spec: PrGateSpec,
+    budget: RemediationBudget,
+    budget_limit: int,
+    notifier: RemediationNotifier | None,
+    data: dict[str, Any],
+) -> None:
+    """The run ended ``infra_failed`` (#377): the host, not the change, is
+    broken — refund the reserved round, re-park the review trigger, and say
+    what to fix. No exhaustion escalation (the change was never judged) and
+    no settle key: the dispatcher holds the PR in memory for the rest of this
+    boot, and a daemon restart — the operator's fix attempt — retries once.
+
+    The state write is STRICT, as for a repo-mismatch refund: it is what
+    keeps the round and the review debt.
+    """
+    action = str(data.get("host_action") or "fix the host")
+    detail = str(data.get("message") or "infrastructure failure")[:300]
+    refund = dataclasses.replace(budget, rounds_used=max(0, budget.rounds_used - 1))
+    marker = {
+        REMEDIATION_KEY: refund.as_marker(),
+        PENDING_KEY: {"pr_url": spec.pr_url},
+    }
+    failure: Exception | None = None
+    for delay in (0.0, *REFUND_RETRY_DELAYS):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await ctx.lithos.task_update(task_id=gate_id, metadata=marker)
+            failure = None
+            break
+        except Exception as exc:  # noqa: BLE001 — a raw transport error
+            # propagates past the client's own recovery (lithos_client._invoke)
+            # and must land in this retry loop, not in the crash handler
+            failure = exc
+    if failure is None:
+        ctx.logger.warning(
+            "[Friction] external-remediation: converge for %s stopped on an "
+            "infrastructure failure (%s); round refunded, trigger re-parked, "
+            "held until the next daemon boot",
+            spec.pr_url,
+            detail,
+        )
+        await post_finding(
+            ctx,
+            story_id,
+            f"[Friction] external-remediation: converge --from-github for "
+            f"{spec.pr_url} stopped on an infrastructure failure, not a verdict "
+            f"on the change ({detail}). The round is refunded "
+            f"({refund.rounds_used}/{budget_limit}) and the review trigger "
+            f"re-parked; loom will not retry this PR until the daemon restarts. "
+            f"{action} — then restart loom.",
+        )
+        return
+    ctx.logger.warning(
+        "[Friction] external-remediation: infra refund for %s did not land after "
+        "%d attempts (%s); round %d/%d remains spent",
+        spec.pr_url,
+        1 + len(REFUND_RETRY_DELAYS),
+        failure,
+        budget.rounds_used,
+        budget_limit,
+    )
+    await post_finding(
+        ctx,
+        story_id,
+        f"[Friction] external-remediation: converge --from-github for "
+        f"{spec.pr_url} stopped on an infrastructure failure ({detail}), but "
+        f"recording the refund did not land ({failure}): round "
+        f"{budget.rounds_used}/{budget_limit} remains spent and the review "
+        f"trigger is not re-parked. {action} — then restart loom and re-run "
+        f"`develop converge --from-github` for the material.",
+    )
+    # the round IS spent on this path: a last round decides like any other
+    await escalate_or_report(
+        ctx,
+        gate_id=gate_id,
+        story_id=story_id,
+        spec=spec,
+        budget=budget,
+        budget_limit=budget_limit,
+        notifier=notifier,
+        last_status="infra_failed",
+        detail=f"{detail}; the refund did not land ({failure})",
+    )
+
+
 async def refund_repo_mismatch(
     ctx: SubscriptionContext,
     *,
@@ -330,7 +431,7 @@ async def refund_repo_mismatch(
             "actual_repo": actual,
         },
     }
-    failure: LithosClientError | None = None
+    failure: Exception | None = None
     for delay in (0.0, *REFUND_RETRY_DELAYS):
         if delay:
             await asyncio.sleep(delay)
@@ -338,7 +439,9 @@ async def refund_repo_mismatch(
             await ctx.lithos.task_update(task_id=gate_id, metadata=marker)
             failure = None
             break
-        except LithosClientError as exc:
+        except Exception as exc:  # noqa: BLE001 — a raw transport error
+            # propagates past the client's own recovery (lithos_client._invoke)
+            # and must land in this retry loop, not in the crash handler
             failure = exc
     if failure is None:
         await post_finding(
