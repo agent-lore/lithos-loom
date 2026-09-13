@@ -246,7 +246,12 @@ def _derive(
             f"{budget['needs_human_gate_id']}",
         )
 
-    if said.remediation_exhausted:
+    # The round is reserved at dispatch, so the count reads exhausted while
+    # the run that spends it is still in the panel (lens #84, 2026-09-13: the
+    # board said needs_human with no gate behind it for the whole last
+    # round). A remediation in flight outranks the count — its outcome (a
+    # push, or the escalation that writes the gate id above) settles it.
+    if said.remediation_exhausted and not busy.remediation:
         return Derived("needs_human", "external-remediation budget exhausted")
     # #377: a dispatcher stopped on the HOST (no verdict reached) — like a
     # refusal, only the operator can move it (fix the host, restart loom).

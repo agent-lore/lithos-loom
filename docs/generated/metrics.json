@@ -125,7 +125,7 @@
         "qualname": "lithos_loom.cli.project.import_project"
       },
       {
-        "complexity": 46,
+        "complexity": 47,
         "qualname": "lithos_loom.subscriptions.reconciliation_state._derive"
       },
       {
@@ -516,7 +516,7 @@
         "functions": 340,
         "largest_module": "lithos_loom.subscriptions.route_runner",
         "largest_module_lines": 797,
-        "lines": 14438,
+        "lines": 14443,
         "modules": 44,
         "public_symbols": 134,
         "sloc": 11682
@@ -552,13 +552,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 58580,
+    "total_lines": 58585,
     "total_modules": 170,
     "total_sloc": 47421
   },
   "tests": {
     "ratio": 1.58,
-    "src_lines": 58580,
-    "test_lines": 92342
+    "src_lines": 58585,
+    "test_lines": 92360
   }
 }

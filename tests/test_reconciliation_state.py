@@ -473,6 +473,24 @@ def test_an_exhausted_budget_without_a_gate_id_is_needs_human() -> None:
     assert d.state == "needs_human" and "exhausted" in d.detail
 
 
+def test_the_last_budgeted_round_in_flight_is_reconciling_not_exhausted() -> None:
+    # lens #84, 2026-09-13: the round is reserved at dispatch, so the count
+    # reads exhausted while the run that spends it is still in the panel —
+    # the board said needs_human with no gate behind it for the whole run.
+    # A remediation in flight outranks the count; its outcome (a push, or the
+    # escalation that writes the gate id) is what settles the state.
+    d = _derive_d({}, remediation_exhausted=True, busy=Busy(remediation=True))
+    assert d.state == "reconciling" and "remediation in flight" in d.detail
+    # a gate that already waits is authoritative even then
+    budget = RemediationBudget(pr_url=_URL, rounds_used=2, needs_human_gate_id="gate-h")
+    d = _derive_d(
+        {"external_remediation": budget.as_marker()},
+        remediation_exhausted=True,
+        busy=Busy(remediation=True),
+    )
+    assert d.state == "needs_human" and "gate-h" in d.detail
+
+
 def test_the_detail_is_truncated_at_the_source() -> None:
     from lithos_loom.subscriptions.reconciliation_state import DETAIL_MAX_CHARS
 
