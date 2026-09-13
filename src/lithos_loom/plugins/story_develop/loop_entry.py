@@ -15,11 +15,35 @@ from typing import TYPE_CHECKING
 from ...runner import git
 
 if TYPE_CHECKING:
-    from .check_set import CheckSetResult
+    from .check_set import CheckResult, CheckSetResult
     from .config import DevelopConfig
     from .panel import ReviewOutcome
 
-__all__ = ["LoopEntry"]
+__all__ = ["LoopEntry", "PostCommitOutcome"]
+
+
+@dataclass(frozen=True)
+class PostCommitOutcome:
+    """What a round's post-commit pass left behind (PRD S4; PR #388 review).
+
+    ``sha`` is the commit the pass made — the gated tree moves to it. ``row``
+    is the pass's verdict as a check-set result riding with the round's
+    commit: a REQUIRED raw-exit check, so a red one holds approval through
+    the floor, reaches the coder's next prompt with its output tail and is
+    named in the run outcome, while a green one tells the panel the rebuild
+    ran clean. A pass that ran its tool returns a row EVERY time (green
+    included), so a prior commit's row never outlives the commit it
+    described; a round with no new commit keeps the prior row (the tree is
+    unchanged). ``infra_error`` means the pass never got a verdict (export /
+    container runtime) — nothing the coder can fix — and the round is
+    terminal ``infra_failed`` with ``host_action``. The empty outcome is
+    reserved for a pass with nothing to run.
+    """
+
+    sha: str | None = None
+    row: CheckResult | None = None
+    infra_error: str = ""
+    host_action: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,6 +80,13 @@ class LoopEntry:
     coder_init_template: str = "converge_coder_init.md"
     coder_init_extra: Mapping[str, str] = field(default_factory=dict)
     pre_commit_guard: Callable[[Path], str | None] | None = None
+    # PRD S4: a pass run after every round commit (and the auto-format pass),
+    # ``(worktree, round_no) -> PostCommitOutcome`` — resolve mode regenerates
+    # the project's generated paths deterministically and commits the result,
+    # so the gate + panel never judge a hand-merged or stale generated file;
+    # its verdict rides with the commit as a required check row, and a pass
+    # that cannot run ends the round ``infra_failed`` (fail closed).
+    post_commit_pass: Callable[[Path, int], PostCommitOutcome] | None = None
     # ...and the panel's merge-shaped context (PR #364 review F1): the
     # conflicted paths and both parents, so a reviewer can see a resolution
     # that took the base version — invisible in the fork-point diff.

@@ -702,6 +702,26 @@ async def test_conflict_widens_pr_conflicted_with_the_paths_once(
     assert len(_findings(client)) == 1
 
 
+async def test_conflict_names_the_generated_paths_set_aside(tmp_path: Path) -> None:
+    # PRD S4: the run resolved the generated conflicts itself; the finding
+    # names the REAL conflict as the one to fix and the set-aside ones as
+    # such, so nobody hand-merges a generated file
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    record = _record("conflict", paths=["src/a.py"])
+    record["generated_conflicts"] = ["docs/generated/metrics.json"]
+    record["regenerate_command"] = "make diagrams"
+    spawn, _calls = _spawner(record, probe=_probe(_FP))
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await _settle(dispatch)
+    (finding,) = _findings(client)
+    assert "in 1 path(s): src/a.py" in finding
+    assert "1 generated path(s) set aside" in finding
+    assert "run `make diagrams` on the merged tree before pushing" in finding
+    assert "docs/generated/metrics.json" in finding
+
+
 async def test_no_checks_records_without_chatter(tmp_path: Path) -> None:
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)

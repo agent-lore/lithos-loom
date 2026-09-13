@@ -53,6 +53,10 @@ from lithos_loom.plugins.story_develop.external_reviews import (
     issue_comment_reply_body,
     pr_number_from_spec,
 )
+from lithos_loom.plugins.story_develop.generated import (
+    parse_generated_paths,
+    parse_regenerate_command,
+)
 from lithos_loom.plugins.story_develop.github_access import repo_name_with_owner
 from lithos_loom.plugins.story_develop.pr_delivery import (
     post_pr_comment,
@@ -138,6 +142,22 @@ def converge_command(
         "as a required `repo-parity` gate check so the converged tree passes what CI "
         "enforces beyond the structured check-set (diagram drift, codegen, docs lint). "
         "Primary gate for ecosystems the catalog doesn't model (C/C++).",
+    ),
+    generated_path: list[str] | None = typer.Option(
+        None,
+        "--generated-path",
+        help="Repo-relative path whose content is GENERATED (repeatable; PRD S4). A "
+        "conflict there is taken from the base and rebuilt on the composed tree "
+        "with --regenerate-command, never merged; a clean merge regenerates too. "
+        "Without --story this is the only source; with it, the story's "
+        "develop_generated_paths.",
+    ),
+    regenerate_command: str | None = typer.Option(
+        None,
+        "--regenerate-command",
+        help="Command that rebuilds every --generated-path on the composed tree, "
+        "run in the gate container before the check-set. Required with "
+        "--generated-path.",
     ),
     image: str | None = typer.Option(
         None,
@@ -267,6 +287,17 @@ def converge_command(
     try:
         test_command = parse_test_command(test_command, where="--test-command")
         parity_command = parse_parity_command(parity_command, where="--parity-command")
+        generated_paths = parse_generated_paths(
+            generated_path or None, where="--generated-path"
+        )
+        regenerate_command = parse_regenerate_command(
+            regenerate_command, where="--regenerate-command"
+        )
+        if generated_paths and not regenerate_command:
+            raise ValueError(
+                "--generated-path needs --regenerate-command: paths nothing "
+                "regenerates would take a side and ship stale output"
+            )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -447,10 +478,13 @@ def converge_command(
             "max_cost_usd": max_cost,
             "test_command": test_command,
             "parity_command": parity_command,
+            "regenerate_command": regenerate_command,
             "artifacts_path": resolved_artifacts,
         }.items()
         if v is not None
     }
+    if generated_paths:
+        explicit["generated_paths"] = generated_paths
     develop_config = DevelopConfig(
         **{
             **dict(

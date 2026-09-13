@@ -380,6 +380,59 @@ def test_parity_command_bad_value_frictions_and_keeps_none() -> None:
     assert frictions[0].endswith("; ignoring")
 
 
+# --- generated paths + regenerate command (PRD pr-reconciliation S4) ────────
+
+
+def test_generated_policy_project_then_task() -> None:
+    project, frictions = _resolve(
+        {
+            "develop_generated_paths": ["docs/generated/", "./api/client.py"],
+            "develop_regenerate_command": " make diagrams ",
+        }
+    )
+    assert project.generated_paths == ("docs/generated", "api/client.py")
+    assert project.regenerate_command == "make diagrams"
+    assert frictions == ()
+    both, _ = _resolve(
+        {
+            "develop_generated_paths": ["docs/generated"],
+            "develop_regenerate_command": "make diagrams",
+        },
+        {
+            "develop_generated_paths": ["gen"],
+            "develop_regenerate_command": "make gen",
+        },
+    )
+    assert both.generated_paths == ("gen",) and both.regenerate_command == "make gen"
+
+
+def test_generated_policy_default_empty_no_friction() -> None:
+    settings, frictions = _resolve()
+    assert settings.generated_paths == () and settings.regenerate_command is None
+    assert frictions == ()
+
+
+def test_generated_policy_bad_values_friction_and_keep_defaults() -> None:
+    settings, frictions = _resolve(
+        {"develop_generated_paths": "docs/generated", "develop_regenerate_command": ""}
+    )
+    assert settings.generated_paths == () and settings.regenerate_command is None
+    assert len(frictions) == 2 and all(f.endswith("; ignoring") for f in frictions)
+
+
+def test_generated_paths_without_a_command_are_dropped_with_a_friction() -> None:
+    # half a policy is no policy: paths alone would take a side and never
+    # regenerate, shipping stale output through the gate
+    settings, frictions = _resolve({"develop_generated_paths": ["docs/generated"]})
+    assert settings.generated_paths == () and settings.regenerate_command is None
+    assert len(frictions) == 1
+    assert "develop_regenerate_command" in frictions[0] and "; ignoring" in frictions[0]
+    # ...and a command alone is inert (nothing to regenerate) but harmless
+    settings, frictions = _resolve({"develop_regenerate_command": "make gen"})
+    assert settings.generated_paths == () and settings.regenerate_command == "make gen"
+    assert frictions == ()
+
+
 # ── friction ORDER (must match the original resolve_project_settings) ──
 
 

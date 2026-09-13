@@ -828,6 +828,73 @@ def test_resolve_mode_seeds_the_loop_from_a_merge_in_progress(
     assert captured["push"]["expected_remote_sha"] == head
 
 
+def test_resolve_mode_wires_the_regenerate_pass_and_names_the_set_aside_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    # PRD S4: under a policy the loop entry carries the post-commit regenerate
+    # pass, and the panel's merge context names the generated paths that were
+    # set aside (a hand-merged one is a defect, a stale one too)
+    merge_base, head, _tip = _seed_conflict(tmp_git_repo)
+    # add a generated conflict beside the real one
+    subprocess.run(["git", "switch", "-q", "main"], cwd=tmp_git_repo, check=True)
+    (tmp_git_repo / "docs" / "generated").mkdir(parents=True, exist_ok=True)
+    (tmp_git_repo / "docs" / "generated" / "m.json").write_text("main\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "main: gen"], cwd=tmp_git_repo, check=True
+    )
+    subprocess.run(["git", "switch", "-q", "feature"], cwd=tmp_git_repo, check=True)
+    (tmp_git_repo / "docs" / "generated").mkdir(parents=True, exist_ok=True)
+    (tmp_git_repo / "docs" / "generated" / "m.json").write_text("feature\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "feature: gen"], cwd=tmp_git_repo, check=True
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_git_repo, capture_output=True, text=True
+    ).stdout.strip()
+    _install(monkeypatch, blocking=False)
+    seen: dict = {}
+
+    def fake_develop(config, *, coder_timeout=3600, reviewer_timeout=3600, entry=None):
+        assert entry is not None
+        wt = entry.worktree_factory(config)
+        seen["entry"] = entry
+        (wt / "shared.txt").write_text("feature+base\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "resolve"], cwd=wt, check=True)
+        return _dev_result(wt, status="approved")
+
+    monkeypatch.setattr(converge_mod, "develop", fake_develop)
+    config = dataclasses.replace(
+        _config(tmp_path),
+        generated_paths=("docs/generated",),
+        regenerate_command="make gen",
+    )
+    result = converge_pr(
+        config, _resolve_change(merge_base, head), resolve_conflicts=True, no_push=True
+    )
+    assert result.status == "converged"
+    entry = seen["entry"]
+    assert entry.post_commit_pass is not None
+    assert "docs/generated/m.json" in entry.review_context
+    assert "not hand-merged" in entry.review_context
+    assert "docs/generated/m.json" in entry.coder_init_extra["conflict_brief"]
+    assert "make gen" in entry.coder_init_extra["conflict_brief"]
+    assert result.conflict is not None and result.conflict.paths == ("shared.txt",)
+
+    # without a policy: no pass, no mention
+    seen.clear()
+    converge_pr(
+        _config(tmp_path),
+        _resolve_change(merge_base, head),
+        resolve_conflicts=True,
+        no_push=True,
+    )
+    assert seen["entry"].post_commit_pass is None
+    assert "not hand-merged" not in seen["entry"].review_context
+
+
 def test_resolve_mode_with_nothing_to_resolve_spends_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_git_repo: Path
 ) -> None:

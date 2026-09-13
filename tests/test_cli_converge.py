@@ -250,6 +250,30 @@ def test_parity_command_threads_through(stubs: dict) -> None:
     assert stubs["config"].parity_command == "make check"
 
 
+def test_generated_policy_threads_through(stubs: dict) -> None:
+    result = runner.invoke(
+        develop_app,
+        [
+            "converge",
+            "#142",
+            "--ac",
+            "x",
+            "--generated-path",
+            "docs/generated/",
+            "--regenerate-command",
+            "make gen",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert stubs["config"].generated_paths == ("docs/generated",)
+    assert stubs["config"].regenerate_command == "make gen"
+    half = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--generated-path", "docs/generated"],
+    )
+    assert half.exit_code == 2
+
+
 def test_image_threads_through(stubs: dict) -> None:
     """Without --image, converge silently ran DEFAULT_IMAGE regardless of the
     project's develop_image — so a project whose gate needs a browser could

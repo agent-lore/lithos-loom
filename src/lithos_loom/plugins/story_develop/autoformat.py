@@ -130,7 +130,7 @@ def resolve_formatters(config: DevelopConfig, wt: Path) -> list[str]:
     return [c for c in commands if c.split()[0] in available]
 
 
-def _within(root: Path, target: Path) -> bool:
+def within_tree(root: Path, target: Path) -> bool:
     """Whether *target* resolves to a path inside *root* (write-side traversal guard).
 
     Resolves *target*'s deepest **existing** ancestor (following any symlinks) and
@@ -182,7 +182,7 @@ def _apply_formatted_tree(formatted: Path, baseline: Path, wt: Path) -> bool:
         dst = wt / rel
         # Defense in depth: don't write through a pre-existing worktree symlink or to a
         # path that escapes the worktree.
-        if dst.is_symlink() or not _within(wt, dst):
+        if dst.is_symlink() or not within_tree(wt, dst):
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(new)

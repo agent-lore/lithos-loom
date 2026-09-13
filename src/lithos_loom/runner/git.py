@@ -343,6 +343,43 @@ def abort_merge(worktree: Path) -> None:
     _git(worktree, "merge", "--abort")
 
 
+def take_their_side(worktree: Path, paths: Sequence[str]) -> None:
+    """Resolve conflicted *paths* of an in-progress merge to the MERGED-IN
+    side (``MERGE_HEAD``'s copy) and stage them — PRD S4: a conflict in a
+    generated artifact is not merged, either side is taken and the generator
+    runs on the composed tree. Pathspec magic is disabled: the paths come
+    from ``git``'s own unmerged list, never from a prompt."""
+    for path in paths:
+        if 3 in unmerged_entries(worktree, path):
+            _git(worktree, "--literal-pathspecs", "checkout", "--theirs", "--", path)
+            _git(worktree, "--literal-pathspecs", "add", "--", path)
+        else:
+            # a modify/delete where THEIR side is the deletion: no stage-3
+            # blob to check out — remove it; the generator recreates the
+            # file if the composed tree still wants it
+            _git(worktree, "--literal-pathspecs", "rm", "-q", "--", path)
+
+
+def stage_paths(worktree: Path, paths: Sequence[str]) -> None:
+    """``git add -A`` limited to *paths* (files, or directory prefixes):
+    additions, modifications and deletions under them, nothing else. A path
+    that matches nothing in the index or on disk is a hard error from git —
+    pass concrete paths that exist on one side or the other."""
+    if not paths:
+        return
+    _git(worktree, "--literal-pathspecs", "add", "-A", "--", *paths)
+
+
+def write_tree(worktree: Path) -> str:
+    """The tree object of the INDEX — what a commit made now would contain.
+
+    With a merge in progress this is the composed tree (auto-merged paths
+    plus whatever the caller resolved and staged), which ``git archive``
+    accepts as a tree-ish: the way to export a merge result before it is
+    committed."""
+    return _git(worktree, "write-tree")
+
+
 def merge_head(worktree: Path) -> str | None:
     """The sha an in-progress merge is merging (``MERGE_HEAD``), else None."""
     marker = Path(_git(worktree, "rev-parse", "--git-path", "MERGE_HEAD"))

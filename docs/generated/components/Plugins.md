@@ -19,10 +19,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.__main__` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.agent_session` | S | 1 | 3 |
-| `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 3 |
+| `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
-| `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
+| `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.coder_salvage` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
@@ -37,12 +37,13 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
+| `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
 | `lithos_loom.plugins.story_develop.github_access` | XS | 0 | 2 |
 | `lithos_loom.plugins.story_develop.handoff` | M | 3 | 13 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
-| `lithos_loom.plugins.story_develop.loop_entry` | XS | 1 | 0 |
+| `lithos_loom.plugins.story_develop.loop_entry` | XS | 2 | 0 |
 | `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
@@ -81,6 +82,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.autoformat`
 - def `build_format_command` — Build the one-shot ``docker run`` argv for one formatter run.
 - def `resolve_formatters` — The runnable write-mode formatter commands for *wt*, probed once for the run.
+- def `within_tree` — Whether *target* resolves to a path inside *root* (write-side traversal guard).
 - def `run_format_pass` — Format the coder's commit in isolation and commit any change separately.
 
 ### `lithos_loom.plugins.story_develop.check_artifacts`
@@ -103,6 +105,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `effective_check_state` — The check's blocking state after operator overrides (#273 slice 2).
 - def `build_check_set` — The Review-Profile-selected check-set for this run (#140, ADR §3/§4).
 - def `merge_check_sets` — Append *extra*'s results to *base* (the approval-candidate merge, #140).
+- def `with_result` — *base* with *row* appended, any prior result of the same check name dropped — a verdict produced outside :func:`run_check_set` (the S4 post-commit regenerate pass) joining the round's check-set.
 - def `check_result_blocks` — Whether a single **required** check holds approval (#140, ADR §4/§5).
 - def `gate_floor_blocks` — Whether the deterministic floor blocks approval (#140, ADR §4/§5).
 - def `run_check_set` — Run an ordered check-set against one round commit.
@@ -146,7 +149,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `UnsupportedConflict` — The merge conflicts in a shape this mode cannot resolve by editing (PR #364 review round 3): a binary file, a modify/delete, a path git left without textual markers. Nothing distinguishes a coder's resolution of such a path from an untouched one, and `git add -A` would then silently take whichever side git left in the tree — so the intake refuses before any agent runs, naming every such path.
 - class `ConflictIntake` — A merge in progress, ready for the resolution round.
 - def `prepare_conflict_intake` — Merge the base's current tip into a throwaway worktree at the PR head, without committing. ``None`` when there is nothing to resolve — the head already contains the base tip, or the merge is clean (the base-move re-gate's job, PRD S3): the worktree is removed again and no agent runs.
-- def `render_conflict_brief` — The round-1 brief: the PR's intent, what landed on the base since the merge-base, and the conflicted hunks (bounded per path).
+- def `render_conflict_brief` — The round-1 brief: the PR's intent, what landed on the base since the merge-base, the conflicted hunks (bounded per path) and, under the PRD S4 policy, the generated paths set aside with the command that rebuilds them.
 - def `fence` — A Markdown fence the *content* cannot close: one backtick longer than the longest backtick run inside it (PR #364 review round 3 — a path or a hunk containing ``` closed a fixed fence and became prompt prose).
 - def `markers_guard` — The pre-commit guard — the host-side enforcement behind the prompt's "never touch git state" (PR #364 review F2). It proves the INTENDED base is what gets merged: no conflicted path may still carry markers; while a merge is in progress it must be a merge of exactly *base_sha* onto the PR head; and once HEAD has moved past the PR head, *base_sha* must be an ancestor of it. Anything else — an aborted merge, a merge of something else, an agent commit that skipped the merge — fails the round, so the tree is never gated, reviewed or pushed.
 - def `render_review_context` — The panel's merge-shaped context (PR #364 review F1). The fork-point diff the reviewers start from runs base tip → HEAD, so a conflicted path resolved to the BASE version is absent from it — the PR's change silently dropped. Name the paths and both parents and give each side's diff.
@@ -233,6 +236,17 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `GateFinding` — One deterministic finding from a gate check (already severity-mapped).
 - class `GateLedger` — Gate-owned registry of deterministic findings with stable per-check ids.
 
+### `lithos_loom.plugins.story_develop.generated`
+- def `parse_generated_paths` — Validate + normalise a ``generated_paths`` declaration, or ``()``.
+- def `parse_regenerate_command` — Validate a ``regenerate_command``, or ``None``. Mirrors ``parse_parity_command``: a non-empty string, trusted as-is (it runs in the gate container); a bad command surfaces when the container runs it.
+- def `is_generated` — Whether *path* is one of the declared prefixes or lies under one (segment-wise: ``docs/generated`` covers ``docs/generated/x``, never ``docs/generated2/x``).
+- def `partition_conflicts` — Split conflicted *paths* into ``(generated, real)``, order kept.
+- def `take_base_side` — Resolve conflicted generated *paths* of the in-progress merge to the base's copy and stage them. Which side is immaterial — the generator overwrites the content — but the base's is the one a clean merge would have carried, so the diff the panel later reads stays honest.
+- class `RegenerateResult` — What :func:`regenerate` did. ``changed`` lists the declared-path files whose content the generator moved (added, rewritten or deleted), now staged; ``exit_code`` is ``None`` when the container never ran.
+- def `regenerate` — Run the project's generator on the COMPOSED tree and copy the declared paths back into *wt*, staged.
+- def `regenerate_check_result` — The generator's verdict as a check-set row: a REQUIRED raw-exit check (its exit code is the verdict, no finding adapter), ``ran`` or ``timed_out``. Only for a generator that ran — a pass that never reached it has no verdict to report (see :func:`post_commit_regenerate`).
+- def `post_commit_regenerate` — The round's post-commit pass for a loop that composes trees (the S5 resolve mode): after the coder's commit (and the auto-format pass), run the generator on HEAD and commit what it moved as its own commit — ``story-develop r<n>: regenerate`` — so the gate and the panel judge a tree whose generated output is the generator's, whatever the coder ran. ``None`` when the project declares no policy.
+
 ### `lithos_loom.plugins.story_develop.github_access`
 - def `github_call` — Run one GitHub REST operation against a typed client, synchronously.
 - def `repo_name_with_owner` — ``owner/repo`` of the local checkout's ``origin`` remote, via ``gh``.
@@ -283,6 +297,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `complete_task` — Mark the task completed (``--complete-on-approval`` opt-in only).
 
 ### `lithos_loom.plugins.story_develop.loop_entry`
+- class `PostCommitOutcome` — What a round's post-commit pass left behind (PRD S4; PR #388 review).
 - class `LoopEntry` — Overrides that let ``develop()`` enter its loop on an EXISTING PR branch instead of cutting a fresh worktree off a base (converge / ADR 0003 §9 "Shape 1").
 
 ### `lithos_loom.plugins.story_develop.merge_gate`
@@ -365,7 +380,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `resolve_change` — Resolve *spec* into a :class:`ResolvedChange`.
 
 ### `lithos_loom.plugins.story_develop.rounds`
-- class `Services` — The side-effecting seams the round pipeline depends on, injected so the loop is testable with fakes (ARCH-1.S4).
+- class `Services` — The side-effecting seams the round pipeline depends on, injected so the loop is testable with fakes (ARCH-1.S4): ``run_turn`` / ``sleep`` feed :func:`agent_session.turn_with_reactions`, the rest the phase pipeline.
 - class `CycleExit` — A terminal outcome of the develop loop.
 - class `RoundContext` — The explicit successor of ``develop()``'s locals bag (ARCH-1.S6).
 - def `round1_coder_prompt` — The cold-start coder prompt: story-develop's ``coder_init.md``, or — on a converge entry (``intake_reviews`` set) — the entry's template seeded from the intake review + the PR's own commit log so the coder reconstructs intent before changing anything (ADR 0003 §9 Shape 1); a conflict resolution (PRD S5) swaps the template and adds its brief as extra slots.

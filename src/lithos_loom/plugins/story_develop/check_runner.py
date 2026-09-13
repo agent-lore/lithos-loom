@@ -357,6 +357,18 @@ def merge_check_sets(
     return CheckSetResult(results=base.results + extra.results)
 
 
+def with_result(base: CheckSetResult | None, row: CheckResult) -> CheckSetResult:
+    """*base* with *row* appended, any prior result of the same check name
+    dropped — a verdict produced outside :func:`run_check_set` (the S4
+    post-commit regenerate pass) joining the round's check-set."""
+    kept = tuple(
+        r
+        for r in (base.results if base is not None else ())
+        if r.check.name != row.check.name
+    )
+    return CheckSetResult(results=kept + (row,))
+
+
 def check_result_blocks(
     r: CheckResult,
     gate_ledger: GateLedger | None,

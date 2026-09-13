@@ -412,3 +412,154 @@ def test_intake_refuses_a_moved_base(tmp_path: Path, tmp_git_repo: Path) -> None
         config, _change(_merge_base, head), expect_base=base_tip
     )
     assert intake is not None and intake.base_sha == base_tip
+
+
+# ── PRD S4: generated paths are set aside at intake, never given to the coder ──
+
+
+def _seed_with_generated(repo: Path) -> tuple[str, str, str]:
+    """Like ``_seed`` — main + feature both edit shared.txt — with both
+    sides ALSO rewriting ``docs/generated/metrics.json``."""
+    (repo / "docs" / "generated").mkdir(parents=True)
+    (repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 1}\n')
+    merge_base, head, base_tip = _seed(repo)  # on feature at the end
+    (repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 12}\n')
+    _git(repo, "commit", "-q", "-am", "feature: metrics")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", "main")
+    (repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 11}\n')
+    _git(repo, "commit", "-q", "-am", "main: metrics")
+    base_tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", "feature")
+    return merge_base, head, base_tip
+
+
+def _policy_config(tmp_path: Path, repo: Path) -> DevelopConfig:
+    return DevelopConfig(
+        repo=repo,
+        description="A PR",
+        work_dir=tmp_path / "work",
+        acceptance_criteria="do the thing",
+        generated_paths=("docs/generated",),
+        regenerate_command="make diagrams",
+    )
+
+
+def test_generated_conflicts_are_set_aside_and_only_real_ones_reach_the_coder(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    merge_base, head, base_tip = _seed_with_generated(tmp_git_repo)
+    intake = prepare_conflict_intake(
+        _policy_config(tmp_path, tmp_git_repo), _change(merge_base, head)
+    )
+    assert intake is not None
+    try:
+        # the coder's paths, the guard's paths: the REAL conflict only
+        assert intake.paths == ("shared.txt",)
+        assert intake.generated_paths == ("docs/generated/metrics.json",)
+        wt = intake.worktree
+        # the generated file is the base's copy, staged, marker-free; the
+        # real one still carries markers, and the merge is still in progress
+        assert (wt / "docs/generated/metrics.json").read_text() == '{"lines": 11}\n'
+        assert git.unmerged_paths(wt) == ["shared.txt"]
+        assert git.merge_head(wt) == base_tip
+        # the brief says what was set aside and what the coder must run
+        assert "shared.txt" in intake.brief
+        assert "docs/generated/metrics.json" in intake.brief
+        assert "make diagrams" in intake.brief
+        assert "set aside" in intake.brief
+        # the guard is scoped to the real path: markers left in the generated
+        # file are impossible (it was resolved), so only shared.txt can fail it
+        from lithos_loom.plugins.story_develop.conflict_resolve import markers_guard
+
+        guard = markers_guard(intake.paths, head_sha=head, base_sha=base_tip)
+        assert guard(wt) is not None and "shared.txt" in (guard(wt) or "")
+    finally:
+        from lithos_loom.runner import worktree
+
+        worktree.remove(intake.worktree, force=True)
+
+
+def test_a_generated_only_conflict_is_no_conflict_for_the_resolver(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    # the merge-gate owns this case (zero tokens); the resolver has nothing
+    # to give a coder — the intake reports a clean merge and spends nothing
+    (tmp_git_repo / "docs" / "generated").mkdir(parents=True)
+    (tmp_git_repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 1}\n')
+    (tmp_git_repo / "own.txt").write_text("v0\n")
+    _git(tmp_git_repo, "add", "-A")
+    _git(tmp_git_repo, "commit", "-q", "-m", "seed")
+    merge_base = _git(tmp_git_repo, "rev-parse", "HEAD")
+    _git(tmp_git_repo, "switch", "-q", "-c", "feature")
+    (tmp_git_repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 12}\n')
+    _git(tmp_git_repo, "commit", "-q", "-am", "feature: metrics")
+    head = _git(tmp_git_repo, "rev-parse", "HEAD")
+    _git(tmp_git_repo, "switch", "-q", "main")
+    (tmp_git_repo / "docs" / "generated" / "metrics.json").write_text('{"lines": 11}\n')
+    _git(tmp_git_repo, "commit", "-q", "-am", "main: metrics")
+    _git(tmp_git_repo, "switch", "-q", "feature")
+    intake = prepare_conflict_intake(
+        _policy_config(tmp_path, tmp_git_repo), _change(merge_base, head)
+    )
+    assert intake is None
+    assert not git.merge_in_progress(tmp_git_repo)
+    leftover = [p.name for p in tmp_path.iterdir() if p.is_dir() and p.name != "repo"]
+    assert leftover == [] or leftover == ["work"]
+
+
+def test_a_binary_generated_conflict_is_taken_not_refused(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    # a binary under a generated path is resolved by taking a side (the
+    # generator rebuilds it), so the unsupported-shape refusal does not apply
+    (tmp_git_repo / "docs" / "generated").mkdir(parents=True)
+    (tmp_git_repo / "docs" / "generated" / "graph.png").write_bytes(b"\x89PNG\x00v0")
+    (tmp_git_repo / "shared.txt").write_text("v0\n")
+    _git(tmp_git_repo, "add", "-A")
+    _git(tmp_git_repo, "commit", "-q", "-m", "seed")
+    merge_base = _git(tmp_git_repo, "rev-parse", "HEAD")
+    _git(tmp_git_repo, "switch", "-q", "-c", "feature")
+    (tmp_git_repo / "docs" / "generated" / "graph.png").write_bytes(
+        b"\x89PNG\x00feature"
+    )
+    (tmp_git_repo / "shared.txt").write_text("feature\n")
+    _git(tmp_git_repo, "commit", "-q", "-am", "feature")
+    head = _git(tmp_git_repo, "rev-parse", "HEAD")
+    _git(tmp_git_repo, "switch", "-q", "main")
+    (tmp_git_repo / "docs" / "generated" / "graph.png").write_bytes(b"\x89PNG\x00main")
+    (tmp_git_repo / "shared.txt").write_text("base\n")
+    _git(tmp_git_repo, "commit", "-q", "-am", "main")
+    _git(tmp_git_repo, "switch", "-q", "feature")
+    intake = prepare_conflict_intake(
+        _policy_config(tmp_path, tmp_git_repo), _change(merge_base, head)
+    )
+    assert intake is not None
+    try:
+        assert intake.paths == ("shared.txt",)
+        assert intake.generated_paths == ("docs/generated/graph.png",)
+        assert (
+            intake.worktree / "docs/generated/graph.png"
+        ).read_bytes() == b"\x89PNG\x00main"
+    finally:
+        from lithos_loom.runner import worktree
+
+        worktree.remove(intake.worktree, force=True)
+
+
+def test_without_a_policy_generated_conflicts_reach_the_coder_as_before(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    merge_base, head, _tip = _seed_with_generated(tmp_git_repo)
+    intake = prepare_conflict_intake(
+        _config(tmp_path, tmp_git_repo), _change(merge_base, head)
+    )
+    assert intake is not None
+    try:
+        assert sorted(intake.paths) == ["docs/generated/metrics.json", "shared.txt"]
+        assert intake.generated_paths == ()
+        assert "set aside" not in intake.brief
+    finally:
+        from lithos_loom.runner import worktree
+
+        worktree.remove(intake.worktree, force=True)

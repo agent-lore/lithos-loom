@@ -608,6 +608,14 @@ class DevelopConfig:
     # ecosystem the per-check catalog doesn't model (e.g. C/C++) it is the PRIMARY gate.
     # None = no parity check.
     parity_command: str | None = None
+    # PRD pr-reconciliation S4 (the loom half): repo-relative prefixes whose
+    # content is GENERATED, and the command that regenerates them. Loom's own
+    # merges (the S3 trial merge, the S5 resolve intake) never merge these
+    # textually: a conflict in them takes either side and the generator runs
+    # on the composed tree. Declared together — `generated_paths` without a
+    # `regenerate_command` is rejected at the settings layer.
+    generated_paths: tuple[str, ...] = ()
+    regenerate_command: str | None = None
     # #140: the `test` check's blocking is the resolved profile's ProfileCheck("test",
     # ...) state — the single source of truth (the legacy `block_on_red` knob is gone).
     test_timeout: int = DEFAULT_TEST_TIMEOUT

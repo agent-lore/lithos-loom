@@ -1,36 +1,27 @@
-"""The develop round pipeline's shared injection seam (ARCH-1.S4).
+"""The develop round pipeline + its shared injection seam (ARCH-1.S4/S6).
 
 :class:`Services` is the frozen bundle of side-effecting seams the round
-machinery calls through instead of reaching module globals directly, so the loop
-is unit-testable by constructing a ``Services`` with fakes.
+machinery calls through instead of module globals, so the loop is
+unit-testable with fakes. Both :meth:`Services.live` and ``develop()``'s own
+``_develop_services()`` are constructed at ``develop()`` start, *after* any
+test's ``monkeypatch.setattr`` of ``turns.run_turn`` / ``containers.*`` /
+``develop_mod.run_turn`` / …, so each field binds the patched callable.
+``develop()`` builds its ``Services`` from its own module globals so the
+existing ``develop_mod``-level patches keep taking effect (compat note in
+:mod:`develop`).
 
-:meth:`Services.live` wires the real module callables — captured when it is
-built. Both it and ``develop()``'s own ``_develop_services()`` are constructed at
-``develop()`` start, *after* any test applies its ``monkeypatch.setattr`` of
-``turns.run_turn`` / ``containers.start_container`` / ``develop_mod.run_turn`` / … ,
-so each field binds the patched callable (a patch applied *after* construction is
-not observed — nothing does that). ``develop()`` does *not* use ``live()`` yet —
-it builds a ``Services`` from its own module globals so the existing
-``monkeypatch.setattr(develop_mod, "run_turn"/"_sleep"/…)`` patches keep taking
-effect until S8 re-points the tests (see the compat note in :mod:`develop`).
-
-S4 introduced the seam and threaded it through
-:func:`agent_session.turn_with_reactions`; S6 grew this module into the
-round/phase pipeline. :class:`RoundContext` is the explicit successor of
-``develop()``'s locals bag; each phase function ``(ctx, round_no) -> CycleExit |
-None`` maps 1:1 onto a phase of a develop round and returns a :class:`CycleExit`
-at exactly one site per terminal condition (replacing the old status-assignment
-+ ``break`` pairs); :func:`run_round` sequences them. ``develop()`` shrinks to
+:class:`RoundContext` is the explicit successor of ``develop()``'s locals bag;
+each phase function ``(ctx, round_no) -> CycleExit | None`` maps 1:1 onto a
+phase of a develop round and returns a :class:`CycleExit` at exactly one site
+per terminal condition; :func:`run_round` sequences them. ``develop()`` is
 validation → setup → ``for round: run_round`` → epilogue.
 
-To keep the pipeline a leaf that imports neither ``panel`` (which imports
-``Services`` from here) nor ``agent_session`` (ditto) nor ``develop`` — no import
-cycle — the boundary collaborators (``run_panel_round``,
+To keep the pipeline a leaf that imports neither ``panel`` nor
+``agent_session`` (both import ``Services`` from here) nor ``develop`` — no
+import cycle — the boundary collaborators (``run_panel_round``,
 ``turn_with_reactions``, ``resume_after_from`` and the coder-side prompt
-helpers) are **injected** onto :class:`RoundContext` by ``develop()`` from its own
-module globals. That also keeps the ``develop_mod``-level ``monkeypatch`` targets
-(``run_panel_round`` / ``_run_check_set`` via :class:`Services` / ``run_turn`` /
-``_sleep``) live without any test change.
+helpers) are **injected** onto :class:`RoundContext` by ``develop()`` from its
+own module globals, which also keeps those ``monkeypatch`` targets live.
 """
 
 from __future__ import annotations
@@ -55,10 +46,11 @@ from . import (
     handoff,
     turns,
 )
-from .check_set import Check, CheckSetResult, render_check_summary
+from .check_set import Check, CheckResult, CheckSetResult, render_check_summary
 from .config import HANDOFF_DIRNAME, DevelopConfig
 from .gate_findings import GateLedger
 from .handoff import max_severity, render_prompt
+from .loop_entry import PostCommitOutcome
 from .sandbox_facts import for_prompt as _sandbox_section
 from .test_gate import GateResult
 from .turns import TurnAttempt, TurnResult
@@ -73,13 +65,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class Services:
     """The side-effecting seams the round pipeline depends on, injected so the
-    loop is testable with fakes (ARCH-1.S4).
-
-    ``run_turn`` and ``sleep`` are consumed by
-    :func:`agent_session.turn_with_reactions` today; ``start_container`` /
-    ``stop_container`` / ``run_check_set`` are wired now for the S6 phase
-    pipeline.
-    """
+    loop is testable with fakes (ARCH-1.S4): ``run_turn`` / ``sleep`` feed
+    :func:`agent_session.turn_with_reactions`, the rest the phase pipeline."""
 
     run_turn: Callable[..., TurnResult]
     sleep: Callable[[float], None]
@@ -89,10 +76,8 @@ class Services:
 
     @classmethod
     def live(cls) -> Services:
-        """The concrete production seams — the real module callables. Built at
-        ``develop()`` start (once S8 switches to it), *after* any test patch of
-        ``turns.run_turn`` / ``containers.*`` is applied, so each field captures
-        the patched callable."""
+        """The concrete production seams — the real module callables, bound
+        at ``develop()`` start (after any test patch, see the module doc)."""
         return cls(
             run_turn=turns.run_turn,
             sleep=time.sleep,
@@ -176,6 +161,7 @@ class RoundContext:
     coder_init_template: str = "converge_coder_init.md"
     coder_init_extra: Mapping[str, str] = field(default_factory=dict)
     pre_commit_guard: Callable[[Path], str | None] | None = None
+    post_commit_pass: Callable[[Path, int], PostCommitOutcome] | None = None
     review_context: str = ""
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
@@ -188,6 +174,10 @@ class RoundContext:
     prev_signature: frozenset | None = None
     final_reviews: list[ReviewOutcome] = field(default_factory=list)
     new_commit: str | None = None  # round-scoped: set by commit_phase
+    # PRD S4 / PR #388 review: the post-commit pass's verdict for the latest
+    # committed tree, joined to the check-set by fast_gate_phase (a required
+    # row — red holds approval); None until a pass reports one
+    post_commit_row: CheckResult | None = None
     rounds_completed: int = 0
     # 793edc9f: set when approval was held because no capture from the current
     # tree exists (stale/failed re-capture); appended to the next coder
@@ -399,8 +389,9 @@ def commit_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Commit the round's work (excluding the handoff dir) and auto-format it in
     place (#134). Sets ``ctx.new_commit`` / ``ctx.gated_sha``.
 
-    Exit: C ``failed`` (round 1 produced no commit, or the entry's pre-commit
-    guard refused the tree — PRD S5: conflict markers left behind).
+    Exits: C ``failed`` (round 1 produced no commit, or the entry's pre-commit
+    guard refused the tree — PRD S5: conflict markers left behind), C'
+    ``infra_failed`` (the entry's post-commit pass could not run — PRD S4).
     """
     if ctx.pre_commit_guard is not None:
         refused = ctx.pre_commit_guard(ctx.wt)
@@ -430,6 +421,26 @@ def commit_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         )
         if format_sha is not None:
             new_commit = format_sha
+        # PRD S4: the entry's post-commit pass (resolve mode regenerates the
+        # project's generated paths) runs AFTER formatting — the generator's
+        # output counts what the formatter moved — and its commit supersedes
+        # the round's like the format commit does. It fails CLOSED (PR #388
+        # review): its verdict is a required check row (fast_gate_phase joins
+        # it), and a pass that could not run ends the round — the committed
+        # tree carries the intake's copies, so silence would gate a stale one.
+        if ctx.post_commit_pass is not None:
+            outcome = ctx.post_commit_pass(ctx.wt, round_no)
+            ctx.post_commit_row = outcome.row
+            if outcome.sha is not None:
+                new_commit = outcome.sha
+            if outcome.infra_error:
+                ctx.new_commit = ctx.gated_sha = new_commit
+                return CycleExit(
+                    status="infra_failed",
+                    failure_reason=f"round {round_no}: {outcome.infra_error}",
+                    resume_after=None,
+                    host_action=outcome.host_action,
+                )
         # Track the latest committed tree so the approval-candidate gate (#140)
         # can run candidate-staged checks against it even on a later round that
         # produced no fresh commit.
@@ -486,6 +497,11 @@ def fast_gate_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         ctx.check_set = check_set
         ctx.gate = check_set.test_gate if check_set is not None else None
         check_runner.persist_gate_ledger(ctx.config, ctx.gate_ledger)
+    if ctx.new_commit is not None and ctx.post_commit_row is not None:
+        # PRD S4 / PR #388 review: the post-commit pass's verdict rides with
+        # this commit's check-set (replacing the prior commit's row) so the
+        # floor, the coder's next prompt and the epilogue all read it.
+        ctx.check_set = check_runner.with_result(ctx.check_set, ctx.post_commit_row)
     return None
 
 

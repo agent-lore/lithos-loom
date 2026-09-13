@@ -93,6 +93,12 @@ name = "story-develop"
 # drift, codegen freshness, docs lint, …). Runs regardless of ecosystem — the primary
 # gate for a repo the catalog can't model (C/C++). Explicit opt-in; --parity-command is
 # the route-level fallback. See docs/adr/0010-aggregate-repo-parity-check.md (#273 sl3).
+# develop_generated_paths = ["docs/generated"] + develop_regenerate_command = "make diagrams"
+# (PRD pr-reconciliation S4) declare the repo's GENERATED output and the command that rebuilds
+# it: loom's own merges (the base-move re-gate, the conflict resolver's intake) never merge
+# those paths textually — a conflict there takes either side and the generator runs on the
+# composed tree, so a generated-only conflict is a zero-token push. Declared together;
+# --generated-path / --regenerate-command are the CLI fallbacks.
 # On Python repos with ruff present, an informational `lint` check also runs and
 # its findings are structured into a stable gate/<check>-NNN ledger surfaced to
 # the panel + [DevelopResult] (non-blocking; #132).

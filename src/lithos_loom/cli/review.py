@@ -366,6 +366,8 @@ GATE_SETTING_KEYS: tuple[str, ...] = (
     "develop_check_commands",
     "develop_check_states",
     "develop_parity_command",
+    "develop_generated_paths",
+    "develop_regenerate_command",
     "develop_review_profile",
 )
 """The ``develop_*`` keys a deterministic gate consumes. A rejected value for

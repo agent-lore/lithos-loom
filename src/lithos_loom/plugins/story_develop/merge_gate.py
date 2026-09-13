@@ -50,6 +50,12 @@ from .check_runner import (
 from .check_set import Check, CheckSetResult
 from .config import DevelopConfig
 from .gate_findings import GateLedger
+from .generated import (
+    REGENERATE_CHECK_NAME,
+    partition_conflicts,
+    regenerate,
+    take_base_side,
+)
 from .pr_delivery import ForkPushUnsupported, MergeRaceDetected, push_to_pr_ref
 from .review_resolve import ResolvedChange
 
@@ -127,6 +133,15 @@ class MergeGateResult:
     merge_sha: str = ""
     behind: bool = False
     conflicting_paths: tuple[str, ...] = ()
+    # PRD S4: conflicts in the project's declared generated paths are not
+    # conflicts — taken from the base and regenerated on the composed tree.
+    # `generated_conflicts` names them beside a REAL conflict (never in
+    # `conflicting_paths`); `regenerated` lists what the generator moved.
+    generated_conflicts: tuple[str, ...] = ()
+    regenerated: tuple[str, ...] = ()
+    # the command the policy regenerates with — so a `[PRConflicted]` on a
+    # real conflict can tell the human what to run after taking a side
+    regenerate_command: str = ""
     checks: tuple[MergeGateCheck, ...] = ()
     verdict: str | None = None
     config_fingerprint: str = ""
@@ -150,6 +165,9 @@ class MergeGateResult:
             "merge_sha": self.merge_sha,
             "behind": self.behind,
             "conflicting_paths": list(self.conflicting_paths),
+            "generated_conflicts": list(self.generated_conflicts),
+            "regenerated": list(self.regenerated),
+            "regenerate_command": self.regenerate_command,
             "checks": [c.to_json() for c in self.checks],
             "verdict": self.verdict,
             "config_fingerprint": self.config_fingerprint,
@@ -218,6 +236,9 @@ def settings_fingerprint(config: DevelopConfig) -> str:
         "check_commands": dict(sorted(config.check_commands.items())),
         "check_states": dict(sorted(config.check_states.items())),
         "parity_command": config.parity_command,
+        # PRD S4: the generated-paths policy decides what a trial merge IS
+        "generated_paths": list(config.generated_paths),
+        "regenerate_command": config.regenerate_command,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8"))
     return digest.hexdigest()[:16]
@@ -291,6 +312,58 @@ def _cleanup(repo: Path, wt: Path, branch: str) -> None:
         logger.warning("merge-gate: could not delete branch %s: %s", branch, exc)
 
 
+@dataclass(frozen=True)
+class _RegeneratingMerge:
+    """What :func:`_merge_regenerating` left behind: a committed merge
+    (``regenerated`` = what the generator moved), a REAL conflict (``real`` +
+    the generated paths set aside; aborted, nothing committed), or a failed
+    generator (``failed`` = the check row; aborted too)."""
+
+    regenerated: tuple[str, ...] = ()
+    real: tuple[str, ...] = ()
+    generated: tuple[str, ...] = ()
+    failed: MergeGateCheck | None = None
+
+
+def _merge_regenerating(
+    config: DevelopConfig, wt: Path, base_sha: str, *, message: str
+) -> _RegeneratingMerge:
+    """The trial merge under the project's generated-paths policy (PRD S4).
+
+    Merge without committing; a conflict in a declared generated path is
+    taken from the base, then the generator runs on the composed tree and
+    the merge is committed ONCE with fresh outputs — a clean merge too, since
+    composition moves generated output even when the files auto-merge.
+    """
+    conflicts = git.merge_no_commit(wt, base_sha)
+    generated, real = partition_conflicts(conflicts, config.generated_paths)
+    if real:
+        git.abort_merge(wt)
+        return _RegeneratingMerge(real=real, generated=generated)
+    if generated:
+        take_base_side(wt, generated)
+    regen = regenerate(config, wt, label="merge")
+    if not regen.ok:
+        git.abort_merge(wt)
+        return _RegeneratingMerge(
+            failed=MergeGateCheck(
+                name=REGENERATE_CHECK_NAME,
+                command=config.regenerate_command or "",
+                state="required",
+                stage="merge",
+                outcome="ran" if regen.exit_code is not None else "errored",
+                passed=False,
+                exit_code=regen.exit_code,
+                timed_out=regen.timed_out,
+                output_tail=regen.output_tail or regen.error,
+            )
+        )
+    # a merge in progress always commits (MERGE_HEAD makes the commit, even
+    # with an unchanged tree), so this is never None for a behind head
+    git.commit_all(wt, message)
+    return _RegeneratingMerge(regenerated=regen.changed, generated=generated)
+
+
 def run_merge_gate(
     config: DevelopConfig,
     change: ResolvedChange,
@@ -354,27 +427,85 @@ def run_merge_gate(
     kept = wt if keep else None
     try:
         merge_sha = head_sha
+        regenerated: tuple[str, ...] = ()
+        taken: tuple[str, ...] = ()
+        regen_row: MergeGateCheck | None = None
         if behind:
-            conflicts = git.merge(
-                wt, base_sha, message=f"Merge {base_ref} into {change.head_branch}"
-            )
-            if conflicts:
-                return MergeGateResult(
-                    status="conflict",
-                    change=change,
-                    base_ref=base_ref,
-                    base_sha=base_sha,
-                    head_sha=head_sha,
-                    behind=True,
-                    conflicting_paths=tuple(conflicts),
-                    worktree=kept,
-                    message=(
-                        f"{change.head_ref} conflicts with {base_ref} @ "
-                        f"{base_sha[:12]} in {len(conflicts)} path(s): "
-                        + ", ".join(conflicts)
-                    ),
+            merge_message = f"Merge {base_ref} into {change.head_branch}"
+            if config.generated_paths and config.regenerate_command:
+                merged = _merge_regenerating(
+                    config, wt, base_sha, message=merge_message
                 )
-            merge_sha = git.commit_sha(wt)
+                if merged.real:
+                    real, generated = merged.real, merged.generated
+                    return MergeGateResult(
+                        status="conflict",
+                        change=change,
+                        base_ref=base_ref,
+                        base_sha=base_sha,
+                        head_sha=head_sha,
+                        behind=True,
+                        conflicting_paths=real,
+                        generated_conflicts=generated,
+                        regenerate_command=config.regenerate_command or "",
+                        worktree=kept,
+                        message=(
+                            f"{change.head_ref} conflicts with {base_ref} @ "
+                            f"{base_sha[:12]} in {len(real)} path(s): "
+                            + ", ".join(real)
+                            + (
+                                f" ({len(generated)} generated path(s) set aside: "
+                                + ", ".join(generated)
+                                + ")"
+                                if generated
+                                else ""
+                            )
+                        ),
+                    )
+                regen_row = merged.failed
+                regenerated = merged.regenerated
+                taken = merged.generated
+            else:
+                conflicts = git.merge(wt, base_sha, message=merge_message)
+                if conflicts:
+                    return MergeGateResult(
+                        status="conflict",
+                        change=change,
+                        base_ref=base_ref,
+                        base_sha=base_sha,
+                        head_sha=head_sha,
+                        behind=True,
+                        conflicting_paths=tuple(conflicts),
+                        worktree=kept,
+                        message=(
+                            f"{change.head_ref} conflicts with {base_ref} @ "
+                            f"{base_sha[:12]} in {len(conflicts)} path(s): "
+                            + ", ".join(conflicts)
+                        ),
+                    )
+            if regen_row is None:
+                merge_sha = git.commit_sha(wt)
+
+        if regen_row is not None:
+            # The composed tree could not be BUILT: the generator failed on it.
+            # A required check that ran and failed — the check-set never runs
+            # on a tree the project's own generator rejects, nothing is pushed.
+            return MergeGateResult(
+                status="red",
+                change=change,
+                base_ref=base_ref,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                behind=behind,
+                checks=(regen_row,),
+                verdict="RED",
+                worktree=kept,
+                message=(
+                    f"{change.head_ref} merged with {base_ref} @ {base_sha[:12]}: the "
+                    f"regenerate command failed (exit {regen_row.exit_code}) — the "
+                    "composed tree's generated paths could not be rebuilt"
+                ),
+            )
 
         checks = build_check_set(config, wt)
         fingerprint = config_fingerprint(config, checks)
@@ -387,6 +518,9 @@ def run_merge_gate(
             head_sha=head_sha,
             merge_sha=merge_sha,
             behind=behind,
+            generated_conflicts=taken,
+            regenerated=regenerated,
+            regenerate_command=config.regenerate_command or "",
             config_fingerprint=fingerprint,
             worktree=kept,
         )
