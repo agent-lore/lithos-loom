@@ -2176,6 +2176,142 @@ def test_converge_entry_seeds_round_one_and_reuses_loop(
     assert branch and branch != "HEAD"
 
 
+def _pr_entry(config: DevelopConfig, post_commit_pass):
+    """A LoopEntry on a PR head one commit past the base (the converge shape),
+    carrying *post_commit_pass* — the S4 resolve-mode regenerate seam."""
+    from lithos_loom.plugins.story_develop.develop import LoopEntry
+    from lithos_loom.runner import git, worktree
+
+    base = git.base_sha(config.repo)
+    (config.repo / "pr.txt").write_text("pr change\n")
+    subprocess.run(
+        ["git", "add", "-A"], cwd=config.repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "the PR commit"],
+        cwd=config.repo,
+        check=True,
+        capture_output=True,
+    )
+    head = git.base_sha(config.repo)
+    return LoopEntry(
+        worktree_factory=lambda cfg: worktree.create_on_branch(
+            cfg.repo, head, cfg.description, parent=cfg.worktree_parent
+        ),
+        base_override=git.RangeBase(base),
+        intake_reviews=[],
+        intake_check_set=None,
+        post_commit_pass=post_commit_pass,
+    )
+
+
+def _regenerate_row(*, passed: bool):
+    from lithos_loom.plugins.story_develop.check_set import Check, CheckResult
+
+    return CheckResult(
+        check=Check(
+            name="regenerate", command="make diagrams", state="required", raw_exit=True
+        ),
+        execution_outcome="ran",
+        gate=GateResult(
+            command="make diagrams",
+            exit_code=0 if passed else 2,
+            passed=passed,
+            output_tail="ok" if passed else "guardrail: orphan module src/new.py",
+        ),
+    )
+
+
+def test_resolve_mode_cannot_deliver_while_the_regenerate_pass_fails(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #388 review (High): a project need not have a parity / drift check,
+    so approving reviewers alone must never seal a tree whose generated paths
+    the generator could not rebuild. The pass's red row is a required check:
+    every round holds, the next coder prompt carries the generator's output,
+    and the run ends unapproved with the check named in the outcome."""
+    from lithos_loom.plugins.story_develop.loop_entry import PostCommitOutcome
+
+    cfg = DevelopConfig(
+        repo=config.repo,
+        description=config.description,
+        work_dir=config.work_dir,
+        claude_config_dir=config.claude_config_dir,
+        max_rounds=2,
+    )
+    state = _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}])
+    seen: list[int] = []
+
+    def failing_pass(wt: Path, round_no: int) -> PostCommitOutcome:
+        seen.append(round_no)
+        return PostCommitOutcome(row=_regenerate_row(passed=False))
+
+    result = develop_mod.develop(cfg, entry=_pr_entry(cfg, failing_pass))
+
+    assert result.status == "max_rounds"
+    assert result.succeeded is False
+    assert seen == [1, 2]  # every round commit was passed through the generator
+    assert [c.name for c in result.blocking_checks] == ["regenerate"]
+    assert result.blocking_checks[0].verdict == "RED"
+    assert "regenerate RED (`make diagrams`)" in result.message
+    # the round-2 coder was told, with the generator's own output
+    prompt1 = state["coder_prompts"][1]
+    assert "regenerate gate (FAILED)" in prompt1
+    assert "guardrail: orphan module src/new.py" in prompt1
+
+
+def test_resolve_mode_delivers_once_the_regenerate_pass_goes_green(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix loop, not a dead end: a later commit the generator accepts
+    replaces the red row with a green one and approval seals."""
+    from lithos_loom.plugins.story_develop.loop_entry import PostCommitOutcome
+
+    cfg = DevelopConfig(
+        repo=config.repo,
+        description=config.description,
+        work_dir=config.work_dir,
+        claude_config_dir=config.claude_config_dir,
+        max_rounds=3,
+    )
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}])
+
+    def recovering_pass(wt: Path, round_no: int) -> PostCommitOutcome:
+        return PostCommitOutcome(row=_regenerate_row(passed=round_no >= 2))
+
+    result = develop_mod.develop(cfg, entry=_pr_entry(cfg, recovering_pass))
+
+    assert result.status == "approved"
+    assert result.rounds == 2
+    assert result.blocking_checks == ()
+
+
+def test_resolve_mode_ends_infra_failed_when_the_regenerate_pass_cannot_run(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #388 review (High), the other half: a pass that could not run at all
+    is no verdict on the tree — the run is terminal ``infra_failed`` with the
+    host action, never a delivery and never rounds burnt on the coder."""
+    from lithos_loom.plugins.story_develop.loop_entry import PostCommitOutcome
+
+    state = _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+
+    def dead_pass(wt: Path, round_no: int) -> PostCommitOutcome:
+        return PostCommitOutcome(
+            infra_error="regenerate pass could not run (`make diagrams`): docker: no",
+            host_action="check docker on the host, then complete the gate",
+        )
+
+    result = develop_mod.develop(config, entry=_pr_entry(config, dead_pass))
+
+    assert result.status == "infra_failed"
+    assert result.succeeded is False
+    assert result.rounds == 1
+    assert "docker: no" in result.message
+    assert result.host_action == "check docker on the host, then complete the gate"
+    assert state["review_calls"] == []  # nothing was reviewed
+
+
 def test_develop_without_entry_uses_fresh_worktree_off_base(
     config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:

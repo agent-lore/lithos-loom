@@ -885,7 +885,7 @@ def test_resolve_mode_wires_the_regenerate_pass_and_names_the_set_aside_paths(
 
     # without a policy: no pass, no mention
     seen.clear()
-    result = converge_pr(
+    converge_pr(
         _config(tmp_path),
         _resolve_change(merge_base, head),
         resolve_conflicts=True,

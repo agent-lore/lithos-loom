@@ -22,7 +22,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
-| `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 9 |
+| `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 10 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.coder_salvage` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
@@ -37,13 +37,13 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
-| `lithos_loom.plugins.story_develop.generated` | M | 1 | 7 |
+| `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
 | `lithos_loom.plugins.story_develop.github_access` | XS | 0 | 2 |
 | `lithos_loom.plugins.story_develop.handoff` | M | 3 | 13 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
-| `lithos_loom.plugins.story_develop.loop_entry` | XS | 1 | 0 |
+| `lithos_loom.plugins.story_develop.loop_entry` | XS | 2 | 0 |
 | `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
@@ -105,6 +105,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `effective_check_state` — The check's blocking state after operator overrides (#273 slice 2).
 - def `build_check_set` — The Review-Profile-selected check-set for this run (#140, ADR §3/§4).
 - def `merge_check_sets` — Append *extra*'s results to *base* (the approval-candidate merge, #140).
+- def `with_result` — *base* with *row* appended, any prior result of the same check name dropped — a verdict produced outside :func:`run_check_set` (the S4 post-commit regenerate pass) joining the round's check-set.
 - def `check_result_blocks` — Whether a single **required** check holds approval (#140, ADR §4/§5).
 - def `gate_floor_blocks` — Whether the deterministic floor blocks approval (#140, ADR §4/§5).
 - def `run_check_set` — Run an ordered check-set against one round commit.
@@ -243,7 +244,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `take_base_side` — Resolve conflicted generated *paths* of the in-progress merge to the base's copy and stage them. Which side is immaterial — the generator overwrites the content — but the base's is the one a clean merge would have carried, so the diff the panel later reads stays honest.
 - class `RegenerateResult` — What :func:`regenerate` did. ``changed`` lists the declared-path files whose content the generator moved (added, rewritten or deleted), now staged; ``exit_code`` is ``None`` when the container never ran.
 - def `regenerate` — Run the project's generator on the COMPOSED tree and copy the declared paths back into *wt*, staged.
-- def `post_commit_regenerate` — The round's post-commit pass for a loop that composes trees (the S5 resolve mode): after the coder's commit (and the auto-format pass), run the generator on HEAD and commit what it moved as its own commit — ``story-develop r<n>: regenerate`` — so the gate and the panel judge a tree whose generated output is the generator's, whatever the coder ran. ``None`` when the project declares no policy. Best-effort like the format pass: a generator that fails leaves the tree as committed (the project's drift check, where it has one, is the backstop) and is logged.
+- def `regenerate_check_result` — The generator's verdict as a check-set row: a REQUIRED raw-exit check (its exit code is the verdict, no finding adapter), ``ran`` or ``timed_out``. Only for a generator that ran — a pass that never reached it has no verdict to report (see :func:`post_commit_regenerate`).
+- def `post_commit_regenerate` — The round's post-commit pass for a loop that composes trees (the S5 resolve mode): after the coder's commit (and the auto-format pass), run the generator on HEAD and commit what it moved as its own commit — ``story-develop r<n>: regenerate`` — so the gate and the panel judge a tree whose generated output is the generator's, whatever the coder ran. ``None`` when the project declares no policy.
 
 ### `lithos_loom.plugins.story_develop.github_access`
 - def `github_call` — Run one GitHub REST operation against a typed client, synchronously.
@@ -295,6 +297,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `complete_task` — Mark the task completed (``--complete-on-approval`` opt-in only).
 
 ### `lithos_loom.plugins.story_develop.loop_entry`
+- class `PostCommitOutcome` — What a round's post-commit pass left behind (PRD S4; PR #388 review).
 - class `LoopEntry` — Overrides that let ``develop()`` enter its loop on an EXISTING PR branch instead of cutting a fresh worktree off a base (converge / ADR 0003 §9 "Shape 1").
 
 ### `lithos_loom.plugins.story_develop.merge_gate`
@@ -377,7 +380,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `resolve_change` — Resolve *spec* into a :class:`ResolvedChange`.
 
 ### `lithos_loom.plugins.story_develop.rounds`
-- class `Services` — The side-effecting seams the round pipeline depends on, injected so the loop is testable with fakes (ARCH-1.S4).
+- class `Services` — The side-effecting seams the round pipeline depends on, injected so the loop is testable with fakes (ARCH-1.S4): ``run_turn`` / ``sleep`` feed :func:`agent_session.turn_with_reactions`, the rest the phase pipeline.
 - class `CycleExit` — A terminal outcome of the develop loop.
 - class `RoundContext` — The explicit successor of ``develop()``'s locals bag (ARCH-1.S6).
 - def `round1_coder_prompt` — The cold-start coder prompt: story-develop's ``coder_init.md``, or — on a converge entry (``intake_reviews`` set) — the entry's template seeded from the intake review + the PR's own commit log so the coder reconstructs intent before changing anything (ADR 0003 §9 Shape 1); a conflict resolution (PRD S5) swaps the template and adds its brief as extra slots.

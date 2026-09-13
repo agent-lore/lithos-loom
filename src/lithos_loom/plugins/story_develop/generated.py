@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import stat
 import subprocess
 import uuid
 from collections.abc import Callable, Sequence
@@ -39,12 +40,15 @@ from pathlib import Path, PurePosixPath
 from ...runner import git
 from . import containers, test_gate
 from .autoformat import within_tree
+from .check_set import Check, CheckResult, classify_execution
 from .config import HANDOFF_DIRNAME, DevelopConfig
+from .loop_entry import PostCommitOutcome
 from .test_gate import GateResult
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "REGENERATE_CHECK_NAME",
     "RegenerateResult",
     "is_generated",
     "parse_generated_paths",
@@ -52,8 +56,13 @@ __all__ = [
     "partition_conflicts",
     "post_commit_regenerate",
     "regenerate",
+    "regenerate_check_result",
     "take_base_side",
 ]
+
+# The check-set row the generator's verdict is reported under — in the
+# merge-gate's check list and in the resolve loop's (never a profile check).
+REGENERATE_CHECK_NAME = "regenerate"
 
 # The same seam the gate + auto-format pass use (monkeypatched in tests).
 RunContainer = Callable[..., GateResult]
@@ -176,8 +185,12 @@ def regenerate(
     its output applied, and only under ``config.generated_paths``: files are
     added, rewritten and deleted to match the export; symlinks are never
     followed on either side; a path that resolves outside *wt* is skipped.
-    Never raises for the generator's own failure — an export or container
-    error is a failed result with ``error`` set.
+    Never raises for a failure of the pass. Three failed shapes: the
+    generator exited non-zero / timed out (its exit and tail); it exited 0
+    but its output could not be applied — a file that became a directory, a
+    path git refuses — (its exit kept, ``error`` says why: the generator's or
+    the policy's defect, review round 2); the pass never got a verdict — the
+    export or the container runtime failed (``exit_code=None``, ``error``).
     """
     if not config.generated_paths or not config.regenerate_command:
         raise ValueError(
@@ -198,31 +211,37 @@ def regenerate(
         result = run_container(
             cmd, name=name, command=command, timeout=config.test_timeout
         )
-        if not result.passed:
-            logger.warning(
-                "story-develop %s: regenerate (%s) `%s` exited %s — output discarded",
-                config.run_id,
-                label,
-                command,
-                result.exit_code,
-            )
-            return RegenerateResult(
-                ok=False,
-                exit_code=result.exit_code,
-                output_tail=result.output_tail,
-                timed_out=result.timed_out,
-            )
-        # the sync and the staging are the generator's effect on the tree —
-        # a failure there (a file/dir shape change, a path git cannot stage)
-        # is the generator's failure, never the caller's crash
-        changed = tuple(_sync_generated(export, wt, config.generated_paths))
-        git.stage_paths(wt, changed)
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+        # nothing ran, or the runtime died under it: no verdict at all
         logger.warning(
             "story-develop %s: regenerate (%s) errored: %s", config.run_id, label, exc
         )
+        _remove_export(config, label, export)
         return RegenerateResult(
             ok=False, exit_code=None, output_tail="", error=str(exc)
+        )
+    if not result.passed:
+        _remove_export(config, label, export)
+        return _generator_red(config, label, result)
+    try:
+        # applying the output is the generator's effect on the tree: a failure
+        # here — a file that became a directory, a path git refuses (ignored)
+        # — is the generator's / the policy's defect, RED with its own exit
+        # kept (review round 2), never the host's "could not run"
+        changed = tuple(_sync_generated(export, wt, config.generated_paths))
+        git.stage_paths(wt, changed)
+    except (RuntimeError, OSError) as exc:
+        logger.warning(
+            "story-develop %s: regenerate (%s) output could not be applied: %s",
+            config.run_id,
+            label,
+            exc,
+        )
+        return RegenerateResult(
+            ok=False,
+            exit_code=result.exit_code,
+            output_tail=result.output_tail,
+            error=f"the generator's output could not be applied: {exc}",
         )
     finally:
         _remove_export(config, label, export)
@@ -242,34 +261,128 @@ def regenerate(
     )
 
 
+def regenerate_check_result(
+    config: DevelopConfig, result: RegenerateResult
+) -> CheckResult:
+    """The generator's verdict as a check-set row: a REQUIRED raw-exit check
+    (its exit code is the verdict, no finding adapter), ``ran`` or
+    ``timed_out``. Only for a generator that ran — a pass that never reached
+    it has no verdict to report (see :func:`post_commit_regenerate`)."""
+    if result.exit_code is None:
+        raise ValueError("no generator verdict to report: the pass never ran it")
+    tail = result.output_tail
+    if result.error:  # a green run whose output could not be applied
+        tail = f"{tail}\n\n{result.error}" if tail else result.error
+    gate = GateResult(
+        command=config.regenerate_command or "",
+        exit_code=result.exit_code,
+        passed=result.ok,
+        output_tail=tail,
+    )
+    return CheckResult(
+        check=Check(
+            name=REGENERATE_CHECK_NAME,
+            command=config.regenerate_command or "",
+            state="required",
+            raw_exit=True,
+        ),
+        execution_outcome=classify_execution(gate),
+        gate=gate,
+    )
+
+
 def post_commit_regenerate(
     config: DevelopConfig,
     *,
     run_container: RunContainer = test_gate.run_gate_container,
-) -> Callable[[Path, int], str | None] | None:
+) -> Callable[[Path, int], PostCommitOutcome] | None:
     """The round's post-commit pass for a loop that composes trees (the S5
     resolve mode): after the coder's commit (and the auto-format pass), run
     the generator on HEAD and commit what it moved as its own commit —
     ``story-develop r<n>: regenerate`` — so the gate and the panel judge a
     tree whose generated output is the generator's, whatever the coder ran.
-    ``None`` when the project declares no policy. Best-effort like the
-    format pass: a generator that fails leaves the tree as committed (the
-    project's drift check, where it has one, is the backstop) and is logged.
+    ``None`` when the project declares no policy.
+
+    Fails CLOSED (PR #388 review): the round's commit already carries the
+    generated copies taken at intake, and a project need not have a drift
+    check, so a failure here can never read as success. A generator that
+    ran and said no (exit / timeout) is the outcome's ``row`` — a required
+    check the floor holds approval on, the coder reads next round and the
+    epilogue names — a green run whose output could not be applied counts
+    as the generator's red; a pass that never got a verdict (export /
+    container runtime) is the outcome's ``infra_error`` — the round ends
+    ``infra_failed`` with the host action, since no coder round can fix it.
     """
     if not config.generated_paths or not config.regenerate_command:
         return None
+    command = config.regenerate_command
 
-    def run(wt: Path, round_no: int) -> str | None:
+    def run(wt: Path, round_no: int) -> PostCommitOutcome:
         result = regenerate(
             config, wt, label=f"r{round_no}", run_container=run_container
         )
+        if result.exit_code is None:
+            return PostCommitOutcome(
+                infra_error=(
+                    f"regenerate pass could not run (`{command}`): {result.error}"
+                ),
+                host_action=(
+                    "check the gate container runtime on the host (docker, the "
+                    "gate image, the run's gate dir on disk), then complete the "
+                    "gate to re-dispatch"
+                ),
+            )
+        row = regenerate_check_result(config, result)
+        _write_round_output(config, round_no, row)
         if not result.ok or not result.changed:
-            return None
-        return git.commit_all(
+            return PostCommitOutcome(row=row)
+        sha = git.commit_all(
             wt, f"story-develop r{round_no}: regenerate", exclude=[HANDOFF_DIRNAME]
         )
+        return PostCommitOutcome(sha=sha, row=row)
 
     return run
+
+
+def _write_round_output(config: DevelopConfig, round_no: int, row: CheckResult) -> None:
+    """The generator's output beside the round's gate output
+    (``output_regenerate.txt``) for operator inspection; best-effort."""
+    gate = row.gate
+    if gate is None:
+        return
+    round_dir = config.gate_dir / f"round_{round_no:02d}"
+    try:
+        round_dir.mkdir(parents=True, exist_ok=True)
+        (round_dir / f"output_{row.check.name}.txt").write_text(
+            f"$ {gate.command}\nexit: {gate.exit_code} ({gate.verdict})\n\n"
+            f"{gate.output_tail}\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning(
+            "story-develop %s: regenerate (r%d) output not written: %s",
+            config.run_id,
+            round_no,
+            exc,
+        )
+
+
+def _generator_red(
+    config: DevelopConfig, label: str, result: GateResult
+) -> RegenerateResult:
+    logger.warning(
+        "story-develop %s: regenerate (%s) `%s` exited %s — output discarded",
+        config.run_id,
+        label,
+        config.regenerate_command,
+        result.exit_code,
+    )
+    return RegenerateResult(
+        ok=False,
+        exit_code=result.exit_code,
+        output_tail=result.output_tail,
+        timed_out=result.timed_out,
+    )
 
 
 def _remove_export(config: DevelopConfig, label: str, export: Path) -> None:
@@ -314,8 +427,22 @@ def _files_under(root: Path, prefix: str) -> dict[str, Path]:
     return found
 
 
+def _executable(path: Path) -> bool:
+    """The one mode bit git tracks (``100755`` vs ``100644``): owner-execute."""
+    return bool(path.stat().st_mode & stat.S_IXUSR)
+
+
+def _set_executable(path: Path, on: bool) -> None:
+    mode = path.stat().st_mode
+    wanted = mode | 0o111 if on else mode & ~0o111
+    if wanted != mode:
+        path.chmod(wanted)
+
+
 def _sync_generated(export: Path, wt: Path, prefixes: Sequence[str]) -> list[str]:
-    """Make *wt*'s declared paths match the *export*'s; return what moved."""
+    """Make *wt*'s declared paths match the *export*'s — content AND the
+    executable bit (PR #388 review: git tracks it, so a mode-only change is a
+    change, and a fresh executable must land executable); return what moved."""
     changed: list[str] = []
     for prefix in prefixes:
         fresh = _files_under(export, prefix)
@@ -325,10 +452,16 @@ def _sync_generated(export: Path, wt: Path, prefixes: Sequence[str]) -> list[str
             if dst.is_symlink() or not within_tree(wt, dst):
                 continue
             new = src.read_bytes()
-            if dst.is_file() and dst.read_bytes() == new:
+            executable = _executable(src)
+            if (
+                dst.is_file()
+                and dst.read_bytes() == new
+                and _executable(dst) == executable
+            ):
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(new)
+            _set_executable(dst, executable)
             changed.append(rel)
         for rel, path in stale.items():
             if rel in fresh or path.is_symlink() or not within_tree(wt, path):

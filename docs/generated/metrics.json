@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.plugins.story_develop.converge.converge_pr"
       }
     ],
-    "total_functions": 1523
+    "total_functions": 1529
   },
   "domain": {
     "associations": 2,
@@ -269,6 +269,7 @@
       [
         "lithos_loom.plugins.story_develop.agent_session",
         "lithos_loom.plugins.story_develop.coder_salvage",
+        "lithos_loom.plugins.story_develop.loop_entry",
         "lithos_loom.plugins.story_develop.panel",
         "lithos_loom.plugins.story_develop.rounds"
       ]
@@ -452,14 +453,14 @@
         "sloc": 224
       },
       "Plugins": {
-        "classes": 75,
-        "functions": 432,
+        "classes": 76,
+        "functions": 438,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1108,
-        "lines": 17393,
+        "lines": 17581,
         "modules": 50,
-        "public_symbols": 286,
-        "sloc": 14000
+        "public_symbols": 289,
+        "sloc": 14157
       },
       "ProjectContext": {
         "classes": 0,
@@ -552,13 +553,13 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io"
     ],
-    "total_lines": 59328,
+    "total_lines": 59516,
     "total_modules": 171,
-    "total_sloc": 48063
+    "total_sloc": 48220
   },
   "tests": {
-    "ratio": 1.57,
-    "src_lines": 59328,
-    "test_lines": 93439
+    "ratio": 1.58,
+    "src_lines": 59516,
+    "test_lines": 93944
   }
 }

@@ -50,7 +50,12 @@ from .check_runner import (
 from .check_set import Check, CheckSetResult
 from .config import DevelopConfig
 from .gate_findings import GateLedger
-from .generated import partition_conflicts, regenerate, take_base_side
+from .generated import (
+    REGENERATE_CHECK_NAME,
+    partition_conflicts,
+    regenerate,
+    take_base_side,
+)
 from .pr_delivery import ForkPushUnsupported, MergeRaceDetected, push_to_pr_ref
 from .review_resolve import ResolvedChange
 
@@ -342,7 +347,7 @@ def _merge_regenerating(
         git.abort_merge(wt)
         return _RegeneratingMerge(
             failed=MergeGateCheck(
-                name="regenerate",
+                name=REGENERATE_CHECK_NAME,
                 command=config.regenerate_command or "",
                 state="required",
                 stage="merge",

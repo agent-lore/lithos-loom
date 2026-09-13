@@ -24,6 +24,7 @@ from lithos_loom.plugins.story_develop.check_set import (
     Check,
     CheckResult,
     CheckSetResult,
+    render_check_summary,
 )
 from lithos_loom.plugins.story_develop.config import (
     HANDOFF_DIRNAME,
@@ -31,12 +32,14 @@ from lithos_loom.plugins.story_develop.config import (
     ReviewerSpec,
 )
 from lithos_loom.plugins.story_develop.gate_findings import GateLedger
+from lithos_loom.plugins.story_develop.loop_entry import PostCommitOutcome
 from lithos_loom.plugins.story_develop.panel import (
     PanelRoundResult,
     ReviewerState,
     ReviewOutcome,
 )
 from lithos_loom.plugins.story_develop.rounds import commit_round
+from lithos_loom.plugins.story_develop.test_gate import GateResult
 
 
 def _init_repo(path: Path) -> None:
@@ -590,14 +593,15 @@ def test_commit_phase_runs_the_post_commit_pass_after_formatting(
         order.append("format")
         return None
 
-    def regen(wt: Path, round_no: int) -> str | None:
+    def regen(wt: Path, round_no: int) -> PostCommitOutcome:
         order.append(f"regen r{round_no}")
         (wt / "gen.json").write_text("{}\n")
         subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "regenerate"], cwd=wt, check=True)
-        return subprocess.run(
+        sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=wt, capture_output=True, text=True
         ).stdout.strip()
+        return PostCommitOutcome(sha=sha)
 
     monkeypatch.setattr(rounds_mod.autoformat, "run_format_pass", fake_format)
     ctx.post_commit_pass = regen
@@ -613,13 +617,165 @@ def test_commit_phase_runs_the_post_commit_pass_after_formatting(
     assert (tmp_git_repo / "gen.json").exists()
 
     # a no-op pass keeps the round commit as the gated tree
-    ctx.post_commit_pass = lambda wt, n: None
+    ctx.post_commit_pass = lambda wt, n: PostCommitOutcome()
     (tmp_git_repo / "src.py").write_text("x = 2\n")
     assert rounds_mod.commit_phase(ctx, 4) is None
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=tmp_git_repo, capture_output=True, text=True
     ).stdout.strip()
     assert ctx.new_commit == head
+
+
+def _regen_row(*, passed: bool, exit_code: int = 0, tail: str = "gen") -> CheckResult:
+    return CheckResult(
+        check=Check(
+            name="regenerate", command="make diagrams", state="required", raw_exit=True
+        ),
+        execution_outcome="timed_out" if exit_code == 124 else "ran",
+        gate=GateResult(
+            command="make diagrams",
+            exit_code=exit_code,
+            passed=passed,
+            output_tail=tail,
+        ),
+    )
+
+
+def _head(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_a_red_post_commit_pass_holds_approval_until_a_later_commit_passes(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """PR #388 review (High): a project need not have a parity / drift check,
+    so approving reviewers alone must never seal a tree whose generated paths
+    the generator could not rebuild. The pass's verdict is a REQUIRED check
+    row riding with the round's commit: the floor holds approval, the next
+    coder prompt carries the output, the epilogue's raw-check list names it —
+    and a round with no new commit keeps it (the tree is unchanged)."""
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = tmp_git_repo
+    ctx.candidate_checks = ()  # no parity check anywhere
+    outcomes = {
+        1: PostCommitOutcome(
+            row=_regen_row(passed=False, exit_code=2, tail="guardrail: orphan module")
+        ),
+        3: PostCommitOutcome(row=_regen_row(passed=True)),
+    }
+    ctx.post_commit_pass = lambda wt, n: outcomes[n]
+
+    (tmp_git_repo / "src.py").write_text("x = 1\n")
+    assert rounds_mod.commit_phase(ctx, 1) is None
+    assert rounds_mod.fast_gate_phase(ctx, 1) is None
+    assert rounds_mod.approval_phase(ctx, 1) is None  # held, reviewers passing
+    assert ctx.check_set is not None
+    assert [r.check.name for r in ctx.check_set.results] == ["regenerate"]
+    assert not ctx.check_set.blocking_passed
+    assert [r.check.name for r in ctx.check_set.failing_raw_checks] == ["regenerate"]
+    brief = render_check_summary(ctx.check_set, for_coder=True)
+    assert "regenerate gate (FAILED)" in brief and "guardrail: orphan module" in brief
+
+    # no new commit: the pass does not run and the red row still describes HEAD
+    assert rounds_mod.commit_phase(ctx, 2) is None
+    assert ctx.new_commit is None
+    assert rounds_mod.fast_gate_phase(ctx, 2) is None
+    assert rounds_mod.approval_phase(ctx, 2) is None
+    assert ctx.check_set is not None and not ctx.check_set.blocking_passed
+
+    # a commit the generator accepts: ONE row, green, and approval seals
+    (tmp_git_repo / "src.py").write_text("x = 2\n")
+    assert rounds_mod.commit_phase(ctx, 3) is None
+    assert rounds_mod.fast_gate_phase(ctx, 3) is None
+    exit_ = rounds_mod.approval_phase(ctx, 3)
+    assert exit_ is not None and exit_.status == "approved"
+    assert ctx.check_set is not None
+    rows = [r for r in ctx.check_set.results if r.check.name == "regenerate"]
+    assert len(rows) == 1 and rows[0].passed
+
+
+def test_the_post_commit_row_joins_a_fresh_fast_check_set(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """The production shape (a Python repo: lint / typecheck fast checks):
+    fast_gate_phase OVERWRITES the check-set with this commit's fresh run and
+    only then joins the pass's row — the row must survive that overwrite
+    (and an errored run that yields no set at all)."""
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = tmp_git_repo
+    ctx.candidate_checks = ()
+    lint = Check(name="lint", command="ruff check", state="required")
+    ctx.fast_checks = (lint,)
+    fresh: dict[str, CheckSetResult | None] = {}
+
+    def fake_run_check_set(cfg, wt, sha, round_no, checks, ledger):
+        assert checks == (lint,)
+        return fresh[sha]
+
+    ctx.services = rounds_mod.Services(
+        run_turn=ctx.services.run_turn,
+        sleep=ctx.services.sleep,
+        start_container=ctx.services.start_container,
+        stop_container=ctx.services.stop_container,
+        run_check_set=fake_run_check_set,
+    )
+    ctx.post_commit_pass = lambda wt, n: PostCommitOutcome(
+        row=_regen_row(passed=False, exit_code=2)
+    )
+
+    (tmp_git_repo / "src.py").write_text("x = 1\n")
+    assert rounds_mod.commit_phase(ctx, 1) is None
+    green_lint = CheckResult(
+        check=lint,
+        execution_outcome="ran",
+        gate=GateResult(command="ruff check", exit_code=0, passed=True, output_tail=""),
+    )
+    fresh[_head(tmp_git_repo)] = CheckSetResult((green_lint,))
+    assert rounds_mod.fast_gate_phase(ctx, 1) is None
+    assert ctx.check_set is not None
+    assert [r.check.name for r in ctx.check_set.results] == ["lint", "regenerate"]
+    assert rounds_mod.approval_phase(ctx, 1) is None  # lint green, regenerate holds
+
+    # a check-set run that errored out entirely (None) still carries the row
+    (tmp_git_repo / "src.py").write_text("x = 2\n")
+    assert rounds_mod.commit_phase(ctx, 2) is None
+    fresh[_head(tmp_git_repo)] = None
+    assert rounds_mod.fast_gate_phase(ctx, 2) is None
+    assert ctx.check_set is not None
+    assert [r.check.name for r in ctx.check_set.results] == ["regenerate"]
+    assert rounds_mod.approval_phase(ctx, 2) is None
+
+
+def test_a_post_commit_pass_that_cannot_run_ends_the_round_infra_failed(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """PR #388 review (High), the other half: a pass that could not run at all
+    (export / container / copy-back) has no verdict for the coder to act on —
+    the round is terminal ``infra_failed`` with the host action, never a
+    silent continue into the gate and the panel."""
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = tmp_git_repo
+    dead = PostCommitOutcome(
+        infra_error=(
+            "regenerate pass could not run (`make diagrams`): docker: not found"
+        ),
+        host_action="check docker on the host, then complete the gate to re-dispatch",
+    )
+    ctx.post_commit_pass = lambda wt, n: dead
+    (tmp_git_repo / "src.py").write_text("x = 1\n")
+
+    exit_ = rounds_mod.commit_phase(ctx, 1)
+
+    assert exit_ is not None and exit_.status == "infra_failed"
+    assert exit_.failure_reason == (
+        "round 1: regenerate pass could not run (`make diagrams`): docker: not found"
+    )
+    assert exit_.host_action.startswith("check docker on the host")
+    # the round's commit exists and is recorded; nothing was gated or reviewed
+    assert ctx.new_commit == _head(tmp_git_repo) and ctx.gated_sha == ctx.new_commit
+    assert ctx.post_commit_row is None
 
 
 def test_commit_phase_honours_the_pre_commit_guard(

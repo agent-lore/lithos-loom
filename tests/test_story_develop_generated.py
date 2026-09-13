@@ -12,11 +12,13 @@ is stubbed through the same seam the gate uses.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from lithos_loom.plugins.story_develop import check_runner
 from lithos_loom.plugins.story_develop import generated as gen
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.test_gate import GateResult
@@ -322,8 +324,13 @@ def test_post_commit_regenerate_commits_what_the_generator_moved(
         _config(repo, tmp_path), run_container=_fake_runner(calls, mutate=mutate)
     )
     assert passer is not None
-    sha = passer(repo, 2)
+    outcome = passer(repo, 2)
+    sha = outcome.sha
     assert sha is not None and sha != before
+    assert outcome.infra_error == ""
+    # the generator's verdict rides with the commit as a GREEN required row
+    assert outcome.row is not None and outcome.row.passed
+    assert outcome.row.check.name == gen.REGENERATE_CHECK_NAME
     assert _git(repo, "rev-parse", "HEAD") == sha
     assert _git(repo, "log", "-1", "--format=%s") == "story-develop r2: regenerate"
     assert _git(repo, "show", "HEAD:docs/generated/metrics.json") == '{"lines": 99}'
@@ -338,29 +345,235 @@ def test_post_commit_regenerate_is_a_no_op_when_nothing_moves(tmp_path: Path) ->
         _config(repo, tmp_path), run_container=_fake_runner([])
     )
     assert passer is not None
-    assert passer(repo, 1) is None
+    outcome = passer(repo, 1)
+    assert outcome.sha is None and outcome.infra_error == ""
+    assert outcome.row is not None and outcome.row.passed
     assert _git(repo, "rev-parse", "HEAD") == before
 
 
-def test_post_commit_regenerate_never_commits_a_failed_generator(
+def test_post_commit_regenerate_reports_a_failed_generator_as_a_blocking_row(
+    tmp_path: Path,
+) -> None:
+    """PR #388 review (High): a generator that says no is a REQUIRED raw-exit
+    check row — it blocks approval through the floor, the coder reads its
+    output next round, the epilogue names it — and nothing is committed."""
+    repo = _committed_repo(tmp_path)
+    before = _git(repo, "rev-parse", "HEAD")
+    config = _config(repo, tmp_path)
+
+    def mutate(tree: Path) -> None:  # a generator that wrote, then failed
+        (tree / "docs/generated/metrics.json").write_text('{"lines": 99}\n')
+
+    passer = gen.post_commit_regenerate(
+        config, run_container=_fake_runner([], passed=False, mutate=mutate)
+    )
+    assert passer is not None
+
+    outcome = passer(repo, 1)
+
+    assert outcome.sha is None and outcome.infra_error == ""
+    row = outcome.row
+    assert row is not None
+    assert row.check.name == "regenerate" and row.check.command == "make diagrams"
+    assert row.check.state == "required" and row.check.raw_exit
+    assert row.execution_outcome == "ran" and not row.passed
+    assert row.gate is not None
+    assert row.gate.exit_code == 2 and row.gate.output_tail == "gen"
+    assert check_runner.check_result_blocks(row, None)
+    assert _git(repo, "rev-parse", "HEAD") == before
+    assert _git(repo, "status", "--porcelain") == ""
+    # the output lands beside the round's gate output for the operator
+    written = (config.gate_dir / "round_01" / "output_regenerate.txt").read_text()
+    assert written.startswith("$ make diagrams\nexit: 2 (RED)")
+
+
+def test_post_commit_regenerate_reports_a_timed_out_generator_as_blocking(
     tmp_path: Path,
 ) -> None:
     repo = _committed_repo(tmp_path)
-    before = _git(repo, "rev-parse", "HEAD")
+
+    def timed_out(cmd, *, name, command, timeout):
+        return GateResult(
+            command=command, exit_code=124, passed=False, output_tail="killed"
+        )
+
     passer = gen.post_commit_regenerate(
-        _config(repo, tmp_path),
-        run_container=_fake_runner([], passed=False, mutate=_regen_mutation),
+        _config(repo, tmp_path), run_container=timed_out
     )
     assert passer is not None
-    assert passer(repo, 1) is None
+    outcome = passer(repo, 1)
+    row = outcome.row
+    assert outcome.sha is None and row is not None
+    assert row.execution_outcome == "timed_out" and not row.passed
+    assert row.gate is not None and row.gate.timed_out
+    assert check_runner.check_result_blocks(row, None)
+
+
+def test_post_commit_regenerate_that_cannot_run_is_an_infra_error_not_a_verdict(
+    tmp_path: Path,
+) -> None:
+    """PR #388 review (High), the other half: an export / container /
+    copy-back failure is no verdict on the tree — the pass reports it as the
+    round's infra failure (terminal, host action named), never as a row the
+    floor could read as "skipped" and never as silence."""
+    repo = _committed_repo(tmp_path)
+    before = _git(repo, "rev-parse", "HEAD")
+
+    def boom(cmd, *, name, command, timeout):
+        raise OSError("docker: not found")
+
+    passer = gen.post_commit_regenerate(_config(repo, tmp_path), run_container=boom)
+    assert passer is not None
+    outcome = passer(repo, 1)
+    assert outcome.sha is None and outcome.row is None
+    assert "docker: not found" in outcome.infra_error
+    assert "make diagrams" in outcome.infra_error
+    assert "complete the gate" in outcome.host_action
     assert _git(repo, "rev-parse", "HEAD") == before
-    assert _git(repo, "status", "--porcelain") == ""
 
 
 def test_post_commit_regenerate_is_absent_without_a_policy(tmp_path: Path) -> None:
     repo = _committed_repo(tmp_path)
     config = DevelopConfig(repo=repo, description="t", work_dir=tmp_path / "w")
     assert gen.post_commit_regenerate(config) is None
+
+
+# --- a green generator whose output cannot be applied (review round 2) --------
+
+
+def test_output_that_cannot_be_applied_after_a_green_run_is_the_generators_red(
+    tmp_path: Path,
+) -> None:
+    """PR #388 review round 2 (Medium): the generator exited 0 but its output
+    cannot land — a file became a directory (here), a path git refuses (next
+    test). That is a defect of the project's generator or policy, never the
+    host's: the result is RED with the generator's exit and the reason in
+    its tail, so the pass reports a blocking row the coder reads and the run
+    walks to the human gate — not ``infra_failed`` with "check docker"."""
+    repo = _committed_repo(tmp_path)
+
+    def mutate(tree: Path) -> None:
+        target = tree / "docs/generated/metrics.json"
+        target.unlink()
+        target.mkdir()
+        (target / "part.json").write_text("{}\n")
+
+    result = gen.regenerate(
+        _config(repo, tmp_path),
+        repo,
+        label="r1",
+        run_container=_fake_runner([], mutate=mutate),
+    )
+
+    assert not result.ok
+    assert result.exit_code == 0  # the generator's own verdict, kept honest
+    assert "could not be applied" in result.error
+    assert "metrics.json" in result.error
+
+
+def test_a_gitignored_generated_path_is_the_generators_red_not_host_infra(
+    tmp_path: Path,
+) -> None:
+    repo = _committed_repo(tmp_path)
+    (repo / ".gitignore").write_text("*.log\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore logs")
+
+    def mutate(tree: Path) -> None:
+        (tree / "docs/generated/build.log").write_text("built\n")
+
+    config = _config(repo, tmp_path)
+    passer = gen.post_commit_regenerate(
+        config, run_container=_fake_runner([], mutate=mutate)
+    )
+    assert passer is not None
+
+    outcome = passer(repo, 1)
+
+    assert outcome.infra_error == "" and outcome.sha is None
+    row = outcome.row
+    assert row is not None and not row.passed and row.gate is not None
+    assert row.gate.exit_code == 0 and row.gate.verdict == "RED"
+    assert "could not be applied" in row.gate.output_tail
+    assert "build.log" in row.gate.output_tail
+    assert check_runner.check_result_blocks(row, None)
+
+
+# --- executable bits (review round 2) ----------------------------------------
+
+
+def _scripted_repo(tmp_path: Path, *, executable: bool) -> Path:
+    """A committed repo whose generated dir holds a script, committed as
+    ``100755`` when *executable* else ``100644``."""
+    repo = _committed_repo(tmp_path)
+    script = repo / "docs" / "generated" / "run.sh"
+    script.write_text("#!/bin/sh\necho hi\n")
+    if executable:
+        script.chmod(script.stat().st_mode | 0o111)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "script")
+    return repo
+
+
+def _index_mode(repo: Path, rel: str) -> str:
+    return _git(repo, "ls-files", "--stage", "--", rel).split()[0]
+
+
+def test_sync_copies_the_executable_bit_the_generator_set(tmp_path: Path) -> None:
+    """PR #388 review (Medium): git tracks the executable bit, so a generator
+    that only flips it has moved the file — and a fresh executable must land
+    executable, not with the host's default mode."""
+    repo = _scripted_repo(tmp_path, executable=False)
+
+    def mutate(tree: Path) -> None:
+        same = tree / "docs/generated/run.sh"  # content unchanged, mode only
+        same.chmod(same.stat().st_mode | 0o111)
+        new = tree / "docs/generated/new.sh"
+        new.write_text("#!/bin/sh\n")
+        new.chmod(0o755)
+
+    result = gen.regenerate(
+        _config(repo, tmp_path),
+        repo,
+        label="r1",
+        run_container=_fake_runner([], mutate=mutate),
+    )
+
+    assert result.ok
+    assert sorted(result.changed) == ["docs/generated/new.sh", "docs/generated/run.sh"]
+    assert os.access(repo / "docs/generated/run.sh", os.X_OK)
+    assert os.access(repo / "docs/generated/new.sh", os.X_OK)
+    assert _index_mode(repo, "docs/generated/run.sh") == "100755"
+    assert _index_mode(repo, "docs/generated/new.sh") == "100755"
+
+
+def test_sync_clears_the_executable_bit_the_generator_dropped(tmp_path: Path) -> None:
+    repo = _scripted_repo(tmp_path, executable=True)
+    assert _index_mode(repo, "docs/generated/run.sh") == "100755"
+
+    def mutate(tree: Path) -> None:
+        script = tree / "docs/generated/run.sh"
+        script.chmod(script.stat().st_mode & ~0o111)
+
+    result = gen.regenerate(
+        _config(repo, tmp_path),
+        repo,
+        label="r1",
+        run_container=_fake_runner([], mutate=mutate),
+    )
+
+    assert result.ok and result.changed == ("docs/generated/run.sh",)
+    assert not os.access(repo / "docs/generated/run.sh", os.X_OK)
+    assert _index_mode(repo, "docs/generated/run.sh") == "100644"
+
+
+def test_sync_leaves_an_unchanged_executable_alone(tmp_path: Path) -> None:
+    repo = _scripted_repo(tmp_path, executable=True)
+    result = gen.regenerate(
+        _config(repo, tmp_path), repo, label="r1", run_container=_fake_runner([])
+    )
+    assert result.ok and result.changed == ()
+    assert _index_mode(repo, "docs/generated/run.sh") == "100755"
 
 
 # --- modify/delete + absent prefixes (review round 1) ------------------------

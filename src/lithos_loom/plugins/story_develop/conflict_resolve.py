@@ -275,9 +275,12 @@ def render_conflict_brief(
             cmd,
             cmd_fence,
             "",
-            "as the LAST step before you hand off (after any formatting — the "
-            "project's drift check compares the committed copy to what the "
-            "generator produces). The paths, one per line:",
+            (
+                "as the LAST step before you hand off (after any formatting — the "
+                "project's drift check compares the committed copy to what the "
+                "generator produces; loom re-runs it after your commit and a red "
+                "run is a blocking `regenerate` check). The paths, one per line:"
+            ),
             "",
             gen_fence,
             *generated,
@@ -467,8 +470,10 @@ def render_review_context(
             (
                 f"{len(generated)} conflicted path(s) are GENERATED output and were "
                 "not hand-merged: taken from the base at intake and rebuilt by the "
-                "project's generator after the round commit. Judge them as "
-                "generated — stale output is a defect, a hand edit is one too:"
+                "project's generator after each round commit — the `regenerate` "
+                "row in the deterministic gate is that rebuild's verdict (red: "
+                "these copies are stale by construction). Judge them as generated "
+                "— stale output is a defect, a hand edit is one too:"
             ),
             "",
             gen_fence,
