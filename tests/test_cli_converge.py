@@ -1140,9 +1140,7 @@ def test_infra_failed_posts_no_external_replies(
             message="INFRA FAILURE: coder auth_failed",
         )
 
-    import lithos_loom.cli.converge as cli_mod
-
-    cli_mod.converge_pr, saved = fake_converge_pr, cli_mod.converge_pr
+    converge_cli.converge_pr, saved = fake_converge_pr, converge_cli.converge_pr
     try:
         result = runner.invoke(
             develop_app,
@@ -1158,7 +1156,7 @@ def test_infra_failed_posts_no_external_replies(
             catch_exceptions=False,
         )
     finally:
-        cli_mod.converge_pr = saved
+        converge_cli.converge_pr = saved
 
     assert result.exit_code == 1
     assert github_stubs["replies"] == []

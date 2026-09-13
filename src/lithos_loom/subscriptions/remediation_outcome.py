@@ -14,7 +14,6 @@ import dataclasses
 from pathlib import Path
 from typing import Any
 
-from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import PrGateSpec
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
@@ -46,13 +45,23 @@ REFUND_RETRY_DELAYS: tuple[float, ...] = (0.5, 2.0, 5.0)
 
 
 async def post_finding(ctx: SubscriptionContext, story_id: str, summary: str) -> None:
-    """Best-effort finding post (the story may have completed mid-run)."""
+    """Best-effort finding post (the story may have completed mid-run).
+
+    Genuinely best-effort (PR #379 review): a raw transport error — which
+    propagates past the client's own recovery — is swallowed here too. Every
+    caller posts the breadcrumb AFTER its durable write landed, and an
+    exception escaping from here would reach ``ExternalRemediation._run``'s
+    crash handler, which re-reads the ORIGINAL reserved budget and can raise
+    a false ``remediation_exhausted`` gate over a round that was refunded.
+    """
     try:
         await ctx.lithos.finding_post(task_id=story_id, summary=summary)
-    except LithosClientError as exc:
+    except Exception as exc:  # noqa: BLE001 — see the docstring
         ctx.logger.warning(
-            "[Friction] external-remediation: posting outcome for story %s failed (%s)",
+            "[Friction] external-remediation: posting outcome for story %s failed "
+            "(%s: %s); the breadcrumb is lost, the recorded state stands",
             story_id,
+            type(exc).__name__,
             exc,
         )
 

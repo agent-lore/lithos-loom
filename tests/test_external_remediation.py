@@ -1920,3 +1920,38 @@ async def test_an_infra_refund_that_never_lands_still_decides_the_last_round(
     assert any("did not land" in f and "not re-parked" in f for f in findings)
     assert len(await _human_gates(client)) == 1  # the last round decides
     assert [n.reason for n in notifier.notices] == ["remediation_exhausted"]
+
+
+async def test_a_breadcrumb_that_fails_after_the_refund_landed_never_spends_the_round(
+    tmp_path: Path,
+) -> None:
+    # PR #379 review (High): the refund write landed, then the [Friction]
+    # post hit a raw transport error. That must not escape to the crash
+    # handler, which would re-read the ORIGINAL reserved budget and raise a
+    # false remediation_exhausted gate on the last round — the gate already
+    # holds the refund and the re-parked trigger.
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+
+    async def failing_post(**kw: Any) -> Any:
+        raise ConnectionResetError("sse stream closed")
+
+    notifier = _RecordingNotifier()
+    rem = ExternalRemediation(
+        _settings(tmp_path, notifier=notifier),
+        spawn=_spawner(_infra_failed_payload(), rc=1)[0],
+    )
+    assert await _consider(client, gate, story, rem, rounds_used=1) == "dispatched"
+    client.finding_post = failing_post  # type: ignore[method-assign]
+    assert rem._task is not None
+    await rem._task  # never raises
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1  # the refund stands
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
+    assert await _human_gates(client) == []
+    assert notifier.notices == []
