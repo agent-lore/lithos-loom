@@ -127,7 +127,11 @@ def _install(
         captured["loop_config"] = config
         wt = config.work_dir / "wt"
         wt.mkdir(parents=True, exist_ok=True)
-        return _dev_result(wt, status=captured.get("develop_status", "approved"))
+        return dataclasses.replace(
+            _dev_result(wt, status=captured.get("develop_status", "approved")),
+            rounds=captured.get("develop_rounds", 2),
+            failure_reason=captured.get("develop_failure_reason", ""),
+        )
 
     monkeypatch.setattr(converge_mod, "develop", fake_develop)
 
@@ -148,6 +152,8 @@ def _install(
     # the whole merge-base..HEAD span develop() would report.
     def fake_commits_since(wt, base):
         captured["commits_since_base"] = base
+        if captured.get("no_fixer_commits"):
+            return []  # the loop committed nothing (#380)
         return ["fix1"] if base == _HEAD else ["orig1", "orig2", "fix1"]
 
     monkeypatch.setattr(converge_mod.git, "commits_since", fake_commits_since)
@@ -811,6 +817,106 @@ def test_a_later_rounds_findings_block_never_speaks_for_an_external_id(
 
     (o,) = result.external_outcomes
     assert o.disposition == "fixed" and o.detail == "guarded the handle"
+
+
+def _no_commit_round_one(captured: dict) -> None:
+    """The lens #83 shape (#380): the round-1 coder found nothing to change,
+    wrote its handoff and made no commit — the loop's exit C."""
+    captured["develop_status"] = "failed"
+    captured["develop_rounds"] = 1
+    captured["develop_failure_reason"] = "round 1: coder produced no commit"
+    captured["no_fixer_commits"] = True
+
+
+def test_external_mode_every_id_no_change_needed_is_already_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """lens #83 (#380): the reviewer's "good to merge" was ingested as a
+    finding; triage rightly proceeded; the coder rightly changed nothing and
+    said so per id. That is `already_clean` — reported, not remediated —
+    never `not_converged` (which spent the last budget round and raised a
+    needs-human gate on a mergeable PR)."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _no_commit_round_one(captured)
+    _install_triage(monkeypatch, captured, proceed=("f-001", "f-002"))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nnothing to change.\n"
+        "## External findings\n"
+        "- f-001: NO CHANGE NEEDED — an approval verdict, not a defect\n"
+        "- f-002: NO CHANGE NEEDED — verified: the guard already exists\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config, _change(), external_findings=(_ext_finding(7), _ext_finding(8))
+    )
+
+    assert result.status == "already_clean"
+    assert result.succeeded and not result.pushed
+    assert "push" not in captured
+    assert {o.disposition for o in result.external_outcomes} == {"no_change_needed"}
+    assert "no change" in result.message and "f-001" in result.message
+    assert result.to_json()["succeeded"] is True
+
+
+def test_external_mode_a_fixed_claim_with_no_commit_is_not_already_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a FIXED ack over a tree that never changed is a contradiction, not a
+    # clean run — the old outcome stands
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _no_commit_round_one(captured)
+    _install_triage(monkeypatch, captured, proceed=("f-001", "f-002"))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nx\n"
+        "## External findings\n"
+        "- f-001: FIXED — guarded it\n"
+        "- f-002: NO CHANGE NEEDED — an approval verdict\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config, _change(), external_findings=(_ext_finding(7), _ext_finding(8))
+    )
+
+    assert result.status == "not_converged" and not result.succeeded
+    by_id = {o.finding_id: o for o in result.external_outcomes}
+    assert by_id["f-001"].disposition == "unaddressed"
+    assert by_id["f-002"].disposition == "no_change_needed"
+
+
+def test_external_mode_rejected_plus_no_change_needed_is_already_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # triage refuted one, the coder found nothing in the other: nothing to do
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _no_commit_round_one(captured)
+    _install_triage(
+        monkeypatch, captured, proceed=("f-002",), rejections={"f-001": "x.py:12"}
+    )
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nx\n"
+        "## External findings\n- f-002: NO CHANGE NEEDED — intended\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config, _change(), external_findings=(_ext_finding(7), _ext_finding(8))
+    )
+
+    assert result.status == "already_clean"
 
 
 def test_external_mode_a_final_round_without_acks_claims_nothing(

@@ -1348,6 +1348,59 @@ async def test_exhausted_budget_after_an_unconverged_run_raises_a_needs_human_ga
     assert notifier.notices[0].route == "external-remediation"
 
 
+async def test_an_already_clean_run_refunds_the_round_and_never_escalates(
+    tmp_path: Path,
+) -> None:
+    """#380 (lens #83): a run that changed nothing because every external
+    finding needed no change is reported, not remediated — the reserved
+    round comes back (the own-sha re-review precedent), the outcome finding
+    names the dispositions, and the last budgeted round raises no gate."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    notifier = _RecordingNotifier()
+    spawn, _calls = _spawner(
+        {
+            "status": "already_clean",
+            "succeeded": True,
+            "pushed": False,
+            "pushed_sha": "",
+            "rounds": 1,
+            "develop_status": "failed",
+            "total_cost_usd": 1.04,
+            "message": "every external finding needed no change (f-001)",
+            "external_outcomes": [
+                {
+                    "finding_id": "f-001",
+                    "author": "davesnowdon",
+                    "source": "conversation",
+                    "stream": "issue_comment",
+                    "activity_id": 9,
+                    "reply_mode": "conversation",
+                    "thread_url": "https://github.com/o/r/pull/142#issuecomment-9",
+                    "disposition": "no_change_needed",
+                    "detail": "an approval verdict, not a defect",
+                }
+            ],
+        }
+    )
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=1, notifier=notifier), spawn=spawn
+    )
+
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 0  # reserved at dispatch, refunded on the result
+    assert await _human_gates(client) == []
+    assert notifier.notices == []
+    outcome = next(f for f in _findings(client) if "remediation outcome" in f)
+    assert "already_clean" in outcome
+    assert "f-001 by davesnowdon: no_change_needed" in outcome
+    assert "refunded" in outcome
+
+
 async def test_rounds_remaining_after_an_unconverged_run_does_not_escalate(
     tmp_path: Path,
 ) -> None:

@@ -28,11 +28,12 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
 | `lithos_loom.plugins.story_develop.conflict_resolve` | M | 3 | 5 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
-| `lithos_loom.plugins.story_develop.converge` | L | 2 | 1 |
+| `lithos_loom.plugins.story_develop.converge` | M | 0 | 1 |
+| `lithos_loom.plugins.story_develop.converge_result` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
-| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 10 |
+| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 11 |
 | `lithos_loom.plugins.story_develop.external_triage` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
@@ -162,9 +163,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `stop_container` — Force-remove the container; never raises (teardown must be best-effort).
 
 ### `lithos_loom.plugins.story_develop.converge`
+- def `converge_pr` — Run the review-convergence loop against an existing PR *change*.
+
+### `lithos_loom.plugins.story_develop.converge_result`
 - class `ConflictSummary` — Resolve mode (PRD S5): what the run set out to resolve.
 - class `ConvergeResult` — Outcome of a :func:`converge_pr` run.
-- def `converge_pr` — Run the review-convergence loop against an existing PR *change*.
 
 ### `lithos_loom.plugins.story_develop.daemon_io`
 - def `read_task_payload` — Parse the runner's ``task.json`` into a :class:`TaskContext`.
@@ -212,6 +215,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `parse_coder_acks` — Parse the coder handoff's ``## External findings`` acknowledgements.
 - def `outcomes_after_loop` — Fold triage rejections + the coder's per-id claims into per-finding outcomes, in the injection order (``id_map`` preserves it).
 - def `final_round_outcomes` — The converge epilogue's dispositions, read from the coder's FINAL handoff (#387: lens #84's round 1 said FIXED, round 3 reverted it, and the threads were answered from round 1) — the mandated ``## External findings`` acks plus any ``## Findings`` dispute block — and checked against the tree: a run whose final tree equals the PR head outside the generated paths undid its fix. The ack section is scoped to the injected ids by construction; the ``## Findings`` block is read in round 1 only (a later round's belongs to the panel). A final round without the section carries no earlier claim forward (the safe direction).
+- def `nothing_to_change` — #380: every injected finding was refuted by triage or dispositioned ``no_change_needed`` by the coder — the run had nothing to do, so a loop that committed nothing is ``already_clean`` (reported, not remediated), not a failure. False when there is no external finding at all.
 - def `undecided_note` — The status-line suffix for a converged run that left an external finding ``reverted`` (#387) — the tree converged, the decision did not.
 - def `pr_number_from_spec` — PR number from a converge change spec (``142`` / ``#142`` / a PR URL).
 

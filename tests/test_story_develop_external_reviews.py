@@ -420,6 +420,7 @@ def test_ack_instruction_names_every_id_and_the_section() -> None:
     assert "omit" in text.lower()  # the never-omit-silently steering
     # #387: the contract holds in EVERY round and knows a reverted fix
     assert "REVERTED" in text
+    assert "NO CHANGE NEEDED" in text  # #380: and a finding that is not a defect
     assert "every round" in text.lower()
 
 
@@ -474,6 +475,31 @@ def test_final_round_outcomes_reads_the_findings_block_in_round_one_only(
     assert r1.disposition == "disputed" and r1.detail == "deliberate decision"
     (r2,) = outcomes(2)
     assert r2.disposition == "fixed" and r2.detail == "guarded it"
+
+
+def test_parse_coder_acks_reads_a_no_change_needed_verdict() -> None:
+    """#380 (lens #83): an approval verdict injected as a finding is
+    dispositioned by the coder as NOT a defect — a fourth word, so the
+    outcome parser can read what the coder already writes."""
+    text = (
+        "## Status: LGTM\n## Summary\nnothing to do\n"
+        "## External findings\n"
+        "- f-001: NO CHANGE NEEDED — an approval verdict, not a defect\n"
+        "- f-002: no_change_needed — the claim describes the intended behaviour\n"
+    )
+    acks = parse_coder_acks(text, ["f-001", "f-002"])
+    assert acks["f-001"].verdict == "no_change_needed"
+    assert acks["f-001"].detail == "an approval verdict, not a defect"
+    assert acks["f-002"].verdict == "no_change_needed"
+
+
+def test_outcomes_no_change_needed_is_its_own_disposition() -> None:
+    # not a fix (nothing landed, no approval needed) and not a dispute (the
+    # coder agrees with the reviewer that there is nothing to change)
+    id_map = {"f-001": _finding()}
+    acks = {"f-001": CoderAck(verdict="no_change_needed", detail="an approval")}
+    (o,) = outcomes_after_loop(id_map, {}, {}, acks, loop_approved=False)
+    assert o.disposition == "no_change_needed" and o.detail == "an approval"
 
 
 def test_parse_coder_acks_reads_a_reverted_verdict() -> None:

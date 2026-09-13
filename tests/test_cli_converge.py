@@ -606,6 +606,60 @@ def test_from_github_answers_a_reverted_fix_honestly(
     assert "operator" in bodies[7].lower()
 
 
+def test_from_github_answers_a_no_change_needed_finding(
+    github_stubs: dict, tmp_path: Path
+) -> None:
+    """#380: a finding the coder judged not a defect is answered as such —
+    no "Fixed in", no silence — and the run is a success (exit 0)."""
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalOutcome
+
+    trusted = [_ext(7)]
+    github_stubs["trusted"] = trusted
+    github_stubs["untrusted"] = []
+
+    def fake_converge_pr(
+        config, change, *, no_push=False, external_findings=None, **_mode
+    ):
+        return ConvergeResult(
+            status="already_clean",
+            change=change,
+            external_outcomes=(
+                ExternalOutcome(
+                    "f-001",
+                    trusted[0],
+                    "no_change_needed",
+                    detail="an approval verdict, not a defect",
+                ),
+            ),
+            message="every external finding needed no change",
+        )
+
+    converge_cli.converge_pr, saved = fake_converge_pr, converge_cli.converge_pr
+    try:
+        result = runner.invoke(
+            develop_app,
+            [
+                "converge",
+                "#142",
+                "--repo",
+                str(tmp_path),
+                "--ac",
+                "do it",
+                "--from-github",
+            ],
+            catch_exceptions=False,
+        )
+    finally:
+        converge_cli.converge_pr = saved
+
+    assert result.exit_code == 0
+    bodies = dict(github_stubs["replies"])
+    assert "Fixed in" not in bodies[7]
+    assert "no change needed" in bodies[7].lower()
+    assert "an approval verdict, not a defect" in bodies[7]
+
+
 def test_from_github_nothing_to_ingest_exits_clean(
     github_stubs: dict, tmp_path: Path
 ) -> None:

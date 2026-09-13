@@ -226,7 +226,8 @@ class ExternalOutcome:
     """What happened to one injected external finding, for the reply epilogue.
 
     ``disposition``: ``rejected`` (triage refuted it, ``detail`` = the cited
-    evidence), ``fixed`` / ``disputed`` / ``reverted`` (the coder's per-id
+    evidence), ``fixed`` / ``disputed`` / ``reverted`` / ``no_change_needed``
+    (#380: not a defect — the coder agrees nothing should change) (the coder's per-id
     acknowledgement in its FINAL handoff, ``detail`` = its one-line response
     — ``reverted`` is a fix a later round undid, #387: the reviewer and the
     story's acceptance criteria disagree, an operator decision), or
@@ -246,7 +247,7 @@ class ExternalOutcome:
 class CoderAck:
     """One line of the coder's ``## External findings`` acknowledgement."""
 
-    verdict: str  # "fixed" | "disputed" | "reverted"
+    verdict: str  # "fixed" | "disputed" | "reverted" | "no_change_needed"
     detail: str = ""
 
 
@@ -264,7 +265,8 @@ _ACK_SECTION_RE = re.compile(
 # One ack per LINE (the same anchoring rule as the triage verdict regex — an
 # unanchored pattern would let one line's detail swallow the next).
 _ACK_RE = re.compile(
-    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*(?P<verdict>FIXED|DISPUTED|REVERTED)"
+    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*"
+    r"(?P<verdict>FIXED|DISPUTED|REVERTED|NO[ \t_]+CHANGE[ \t_]+NEEDED)"
     r"[ \t]*(?:[—–:-]+[ \t]*(?P<detail>.*\S))?[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -294,12 +296,17 @@ that finding AS OF THIS HANDOFF:
 - f-001: FIXED — <one line: what you changed, and where>
 - f-002: DISPUTED — <one line: why the finding is wrong>
 - f-003: REVERTED — <one line: why you undid a fix from an earlier round>
+- f-004: NO CHANGE NEEDED — <one line: why there is nothing to change>
 
 Use FIXED only for a finding whose fix is in the tree NOW. A fix you undid
 this round (a reviewer holds it contradicts the acceptance criteria, say) is
 REVERTED, never FIXED — the operator decides between the two contracts, not
-you. An id you omit is treated as NOT addressed and its thread gets no answer
-— never omit one silently, and repeat the section in every round.
+you. NO CHANGE NEEDED is for a finding that is not a defect at all — an
+approval verdict, a description of the intended behaviour, something already
+in the tree — where you agree with the reviewer that nothing should change
+(DISPUTED is for a claim you say is wrong). An id you omit is treated as NOT
+addressed and its thread gets no answer — never omit one silently, and repeat
+the section in every round.
 """
 
 
@@ -320,8 +327,9 @@ def parse_coder_acks(text: str, finding_ids: Sequence[str]) -> dict[str, CoderAc
         fid = line.group("fid")
         if fid not in known:
             continue
+        verdict = re.sub(r"[ \t_]+", "_", line.group("verdict").strip().lower())
         acks[fid] = CoderAck(
-            verdict=line.group("verdict").lower(),
+            verdict=verdict,
             detail=(line.group("detail") or "").strip(),
         )
     return acks
@@ -376,6 +384,12 @@ def outcomes_after_loop(
             continue
         if ack is not None and ack.verdict == "reverted":
             out.append(ExternalOutcome(fid, ext, "reverted", detail=ack.detail))
+            continue
+        if ack is not None and ack.verdict == "no_change_needed":
+            # #380: not a defect (an approval verdict, intended behaviour) —
+            # nothing landed and nothing had to; no approval is needed to
+            # report that the coder agreed with the reviewer
+            out.append(ExternalOutcome(fid, ext, "no_change_needed", detail=ack.detail))
             continue
         if ack is not None and ack.verdict == "fixed" and loop_approved:
             if tree_changed is False:
@@ -468,6 +482,16 @@ def final_round_outcomes(
         loop_approved=loop_approved,
         tree_changed=tree_changed,
         missing_ack_detail=missing,
+    )
+
+
+def nothing_to_change(outcomes: Sequence[ExternalOutcome]) -> bool:
+    """#380: every injected finding was refuted by triage or dispositioned
+    ``no_change_needed`` by the coder — the run had nothing to do, so a loop
+    that committed nothing is ``already_clean`` (reported, not remediated),
+    not a failure. False when there is no external finding at all."""
+    return bool(outcomes) and all(
+        o.disposition in ("rejected", "no_change_needed") for o in outcomes
     )
 
 

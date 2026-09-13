@@ -161,6 +161,27 @@ async def record_result(
     cost = data.get("total_cost_usd")
     if isinstance(cost, int | float):
         lines.append(f"- spend ${cost:.2f}")
+    if status == "already_clean":
+        # #380: reported, not remediated — the reserved round comes back (the
+        # own-sha re-review precedent); a lost write leaves it spent, said so
+        refund = dataclasses.replace(budget, rounds_used=max(0, budget.rounds_used - 1))
+        landed = await write_marker(
+            ctx,
+            task_id=gate_id,
+            marker={REMEDIATION_KEY: refund.as_marker()},
+            subsystem="external-remediation",
+        )
+        if landed:
+            budget = refund
+            lines.append(
+                f"- nothing to change: the round is refunded "
+                f"({budget.rounds_used}/{budget_limit})"
+            )
+        else:
+            lines.append(
+                "- nothing to change, but recording the refund did not land: the "
+                f"round stays spent ({budget.rounds_used}/{budget_limit})"
+            )
     ctx.logger.info(
         "external-remediation: converge for %s finished: %s, round %d/%d%s%s",
         spec.pr_url,
