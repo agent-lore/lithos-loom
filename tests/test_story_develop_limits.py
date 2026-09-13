@@ -167,6 +167,7 @@ EXPECTED_CLASS = {
     "claude_oauth_expired_parsed.json": FailureClass.AUTH_FAILED,
     "claude_oauth_expired_raw_stdout.json": FailureClass.AUTH_FAILED,
     "claude_401_token_revoked.json": FailureClass.AUTH_FAILED,
+    "claude_not_logged_in_parsed.json": FailureClass.AUTH_FAILED,
     "claude_stream_disconnect.json": FailureClass.TRANSIENT_INFRA,
     "claude_api_overloaded_529.json": FailureClass.TRANSIENT_INFRA,
     "codex_stream_disconnect.json": FailureClass.TRANSIENT_INFRA,
@@ -204,6 +205,11 @@ def test_raw_stdout_shape_is_retained_not_dropped() -> None:
         "authentication_failed: please run /login",
         "Invalid API key · Fix external API key",
         'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}',
+        # #382: the never-logged-in / refresh-gave-up wording (an expired token
+        # the CLI would not refresh) — a different sentence from the same host
+        # condition, seen live under a stale credentials file
+        "Not logged in · Please run /login",
+        "Not logged in. Please run /login to authenticate.",
     ],
 )
 def test_auth_wordings(text: str) -> None:
@@ -360,6 +366,7 @@ _AGENT_PROSE = [
     "Blocking: authentication_failed is swallowed by the bare except at client.py:88",
     "I could not finish: the suite printed 'API Error: 500 internal server error'.",
     "OAuth session expired is the message our own login page shows.",
+    "The user is not logged in, so the page says 'Please run /login' (#382 prose).",
 ]
 
 

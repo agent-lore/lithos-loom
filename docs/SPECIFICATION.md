@@ -885,7 +885,7 @@ uv run python -m lithos_loom.plugins.story_develop \
   | class | signal | reaction |
   |---|---|---|
   | `usage_limited` | the provider limit wordings (incl. a codex `usage_limit` event) | pause within the shared budget / tool-switch (T5, unchanged) |
-  | `auth_failed` | `Failed to authenticate`, OAuth session expired / token revoked, `authentication_failed`, a 401, an invalid key | **one** retry after 20 s (the 2026-09-12 lens#82 loss: the container's refresh failed while the host's credentials were valid minutes later — a re-read is worth one attempt), then escalate |
+  | `auth_failed` | `Failed to authenticate`, OAuth session expired / token revoked, `authentication_failed`, a 401, an invalid key, `Not logged in · Please run /login` (#382) | **one** retry after 20 s (the 2026-09-12 lens#82 loss: the container's refresh failed while the host's credentials were valid minutes later — a re-read is worth one attempt), then escalate |
   | `transient_infra` | stream disconnect, websocket idle timeout, `ECONNRESET`/`ETIMEDOUT`/…, 5xx / 429 / overloaded | retry after 30 s then 120 s, then escalate |
   | `oom_or_spawn` | exit 137, `container … is not running`, `No such container`, `OCI runtime exec failed`, out of memory | one retry after 10 s, then escalate |
   | `timeout` / `agent_error` | the per-turn wall clock; anything unrecognised | the plain failure path (never mis-pause, never mis-retry) |

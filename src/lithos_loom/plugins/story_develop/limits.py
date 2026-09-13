@@ -109,6 +109,9 @@ _AUTH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"api[_ ]error(?:[_ ]status)?\W{0,4}401\b", re.IGNORECASE),
     re.compile(r"\b401\b.{0,40}\b(?:unauthori[sz]ed|oauth|authenticat)", re.IGNORECASE),
     re.compile(r"invalid (?:api key|authentication)", re.IGNORECASE),
+    # the never-logged-in / refresh-gave-up wording (#382): the CLI's own
+    # sentence when its credentials file holds a token it will not refresh
+    re.compile(r"not logged in\b.{0,40}/login", re.IGNORECASE),
 )
 
 # Transient infrastructure: the transport died or the provider is busy. Worth
