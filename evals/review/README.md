@@ -752,6 +752,27 @@ the suppression-proof completeness class from PR #344's review rounds 2+3) and
 — plus one explicit bucket-2 classification (the since-cursor defect, above)
 and an empty bucket 4.
 
+### Escape-review log
+
+Each entry is one merged loom-authored PR that received validated external
+findings, run through the four buckets above.
+
+- **2026-09-13 — lens #83 (T2-A6 side panel, story-develop run 6b7f0fa7).**
+  One validated finding, bucket 1 → `lens83-gate-row-panel-contract`
+  (class: sibling-surface completeness — the panel contract reached
+  `row.html` and not `gate_row.html`, the board's other row renderer;
+  correctness + test-quality, 5 rounds, zero findings). The first mint the
+  standing process produced: the `[ExternalReview]` finding, the thread
+  reply and loom's own remediation commit were all still there to build
+  from. The remediation's second round is **not** in any bucket: it was
+  dispatched on the reviewer's *approval* comment ("good to merge"), which
+  triage was right to PROCEED (nothing false to refute) and the coder right
+  to leave alone — so it is not a triage fixture (an `expected = "reject"`
+  there would train the wrong reflex) but a loom gap,
+  [#380](https://github.com/agent-lore/lithos-loom/issues/380): a
+  dispositioned-as-no-change round reads as `not_converged` and spends the
+  budget.
+
 ## Scoring (how a finding matches)
 
 - **Mechanism LLM-judge (default, `--judge`):** authoritative. Given the reviewer's
