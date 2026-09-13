@@ -155,6 +155,9 @@ class ConvergeResult:
     # Resolve mode (PRD S5): the conflict this run addressed; None on the
     # other modes and on a `no_conflict` exit.
     conflict: ConflictSummary | None = None
+    # ``infra_failed`` only (#377): what to fix on the host — the loop's own
+    # when it ran, the intake panel's when the panel died before any loop
+    host_action: str = ""
 
     @property
     def deferred_findings(self) -> tuple[DeferredFinding, ...]:
@@ -225,8 +228,8 @@ class ConvergeResult:
             "head_sha": self.change.head_sha,
             "rounds": dev.rounds if dev is not None else 0,
             "develop_status": dev.status if dev is not None else None,
-            # #377: what to fix on the host when the loop ended `infra_failed`
-            "host_action": dev.host_action if dev is not None else "",
+            # #377: what to fix on the host when the run ended `infra_failed`
+            "host_action": self.host_action,
             "fixer_commits": len(self.fixer_commits),
             "pushed": self.pushed,
             "pushed_sha": self.pushed_sha or None,
@@ -461,6 +464,26 @@ def converge_pr(
         if f.status == "out-of-scope"
     )
 
+    infra = getattr(intake.panel, "infra_failure", None)
+    if infra is not None:
+        # #377: the intake panel died on the host (slice B) — the same class
+        # as a loop that dies, one phase earlier: say what to fix, not that
+        # the panel was "invalid".
+        logger.info(
+            "converge %s: %s intake stopped on infra: %s",
+            config.run_id,
+            change.head_ref,
+            infra,
+        )
+        action = str(getattr(intake.panel, "infra_host_action", "") or "")
+        return ConvergeResult(
+            status="infra_failed",
+            change=change,
+            intake_cost_usd=intake_cost,
+            intake_deferred=intake_deferred,
+            host_action=action,
+            message=f"INFRA FAILURE during the intake review: {infra} — {action}",
+        )
     if intake.incomplete:
         # The panel produced no usable review (interrupted / invalid / absent).
         # There is nothing trustworthy to seed the fix loop from — surface it as a
@@ -697,6 +720,7 @@ def _loop_and_deliver(
             intake_cost_usd=pre_loop_cost,
             intake_deferred=intake_deferred,
             external_outcomes=external_outcomes,
+            host_action=result.host_action,
             message=result.message,
         )
 

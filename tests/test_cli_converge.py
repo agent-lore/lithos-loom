@@ -1101,3 +1101,64 @@ def test_expect_head_and_base_reach_the_run_when_they_match(stubs: dict) -> None
     assert result.exit_code == 0, result.output
     assert stubs["resolve_conflicts"] is True
     assert stubs["expect_base"] == "t" * 40
+
+
+def test_every_converge_status_has_an_exit_code() -> None:
+    # `_EXIT_CODES.get(status, 1)` would let a new status pass the table test
+    # by default; the table itself must name every member of the vocabulary.
+    import typing
+
+    from lithos_loom.cli.converge import _EXIT_CODES
+    from lithos_loom.plugins.story_develop.converge import ConvergeStatus
+
+    assert set(typing.get_args(ConvergeStatus)) <= set(_EXIT_CODES)
+    assert _EXIT_CODES["infra_failed"] == 1
+
+
+def test_infra_failed_posts_no_external_replies(
+    github_stubs: dict, tmp_path: Path
+) -> None:
+    """#377: the run is retried after the host is fixed; a triage reply posted
+    now would be posted again then."""
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalOutcome
+
+    trusted = [_ext(7)]
+    github_stubs["trusted"] = trusted
+
+    def fake_converge_pr(
+        config, change, *, no_push=False, external_findings=None, **_mode
+    ):
+        return ConvergeResult(
+            status="infra_failed",
+            change=change,
+            pushed=False,
+            external_outcomes=(
+                ExternalOutcome("f-001", trusted[0], "rejected", detail="not real"),
+            ),
+            host_action="re-authenticate the agent CLI",
+            message="INFRA FAILURE: coder auth_failed",
+        )
+
+    import lithos_loom.cli.converge as cli_mod
+
+    cli_mod.converge_pr, saved = fake_converge_pr, cli_mod.converge_pr
+    try:
+        result = runner.invoke(
+            develop_app,
+            [
+                "converge",
+                "#142",
+                "--repo",
+                str(tmp_path),
+                "--ac",
+                "do it",
+                "--from-github",
+            ],
+            catch_exceptions=False,
+        )
+    finally:
+        cli_mod.converge_pr = saved
+
+    assert result.exit_code == 1
+    assert github_stubs["replies"] == []

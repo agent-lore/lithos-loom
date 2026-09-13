@@ -368,7 +368,11 @@ async def reconcile_pr_gate(
                 )
             if label is not None:
                 ctx.logger.info("external-remediation: %s for %s", label, spec.pr_url)
-            said = replace(said, remediation_exhausted=note is not None)
+            said = replace(
+                said,
+                remediation_exhausted=note is not None,
+                remediation_held_infra=label == "held_infra",
+            )
     if merge_gate is not None:
         held = remediation is not None and remediation.busy_on(spec.pr_url)
         verdict = await merge_gate.consider(gate, spec, story_id, pr, ctx, hold=held)

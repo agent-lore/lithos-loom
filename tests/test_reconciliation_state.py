@@ -182,12 +182,37 @@ def test_resolving_conflict_outranks_reconciling() -> None:
     assert d.state == "resolving_conflict"
 
 
-def test_an_infra_failed_conflict_resolver_is_reconciling_not_needs_human() -> None:
+def test_an_infra_failed_conflict_resolver_needs_the_host_fixed() -> None:
     # #377: the resolver did not judge the merge — the host failed under it.
-    # A daemon restart retries the pair; the operator has no decision to make.
+    # Only the operator can move it (fix the host, restart loom): a refusal
+    # in all but name, so it reads needs_human with the action in the detail.
     d = _derive(_conflict("infra_failed"), pr=_PR(mergeable_state="dirty"))
-    assert d.state == "reconciling"
-    assert "infrastructure" in d.detail and "restart" in d.detail
+    assert d.state == "needs_human"
+    assert "infrastructure" in d.detail and "restart loom" in d.detail
+
+
+def test_an_infra_failed_conflict_never_masks_a_waiting_human_gate() -> None:
+    meta = {
+        **_conflict("infra_failed"),
+        "external_remediation": {
+            "pr_url": _URL,
+            "rounds_used": 2,
+            "needs_human_gate_id": "gate-x",
+        },
+    }
+    d = _derive(meta, pr=_PR(mergeable_state="dirty"))
+    assert d.state == "needs_human" and "gate-x" in d.detail
+
+
+def test_a_remediation_held_after_an_infra_failure_needs_the_host_fixed() -> None:
+    # The dispatcher's label is the only signal: the trigger is re-parked (so
+    # the record alone would read "parked behind a busy run") but nothing is
+    # busy and nothing fires until a restart.
+    meta = {"external_remediation_pending": {"pr_url": _URL}}
+    d = _derive_d(meta, remediation_held_infra=True)
+    assert d.state == "needs_human"
+    assert "infrastructure" in d.detail and "restart loom" in d.detail
+    assert _derive_d(meta).state == "reconciling"  # without the label, as before
 
 
 def test_an_escalated_conflict_is_needs_human_naming_the_gate() -> None:

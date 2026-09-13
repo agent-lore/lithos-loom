@@ -386,6 +386,15 @@ class ExternalRemediation:
         ctx: SubscriptionContext,
     ) -> str:
         """The shared dispatch tail: project resolve → reserve → spawn."""
+        if spec.pr_url in self._infra_held:
+            # #377: decided before any read — nothing about this PR can
+            # change until the daemon restarts (the parked trigger waits).
+            ctx.logger.info(
+                "external-remediation: %s is held after an infrastructure "
+                "failure this boot; the parked trigger resumes after a restart",
+                spec.pr_url,
+            )
+            return "held_infra"
         repo_path = await self._project_repo(gate, story_id, ctx)
         if repo_path is None:
             ctx.logger.warning(
@@ -420,13 +429,6 @@ class ExternalRemediation:
             )
             await self._clear_pending(gate.id, ctx)
             return "project_disabled"
-        if spec.pr_url in self._infra_held:
-            ctx.logger.info(
-                "external-remediation: %s is held after an infrastructure "
-                "failure this boot; the parked trigger resumes after a restart",
-                spec.pr_url,
-            )
-            return "held_infra"
         if self._hold is not None and self._hold(spec.pr_url):
             # PRD S3: a merge-gate run on this PR may push its merge commit
             # at any moment; a converge dispatched beside it would lose its
@@ -708,6 +710,7 @@ class ExternalRemediation:
                 spec=spec,
                 budget=budget,
                 budget_limit=self._settings.budget,
+                notifier=self._settings.notifier,
                 data=data,
             )
             return

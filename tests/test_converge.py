@@ -993,3 +993,25 @@ def test_other_unapproved_loops_carry_no_host_action(
     result = converge_pr(_config(tmp_path), _change())
     assert result.status == "not_converged"
     assert result.to_json()["host_action"] == ""
+
+
+def test_an_intake_panel_that_died_on_infra_is_infra_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#377: the same class one phase earlier — the operator is told what to
+    fix on the host, not that the panel was "interrupted / invalid"."""
+    from types import SimpleNamespace
+
+    panel = SimpleNamespace(
+        round_reviews=[],
+        cost=0.3,
+        infra_failure="reviewer [correctness] auth_failed persisted after 2 attempts",
+        infra_host_action=_HOST_ACTION,
+    )
+    captured = _install(monkeypatch, blocking=True, incomplete=True, panel=panel)
+    result = converge_pr(_config(tmp_path), _change())
+    assert result.status == "infra_failed"
+    assert result.host_action == _HOST_ACTION
+    assert "INFRA FAILURE during the intake review" in result.message
+    assert result.to_json()["host_action"] == _HOST_ACTION
+    assert "develop_ran" not in captured

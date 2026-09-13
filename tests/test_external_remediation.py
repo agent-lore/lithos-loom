@@ -1867,3 +1867,56 @@ async def test_an_infra_failed_run_refunds_re_parks_and_holds_until_a_restart(
     assert restarted._task is not None
     await restarted._task
     assert len(calls) == 2
+
+
+async def test_the_infra_hold_is_decided_at_consider(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(_infra_failed_payload(), rc=1)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert await _consider(client, gate, story, rem) == "held_infra"
+    assert len(calls) == 1
+
+
+async def test_an_infra_refund_that_never_lands_still_decides_the_last_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Mirror of the repo-mismatch case: on this path the round IS spent, so a
+    # last round escalates like any other — and a raw transport error (not a
+    # LithosClientError) must land in the retry loop, never the crash handler.
+    from lithos_loom.subscriptions import remediation_outcome
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    monkeypatch.setattr(remediation_outcome, "REFUND_RETRY_DELAYS", (0, 0, 0))
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    original = client.task_update
+
+    async def failing(**kw: Any) -> Any:
+        if REMEDIATION_KEY in (kw.get("metadata") or {}):
+            raise ConnectionResetError("sse stream closed")  # a raw transport error
+        return await original(**kw)
+
+    notifier = _RecordingNotifier()
+    rem = ExternalRemediation(
+        _settings(tmp_path, notifier=notifier),
+        spawn=_spawner(_infra_failed_payload(), rc=1)[0],
+    )
+    assert await _consider(client, gate, story, rem, rounds_used=1) == "dispatched"
+    client.task_update = failing  # type: ignore[method-assign]
+    assert rem._task is not None
+    await rem._task
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 2  # the reservation stands
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert PENDING_KEY not in refreshed.metadata
+    findings = _findings(client)
+    assert not any("crashed before recording" in f for f in findings)
+    assert any("did not land" in f and "not re-parked" in f for f in findings)
+    assert len(await _human_gates(client)) == 1  # the last round decides
+    assert [n.reason for n in notifier.notices] == ["remediation_exhausted"]

@@ -135,6 +135,10 @@ class Dispositions:
     regate: str | None = None
     conflict: str | None = None
     remediation_exhausted: bool = False
+    # #377: the remediation dispatcher's last run this boot ended `infra_failed`
+    # and it holds the PR until a daemon restart — nothing is busy, nothing
+    # will fire; the operator's action is the host fix + the restart.
+    remediation_held_infra: bool = False
 
 
 # A re-gate label that means the trial merge is not owed at all.
@@ -154,7 +158,7 @@ _REGATE_CONFIRMS = frozenset({"unchanged"})
 # A conflict-resolver outcome that is settled and handed to the operator.
 _CONFLICT_SETTLED = frozenset({"not_converged", "failed", "conflict_unsupported"})
 # A conflict-resolver run that died on the host (#377): no verdict on the
-# merge, no decision for the operator — the next daemon boot retries the pair.
+# merge; the operator fixes the host and restarts — the next boot retries.
 _CONFLICT_INFRA = frozenset({"infra_failed"})
 
 
@@ -233,12 +237,6 @@ def _derive(
             "needs_human",
             f"conflict unresolved ({conflict['status']}); handed to the operator",
         )
-    if conflict_now and _str(conflict.get("status")) in _CONFLICT_INFRA:
-        return Derived(
-            "reconciling",
-            "conflict resolver stopped on an infrastructure failure; a daemon "
-            "restart retries it",
-        )
 
     budget = _record(meta, _REMEDIATION, pr_url)
     if _str(budget.get("needs_human_gate_id")):
@@ -250,6 +248,21 @@ def _derive(
 
     if said.remediation_exhausted:
         return Derived("needs_human", "external-remediation budget exhausted")
+    # #377: a dispatcher stopped on the HOST (no verdict reached) — like a
+    # refusal, only the operator can move it (fix the host, restart loom).
+    # Below every human-gate check so a gate that already waits is named first.
+    if conflict_now and _str(conflict.get("status")) in _CONFLICT_INFRA:
+        return Derived(
+            "needs_human",
+            "conflict resolver stopped on an infrastructure failure; fix the "
+            "host, then restart loom (it retries the pair)",
+        )
+    if said.remediation_held_infra:
+        return Derived(
+            "needs_human",
+            "external-review remediation stopped on an infrastructure failure; "
+            "fix the host, then restart loom (the parked trigger fires)",
+        )
 
     regate = _record(meta, _MERGE_GATE, pr_url)
     regate_now = _current_pair(regate, pr)

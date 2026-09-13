@@ -488,7 +488,15 @@ def converge_command(
         expect_base=expect_base,
     )
 
-    if from_github and gh_repo is not None and pr_number is not None:
+    if (
+        from_github
+        and gh_repo is not None
+        and pr_number is not None
+        and result.status != "infra_failed"
+    ):
+        # #377: an infra death is retried after the host is fixed; a reply
+        # now would be re-posted then (nothing has been decided about the
+        # material — the watcher re-parks the trigger).
         _post_external_replies(result, repo=gh_repo, pr_number=pr_number)
 
     typer.echo(_render(result))

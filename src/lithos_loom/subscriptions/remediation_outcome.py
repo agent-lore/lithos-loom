@@ -35,6 +35,7 @@ __all__ = [
     "post_finding",
     "post_repo_mismatch_refusal",
     "record_result",
+    "refund_infra_failed",
     "refund_repo_mismatch",
     "refusal_key",
     "settled_refusal",
@@ -301,6 +302,7 @@ async def refund_infra_failed(
     spec: PrGateSpec,
     budget: RemediationBudget,
     budget_limit: int,
+    notifier: RemediationNotifier | None,
     data: dict[str, Any],
 ) -> None:
     """The run ended ``infra_failed`` (#377): the host, not the change, is
@@ -319,7 +321,7 @@ async def refund_infra_failed(
         REMEDIATION_KEY: refund.as_marker(),
         PENDING_KEY: {"pr_url": spec.pr_url},
     }
-    failure: LithosClientError | None = None
+    failure: Exception | None = None
     for delay in (0.0, *REFUND_RETRY_DELAYS):
         if delay:
             await asyncio.sleep(delay)
@@ -327,7 +329,9 @@ async def refund_infra_failed(
             await ctx.lithos.task_update(task_id=gate_id, metadata=marker)
             failure = None
             break
-        except LithosClientError as exc:
+        except Exception as exc:  # noqa: BLE001 — a raw transport error
+            # propagates past the client's own recovery (lithos_client._invoke)
+            # and must land in this retry loop, not in the crash handler
             failure = exc
     if failure is None:
         ctx.logger.warning(
@@ -366,6 +370,18 @@ async def refund_infra_failed(
         f"{budget.rounds_used}/{budget_limit} remains spent and the review "
         f"trigger is not re-parked. {action} — then restart loom and re-run "
         f"`develop converge --from-github` for the material.",
+    )
+    # the round IS spent on this path: a last round decides like any other
+    await escalate_or_report(
+        ctx,
+        gate_id=gate_id,
+        story_id=story_id,
+        spec=spec,
+        budget=budget,
+        budget_limit=budget_limit,
+        notifier=notifier,
+        last_status="infra_failed",
+        detail=f"{detail}; the refund did not land ({failure})",
     )
 
 
@@ -406,7 +422,7 @@ async def refund_repo_mismatch(
             "actual_repo": actual,
         },
     }
-    failure: LithosClientError | None = None
+    failure: Exception | None = None
     for delay in (0.0, *REFUND_RETRY_DELAYS):
         if delay:
             await asyncio.sleep(delay)
@@ -414,7 +430,9 @@ async def refund_repo_mismatch(
             await ctx.lithos.task_update(task_id=gate_id, metadata=marker)
             failure = None
             break
-        except LithosClientError as exc:
+        except Exception as exc:  # noqa: BLE001 — a raw transport error
+            # propagates past the client's own recovery (lithos_client._invoke)
+            # and must land in this retry loop, not in the crash handler
             failure = exc
     if failure is None:
         await post_finding(
