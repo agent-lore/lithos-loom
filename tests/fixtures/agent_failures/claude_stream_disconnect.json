@@ -1,0 +1,8 @@
+{
+  "_provenance": "synthetic from the loom#298 stderr wording (reviewer-handoff infra failure with a GREEN gate)",
+  "engine": "claude",
+  "exit_code": 1,
+  "result_text": "",
+  "stderr": "Error: stream disconnected before completion: idle timeout waiting for websocket message\n",
+  "raw": null
+}

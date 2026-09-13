@@ -1,0 +1,10 @@
+{
+  "_provenance": "loom#298 (K1-S6/S7 reviewer deaths) \u2014 the wording modelled by tests/test_story_develop_panel.py's _infra_failed_turn; the original failures/*.json did not survive /tmp",
+  "engine": "claude",
+  "exit_code": 1,
+  "result_text": "API Error: 401 OAuth access token has been revoked",
+  "stderr": "",
+  "raw": {
+    "is_error": true
+  }
+}

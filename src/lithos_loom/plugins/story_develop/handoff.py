@@ -12,6 +12,7 @@ back to the agent as a correction prompt.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -450,3 +451,17 @@ def parse_review_handoff(text: str) -> ReviewHandoff:
             "Status is FINDINGS but no '## Findings' entries were parsed"
         )
     return ReviewHandoff(status=status, summary=summary, findings=findings)
+
+
+def file_fingerprint(path: Path) -> str | None:
+    """Content identity of a handoff file (``None`` = absent / unreadable).
+
+    Salvage provenance (#298 / PR #299 review; the coder twin in slice B): a
+    failed attempt may only salvage an artifact it *itself* created or
+    rewrote, so each attempt snapshots the file before running and compares
+    after.
+    """
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None

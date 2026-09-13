@@ -1245,6 +1245,36 @@ def test_build_result_payload_other_stops_are_failed(
     validate_result_schema(payload)
 
 
+def test_build_result_payload_infra_failed_is_environment_and_retriable(
+    tmp_path: Path,
+) -> None:
+    # Slice B: an exhausted infra reaction is a needs-human stop the host can
+    # fix — `environment`, retriable, escalation reason `infra`, the reason
+    # line (with its host action) as the summary.
+    reason = (
+        "round 2: coder auth_failed persisted after 2 attempts: Failed to "
+        "authenticate: OAuth session expired and could not be refreshed"
+    )
+    action = "re-authenticate the agent CLI on the host, then complete the gate"
+    payload, exit_code = build_result_payload(
+        _result("infra_failed", tmp_path, failure_reason=reason, host_action=action),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert exit_code == EXIT_FAILED
+    assert payload["status"] == "failed"
+    assert payload["error"]["category"] == "environment"
+    assert payload["error"]["retriable"] is True
+    assert payload["escalation"]["reason"] == "infra"
+    assert payload["escalation"]["summary"] == reason
+    # the host action is structured, so the gate's summary cap can't eat it
+    assert payload["escalation"]["brief"]["host_action"] == action
+    assert len(reason) <= 200
+    validate_result_schema(payload)
+
+
 def test_build_result_payload_carries_rounds(tmp_path: Path) -> None:
     # #196: the round count is on the result.json contract so a reaped success
     # (its state.json gone) can still report rounds from the completion store.

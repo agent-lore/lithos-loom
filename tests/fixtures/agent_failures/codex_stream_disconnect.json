@@ -1,0 +1,7 @@
+{
+  "_provenance": "synthetic \u2014 a codex `exec --json` stream ending in an error event (ECONNRESET), the shape CodexEngine retains verbatim in raw.failure_events (#103 part A)",
+  "engine": "codex",
+  "exit_code": 1,
+  "stdout": "{\"type\": \"thread.started\", \"thread_id\": \"t1\"}\n{\"type\": \"error\", \"message\": \"stream disconnected before completion: read ECONNRESET\"}\n",
+  "stderr": ""
+}

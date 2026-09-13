@@ -15,7 +15,7 @@ it builds a ``Services`` from its own module globals so the existing
 effect until S8 re-points the tests (see the compat note in :mod:`develop`).
 
 S4 introduced the seam and threaded it through
-:func:`agent_session.turn_with_limit_pauses`; S6 grew this module into the
+:func:`agent_session.turn_with_reactions`; S6 grew this module into the
 round/phase pipeline. :class:`RoundContext` is the explicit successor of
 ``develop()``'s locals bag; each phase function ``(ctx, round_no) -> CycleExit |
 None`` maps 1:1 onto a phase of a develop round and returns a :class:`CycleExit`
@@ -26,7 +26,7 @@ validation → setup → ``for round: run_round`` → epilogue.
 To keep the pipeline a leaf that imports neither ``panel`` (which imports
 ``Services`` from here) nor ``agent_session`` (ditto) nor ``develop`` — no import
 cycle — the boundary collaborators (``run_panel_round``,
-``turn_with_limit_pauses``, ``resume_after_from`` and the coder-side prompt
+``turn_with_reactions``, ``resume_after_from`` and the coder-side prompt
 helpers) are **injected** onto :class:`RoundContext` by ``develop()`` from its own
 module globals. That also keeps the ``develop_mod``-level ``monkeypatch`` targets
 (``run_panel_round`` / ``_run_check_set`` via :class:`Services` / ``run_turn`` /
@@ -49,6 +49,7 @@ from . import (
     autoformat,
     check_artifacts,
     check_runner,
+    coder_salvage,
     containers,
     engines,
     handoff,
@@ -60,7 +61,7 @@ from .gate_findings import GateLedger
 from .handoff import max_severity, render_prompt
 from .sandbox_facts import for_prompt as _sandbox_section
 from .test_gate import GateResult
-from .turns import TurnResult
+from .turns import TurnAttempt, TurnResult
 
 if TYPE_CHECKING:
     from .agent_session import PauseBudget
@@ -75,7 +76,7 @@ class Services:
     loop is testable with fakes (ARCH-1.S4).
 
     ``run_turn`` and ``sleep`` are consumed by
-    :func:`agent_session.turn_with_limit_pauses` today; ``start_container`` /
+    :func:`agent_session.turn_with_reactions` today; ``start_container`` /
     ``stop_container`` / ``run_check_set`` are wired now for the S6 phase
     pipeline.
     """
@@ -118,6 +119,10 @@ class CycleExit:
     status: str
     failure_reason: str
     resume_after: datetime | None
+    # ``infra_failed`` only: what to fix on the host before completing the
+    # gate — carried beside the reason so the gate's capped summary never
+    # truncates it (slice B)
+    host_action: str = ""
 
 
 @dataclass
@@ -150,7 +155,7 @@ class RoundContext:
     budget: PauseBudget
     coder_session: str
     # --- injected boundary collaborators (from develop's own module globals) ---
-    turn_with_limit_pauses: Callable[..., tuple[TurnResult, bool, float]]
+    turn_with_reactions: Callable[..., TurnAttempt]
     run_panel_round: Callable[..., PanelRoundResult]
     resume_after_from: Callable[[TurnResult | None], datetime]
     render_panel_findings: Callable[[list[ReviewOutcome]], str]
@@ -268,11 +273,13 @@ def round1_coder_prompt(ctx: RoundContext) -> str:
 
 
 def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
-    """Build the coder prompt, run its (limit-paused) turn, salvage a missing
-    handoff once (#114), and gate the round on a clean turn + a written handoff.
+    """Build the coder prompt, run its turn through the reaction wrapper,
+    nudge a missing handoff once (#114), and gate the round on a clean turn +
+    a written handoff — or on a handoff the dying turn itself wrote
+    (:mod:`coder_salvage`, slice B).
 
     Exits: A ``interrupted`` (pause budget exhausted), B ``failed`` (turn failed
-    or no handoff).
+    or no handoff), B' ``infra_failed`` (a retry-class failure persisted).
     """
     config = ctx.config
     if round_no == 1:
@@ -314,7 +321,9 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         )
         coder_resume = True
 
-    coder_turn, coder_interrupted, attempt_cost = ctx.turn_with_limit_pauses(
+    done_path = config.handoff_dir / handoff.coder_handoff_name(round_no)
+    pre_turn = handoff.file_fingerprint(done_path)  # salvage provenance
+    attempt = ctx.turn_with_reactions(
         config,
         ctx.budget,
         services=ctx.services,
@@ -328,72 +337,40 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         timeout=ctx.coder_timeout,
         engine=ctx.coder_engine,
     )
-    ctx.coder_cost += attempt_cost
-    # Codex mints its session handle (thread_id) on turn 1; reuse the returned
-    # handle for resumes + persist it (no-op for claude, which echoes the
+    ctx.coder_cost += attempt.cost
+    # Codex mints its session handle (thread_id) on turn 1; the wrapper's
+    # rebound handle (not the last turn's, which a fresh retry may leave empty)
+    # is what resumes + state.json persist (no-op for claude, which echoes the
     # supplied uuid). Drives daemon-resume + PR delivery.
-    if coder_turn.session_id:
-        ctx.coder_session = coder_turn.session_id
-    if coder_interrupted:
+    ctx.coder_session = attempt.session_id or ctx.coder_session
+    # Salvage nudge (#114): a clean turn that left work but no handoff is
+    # re-prompted once; the nudge's OWN outcome then judges the round.
+    if (
+        not attempt.interrupted
+        and attempt.turn.succeeded
+        and not done_path.is_file()
+        and git.has_uncommitted_changes(ctx.wt)
+    ):
+        pre_turn = handoff.file_fingerprint(done_path)  # re-snapshot per attempt
+        attempt = coder_salvage.nudge_for_handoff(ctx, round_no)
+    if attempt.interrupted:
         return CycleExit(
             status="interrupted",
             failure_reason=(
                 f"round {round_no}: coder usage-limited; pause budget exhausted"
             ),
-            resume_after=ctx.resume_after_from(coder_turn),
+            resume_after=ctx.resume_after_from(attempt.turn),
         )
-    done_present = (config.handoff_dir / handoff.coder_handoff_name(round_no)).is_file()
-    # The turn whose success gates the handoff for this round. The salvage nudge
-    # (below) replaces it, so a re-prompt is judged on the NUDGE's own outcome —
-    # a nudge that writes the file but then exits failed/non-zero is not a clean
-    # recovery.
-    handoff_turn = coder_turn
-    # Salvage (lithos-loom#114): the coder ended its turn cleanly and left work in
-    # the worktree but never wrote its handoff (classic case: it backgrounded a
-    # slow suite and stopped before the handoff step). The implementation is done;
-    # only the required breadcrumb is missing. Re-prompt once to write it before
-    # failing. Only for a clean turn (a crashed/errored turn can't be resumed) and
-    # only when there is uncommitted work to save (else a nudge is wasted);
-    # between rounds the worktree is clean, so the flag reflects this round.
-    if (
-        coder_turn.succeeded
-        and not done_present
-        and git.has_uncommitted_changes(ctx.wt)
-    ):
-        logger.warning(
-            "story-develop %s: round %d coder ended its turn with uncommitted "
-            "changes but no handoff — re-prompting once to write it",
-            config.run_id,
-            round_no,
-        )
-        handoff_turn = ctx.services.run_turn(
-            container=ctx.coder_container,
-            prompt=ctx.coder_handoff_nudge(round_no),
-            session_id=ctx.coder_session,
-            resume=True,
-            timeout=ctx.coder_timeout,
-            engine=ctx.coder_engine,
-            model=config.coder_model,
-            effort=config.coder_effort,
-        )
-        ctx.coder_cost += handoff_turn.cost_usd
-        if handoff_turn.session_id:
-            ctx.coder_session = handoff_turn.session_id
-        done_present = (
-            config.handoff_dir / handoff.coder_handoff_name(round_no)
-        ).is_file()
-    if not (handoff_turn.succeeded and done_present):
-        reasons = []
-        if not handoff_turn.succeeded:
-            reasons.append(f"coder turn failed (exit {handoff_turn.exit_code})")
-        if not done_present:
-            reasons.append("no coder handoff file")
-        return CycleExit(
-            status="failed",
-            failure_reason=f"round {round_no}: " + "; ".join(reasons),
-            resume_after=None,
-        )
-    return None
+    outcome = coder_salvage.verdict(config.run_id, attempt, done_path, pre_turn)
+    if outcome is None:
+        return None
+    status, reason = outcome
+    return CycleExit(
+        status=status,
+        failure_reason=f"round {round_no}: {reason}",
+        resume_after=None,
+        host_action=attempt.host_action if status == "infra_failed" else "",
+    )
 
 
 def dispute_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
@@ -516,7 +493,8 @@ def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Run the reviewer panel — the one shared primitive (#154). Sets
     ``ctx.final_reviews`` / accrues ``ctx.review_cost``.
 
-    Exits: E ``interrupted``, F ``failed`` (invalid reviewer handoff).
+    Exits: E ``interrupted``, F ``failed`` (invalid reviewer handoff), F'
+    ``infra_failed`` (a reviewer's retry-class failure persisted, slice B).
     """
     config = ctx.config
     panel = ctx.run_panel_round(
@@ -542,6 +520,13 @@ def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
                 f"round {round_no}: reviewer usage-limited; pause budget exhausted"
             ),
             resume_after=panel.resume_after,
+        )
+    if panel.infra_failure is not None:
+        return CycleExit(
+            status="infra_failed",
+            failure_reason=f"round {round_no}: {panel.infra_failure}",
+            resume_after=None,
+            host_action=panel.infra_host_action,
         )
     if panel.invalid_reviewer is not None:
         return CycleExit(
@@ -689,6 +674,16 @@ def _artifact_review_pass(
                 "artifact-review pass; pause budget exhausted"
             ),
             resume_after=panel.resume_after,
+        )
+    if panel.infra_failure is not None:
+        return CycleExit(
+            status="infra_failed",
+            failure_reason=(
+                f"round {round_no}: {panel.infra_failure} during the "
+                "artifact-review pass"
+            ),
+            resume_after=None,
+            host_action=panel.infra_host_action,
         )
     if panel.invalid_reviewer is not None:
         return CycleExit(

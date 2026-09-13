@@ -1,0 +1,7 @@
+{
+  "_provenance": "the G4 boundary fixture from tests/test_story_develop_limits.py (#103): a codex usage limit arrives as a turn.failed event, never as an agent_message",
+  "engine": "codex",
+  "exit_code": 1,
+  "stdout": "{\"type\": \"thread.started\", \"thread_id\": \"t1\"}\n{\"type\": \"turn.failed\", \"error\": {\"message\": \"You've hit your usage limit.\", \"type\": \"usage_limit\"}}\n",
+  "stderr": ""
+}

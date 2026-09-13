@@ -45,8 +45,10 @@ def test_parse_nonzero_exit_fails() -> None:
 
 def test_parse_garbage_output_fails_safely() -> None:
     r = ClaudeEngine().parse_turn("not json", exit_code=0, stderr="")
-    assert r.succeeded is False
-    assert r.raw is None
+    assert r.succeeded is False and r.completed is False
+    # Slice B: the garbage is RETAINED for the failure classifier (never a
+    # result — `completed` keys on the parsed payload).
+    assert r.raw == {"unparsed_stdout": "not json"}
     assert r.cost_usd == 0.0
 
 

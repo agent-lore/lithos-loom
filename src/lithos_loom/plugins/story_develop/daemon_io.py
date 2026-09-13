@@ -746,6 +746,8 @@ def escalation_block(
         brief["test_gate_verdict"] = result.test_gate.verdict
     if result.conversation_log is not None:
         brief["conversation_log"] = str(result.conversation_log)
+    if result.host_action:
+        brief["host_action"] = result.host_action  # slice B: never truncated
     return {"reason": reason, "summary": summary, "brief": brief}
 
 
@@ -794,6 +796,16 @@ def build_result_payload(
         status, exit_code = "interrupted", EXIT_INTERRUPTED
         error = {
             "category": "usage_limited",
+            "message": result.message,
+            "retriable": True,
+        }
+    elif result.status == "infra_failed":
+        # Slice B: a retry-class failure (auth / transport / spawn) persisted
+        # through its backoff retries. The host, not the story, is what needs
+        # fixing — retriable once it is; the escalation block says how.
+        status, exit_code = "failed", EXIT_FAILED
+        error = {
+            "category": "environment",
             "message": result.message,
             "retriable": True,
         }

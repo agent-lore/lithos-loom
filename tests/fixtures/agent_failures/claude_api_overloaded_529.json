@@ -1,0 +1,11 @@
+{
+  "_provenance": "synthetic \u2014 the claude CLI's API-error wording for a provider 529 overload",
+  "engine": "claude",
+  "exit_code": 1,
+  "result_text": "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+  "stderr": "",
+  "raw": {
+    "is_error": true,
+    "api_error_status": 529
+  }
+}
