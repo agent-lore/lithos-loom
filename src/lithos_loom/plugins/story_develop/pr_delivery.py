@@ -153,8 +153,8 @@ def reply_body(
     if reverted:
         head = (
             f"Not fixed — a change was made and then reverted: {response}. "
-            "This review and the story's acceptance criteria disagree; the "
-            "operator has been asked to decide."
+            "This review and the story's acceptance criteria disagree — an "
+            "operator decision is needed."
         )
     elif held_back_verdict is not None:
         head = (

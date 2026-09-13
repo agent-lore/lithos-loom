@@ -671,9 +671,10 @@ def test_external_mode_rejects_empty_findings(tmp_path: Path) -> None:
 def test_external_mode_dispute_and_unapproved_dispositions(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A coder dispute (the one case the prompt DOES put in a Findings block)
-    survives as `disputed`; an unapproved loop yields `unaddressed`, never a
-    false `fixed`."""
+    """A coder dispute survives as `disputed` — from the DISPUTED
+    acknowledgement line in a later round (round 1's `## Findings` block is
+    the other channel; a later round's block belongs to the panel, #387);
+    an unapproved loop yields `unaddressed`, never a false `fixed`."""
     from lithos_loom.plugins.story_develop import handoff as handoff_mod
 
     captured = _install(monkeypatch, blocking=True)
@@ -682,10 +683,9 @@ def test_external_mode_dispute_and_unapproved_dispositions(
     config.handoff_dir.mkdir(parents=True, exist_ok=True)
     (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
         "## Status: LGTM\n## Summary\nf-001 disputed; f-002 addressed.\n"
-        "## Findings\n"
-        "- finding_id: f-001\n  severity: minor\n  status: disputed\n"
-        "  rationale: r\n  coder_response: deliberate decision\n"
-        "## External findings\n- f-002: FIXED — closed the handle\n",
+        "## External findings\n"
+        "- f-001: DISPUTED — deliberate decision\n"
+        "- f-002: FIXED — closed the handle\n",
         encoding="utf-8",
     )
 
@@ -785,6 +785,34 @@ def test_external_mode_reads_the_final_rounds_acks_a_reverted_fix_is_not_fixed(
     assert result.to_json()["succeeded"] is False
 
 
+def test_a_later_rounds_findings_block_never_speaks_for_an_external_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """opus round 1: round N's `## Findings` block is the T7 dispute contract
+    for the PANEL's findings, whose ids are minted independently — a panel
+    `f-001` disputed there must not mask the external `f-001`'s FIXED (or
+    REVERTED) acknowledgement. Only round 1's block can name injected ids."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001",))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
+        "## Status: LGTM\n## Summary\npanel f-001 disputed; external f-001 stands.\n"
+        "## Findings\n"
+        "- finding_id: f-001\n  severity: minor\n  status: disputed\n"
+        "  rationale: the panel's own nit\n  coder_response: deliberate\n"
+        "## External findings\n- f-001: FIXED — guarded the handle\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(config, _change(), external_findings=(_ext_finding(7),))
+
+    (o,) = result.external_outcomes
+    assert o.disposition == "fixed" and o.detail == "guarded the handle"
+
+
 def test_external_mode_a_final_round_without_acks_claims_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -818,7 +846,9 @@ def test_external_mode_a_fixed_ack_over_an_unmoved_tree_is_not_fixed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The objective backstop (#387): the final tree equals the PR head
-    outside the project's generated paths — nothing can have been fixed."""
+    outside the project's generated paths — nothing can have been fixed,
+    and an approved loop that ends there undid its own fix: the decision
+    shape, even when the coder never said REVERTED."""
     from lithos_loom.plugins.story_develop import handoff as handoff_mod
 
     captured = _install(monkeypatch, blocking=True)
@@ -839,8 +869,9 @@ def test_external_mode_a_fixed_ack_over_an_unmoved_tree_is_not_fixed(
     result = converge_pr(config, _change(), external_findings=(_ext_finding(7),))
 
     (o,) = result.external_outcomes
-    assert o.disposition == "unaddressed"
+    assert o.disposition == "reverted"
     assert "identical to the PR head" in o.detail
+    assert not result.succeeded and "f-001 REVERTED" in result.message
     # measured from the PR head to the final tree, generated paths excluded
     assert captured["tree_differs"] == (_HEAD, "HEAD", ("docs/generated",))
 

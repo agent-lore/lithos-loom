@@ -125,7 +125,10 @@ async def record_result(
     if data.get("pushed") and pushed_sha:
         # Loom's own push: recorded so the next sweep's head observation
         # attributes it (no human-push reset) and own-sha material skips.
-        updated = dataclasses.replace(
+        # Every later write on this budget (the escalations below) starts
+        # from THIS copy, or it would clobber the attribution and the next
+        # sweep would read loom's own push as a human's (opus round 1).
+        budget = dataclasses.replace(
             budget,
             last_loom_pushed_sha=pushed_sha,
             last_seen_head_sha=pushed_sha,
@@ -133,7 +136,7 @@ async def record_result(
         await write_marker(
             ctx,
             task_id=gate_id,
-            marker={REMEDIATION_KEY: updated.as_marker()},
+            marker={REMEDIATION_KEY: budget.as_marker()},
             subsystem="external-remediation",
         )
 

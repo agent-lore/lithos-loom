@@ -36,6 +36,7 @@ from lithos_loom.subscriptions.remediation_budget import (
 __all__ = [
     "DISPUTE_ACTIONS",
     "REMEDIATION_ACTIONS",
+    "decision_pending",
     "escalate_disputed",
     "escalate_if_exhausted",
 ]
@@ -212,3 +213,53 @@ async def _escalate(
         ),
     )
     return None if human_gate_id is not None else (problem or "unknown")
+
+
+async def decision_pending(
+    ctx: SubscriptionContext,
+    *,
+    gate_id: str,
+    spec: PrGateSpec,
+    budget: RemediationBudget,
+) -> tuple[RemediationBudget, bool]:
+    """#387: a decision gate on this budget (a reverted fix, raised with
+    rounds to spare) holds every dispatch — ``consider`` and a parked
+    trigger alike — while it is OPEN. The operator's decision need not
+    involve a push ("answer the reviewer, leave the code"), so the gate
+    going terminal is the release: the marker on the ``pr`` gate *gate_id*
+    forgets it and the budget returned dispatches. An unreadable gate holds
+    (fail closed); a gate that no longer exists can never be completed, so
+    it releases.
+    """
+    decision_id = budget.needs_human_gate_id
+    if not decision_id:
+        return budget, False
+    try:
+        decision = await ctx.lithos.task_get(task_id=decision_id)
+    except LithosClientError as exc:
+        ctx.logger.warning(
+            "external-remediation: decision gate %s for %s unreadable (%s); holding",
+            decision_id,
+            spec.pr_url,
+            exc,
+        )
+        return budget, True
+    if decision is not None and getattr(decision, "status", "open") == "open":
+        return budget, True
+    released = dataclasses.replace(
+        budget, needs_human_gate_id="", needs_human_reason=""
+    )
+    ok = await write_marker(
+        ctx,
+        task_id=gate_id,
+        marker={REMEDIATION_KEY: released.as_marker()},
+        subsystem="external-remediation",
+    )
+    if not ok:
+        return budget, True  # the release must be durable before a spend
+    ctx.logger.info(
+        "external-remediation: decision gate %s for %s is resolved; dispatch resumes",
+        decision_id,
+        spec.pr_url,
+    )
+    return released, False

@@ -347,10 +347,12 @@ def outcomes_after_loop(
     disposition, so a silent partial fix must never earn a per-thread claim)
     AND ``loop_approved`` (the panel + gate accepted the tree the
     acknowledgement is about — an acked fix in an unapproved loop was never
-    validated) AND, when known, a tree that MOVED (*tree_changed*, #387: a
-    run whose final tree equals the PR head outside the generated paths
-    cannot have fixed anything, whatever the handoff says). A ``REVERTED``
-    acknowledgement is ``reverted``. A dispute counts from either channel:
+    validated) AND, when known, a tree that MOVED (*tree_changed*, #387: an
+    approved run whose final tree equals the PR head outside the generated
+    paths undid its own fix — ``reverted``, whatever the handoff says). A
+    ``REVERTED`` acknowledgement is ``reverted``. A dispute counts from
+    either channel — the ``## Findings`` block only in round 1, see
+    :func:`final_round_outcomes`:
     the shared ``## Findings`` block contract, or a ``DISPUTED``
     acknowledgement line. Everything else is ``unaddressed`` —
     *missing_ack_detail* is the reason recorded when there is no ack at all.
@@ -377,15 +379,18 @@ def outcomes_after_loop(
             continue
         if ack is not None and ack.verdict == "fixed" and loop_approved:
             if tree_changed is False:
+                # round 1 must commit, so an APPROVED loop that ends at the
+                # PR head undid what it did — the decision shape, whatever
+                # the coder wrote
                 out.append(
                     ExternalOutcome(
                         fid,
                         ext,
-                        "unaddressed",
+                        "reverted",
                         detail=(
                             "acknowledged FIXED, but the final tree is identical "
-                            "to the PR head outside the generated paths — nothing "
-                            "was fixed"
+                            "to the PR head outside the generated paths — the "
+                            "fix was undone"
                         ),
                     )
                 )
@@ -415,10 +420,10 @@ def final_round_outcomes(
     the threads were answered from round 1) — the mandated ``## External
     findings`` acks plus any ``## Findings`` dispute block — and checked
     against the tree: a run whose final tree equals the PR head outside the
-    generated paths fixed nothing. The loop's own panel ids in a later round
-    belong to the panel, not to the injection; the ack section is scoped to
-    the injected ids by construction. A final round without the section
-    carries no earlier claim forward (the safe direction).
+    generated paths undid its fix. The ack section is scoped to the injected
+    ids by construction; the ``## Findings`` block is read in round 1 only
+    (a later round's belongs to the panel). A final round without the
+    section carries no earlier claim forward (the safe direction).
     """
     coder_claims: dict[str, handoff.Finding] = {}
     acks: dict[str, CoderAck] = {}
@@ -437,11 +442,16 @@ def final_round_outcomes(
                 "an earlier round's claim is not carried forward"
             )
             logger.warning("converge %s: %s", run_id, missing.split(" — ")[0])
-        try:
-            parsed = handoff.parse_review_handoff(text)
-            coder_claims = {f.finding_id: f for f in parsed.findings}
-        except ValueError:
-            pass  # unparseable handoff: acks (line-scoped) may still hold
+        if final_round == 1:
+            # Round 1's `## Findings` block can only name the injected ids.
+            # A later round's is the panel's dispute contract, whose ids
+            # are minted independently (a panel f-001 beside the external
+            # f-001) — never read as a claim about an external id.
+            try:
+                parsed = handoff.parse_review_handoff(text)
+                coder_claims = {f.finding_id: f for f in parsed.findings}
+            except ValueError:
+                pass  # unparseable handoff: acks (line-scoped) may still hold
     try:
         tree_changed: bool | None = git.tree_differs(
             worktree, head_sha, "HEAD", exclude=generated_paths

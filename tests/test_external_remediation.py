@@ -785,6 +785,73 @@ async def test_resume_pending_respects_the_budget_and_keeps_the_trigger(
     assert PENDING_KEY in refreshed.metadata  # kept for after a reset
 
 
+async def test_resume_pending_holds_on_a_decision_gate_and_keeps_the_trigger(
+    tmp_path: Path,
+) -> None:
+    """#387 (opus round 1): a parked trigger must not fire past an OPEN
+    decision gate on the budget — rounds remaining or not. Once the
+    operator has completed the gate, the decision is made: the hold lifts,
+    the marker forgets the gate, and the trigger fires."""
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    decision = await client.task_create(
+        title="Needs human", task_type="gate", metadata={"gate_type": "human"}
+    )
+    await client.task_update(
+        task_id=gate.id, metadata={PENDING_KEY: {"pr_url": _PR_URL}}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=1,
+        needs_human_gate_id=decision,
+        needs_human_reason="disputed",
+    )
+
+    label = await rem.resume_pending(gate, spec, story, budget, _github(), _ctx(client))
+
+    assert label == "escalated" and calls == []
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None and PENDING_KEY in refreshed.metadata
+
+    # the operator decides (completes the gate) — no push involved
+    await client.task_complete(task_id=decision, agent="dave")
+    label = await rem.resume_pending(gate, spec, story, budget, _github(), _ctx(client))
+    assert label == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    marker = await _marker(client, gate.id)
+    assert marker["needs_human_gate_id"] == "" and marker["needs_human_reason"] == ""
+
+
+async def test_consider_releases_the_hold_once_the_decision_gate_is_terminal(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    decision = await client.task_create(
+        title="Needs human", task_type="gate", metadata={"gate_type": "human"}
+    )
+    await client.task_cancel(task_id=decision, agent="dave", reason="moot")
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    budget = RemediationBudget(
+        pr_url=_PR_URL, rounds_used=1, needs_human_gate_id=decision
+    )
+    label = await _consider(client, gate, story, rem, budget=budget)
+    assert label == "dispatched"
+    assert rem._task is not None
+    await rem._task
+    assert len(calls) == 1
+
+
 async def test_undispatchable_batch_never_erases_older_parked_debt(
     tmp_path: Path,
 ) -> None:
@@ -1209,6 +1276,9 @@ async def test_a_raised_decision_gate_holds_dispatch_until_a_human_push(
     # raised with rounds to spare, so "exhausted" alone no longer covers it).
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
+    decision = await client.task_create(
+        title="Needs human", task_type="gate", metadata={"gate_type": "human"}
+    )
     await client.task_update(
         task_id=gate.id,
         agent="a",
@@ -1218,7 +1288,8 @@ async def test_a_raised_decision_gate_holds_dispatch_until_a_human_push(
                 "rounds_used": 1,
                 "last_loom_pushed_sha": "",
                 "last_seen_head_sha": _HEAD,
-                "needs_human_gate_id": "gate-already-raised",
+                "needs_human_gate_id": decision,
+                "needs_human_reason": "disputed",
             }
         },
     )
@@ -1229,10 +1300,10 @@ async def test_a_raised_decision_gate_holds_dispatch_until_a_human_push(
     label = await _consider(client, gate, story, rem, budget=read_budget(gate, _PR_URL))
     assert label == "escalated"
     assert rem._task is None and calls == []
-    assert await _human_gates(client) == []
+    assert len(await _human_gates(client)) == 1  # the one that already stands
     marker = await _marker(client, gate.id)
     assert marker["rounds_used"] == 1
-    assert marker["needs_human_gate_id"] == "gate-already-raised"
+    assert marker["needs_human_gate_id"] == decision
 
 
 async def test_exhaustion_escalates_once_per_budget(tmp_path: Path) -> None:
@@ -1351,6 +1422,11 @@ async def test_a_reverted_external_fix_raises_a_disputed_gate_with_rounds_to_spa
     assert marker["needs_human_gate_id"] == human.id
     assert marker["needs_human_reason"] == "disputed"
     assert marker["rounds_used"] == 1  # the round was spent, not refunded
+    # ...and loom's own push stays attributed (opus round 1: the escalation
+    # write must not clobber it, or the next sweep reads the revert push as
+    # a human push, resets the budget and lifts the hold)
+    assert marker["last_loom_pushed_sha"] == "8d" * 20
+    assert marker["last_seen_head_sha"] == "8d" * 20
     needs = [f for f in _findings(client) if f.startswith("[NeedsHuman]")]
     assert len(needs) == 1
     assert "disputed" in needs[0] and human.id in needs[0]
