@@ -772,6 +772,12 @@ findings, run through the four buckets above.
   [#380](https://github.com/agent-lore/lithos-loom/issues/380): a
   dispositioned-as-no-change round reads as `not_converged` and spends the
   budget.
+  **First reading (2026-09-13):** 3/5 caught (95% CI 23–88%), all three
+  tree-reading (the gate-row template, the `[data-task-row]` selector, the
+  missing panel URL), 0/5 fp, gate green throughout — the mid band, so the
+  case stays a frontier regression floor and buys no lens; the known-good
+  noise (4/5 blocked) is five shared claims about what shipped to lens
+  main, listed in the case, for lens's own escape review.
 
 ## Scoring (how a finding matches)
 
