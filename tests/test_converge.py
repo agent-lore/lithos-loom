@@ -151,6 +151,15 @@ def _install(
         return ["fix1"] if base == _HEAD else ["orig1", "orig2", "fix1"]
 
     monkeypatch.setattr(converge_mod.git, "commits_since", fake_commits_since)
+
+    # #387: the objective "did the tree move" read behind a `fixed` claim —
+    # the fake worktree is no git repo, so answer from the script (default:
+    # it moved).
+    def fake_tree_differs(wt, a, b, *, exclude=()):
+        captured["tree_differs"] = (a, b, tuple(exclude))
+        return captured.get("tree_changed", True)
+
+    monkeypatch.setattr(converge_mod.git, "tree_differs", fake_tree_differs)
     return captured
 
 
@@ -577,12 +586,13 @@ def test_external_mode_skips_intake_and_seeds_surviving_findings(
 
     # A CONFORMING external-mode coder handoff (PR #345 re-review 1): the
     # injected prompt mandates a `## External findings` section with one
-    # FIXED/DISPUTED line per injected id — the per-id half of the fixed
-    # evidence (the loop's approval is the other half).
+    # FIXED/DISPUTED/REVERTED line per injected id — the per-id half of the
+    # fixed evidence (the loop's approval is the other half). The FINAL
+    # round's handoff is the one read (#387; the fake loop reports rounds=2).
     config.handoff_dir.mkdir(parents=True, exist_ok=True)
     from lithos_loom.plugins.story_develop import handoff as handoff_mod
 
-    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
         "## Status: LGTM\n## Summary\nf-002: guarded the handle.\n"
         "## External findings\n- f-002: FIXED — guarded the handle\n",
         encoding="utf-8",
@@ -670,7 +680,7 @@ def test_external_mode_dispute_and_unapproved_dispositions(
     _install_triage(monkeypatch, captured, proceed=("f-001", "f-002"))
     config = _config(tmp_path)
     config.handoff_dir.mkdir(parents=True, exist_ok=True)
-    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
         "## Status: LGTM\n## Summary\nf-001 disputed; f-002 addressed.\n"
         "## Findings\n"
         "- finding_id: f-001\n  severity: minor\n  status: disputed\n"
@@ -719,7 +729,7 @@ def test_external_mode_unacked_finding_stays_unaddressed_when_approved(
     _install_triage(monkeypatch, captured, proceed=("f-001", "f-002"))
     config = _config(tmp_path)
     config.handoff_dir.mkdir(parents=True, exist_ok=True)
-    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
         "## Status: LGTM\n## Summary\nf-001: guarded the handle.\n"
         "## External findings\n- f-001: FIXED — guarded the handle\n",
         encoding="utf-8",
@@ -735,6 +745,104 @@ def test_external_mode_unacked_finding_stays_unaddressed_when_approved(
     by_id = {o.finding_id: o for o in result.external_outcomes}
     assert by_id["f-001"].disposition == "fixed"
     assert by_id["f-002"].disposition == "unaddressed"
+
+
+def test_external_mode_reads_the_final_rounds_acks_a_reverted_fix_is_not_fixed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """lens #84 (#387): round 1 acked FIXED, the panel held the change
+    contradicted the acceptance criteria, round 2 reverted it in full and
+    said so. The thread must be answered from the FINAL handoff — the run
+    is not a success (an operator decision is outstanding), and the message
+    says why."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001",))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nf-001: withheld the stripe.\n"
+        "## External findings\n- f-001: FIXED — withheld the healthy stripe\n",
+        encoding="utf-8",
+    )
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
+        "## Status: LGTM\n## Summary\nreverted in full.\n"
+        "## External findings\n- f-001: REVERTED — the correctness reviewer "
+        "holds it contradicts the acceptance criteria; operator decision needed\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(config, _change(), external_findings=(_ext_finding(7),))
+
+    (o,) = result.external_outcomes
+    assert o.disposition == "reverted"
+    assert "contradicts the acceptance criteria" in o.detail
+    assert result.status == "converged"  # the loop's own verdict on the tree
+    assert not result.succeeded  # ...but the external finding is undecided
+    assert "f-001 REVERTED" in result.message
+    assert "operator decision" in result.message
+    assert result.to_json()["succeeded"] is False
+
+
+def test_external_mode_a_final_round_without_acks_claims_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The safe direction (#387): a round-1 FIXED that the final round's
+    handoff does not restate is a stale claim — no "Fixed in" reply, the
+    detail names the missing acknowledgement."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001",))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nf-001: guarded it.\n"
+        "## External findings\n- f-001: FIXED — guarded it\n",
+        encoding="utf-8",
+    )
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
+        "## Status: LGTM\n## Summary\nfixed the reviewer's nit.\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(config, _change(), external_findings=(_ext_finding(7),))
+
+    (o,) = result.external_outcomes
+    assert o.disposition == "unaddressed"
+    assert "round 2" in o.detail and "acknowledg" in o.detail
+
+
+def test_external_mode_a_fixed_ack_over_an_unmoved_tree_is_not_fixed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The objective backstop (#387): the final tree equals the PR head
+    outside the project's generated paths — nothing can have been fixed."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    captured["tree_changed"] = False
+    _install_triage(monkeypatch, captured, proceed=("f-001",))
+    config = dataclasses.replace(
+        _config(tmp_path),
+        generated_paths=("docs/generated",),
+        regenerate_command="make gen",
+    )
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
+        "## Status: LGTM\n## Summary\nf-001: guarded it.\n"
+        "## External findings\n- f-001: FIXED — guarded it\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(config, _change(), external_findings=(_ext_finding(7),))
+
+    (o,) = result.external_outcomes
+    assert o.disposition == "unaddressed"
+    assert "identical to the PR head" in o.detail
+    # measured from the PR head to the final tree, generated paths excluded
+    assert captured["tree_differs"] == (_HEAD, "HEAD", ("docs/generated",))
 
 
 # ── S5 conflict convergence: resolve mode ─────────────────────────────────────

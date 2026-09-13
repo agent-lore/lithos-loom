@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ...runner import git, worktree
-from . import handoff, review_only
+from . import review_only
 from .config import DevelopConfig
 from .conflict_resolve import (
     StaleTrigger,
@@ -49,13 +49,13 @@ from .conflict_resolve import (
 )
 from .develop import DevelopResult, develop
 from .external_reviews import (
-    CoderAck,
     ExternalFinding,
     ExternalOutcome,
     ack_instruction,
     external_intake_reviews,
+    final_round_outcomes,
     outcomes_after_loop,
-    parse_coder_acks,
+    undecided_note,
 )
 from .external_triage import triage_external_findings
 from .findings import DeferredFinding
@@ -177,9 +177,20 @@ class ConvergeResult:
         return self.intake_deferred + loop
 
     @property
+    def undecided_external(self) -> tuple[ExternalOutcome, ...]:
+        """External findings the run could not settle: a fix the loop made
+        and then undid (``reverted``, #387) — the reviewer and the story's
+        acceptance criteria disagree, and that is the operator's call."""
+        return tuple(o for o in self.external_outcomes if o.disposition == "reverted")
+
+    @property
     def succeeded(self) -> bool:
-        """True when the PR is ready for the human merge gate (nothing left to do)."""
-        return self.status in ("already_clean", "converged", "triage_rejected")
+        """True when the PR is ready for the human merge gate (nothing left to
+        do) — a converged tree with an undecided external finding is not."""
+        return (
+            self.status in ("already_clean", "converged", "triage_rejected")
+            and not self.undecided_external
+        )
 
     @property
     def total_cost_usd(self) -> float:
@@ -393,30 +404,18 @@ def converge_pr(
         )
 
         def _external_epilogue(result: DevelopResult) -> tuple[ExternalOutcome, ...]:
-            # The coder's round-1 handoff carries its per-id claims about the
-            # injected findings — the mandated `## External findings` acks
-            # plus any `## Findings` dispute block. A later round's ids belong
-            # to the loop's own panel, not to the injection.
-            coder_claims: dict[str, handoff.Finding] = {}
-            acks: dict[str, CoderAck] = {}
-            coder_path = config.handoff_dir / handoff.coder_handoff_name(1)
-            try:
-                text = coder_path.read_text(encoding="utf-8")
-            except OSError:
-                text = ""  # loop died before round 1's handoff → unaddressed
-            if text:
-                acks = parse_coder_acks(text, surviving_ids)
-                try:
-                    parsed = handoff.parse_review_handoff(text)
-                    coder_claims = {f.finding_id: f for f in parsed.findings}
-                except ValueError:
-                    pass  # unparseable handoff: acks (line-scoped) may still hold
-            return outcomes_after_loop(
-                id_map,
-                triage.rejections,
-                coder_claims,
-                acks,
+            # #387: the threads are answered from the coder's FINAL handoff
+            return final_round_outcomes(
+                handoff_dir=config.handoff_dir,
+                run_id=config.run_id,
+                rounds=result.rounds,
                 loop_approved=result.approved,
+                worktree=result.worktree,
+                head_sha=change.head_sha,
+                generated_paths=config.generated_paths,
+                id_map=id_map,
+                rejections=triage.rejections,
+                surviving_ids=surviving_ids,
             )
 
         return _loop_and_deliver(
@@ -706,6 +705,7 @@ def _loop_and_deliver(
     external_outcomes = (
         external_epilogue(result) if external_epilogue is not None else ()
     )
+    note = undecided_note(external_outcomes)  # #387: a reverted fix is said
 
     # Only the fixer's commits (PR head → HEAD), never develop()'s own span
     # (merge-base → HEAD includes the PR's original commits — the reporting gotcha).
@@ -749,7 +749,7 @@ def _loop_and_deliver(
             intake_cost_usd=pre_loop_cost,
             intake_deferred=intake_deferred,
             external_outcomes=external_outcomes,
-            message="converged — push skipped (--no-push)",
+            message=f"converged — push skipped (--no-push){note}",
         )
     try:
         pushed_sha = push_to_pr_ref(
@@ -796,5 +796,5 @@ def _loop_and_deliver(
         intake_cost_usd=pre_loop_cost,
         intake_deferred=intake_deferred,
         external_outcomes=external_outcomes,
-        message=f"converged and pushed to {change.head_branch}",
+        message=f"converged and pushed to {change.head_branch}{note}",
     )

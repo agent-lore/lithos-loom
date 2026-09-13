@@ -33,7 +33,12 @@ from lithos_loom.subscriptions.remediation_budget import (
     RemediationNotifier,
 )
 
-__all__ = ["REMEDIATION_ACTIONS", "escalate_if_exhausted"]
+__all__ = [
+    "DISPUTE_ACTIONS",
+    "REMEDIATION_ACTIONS",
+    "escalate_disputed",
+    "escalate_if_exhausted",
+]
 
 REMEDIATION_ACTIONS = (
     "the story stays behind its pr gate; push the fix branch by hand if the "
@@ -43,6 +48,16 @@ REMEDIATION_ACTIONS = (
 )
 """What the operator can do about an exhausted remediation — none of it is a
 re-dispatch, so the runner's two actions would mislead here."""
+
+DISPUTE_ACTIONS = (
+    "the external review and the story's acceptance criteria disagree, and "
+    "the loop undid its own fix rather than choose — decide: amend the "
+    "story's acceptance criteria and re-run `develop converge <pr> "
+    "--from-github` (or re-apply the fix by hand), or answer the reviewer on "
+    "the thread and leave the code as it is; a human push to the PR re-arms "
+    "loom's budget; complete this gate once decided"
+)
+"""What the operator can do about a reverted external fix (#387)."""
 
 
 async def escalate_if_exhausted(
@@ -82,9 +97,83 @@ async def escalate_if_exhausted(
         )[:ESCALATION_SUMMARY_MAX_CHARS],
         brief=brief,
     )
+    return await _escalate(
+        ctx,
+        gate_id=gate_id,
+        story_id=story_id,
+        budget=budget,
+        notifier=notifier,
+        escalation=escalation,
+        actions=REMEDIATION_ACTIONS,
+    )
 
+
+async def escalate_disputed(
+    ctx: SubscriptionContext,
+    *,
+    gate_id: str,
+    story_id: str,
+    spec: PrGateSpec,
+    budget: RemediationBudget,
+    notifier: RemediationNotifier | None,
+    outcome: dict[str, Any],
+    pushed_sha: str,
+) -> str | None:
+    """#387: the loop made an external fix and then undid it — the reviewer
+    and the story's acceptance criteria disagree (lens #84: "Fixed in" was
+    posted over a net no-op). A decision, not a re-run: raise the gate NOW,
+    whatever the budget says, once per budget; the marker then holds
+    dispatch until a human push. Same return contract as
+    :func:`escalate_if_exhausted`.
+    """
+    if budget.needs_human_gate_id:
+        return None
+    fid = str(outcome.get("finding_id") or "?")
+    reason = str(outcome.get("detail") or "(no reason given)")
+    brief: dict[str, Any] = {
+        "pr_url": spec.pr_url,
+        "finding_id": fid,
+        "author": outcome.get("author") or "",
+        "thread_url": outcome.get("thread_url") or "",
+        "coder_reason": reason,
+        "pushed_sha": pushed_sha,
+        "rounds_used": budget.rounds_used,
+    }
+    escalation = Escalation(
+        reason="disputed",
+        summary=(
+            f"external finding {fid} on {spec.pr_url} was fixed, then reverted: "
+            f"the review and the story's acceptance criteria disagree — {reason}"
+        )[:ESCALATION_SUMMARY_MAX_CHARS],
+        brief=brief,
+    )
+    return await _escalate(
+        ctx,
+        gate_id=gate_id,
+        story_id=story_id,
+        budget=budget,
+        notifier=notifier,
+        escalation=escalation,
+        actions=DISPUTE_ACTIONS,
+    )
+
+
+async def _escalate(
+    ctx: SubscriptionContext,
+    *,
+    gate_id: str,
+    story_id: str,
+    budget: RemediationBudget,
+    notifier: RemediationNotifier | None,
+    escalation: Escalation,
+    actions: str,
+) -> str | None:
     async def _record(human_gate_id: str) -> bool:
-        updated = dataclasses.replace(budget, needs_human_gate_id=human_gate_id)
+        updated = dataclasses.replace(
+            budget,
+            needs_human_gate_id=human_gate_id,
+            needs_human_reason=escalation.reason,
+        )
         ok = await write_marker(
             ctx,
             task_id=gate_id,
@@ -115,7 +204,7 @@ async def escalate_if_exhausted(
         agent=ctx.agent_id,
         escalation=escalation,
         notifier=notifier,
-        actions=REMEDIATION_ACTIONS,
+        actions=actions,
         record=_record,
         record_problem=(
             "could not record the gate on the budget marker / story — "

@@ -24,7 +24,10 @@ from lithos_loom.subscriptions.remediation_budget import (
     RemediationBudget,
     RemediationNotifier,
 )
-from lithos_loom.subscriptions.remediation_escalation import escalate_if_exhausted
+from lithos_loom.subscriptions.remediation_escalation import (
+    escalate_disputed,
+    escalate_if_exhausted,
+)
 
 __all__ = [
     "REFUND_RETRY_DELAYS",
@@ -165,6 +168,38 @@ async def record_result(
         f", ${cost:.2f}" if isinstance(cost, int | float) else "",
     )
     await post_finding(ctx, story_id, "\n".join(lines))
+    # #387: a fix the loop made and then undid is a DECISION (the review vs
+    # the acceptance criteria), raised now whatever the budget says — before
+    # the exhaustion rule, which would otherwise wait for the last round.
+    reverted = next(
+        (
+            o
+            for o in data.get("external_outcomes") or []
+            if isinstance(o, dict) and o.get("disposition") == "reverted"
+        ),
+        None,
+    )
+    if reverted is not None:
+        problem = await escalate_disputed(
+            ctx,
+            gate_id=gate_id,
+            story_id=story_id,
+            spec=spec,
+            budget=budget,
+            notifier=notifier,
+            outcome=reverted,
+            pushed_sha=pushed_sha,
+        )
+        if problem is not None:
+            await post_finding(
+                ctx,
+                story_id,
+                f"[Friction] external-remediation: external finding "
+                f"{reverted.get('finding_id', '?')} on {spec.pr_url} was fixed "
+                f"then reverted, but no needs-human gate could be raised "
+                f"({problem}); the decision is outstanding",
+            )
+        return
     # The CLI's own verdict decides (PR #361 review F1): `triage_rejected`
     # is a success — nothing left for the operator. An older record without
     # the flag is judged by status alone.

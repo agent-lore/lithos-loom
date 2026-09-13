@@ -549,6 +549,65 @@ def test_from_github_threads_findings_and_replies(
     assert "triage: x.py:12" in bodies[8]
 
 
+def test_from_github_answers_a_reverted_fix_honestly(
+    github_stubs: dict, tmp_path: Path
+) -> None:
+    """#387: a fix the loop made and then undid is answered as NOT fixed —
+    never "Fixed in <sha>" — even though the branch was pushed."""
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalOutcome
+
+    trusted = [_ext(7)]
+    github_stubs["trusted"] = trusted
+    github_stubs["untrusted"] = []
+
+    def fake_converge_pr(
+        config, change, *, no_push=False, external_findings=None, **_mode
+    ):
+        return ConvergeResult(
+            status="converged",
+            change=change,
+            pushed=True,
+            pushed_sha="p" * 40,
+            external_outcomes=(
+                ExternalOutcome(
+                    "f-001",
+                    trusted[0],
+                    "reverted",
+                    detail="the panel holds it contradicts the acceptance criteria",
+                ),
+            ),
+            message="converged and pushed to feature",
+        )
+
+    import lithos_loom.cli.converge as cli_mod
+
+    cli_mod.converge_pr, saved = fake_converge_pr, cli_mod.converge_pr
+    try:
+        result = runner.invoke(
+            develop_app,
+            [
+                "converge",
+                "#142",
+                "--repo",
+                str(tmp_path),
+                "--ac",
+                "do it",
+                "--from-github",
+            ],
+            catch_exceptions=False,
+        )
+    finally:
+        cli_mod.converge_pr = saved
+
+    assert result.exit_code != 0  # not a success: a decision is outstanding
+    bodies = dict(github_stubs["replies"])
+    assert "Fixed in" not in bodies[7]
+    assert "reverted" in bodies[7]
+    assert "contradicts the acceptance criteria" in bodies[7]
+    assert "operator" in bodies[7].lower()
+
+
 def test_from_github_nothing_to_ingest_exits_clean(
     github_stubs: dict, tmp_path: Path
 ) -> None:

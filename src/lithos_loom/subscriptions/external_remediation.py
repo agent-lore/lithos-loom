@@ -266,6 +266,10 @@ class ExternalRemediation:
             return "disabled"
         if budget.rounds_used >= settings.budget:
             return "exhausted"  # the note already rode out on the finding
+        if budget.needs_human_gate_id:
+            # #387: a decision gate stands on this budget (a reverted fix,
+            # raised with rounds to spare) — a human push resets it
+            return "escalated"
         if story_id is None:
             return "no_story"  # nowhere to record the outcome
 

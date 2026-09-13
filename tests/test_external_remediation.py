@@ -1200,9 +1200,13 @@ async def test_converged_on_the_last_round_does_not_escalate(tmp_path: Path) -> 
     assert await _human_gates(client) == []
 
 
-async def test_exhaustion_escalates_once_per_budget(tmp_path: Path) -> None:
-    # A gate already raised for this exhaustion (marker carries its id) is not
-    # raised again by a later exhausted run — one decision, one gate.
+async def test_a_raised_decision_gate_holds_dispatch_until_a_human_push(
+    tmp_path: Path,
+) -> None:
+    # A gate already raised for this budget (marker carries its id) means a
+    # decision is outstanding: nothing dispatches on it — rounds remaining or
+    # not — until a human push resets the budget (#387: the disputed gate is
+    # raised with rounds to spare, so "exhausted" alone no longer covers it).
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     await client.task_update(
@@ -1220,16 +1224,40 @@ async def test_exhaustion_escalates_once_per_budget(tmp_path: Path) -> None:
     )
     gate = await client.task_get(task_id=gate.id)
     assert gate is not None
-    spawn, _calls = _spawner(_not_converged_payload())
+    spawn, calls = _spawner(_not_converged_payload())
     rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
     label = await _consider(client, gate, story, rem, budget=read_budget(gate, _PR_URL))
-    assert label == "dispatched"
-    assert rem._task is not None
-    await rem._task
+    assert label == "escalated"
+    assert rem._task is None and calls == []
     assert await _human_gates(client) == []
     marker = await _marker(client, gate.id)
-    assert marker["rounds_used"] == 2
+    assert marker["rounds_used"] == 1
     assert marker["needs_human_gate_id"] == "gate-already-raised"
+
+
+async def test_exhaustion_escalates_once_per_budget(tmp_path: Path) -> None:
+    # The recorder's own guard: a result landing at exhaustion while the
+    # marker already names a gate raises no second one.
+    from lithos_loom.subscriptions.remediation_outcome import record_result
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = RemediationBudget(
+        pr_url=_PR_URL, rounds_used=2, needs_human_gate_id="gate-already-raised"
+    )
+    await record_result(
+        _ctx(client),
+        gate_id=gate.id,
+        story_id=story,
+        spec=spec,
+        budget=budget,
+        budget_limit=2,
+        notifier=None,
+        data=_not_converged_payload(),
+    )
+    assert await _human_gates(client) == []
 
 
 async def test_failed_run_without_a_result_at_exhaustion_escalates(
@@ -1252,6 +1280,124 @@ async def test_failed_run_without_a_result_at_exhaustion_escalates(
     assert gates[0].metadata["run_brief"]["last_status"] == "failed"
     assert [f for f in _findings(client) if f.startswith("[Friction]")]
     assert len(notifier.notices) == 1
+
+
+def _reverted_payload() -> dict:
+    # lens #84 (#387): the loop converged and pushed a tree that UNDID the
+    # external fix; the CLI reports the finding reverted and the run not
+    # succeeded.
+    return {
+        "status": "converged",
+        "succeeded": False,
+        "pushed": True,
+        "pushed_sha": "8d" * 20,
+        "rounds": 3,
+        "develop_status": "approved",
+        "total_cost_usd": 12.5,
+        "message": "converged; external f-001 REVERTED — operator decision needed",
+        "external_outcomes": [
+            {
+                "finding_id": "f-001",
+                "author": "davesnowdon",
+                "source": "review",
+                "stream": "review_comment",
+                "activity_id": 7,
+                "reply_mode": "thread",
+                "thread_url": "https://github.com/o/r/pull/142#discussion_r7",
+                "disposition": "reverted",
+                "detail": "the correctness reviewer holds it contradicts the "
+                "acceptance criteria",
+            }
+        ],
+    }
+
+
+async def test_a_reverted_external_fix_raises_a_disputed_gate_with_rounds_to_spare(
+    tmp_path: Path,
+) -> None:
+    """#387: the external reviewer and the story's acceptance criteria
+    disagree — a decision, not a re-run. The gate is raised NOW (budget 1/2),
+    names both sides, and stops dispatch until a human push."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    notifier = _RecordingNotifier()
+    spawn, _calls = _spawner(_reverted_payload())
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2, notifier=notifier), spawn=spawn
+    )
+
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    gates = await _human_gates(client)
+    assert len(gates) == 1
+    human = gates[0]
+    assert human.metadata["escalation_reason"] == "disputed"
+    assert human.metadata["route"] == "external-remediation"
+    summary = human.metadata["escalation_summary"]
+    assert "f-001" in summary and "acceptance criteria" in summary
+    brief = human.metadata["run_brief"]
+    assert brief["pr_url"] == _PR_URL
+    assert brief["finding_id"] == "f-001"
+    assert brief["thread_url"].endswith("#discussion_r7")
+    assert brief["author"] == "davesnowdon"
+    assert "contradicts" in brief["coder_reason"]
+    assert brief["pushed_sha"] == "8d" * 20
+    # recorded on the story and, once per budget, on the marker — with WHY
+    fresh = await client.task_get(task_id=story)
+    assert fresh is not None and fresh.metadata["needs_human_gate_id"] == human.id
+    marker = await _marker(client, gate.id)
+    assert marker["needs_human_gate_id"] == human.id
+    assert marker["needs_human_reason"] == "disputed"
+    assert marker["rounds_used"] == 1  # the round was spent, not refunded
+    needs = [f for f in _findings(client) if f.startswith("[NeedsHuman]")]
+    assert len(needs) == 1
+    assert "disputed" in needs[0] and human.id in needs[0]
+    assert "acceptance criteria" in needs[0]  # the actions name the decision
+    assert [n.reason for n in notifier.notices] == ["disputed"]
+    # the outcome finding still records the run as before
+    outcome = next(f for f in _findings(client) if "remediation outcome" in f)
+    assert "f-001 by davesnowdon: reverted" in outcome
+
+
+async def test_a_disputed_gate_is_raised_once_per_budget(tmp_path: Path) -> None:
+    from lithos_loom.subscriptions.remediation_outcome import record_result
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=1,
+        needs_human_gate_id="gate-already-raised",
+        needs_human_reason="disputed",
+    )
+    await record_result(
+        _ctx(client),
+        gate_id=gate.id,
+        story_id=story,
+        spec=spec,
+        budget=budget,
+        budget_limit=2,
+        notifier=None,
+        data=_reverted_payload(),
+    )
+    assert await _human_gates(client) == []
+
+
+def test_budget_marker_round_trips_the_escalation_reason() -> None:
+    budget = RemediationBudget(
+        pr_url=_PR_URL, needs_human_gate_id="g1", needs_human_reason="disputed"
+    )
+    marker = budget.as_marker()
+    assert marker["needs_human_reason"] == "disputed"
+    gate = SimpleNamespace(metadata={REMEDIATION_KEY: marker})
+    assert read_budget(gate, _PR_URL) == budget
+    # an older record without the field reads as the exhaustion it was
+    del marker["needs_human_reason"]
+    assert read_budget(gate, _PR_URL).needs_human_reason == ""
 
 
 async def test_human_push_reset_also_clears_the_escalation(tmp_path: Path) -> None:

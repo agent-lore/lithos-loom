@@ -417,6 +417,52 @@ def test_ack_instruction_names_every_id_and_the_section() -> None:
     assert "## External findings" in text
     assert "f-001" in text and "f-002" in text
     assert "omit" in text.lower()  # the never-omit-silently steering
+    # #387: the contract holds in EVERY round and knows a reverted fix
+    assert "REVERTED" in text
+    assert "every round" in text.lower()
+
+
+# --- #387: a "fixed" claim must survive the final tree -----------------------
+
+
+def test_parse_coder_acks_reads_a_reverted_verdict() -> None:
+    text = (
+        "## Status: LGTM\n## Summary\nreverted at the reviewer's insistence\n"
+        "## External findings\n"
+        "- f-002: REVERTED — the panel holds it contradicts the acceptance "
+        "criteria; operator decision needed\n"
+    )
+    acks = parse_coder_acks(text, ["f-002"])
+    assert acks["f-002"].verdict == "reverted"
+    assert acks["f-002"].detail.startswith("the panel holds")
+
+
+def test_outcomes_reverted_ack_is_reported_reverted_never_fixed() -> None:
+    """lens #84 (#387): the round-1 ack said FIXED, the final round undid it —
+    the final ack is what the thread is answered from."""
+    id_map = {"f-002": _finding()}
+    acks = {"f-002": CoderAck(verdict="reverted", detail="contradicts the AC")}
+    (o,) = outcomes_after_loop(id_map, {}, {}, acks, loop_approved=True)
+    assert o.disposition == "reverted"
+    assert o.detail == "contradicts the AC"
+
+
+def test_outcomes_fixed_needs_a_tree_that_moved() -> None:
+    """The objective backstop: a run whose final tree equals the PR head
+    cannot have fixed anything, whatever the handoff claims."""
+    id_map = {"f-001": _finding()}
+    acks = {"f-001": CoderAck(verdict="fixed", detail="guarded it")}
+    (o,) = outcomes_after_loop(
+        id_map, {}, {}, acks, loop_approved=True, tree_changed=False
+    )
+    assert o.disposition == "unaddressed"
+    assert "identical to the PR head" in o.detail
+    # unknown (None) keeps today's behaviour; True is the normal case
+    for known in (None, True):
+        (o,) = outcomes_after_loop(
+            id_map, {}, {}, acks, loop_approved=True, tree_changed=known
+        )
+        assert o.disposition == "fixed"
 
 
 # ── conversation comments (#353) ──────────────────────────────────────

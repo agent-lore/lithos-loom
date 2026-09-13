@@ -229,6 +229,19 @@ def test_an_exhausted_remediation_budget_is_needs_human() -> None:
     assert d.state == "needs_human" and "gate-h" in d.detail
 
 
+def test_a_disputed_remediation_gate_names_the_decision_not_exhaustion() -> None:
+    # #387: the gate can be raised with rounds to spare — the detail says why
+    budget = RemediationBudget(
+        pr_url=_URL,
+        rounds_used=1,
+        needs_human_gate_id="gate-d",
+        needs_human_reason="disputed",
+    )
+    d = _derive({"external_remediation": budget.as_marker()})
+    assert d.state == "needs_human" and "gate-d" in d.detail
+    assert "acceptance criteria" in d.detail and "exhausted" not in d.detail
+
+
 def test_a_closed_or_deleted_pr_is_needs_human() -> None:
     for marker in ("closed_unmerged", "gone"):
         meta = {"develop_pr_merge_state": marker, "develop_pr_merge_url": _URL}

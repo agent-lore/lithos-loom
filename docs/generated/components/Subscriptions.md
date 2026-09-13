@@ -51,7 +51,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.ready_recheck` | S | 1 | 1 |
 | `lithos_loom.subscriptions.reconciliation_state` | M | 3 | 3 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
-| `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 1 |
+| `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 2 |
 | `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 9 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
@@ -262,6 +262,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions.remediation_escalation`
 - def `escalate_if_exhausted` — Raise the needs-human gate when *budget* is spent and the PR is still not converged. Returns ``None`` when nothing was needed or the gate landed, else the problem that stopped the gate (for the caller's ``[Friction]``). Never raises.
+- def `escalate_disputed` — #387: the loop made an external fix and then undid it — the reviewer and the story's acceptance criteria disagree (lens #84: "Fixed in" was posted over a net no-op). A decision, not a re-run: raise the gate NOW, whatever the budget says, once per budget; the marker then holds dispatch until a human push. Same return contract as :func:`escalate_if_exhausted`.
 
 ### `lithos_loom.subscriptions.remediation_outcome`
 - def `post_finding` — Best-effort finding post (the story may have completed mid-run).

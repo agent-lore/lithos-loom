@@ -538,7 +538,10 @@ def converge_command(
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(result.to_json(), indent=2), encoding="utf-8")
 
-    raise typer.Exit(_EXIT_CODES.get(result.status, 1))
+    code = _EXIT_CODES.get(result.status, 1)
+    if code == 0 and result.undecided_external:
+        code = 1  # #387: a reverted external fix is a decision, not a success
+    raise typer.Exit(code)
 
 
 def _render(result: ConvergeResult) -> str:
@@ -634,6 +637,11 @@ def _post_external_replies(
             )
         elif o.disposition == "disputed":
             body = reply_body(fixed=False, sha=None, coder_response=o.detail)
+        elif o.disposition == "reverted":
+            # #387: a fix the loop made and then undid — never "Fixed in"
+            body = reply_body(
+                fixed=False, sha=None, coder_response=o.detail, reverted=True
+            )
         elif o.disposition == "fixed" and result.pushed:
             body = reply_body(
                 fixed=True, sha=result.pushed_sha, coder_response=o.detail

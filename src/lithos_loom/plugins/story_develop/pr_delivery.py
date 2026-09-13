@@ -139,15 +139,24 @@ def reply_body(
     sha: str | None,
     coder_response: str,
     held_back_verdict: str | None = None,
+    reverted: bool = False,
 ) -> str:
     """The per-thread reply: fix reference, held-back notice, or pushback.
 
     *held_back_verdict* covers the committed-but-not-pushed case (RED
     regression gate): the code DID change, so "Not changed" would be
-    misleading — say what happened instead.
+    misleading — say what happened instead. *reverted* (#387) covers a fix
+    the loop made and then undid: the reviewer and the story's acceptance
+    criteria disagree, and the operator has been asked to decide.
     """
     response = coder_response.strip() or "(no further detail given)"
-    if held_back_verdict is not None:
+    if reverted:
+        head = (
+            f"Not fixed — a change was made and then reverted: {response}. "
+            "This review and the story's acceptance criteria disagree; the "
+            "operator has been asked to decide."
+        )
+    elif held_back_verdict is not None:
         head = (
             f"A fix was prepared but NOT pushed — the regression test gate "
             f"came back {held_back_verdict} on the fix commit (see the PR "
