@@ -17,6 +17,10 @@ live base ref) and measure from :func:`fork_point`; the commit enumerators walk
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import os
+import signal
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -37,6 +41,82 @@ def _git(worktree: Path, *args: str) -> str:
             f"{result.stderr.strip()}"
         )
     return result.stdout.strip()
+
+
+logger = logging.getLogger(__name__)
+
+# A remote that does not answer must not hang a dispatch.
+FETCH_TIMEOUT_SECONDS = 60.0
+_REF_LOCK_RACE = "cannot lock ref"
+
+
+def fetch_branch(
+    repo: Path, base_branch: str, *, timeout: float = FETCH_TIMEOUT_SECONDS
+) -> str:
+    """Fetch origin's *base_branch* into ``refs/remotes/origin/<base_branch>``.
+
+    Returns ``""`` on success, else the reason (for the caller's log). Never
+    raises, never prompts (``GIT_TERMINAL_PROMPT=0`` — a credential prompt
+    on the daemon's tty would block for the whole timeout), and a hung
+    transport is killed with its process group (the ssh / https helper
+    outlives a bare kill of ``git``). The refspec is explicit, so the
+    tracking ref is updated whatever ``remote.origin.fetch`` says (a checkout
+    narrowed to another branch would otherwise report success and leave it
+    stale). Two fetches of a moved base in one repo race on the ref's
+    compare-and-swap and the loser fails with ``cannot lock ref … is at X but
+    expected Y`` though both write X — that is retried once, not a failure
+    (#390 review).
+    """
+    argv = [
+        "git",
+        "fetch",
+        "-q",
+        "origin",
+        f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
+    ]
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    for attempt in (1, 2):
+        returncode, stderr = run_group(argv, cwd=repo, env=env, timeout=timeout)
+        if returncode is None:
+            return f"timed out after {timeout:.0f}s"
+        if returncode == 0:
+            return ""
+        stderr = stderr.strip()
+        reason = stderr.splitlines()[-1] if stderr else f"exit {returncode}"
+        if _REF_LOCK_RACE in stderr and attempt == 1:
+            logger.info(
+                "git: fetch of origin/%s raced with another fetch (%s); retrying",
+                base_branch,
+                reason,
+            )
+            continue
+        return reason
+    return "unreachable"  # pragma: no cover
+
+
+def run_group(
+    argv: Sequence[str], *, cwd: Path, env: dict[str, str], timeout: float
+) -> tuple[int | None, str]:
+    """Run *argv* in its own process group; ``(returncode, stderr)``, or
+    ``(None, "")`` when it timed out — the whole group is killed then, so a
+    transport helper (ssh, git-remote-https) cannot outlive the fetch."""
+    proc = subprocess.Popen(
+        list(argv),
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        _out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):  # gone already
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        return None, ""
+    return proc.returncode, err or ""
 
 
 def base_sha(worktree: Path) -> str:

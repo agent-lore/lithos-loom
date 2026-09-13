@@ -12,10 +12,15 @@ directory) so concurrent runs never collide.
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 import subprocess
 from pathlib import Path
+
+from . import git
+
+logger = logging.getLogger(__name__)
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -35,12 +40,69 @@ def create(
 ) -> Path:
     """Create a per-task worktree off *base_branch* and return its path.
 
-    A fresh branch ``{slug(name)}-{8hex}`` is created at *base_branch*. The
-    worktree directory is placed under *parent* (default ``repo.parent``). This
-    is the special case of :func:`create_on_branch` where the start point is a
-    base branch.
+    A fresh branch ``{slug(name)}-{8hex}`` is created at the base's CURRENT
+    tip: ``origin/<base_branch>`` after a fetch when the repo has that remote
+    (#390 — lens #85 was cut at the operator's local ``main``, one merge
+    behind origin, and delivered a PR born in conflict), else the local
+    branch (a repo with no remote, the test fixtures). A fetch that fails
+    (offline, a dead remote) falls back to the last-fetched remote ref and
+    is logged — a stale run is explicable, a dead dispatch is not. The
+    operator's own branch is never moved. The worktree directory is placed
+    under *parent* (default ``repo.parent``). This is the special case of
+    :func:`create_on_branch` where the start point is a base branch.
     """
-    return create_on_branch(repo, base_branch, name, parent=parent)
+    return create_on_branch(
+        repo, current_base_ref(repo, base_branch), name, parent=parent
+    )
+
+
+def current_base_ref(repo: Path, base_branch: str) -> str:
+    """The commit-ish a fresh branch off *base_branch* starts at (see
+    :func:`create`): when the repo has an ``origin`` remote, the SHA of
+    ``refs/remotes/origin/<base_branch>`` after :func:`git.fetch_branch` —
+    the explicit refspec CREATES the tracking ref, so a checkout that never
+    materialised it (narrowed then widened, pruned — PR #393 review) is
+    fetched too, never cut at the stale local branch; when the fetch fails,
+    the ref as last fetched if there is one, else the local branch (logged).
+    A repo with no ``origin`` (the test fixtures) keeps the local branch. A
+    sha, not the ``origin/<base>`` name: a branch created at a
+    remote-tracking name gets upstream config written to ``.git/config``
+    under a non-retrying lock, which concurrent cuts in one checkout trip
+    over; a sha writes nothing."""
+    remote_ref = f"refs/remotes/origin/{base_branch}"
+
+    def resolve() -> str | None:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", remote_ref],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        return probe.stdout.strip() if probe.returncode == 0 else None
+
+    has_origin = (
+        subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 0
+    )
+    if not has_origin:
+        return base_branch
+    problem = git.fetch_branch(repo, base_branch)
+    sha = resolve()
+    if problem:
+        logger.warning(
+            "worktree: fetch of origin/%s failed (%s); starting at %s",
+            base_branch,
+            problem,
+            f"the last fetched origin/{base_branch}"
+            if sha
+            else f"the local {base_branch} (no fetched ref)",
+        )
+    return sha or base_branch
 
 
 def create_on_branch(

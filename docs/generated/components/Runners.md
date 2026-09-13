@@ -14,8 +14,8 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | M | 1 | 26 |
-| `lithos_loom.runner.worktree` | S | 0 | 5 |
+| `lithos_loom.runner.git` | M | 1 | 28 |
+| `lithos_loom.runner.worktree` | S | 0 | 6 |
 
 ## Public API
 
@@ -30,6 +30,8 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `detect_test_commands` — Detect candidate test commands for *repo_path*, best first.
 
 ### `lithos_loom.runner.git`
+- def `fetch_branch` — Fetch origin's *base_branch* into ``refs/remotes/origin/<base_branch>``.
+- def `run_group` — Run *argv* in its own process group; ``(returncode, stderr)``, or ``(None, "")`` when it timed out — the whole group is killed then, so a transport helper (ssh, git-remote-https) cannot outlive the fetch.
 - def `base_sha` — Return the current ``HEAD`` SHA of *worktree*.
 - class `RangeBase` — Where a branch's own work begins (PRD S5c).
 - def `base_ref_for` — Name the live base ref for *base_branch* as seen from *worktree*.
@@ -60,6 +62,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 
 ### `lithos_loom.runner.worktree`
 - def `create` — Create a per-task worktree off *base_branch* and return its path.
+- def `current_base_ref` — The commit-ish a fresh branch off *base_branch* starts at (see :func:`create`): when the repo has an ``origin`` remote, the SHA of ``refs/remotes/origin/<base_branch>`` after :func:`git.fetch_branch` — the explicit refspec CREATES the tracking ref, so a checkout that never materialised it (narrowed then widened, pruned — PR #393 review) is fetched too, never cut at the stale local branch; when the fetch fails, the ref as last fetched if there is one, else the local branch (logged). A repo with no ``origin`` (the test fixtures) keeps the local branch. A sha, not the ``origin/<base>`` name: a branch created at a remote-tracking name gets upstream config written to ``.git/config`` under a non-retrying lock, which concurrent cuts in one checkout trip over; a sha writes nothing.
 - def `create_on_branch` — Create a worktree on a **fresh committable branch at** *start_point*.
 - def `create_at` — Create a worktree with HEAD **detached at an existing commit** *ref*.
 - def `git_common_dir` — Absolute path to the shared git dir for the worktree at *path*.
