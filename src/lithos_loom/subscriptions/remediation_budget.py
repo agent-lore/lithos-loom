@@ -56,6 +56,12 @@ class RemediationBudget:
     # human-push reset — a fresh budget — clears it, and the NEXT exhaustion
     # escalates again; within one budget the gate is raised once.
     needs_human_gate_id: str = ""
+    # Why that gate was raised — ``remediation_exhausted`` (the budget ran
+    # out) or ``disputed`` (#387: the loop undid an external fix the panel
+    # holds contradicts the acceptance criteria — raised with rounds to
+    # spare). Empty on a record written before the reason existed, which
+    # was always an exhaustion.
+    needs_human_reason: str = ""
 
     def as_marker(self) -> dict[str, Any]:
         return {
@@ -64,6 +70,7 @@ class RemediationBudget:
             "last_loom_pushed_sha": self.last_loom_pushed_sha,
             "last_seen_head_sha": self.last_seen_head_sha,
             "needs_human_gate_id": self.needs_human_gate_id,
+            "needs_human_reason": self.needs_human_reason,
         }
 
 
@@ -76,12 +83,14 @@ def read_budget(gate: Any, pr_url: str) -> RemediationBudget:
     loom_sha = raw.get("last_loom_pushed_sha")
     seen_sha = raw.get("last_seen_head_sha")
     gate_id = raw.get("needs_human_gate_id")
+    reason = raw.get("needs_human_reason")
     return RemediationBudget(
         pr_url=pr_url,
         rounds_used=rounds if isinstance(rounds, int) and rounds >= 0 else 0,
         last_loom_pushed_sha=loom_sha if isinstance(loom_sha, str) else "",
         last_seen_head_sha=seen_sha if isinstance(seen_sha, str) else "",
         needs_human_gate_id=gate_id if isinstance(gate_id, str) else "",
+        needs_human_reason=reason if isinstance(reason, str) else "",
     )
 
 

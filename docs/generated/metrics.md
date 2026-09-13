@@ -21,7 +21,7 @@ lower a budget after improving the code to lock in the gain.
 
 ## Import graph
 
-- Cross-component edges: **68** (335 module-level)
+- Cross-component edges: **68** (336 module-level)
 - Component cycles: Render ↔ Subscriptions
 - Module cycles: lithos_loom.plugins.story_develop.agent_session ↔ lithos_loom.plugins.story_develop.coder_salvage ↔ lithos_loom.plugins.story_develop.loop_entry ↔ lithos_loom.plugins.story_develop.panel ↔ lithos_loom.plugins.story_develop.rounds
 - Tier-skipping edges (Entrypoints → Foundation): 11 (Children -> Bus, Children -> Config, Children -> GitHub, Children -> LithosClient, Children -> Notifications, Children -> State, Entrypoint -> Bus, Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> LithosClient, Entrypoint -> Supervisor)
@@ -36,7 +36,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 |---|---:|---:|---:|---:|---:|---:|---|---:|
 | Bus | 1 | 207 | 168 | 4 | 0 | 0.00 | 11 (`lithos_loom.bus._matches_struct`) | 1 |
 | Children | 6 | 1476 | 1119 | 0 | 8 | 1.00 | 44 (`lithos_loom.children.obsidian_sync._amain`) | 2 |
-| Cli | 13 | 6155 | 5178 | 2 | 8 | 0.80 | 58 (`lithos_loom.cli.converge.converge_command`) | 20 |
+| Cli | 13 | 6163 | 5185 | 2 | 8 | 0.80 | 60 (`lithos_loom.cli.converge.converge_command`) | 20 |
 | Config | 1 | 1239 | 1055 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
 | Entrypoint | 2 | 634 | 502 | 0 | 9 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
@@ -45,19 +45,19 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | GitHub | 4 | 1723 | 1336 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 1 |
 | LithosClient | 2 | 2268 | 1904 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 270 | 224 | 2 | 1 | 0.33 | 7 (`lithos_loom.notifications.build_notifier`) | 0 |
-| Plugins | 50 | 17581 | 14157 | 2 | 5 | 0.71 | 98 (`lithos_loom.plugins.story_develop.__main__.main`) | 43 |
+| Plugins | 50 | 17715 | 14280 | 2 | 5 | 0.71 | 98 (`lithos_loom.plugins.story_develop.__main__.main`) | 43 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
-| Runners | 5 | 928 | 730 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
+| Runners | 5 | 961 | 761 | 3 | 1 | 0.25 | 8 (`lithos_loom.runner.detection.detect_test_commands`) | 0 |
 | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
-| Subscriptions | 44 | 14457 | 11694 | 4 | 11 | 0.73 | 58 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 27 |
+| Subscriptions | 44 | 14657 | 11878 | 4 | 11 | 0.73 | 58 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 27 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
 | Tasks | 4 | 1243 | 968 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 3 |
 
 ## Size
 
-- Modules: **171**, lines: **59516**, SLOC: **48220**
+- Modules: **171**, lines: **59891**, SLOC: **48565**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
 - Modules over 800 lines: **6**
   - `lithos_loom.cli.develop`
@@ -69,18 +69,18 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1529**, cyclomatic > 10: **139**
+- Functions: **1536**, cyclomatic > 10: **139**
 
 Top 10 most complex functions:
 
 | Complexity | Function |
 |---:|---|
 | 98 | `lithos_loom.plugins.story_develop.__main__.main` |
-| 58 | `lithos_loom.cli.converge.converge_command` |
+| 60 | `lithos_loom.cli.converge.converge_command` |
 | 58 | `lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider` |
 | 52 | `lithos_loom.plugins.story_develop.develop.develop` |
 | 49 | `lithos_loom.cli.project.import_project` |
-| 47 | `lithos_loom.subscriptions.reconciliation_state._derive` |
+| 48 | `lithos_loom.subscriptions.reconciliation_state._derive` |
 | 44 | `lithos_loom.children.obsidian_sync._amain` |
 | 37 | `lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate` |
 | 35 | `lithos_loom.plugins.story_develop.merge_gate.run_merge_gate` |
@@ -136,4 +136,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.58** (93944 test lines / 59516 source lines)
+- Test-to-source line ratio: **1.58** (94614 test lines / 59891 source lines)

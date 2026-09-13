@@ -228,6 +228,39 @@ def diff_stat(worktree: Path, base: str) -> str:
     return _git(worktree, "diff", "--stat", f"{base}...HEAD")
 
 
+def tree_differs(
+    worktree: Path, a: str, b: str, *, exclude: Sequence[str] = ()
+) -> bool:
+    """Whether the trees of *a* and *b* differ, ignoring paths under the
+    *exclude* prefixes (repo-relative; ``:(exclude)`` pathspec magic, so
+    literal-pathspec mode is deliberately NOT set). ``git diff --quiet``:
+    exit 1 = differs, 0 = identical, anything else raises (#387's objective
+    "did the run move the tree" read)."""
+    result = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--quiet",
+            a,
+            b,
+            "--",
+            ".",
+            *(f":(exclude){p}" for p in exclude),
+        ],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return False
+    if result.returncode == 1:
+        return True
+    raise RuntimeError(
+        f"git diff --quiet {a} {b} failed (exit {result.returncode}): "
+        f"{result.stderr.strip()}"
+    )
+
+
 def merge(worktree: Path, ref: str, *, message: str) -> list[str]:
     """Merge *ref* into *worktree*'s HEAD; return the conflicting paths.
 

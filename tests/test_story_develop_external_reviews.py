@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -417,6 +418,106 @@ def test_ack_instruction_names_every_id_and_the_section() -> None:
     assert "## External findings" in text
     assert "f-001" in text and "f-002" in text
     assert "omit" in text.lower()  # the never-omit-silently steering
+    # #387: the contract holds in EVERY round and knows a reverted fix
+    assert "REVERTED" in text
+    assert "every round" in text.lower()
+
+
+# --- #387: a "fixed" claim must survive the final tree -----------------------
+
+
+def test_final_round_outcomes_reads_the_findings_block_in_round_one_only(
+    tmp_path: Path,
+) -> None:
+    """Round 1's `## Findings` block can only name injected ids, so a
+    dispute there counts; a later round's block is the panel's dispute
+    contract (ids minted independently) and never speaks for an external
+    id — the ack section is the sole channel then (opus round 1)."""
+    from lithos_loom.plugins.story_develop.external_reviews import (
+        final_round_outcomes,
+    )
+    from lithos_loom.plugins.story_develop.handoff import coder_handoff_name
+
+    handoff_dir = tmp_path / "handoff"
+    handoff_dir.mkdir()
+    block = (
+        "## Findings\n"
+        "- finding_id: f-001\n  severity: minor\n  status: disputed\n"
+        "  rationale: r\n  coder_response: deliberate decision\n"
+    )
+    (handoff_dir / coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nf-001 disputed.\n" + block, encoding="utf-8"
+    )
+    (handoff_dir / coder_handoff_name(2)).write_text(
+        "## Status: LGTM\n## Summary\npanel f-001 disputed; external fixed.\n"
+        + block
+        + "## External findings\n- f-001: FIXED — guarded it\n",
+        encoding="utf-8",
+    )
+    id_map = {"f-001": _finding()}
+
+    def outcomes(rounds: int):
+        return final_round_outcomes(
+            handoff_dir=handoff_dir,
+            run_id="r",
+            rounds=rounds,
+            loop_approved=True,
+            worktree=tmp_path,  # not a repo: the tree read is unknown (None)
+            head_sha="h" * 40,
+            generated_paths=(),
+            id_map=id_map,
+            rejections={},
+            surviving_ids=["f-001"],
+        )
+
+    (r1,) = outcomes(1)
+    assert r1.disposition == "disputed" and r1.detail == "deliberate decision"
+    (r2,) = outcomes(2)
+    assert r2.disposition == "fixed" and r2.detail == "guarded it"
+
+
+def test_parse_coder_acks_reads_a_reverted_verdict() -> None:
+    text = (
+        "## Status: LGTM\n## Summary\nreverted at the reviewer's insistence\n"
+        "## External findings\n"
+        "- f-002: REVERTED — the panel holds it contradicts the acceptance "
+        "criteria; operator decision needed\n"
+    )
+    acks = parse_coder_acks(text, ["f-002"])
+    assert acks["f-002"].verdict == "reverted"
+    assert acks["f-002"].detail.startswith("the panel holds")
+
+
+def test_outcomes_reverted_ack_is_reported_reverted_never_fixed() -> None:
+    """lens #84 (#387): the round-1 ack said FIXED, the final round undid it —
+    the final ack is what the thread is answered from."""
+    id_map = {"f-002": _finding()}
+    acks = {"f-002": CoderAck(verdict="reverted", detail="contradicts the AC")}
+    (o,) = outcomes_after_loop(id_map, {}, {}, acks, loop_approved=True)
+    assert o.disposition == "reverted"
+    assert o.detail == "contradicts the AC"
+
+
+def test_outcomes_fixed_needs_a_tree_that_moved() -> None:
+    """The objective backstop: an approved run whose final tree equals the
+    PR head cannot have fixed anything, whatever the handoff claims — and
+    since round 1 must commit, it undid what it did: reverted."""
+    id_map = {"f-001": _finding()}
+    acks = {"f-001": CoderAck(verdict="fixed", detail="guarded it")}
+    (o,) = outcomes_after_loop(
+        id_map, {}, {}, acks, loop_approved=True, tree_changed=False
+    )
+    # an APPROVED loop that ends at the PR head is fix-then-revert by
+    # construction (round 1 must commit) — stronger than the coder's word,
+    # so it is the decision shape, not a mere silence (opus round 1)
+    assert o.disposition == "reverted"
+    assert "identical to the PR head" in o.detail
+    # unknown (None) keeps today's behaviour; True is the normal case
+    for known in (None, True):
+        (o,) = outcomes_after_loop(
+            id_map, {}, {}, acks, loop_approved=True, tree_changed=known
+        )
+        assert o.disposition == "fixed"
 
 
 # ── conversation comments (#353) ──────────────────────────────────────

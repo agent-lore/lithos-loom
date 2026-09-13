@@ -12,7 +12,7 @@ findings were raised. This is round {round_no}.
 
 The full write-ups are in `/workspace/.handoff/` ({review_files}).
 {gate_summary}
-{sandbox_facts}
+{sandbox_facts}{external_ack}
 ## Your job
 
 You have a **single, non-interactive turn** — run every command synchronously
