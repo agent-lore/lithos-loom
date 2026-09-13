@@ -144,6 +144,7 @@ def test_runs_k_samples_prints_table_and_writes_reports(
     assert summary["coder"] == {"tool": "claude", "model": "m-claude", "effort": None}
     assert summary["panel"][0]["name"] == "correctness"
     assert summary["profile"] == "standard" and summary["max_rounds"] == 5
+    assert summary["develop"] == {"check_commands": {}, "check_states": {}}
     assert summary["tree"] == f"{_MB[:12]}+{_HEAD[:12]} ⇐ {_BASE[:12]}"
     assert summary["trees"] == {"head": _HEAD, "known_good": _GOOD, "known_bad": _BAD}
     assert len(summary["expected_fingerprint"]) == 16
@@ -281,6 +282,7 @@ def test_the_panel_needs_explicit_models_too(
     "argv",
     [
         ["--bar", "1.5"],
+        ["-k", "0"],
         ["--effort", "banana"],
         ["--tool", "gpt"],
         ["--max-rounds", "0"],

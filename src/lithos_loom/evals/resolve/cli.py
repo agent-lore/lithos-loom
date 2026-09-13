@@ -144,6 +144,7 @@ def resolve(
     discriminate its controls, a merge the intake refuses).
     """
     require_rate("--bar", bar)
+    _positive("-k", k)
     _positive("--max-rounds", max_rounds)
     _positive("--coder-timeout", coder_timeout)
     _positive("--reviewer-timeout", reviewer_timeout)
@@ -314,6 +315,9 @@ def _write_summary(
             for s in panel
         ],
         "max_rounds": max_rounds,
+        # the project's gate settings the case declared (the check-set is the
+        # profile's catalog PLUS these — what a --story run would resolve)
+        "develop": case.develop_settings(),
         "n": r.n,
         "n_valid": r.n_valid,
         "resolved": r.resolved,

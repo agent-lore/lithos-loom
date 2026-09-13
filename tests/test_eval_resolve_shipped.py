@@ -91,6 +91,10 @@ def test_the_merge_conflicts_in_text_paths_only(
     assert not git.is_ancestor(repo, case.base, trees.head), (
         "the base is already in the head"
     )
+    # the brief's "landed on the base since the merge-base" is a real range
+    assert git.is_ancestor(repo, case.merge_base, case.base), (
+        "merge_base must be an ancestor of base"
+    )
     parent = Path(tempfile.mkdtemp(prefix="loom-eval-resolve-preflight-"))
     wt = worktree.create_at(repo, trees.head, "preflight", parent=parent)
     try:

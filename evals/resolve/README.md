@@ -45,9 +45,12 @@ to the base tip once the merge commit exists — S5c), later rounds answer
 blocking findings, and the loop ends approved or not. Then the case's
 **probes** run on two of the run's trees:
 
-- **resolved** — the coder produced a merge commit at all (it got past the
-  markers guard: no markers left, the intended base merged, nothing else
-  committed). A run with no merge commit scores nothing else.
+- **resolved** — the coder produced a merge commit at all: a commit on the
+  PR head that brings the base in, past the markers guard (no markers
+  left, the intended base merged — more round-1 commits after it are
+  fine). A run with no merge commit scores nothing else, and so does one
+  whose final tree does not descend from the PR head (history rewritten:
+  S5's push epilogue would refuse it, so its approval is not a push).
 - **coder-right** — every probe holds on the **round-1 merge commit**: the
   coder's own resolution, before any panel feedback. This is the resolver's
   reading of the brief — does it read what landed on the base, or just clear
@@ -68,11 +71,14 @@ A case **passes** with valid samples, no UNSAFE, and pipeline-right at
 has no valid sample, or the fixture cannot be measured at all (below).
 
 **Errored** samples — an `infra_failed` run (an auth / transport / spawn death
-the reaction table could not retry through), or the harness's own plumbing
-raising — are excluded from every denominator, like a crashed reviewer in
-`eval review`; `+Nerr` marks the row. **Gate-green** is recorded per sample
-(`summary.json`) but not rated: the check-set is the project's, and a red
-gate on a wrong merge is the path working.
+the reaction table could not retry through), a loop that ended
+`interrupted` (a pause budget ran out), a reviewer whose final handoff was
+invalid (no verdict given), or the harness's own plumbing raising — are
+excluded from every denominator, like a crashed reviewer in `eval review`;
+`+Nerr` marks the row. **Gate-green** — the last round's `test` check
+verdict — is recorded per sample (`sample-<i>.json`) and counted in
+`summary.json` but not rated: a red gate on a wrong merge is the path
+working.
 
 Wilson 95% intervals are over the valid samples. Read them with the
 [review harness's sample-size table](../review/README.md#how-many-samples--what-an-ab-can-actually-detect-rh-5):
@@ -105,9 +111,17 @@ head = "<40-hex>"                      # the PR head — OR head_patch = "delive
 known_good = "<40-hex>"                # OR known_good_patch = "known-good.patch" (on base)
 known_bad = "<40-hex>"                 # OR known_bad_patch = "known-bad.patch" (on base)
 personas = ["correctness"]             # the panel on the composed tree (validated at load)
-profile = "standard"                   # the check-set (validated at load)
+profile = "standard"                   # the check-set catalog (validated at load)
 acceptance_criteria_file = "ac.md"
-# image = "ralph-sandbox:python-ui"    # optional sandbox image for the agents + gate
+# The project's own develop settings — what a production `--story` run would
+# resolve from its context doc. Declared here so the gate is the PROJECT's
+# (its parity command, its image) and the fixture is hermetic; all optional.
+# image = "ralph-sandbox:python-ui"
+# parity_command = "uv sync --locked && make check && make diagrams"
+# test_command = "make test"
+# artifacts_path = "e2e/artifacts"     # turns on the approval-hold artifact pass
+# [case.check_commands]                # per-check command overrides (#273)
+# [case.check_states]                  # required | informational | off
 
 [[probe]]
 name = "projects-narrow"
@@ -116,15 +130,19 @@ name = "projects-narrow"
 command = "uv run --quiet python {case_dir}/probes/projects_narrow.py"
 ```
 
-Rules. The first four are gate-enforced by `tests/test_eval_resolve_shipped.py`
-(where the checkout is present; skips with a reason otherwise); the loader
-enforces the schema; the rest are conventions:
+Rules. The first two are gate-enforced by `tests/test_eval_resolve_shipped.py`
+(where the checkout is present; skips with a reason otherwise), and the
+harness re-checks the second before every paid run; the loader enforces the
+schema; the rest are conventions (a case pins its own trees against the real
+commits, as the lens43 case does):
 
-- **The merge conflicts, in text paths only.** `base` is not an ancestor of
-  the head; merging it conflicts in ≥1 path; every conflicted path carries
-  markers (a binary, a modify/delete, a symlink is a shape the S5 mode
-  refuses before any agent runs — the harness aborts the case on its first
-  sample with `conflict_unsupported`, and likewise `no_conflict`).
+- **The merge conflicts, in text paths only.** `merge_base` is an ancestor
+  of `base` (the brief's "landed on the base since" is a real range);
+  `base` is not an ancestor of the head; merging it conflicts in ≥1 path;
+  every conflicted path carries markers (a binary, a modify/delete, a
+  symlink is a shape the S5 mode refuses before any agent runs — the
+  harness aborts the case on its first sample with `conflict_unsupported`,
+  and likewise `no_conflict`).
 - **The oracle discriminates its controls.** Every probe passes the
   known-good tree; at least one fails the known-bad. The harness re-checks
   this **before the first paid sample** and refuses otherwise — an oracle
@@ -136,8 +154,14 @@ enforces the schema; the rest are conventions:
   cleared, the check-set green), missing exactly the property. The real
   occurrence's own escape is the best source.
 - **A patch-form case owns its patches** (no `../`): the head on
-  `merge_base`, the controls on `base`. The preflight pins the rebuilt trees
-  against the real commits where the checkout has them.
+  `merge_base`, the controls on `base`. Pin the rebuilt trees against the
+  real commits in the preflight, where the checkout has them.
+- **Declare the project's gate.** Three of lens #43's conflicted paths are
+  generated docs; only lens's parity drift check sees a hand-merged one. A
+  case that leaves `parity_command` / `image` / `artifacts_path` out
+  measures the profile catalog's auto-detected checks, and its `approved`
+  is not the production pipeline's — say so in the description if that is
+  the intent.
 - **Probes ask what the tree DOES, not where a symbol lives.** A resolution
   may legitimately move code (the operator's #43 merge moved the helper
   into the module the base introduced); a probe keyed on a file path or an
@@ -165,8 +189,10 @@ case id + probes — what the scorer consumed).
 `lens43-projects-merge` — the real conflict behind lens #43: the delivered
 T1-S12 head against lens main after #44/#45 landed, ten text conflicts, the
 operator's own merge (e1965aa) as the known-good and the
-`lens43-composed-projects` defect head (that merge with the `projects` term
-undone) as the known-bad. The property is compositional and lives OUTSIDE
+`lens43-composed-projects` defect head (the pre-squash tip with the
+`projects` term undone — 17 files from the known-good; the oracle
+discriminates on the term) as the known-bad, lens's own image, parity
+command and artifacts path declared. The property is compositional and lives OUTSIDE
 the conflicted hunks: `filters_narrow_the_board` merges cleanly, and the
 base it lands on now carries `TaskFilters.projects`, so a resolution that
 only clears the markers ships a helper that lets a `?project=` board make

@@ -18,9 +18,10 @@ onto the PR branch, carrying a defect the oracle names. A correct
 resolution the panel rejected is **wasted** (escalated to a human for
 nothing) — a cost, not a hazard. A run with no merge commit (the coder
 never got past the markers guard) is *not resolved*, and no probe runs on
-it. An infra death (``infra_failed``, or a crash of the harness's own
-plumbing) is *errored*: excluded from every denominator, like a crashed
-reviewer in ``eval review``.
+it. An infra death (``infra_failed``), a loop that ended ``interrupted``
+(a pause budget ran out), a reviewer whose final handoff was invalid, or a
+crash of the harness's own plumbing is *errored*: excluded from every
+denominator, like a crashed reviewer in ``eval review``.
 
 Fail-closed order: the oracle is validated on the known-good and known-bad
 trees BEFORE the first paid sample (every probe passes the one, at least one
@@ -36,8 +37,10 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -157,6 +160,15 @@ class ResolveOutcome:
     findings_by_severity: Mapping[str, int]
     retained: Mapping[str, str] = field(default_factory=dict)
     cleanup: Callable[[], None] = lambda: None
+    # the loop's own status behind converge's (`interrupted` — a pause budget
+    # ran out — is a host condition, not a verdict on the merge)
+    develop_status: str = ""
+    # a reviewer whose final handoff was invalid: no verdict was given
+    panel_invalid: bool = False
+    # S5's push precondition — the final tree descends from the PR head. A
+    # resolution that rewrote history could never be pushed, so its approval
+    # is not "the merge S5 would have pushed".
+    pushable: bool = True
 
 
 # (case, trees) → one S5 run's outcome.
@@ -302,8 +314,14 @@ def score_sample(
 ) -> SampleScore:
     """Score one S5 run: the panel's verdict beside the oracle's, on the
     round-1 merge commit and on the final tree. No probe runs on a run that
-    produced no merge commit, nor on an errored one."""
-    errored = outcome.status in _ERRORED_STATUSES
+    produced no merge commit, nor on an errored one (an infra death, a pause
+    budget that ran out, a reviewer that gave no valid verdict). An approval
+    only counts when S5 could have pushed the tree."""
+    errored = (
+        outcome.status in _ERRORED_STATUSES
+        or outcome.develop_status == "interrupted"
+        or outcome.panel_invalid
+    )
     resolved = bool(outcome.merge_sha) and not errored
     first: tuple[ProbeResult, ...] = ()
     final: tuple[ProbeResult, ...] = ()
@@ -320,7 +338,7 @@ def score_sample(
         errored=errored,
         resolved=resolved,
         gate_green=resolved and outcome.gate_green,
-        approved=outcome.status == "converged",
+        approved=outcome.status == "converged" and outcome.pushable,
         correct_first=_held(first),
         correct_final=_held(final),
         rounds=outcome.rounds,
@@ -510,7 +528,10 @@ def run_resolve_case(
                         f"case {case.id}: the intake refused the merge "
                         f"({outcome.status}): {outcome.message}"
                     )
-                score = score_sample(case, outcome, probe_runner)
+                try:
+                    score = score_sample(case, outcome, probe_runner)
+                except Exception as exc:  # noqa: BLE001 — probe plumbing died
+                    score = _errored_score(exc)
                 if sink is not None:
                     sink(
                         case.id,
@@ -543,8 +564,9 @@ def run_probe(
 
     The command is the case's (repo-controlled data, run as an argv — no
     shell), with ``{case_dir}`` / ``{worktree}`` rendered shell-quoted. A
-    timeout or an unlaunchable command is a failed probe with ``error`` set,
-    never an exception — the sample records it and scores as not holding.
+    timeout (the probe's whole process group is killed) or an unlaunchable
+    command is a failed probe with ``error`` set, never an exception — the
+    sample records it and scores as not holding.
     """
     assert case.case_dir is not None
     repo = Path(case.repo).resolve()
@@ -556,16 +578,15 @@ def run_probe(
                 probe.render(case_dir=case.case_dir.resolve(), worktree=wt)
             )
             try:
-                proc = subprocess.run(
-                    argv, cwd=wt, capture_output=True, text=True, timeout=timeout
-                )
-            except subprocess.TimeoutExpired:
-                return ProbeResult(
-                    name=probe.name,
-                    passed=False,
-                    exit_code=None,
-                    output="",
-                    error=f"timed out after {timeout}s",
+                # its own session, so a timeout kills the whole tree (`uv run`
+                # spawns the interpreter that does the work)
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=wt,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    start_new_session=True,
                 )
             except OSError as exc:
                 return ProbeResult(
@@ -575,12 +596,24 @@ def run_probe(
                     output="",
                     error=str(exc),
                 )
-            output = (proc.stdout + proc.stderr)[-_OUTPUT_TAIL:]
+            try:
+                output, _ = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
+                return ProbeResult(
+                    name=probe.name,
+                    passed=False,
+                    exit_code=None,
+                    output="",
+                    error=f"timed out after {timeout}s",
+                )
             return ProbeResult(
                 name=probe.name,
                 passed=proc.returncode == 0,
                 exit_code=proc.returncode,
-                output=output,
+                output=(output or "")[-_OUTPUT_TAIL:],
             )
         finally:
             with contextlib.suppress(Exception):  # cleanup is best-effort
@@ -623,7 +656,6 @@ def live_resolve(
     """
     repo = Path(case.repo).resolve()
     work_dir = Path(tempfile.mkdtemp(prefix="loom-eval-resolve-"))
-    extra: dict = {"image": case.image} if case.image else {}
     config = DevelopConfig(
         repo=repo,
         description=case.title,
@@ -636,7 +668,8 @@ def live_resolve(
         coder_effort=effort,
         max_rounds=max_rounds,
         default_models=default_models or {},
-        **extra,
+        # the project's own gate settings, as a `--story` run would resolve them
+        **case.develop_settings(),
     )
     change = ResolvedChange(
         base_sha=case.merge_base,
@@ -648,17 +681,22 @@ def live_resolve(
         # converge requires a pushable branch name; --no-push never uses it
         head_branch=f"eval-resolve/{case.id}",
     )
-    run_wt: Path | None = None
-    branch = ""
 
     def cleanup() -> None:
+        # The intake creates the run's worktree — a child of the config's
+        # worktree parent, on a branch of the same name in the TARGET repo —
+        # before any agent runs, so a run that raised after the intake has
+        # left both behind with no result to name them: sweep the parent.
         try:
-            if run_wt is not None:
+            parent = config.worktree_parent
+            children = (
+                [p for p in parent.iterdir() if p.is_dir()] if parent.is_dir() else []
+            )
+            for wt in children:
                 with contextlib.suppress(Exception):  # cleanup is best-effort
-                    worktree.remove(run_wt, force=True)
-            if branch:
+                    worktree.remove(wt, force=True)
                 with contextlib.suppress(Exception):
-                    git.delete_branch(repo, branch)
+                    git.delete_branch(repo, wt.name)
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -678,19 +716,32 @@ def live_resolve(
     merge_sha = ""
     final_sha = ""
     gate_green = False
+    pushable = True
+    panel_invalid = False
+    message = result.message
     retained: dict[str, str] = {}
     severities: dict[str, int] = {}
     if dr is not None:
         run_wt = dr.worktree
-        branch = dr.branch
         final_sha = git.commit_sha(run_wt)
-        # the merge commit is the first first-parent commit past the PR head
-        # that contains the base — the round-1 resolution
-        for sha in result.fixer_commits:
-            if git.is_ancestor(run_wt, case.base, sha):
-                merge_sha = sha
-                break
+        # S5's push precondition (pr_delivery refuses a HEAD that does not
+        # descend from the PR head): only then is any commit a resolution
+        pushable = git.is_ancestor(run_wt, trees.head, final_sha)
+        if pushable:
+            # the merge commit: the round-1 commit ON the PR head (its first
+            # parent) that brings the base in
+            for sha in result.fixer_commits:
+                on_head = git.commit_sha(run_wt, f"{sha}^1") == trees.head
+                if on_head and git.is_ancestor(run_wt, case.base, sha):
+                    merge_sha = sha
+                    break
+        else:
+            message += (
+                " (HEAD does not descend from the PR head — the merge was "
+                "abandoned and history rewritten; S5 would refuse the push)"
+            )
         gate_green = bool(dr.test_gate is not None and dr.test_gate.passed)
+        panel_invalid = any(r.status == "invalid" for r in dr.reviews)
         severities = findings_by_severity(dr.reviews)
         if merge_sha:
             # HOW the coder resolved (the merge's combined diff), and what the
@@ -705,7 +756,7 @@ def live_resolve(
     conflict = result.conflict
     return ResolveOutcome(
         status=result.status,
-        message=result.message,
+        message=message,
         rounds=dr.rounds if dr is not None else 0,
         cost_usd=result.total_cost_usd,
         conflict_paths=tuple(conflict.paths) if conflict is not None else (),
@@ -715,4 +766,7 @@ def live_resolve(
         findings_by_severity=severities,
         retained=retained,
         cleanup=cleanup,
+        develop_status=dr.status if dr is not None else "",
+        panel_invalid=panel_invalid,
+        pushable=pushable,
     )

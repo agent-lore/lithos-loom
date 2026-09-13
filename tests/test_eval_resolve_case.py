@@ -198,8 +198,70 @@ def test_title_defaults_to_the_id(tmp_path: Path) -> None:
     assert load_resolve_case(_write(tmp_path / "r1", toml)).title == "r1"
 
 
-def test_probe_renders_its_placeholders() -> None:
+def test_probe_renders_its_placeholders_shell_quoted() -> None:
+    import shlex
+
     probe = Probe(name="p", command="uv run python {case_dir}/p.py --tree {worktree}")
     assert probe.render(case_dir=Path("/c"), worktree=Path("/w")) == (
         "uv run python /c/p.py --tree /w"
     )
+    # a path with a space (or a quote) survives the runner's shlex.split
+    rendered = probe.render(case_dir=Path("/my evals/c"), worktree=Path("/w it's"))
+    assert shlex.split(rendered) == [
+        "uv",
+        "run",
+        "python",
+        "/my evals/c/p.py",
+        "--tree",
+        "/w it's",
+    ]
+
+
+def test_the_projects_develop_settings_are_declared_by_the_case(tmp_path: Path) -> None:
+    toml = _VALID.replace(
+        'profile = "standard"',
+        'profile = "standard"\n'
+        'image = "ralph-sandbox:python-ui"\n'
+        'parity_command = " make check "\n'
+        'test_command = "make test"\n'
+        'artifacts_path = "e2e/artifacts"\n'
+        '[case.check_commands]\nlint = "make lint"\n'
+        '[case.check_states]\nsast = "off"\n',
+    )
+    case = load_resolve_case(_write(tmp_path / "r1", toml))
+    assert case.image == "ralph-sandbox:python-ui"
+    assert case.parity_command == "make check"
+    assert case.test_command == "make test"
+    assert case.artifacts_path == "e2e/artifacts"
+    assert case.check_commands == {"lint": "make lint"}
+    assert case.check_states == {"sast": "off"}
+    assert case.develop_settings() == {
+        "image": "ralph-sandbox:python-ui",
+        "parity_command": "make check",
+        "test_command": "make test",
+        "artifacts_path": "e2e/artifacts",
+        "check_commands": {"lint": "make lint"},
+        "check_states": {"sast": "off"},
+    }
+
+
+def test_develop_settings_default_to_the_profiles_own(tmp_path: Path) -> None:
+    case = load_resolve_case(_write(tmp_path / "r1", _VALID))
+    assert case.develop_settings() == {"check_commands": {}, "check_states": {}}
+
+
+@pytest.mark.parametrize(
+    ("extra", "needle"),
+    [
+        ('parity_command = "  "', "parity_command"),
+        ('[case.check_commands]\ntest = "x"', "test_command"),
+        ('[case.check_states]\nlint = "maybe"', "lint"),
+        ('artifacts_path = "/abs"', "artifacts path"),
+    ],
+)
+def test_bad_develop_settings_are_rejected(
+    tmp_path: Path, extra: str, needle: str
+) -> None:
+    toml = _VALID.replace('profile = "standard"', 'profile = "standard"\n' + extra)
+    with pytest.raises(ValueError, match=needle):
+        load_resolve_case(_write(tmp_path / "r1", toml))

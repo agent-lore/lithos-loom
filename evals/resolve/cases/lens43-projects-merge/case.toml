@@ -32,17 +32,30 @@ AND wrong is the merge commit S5 would have pushed onto the PR branch.
 
 CONTROLS (validated before any paid sample): known-good = the operator's
 merge e1965aa (`git diff 6e2fcf0..e1965aa`, applied on base) — the probe
-passes; known-bad = that resolution with the projects term undone (the
-lens43-composed-projects defect head, `git diff 6e2fcf0..` that tree,
-applied on base) — the probe fails. e1965aa fails lens's 800-line module
-budget (frontier.py 880 lines; split two commits later), which is
-irrelevant here: the controls are probed, never gated. The seed's own
-check-set verdict is the run's, on the tree the coder produced.
+passes; known-bad = the lens43-composed-projects defect head (applied on
+base) — the probe fails. That head is NOT e1965aa minus the term: it is the
+pre-squash tip 41a43c8 (e1965aa plus the two post-merge fix commits, the
+frontier.py split and the neutralised giveaways) with the projects term
+undone — 17 files apart from the known-good. The oracle discriminates on
+the term alone (the probe prints `… = False` on it, not "helper not
+found"), which is what the pair has to prove. e1965aa fails lens's
+800-line module budget (frontier.py 880 lines; split two commits later),
+which is irrelevant here: the controls are probed, never gated.
+
+THE GATE IS LENS'S: the case declares what a production `--story` run
+resolves from lens's context doc — `image` python-ui, lens's
+`parity_command` (baseline hash of docs/generated → `uv sync --locked &&
+make check && make diagrams` → the hash must not move → `make e2e`) and
+`artifacts_path` e2e/artifacts (so the approval-hold artifact pass runs on
+the e2e captures, as it does live). Three of the ten conflicted paths are
+generated docs; only the parity drift check sees a hand-merged one. The
+profile's catalog checks run beside it.
 
 WHAT A RUN COSTS: round 1 = one coder turn over ten conflicted paths
 (three of them generated docs the coder should regenerate, not hand-merge)
-+ lens's check-set + a one-persona panel; a blocking finding adds a round.
-Expect $5–15 per sample on a claude coder + codex correctness reviewer.
++ lens's check-set (parity incl. e2e: minutes) + a one-persona panel + the
+artifact pass; a blocking finding adds a round. Expect $8–20 per sample on
+a claude coder + codex correctness reviewer.
 
 MDE, STATED BEFORE ANY PAID ARM (README §"How many samples"): the prior is
 UNDEFINED — S5's resolver has run on one live conflict (loom #352, five
@@ -67,6 +80,10 @@ known_bad_patch = "known-bad.patch"                        # the composed-projec
 personas = ["correctness"]
 profile = "standard"
 acceptance_criteria_file = "ac.md"                         # the real T1-S12 story body (replay), the PR's intent
+# lens's develop settings, as its context doc declares them (a --story run resolves the same)
+image = "ralph-sandbox:python-ui"
+parity_command = "B=$(find docs/generated -type f -exec sha256sum {} + | sort | sha256sum) && uv sync --locked && make check && make diagrams && A=$(find docs/generated -type f -exec sha256sum {} + | sort | sha256sum) && [ \"$B\" = \"$A\" ] && make e2e"
+artifacts_path = "e2e/artifacts"
 
 [[probe]]
 name = "projects-narrow"

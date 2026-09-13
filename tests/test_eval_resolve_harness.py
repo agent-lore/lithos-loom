@@ -7,6 +7,7 @@ does not conflict aborts the case, and every tree is cleaned up.
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -446,3 +447,261 @@ def test_expected_fingerprint_keys_on_what_the_scorer_consumes() -> None:
     assert a != expected_fingerprint(
         _case(probes=(Probe("p1", "false"), Probe("p2", "true")))
     )
+
+
+# --- score_sample: the review's errored / pushable rules --------------------
+
+
+def test_an_interrupted_loop_is_errored_not_a_verdict() -> None:
+    # a pause budget ran out mid-run: converge flattens it to not_converged,
+    # but it is a host condition — excluded, never "not resolved"
+    probes = _Probes(_all_pass(_MERGE, _FINAL))
+    s = score_sample(
+        _case(),
+        replace(_outcome("not_converged"), develop_status="interrupted"),
+        probes,
+    )
+    assert s.errored and not s.resolved
+    assert probes.calls == []
+
+
+def test_a_reviewer_with_an_invalid_final_handoff_is_errored() -> None:
+    s = score_sample(
+        _case(),
+        replace(_outcome("failed"), panel_invalid=True),
+        _Probes(_all_pass(_MERGE)),
+    )
+    assert s.errored
+
+
+def test_an_approval_that_could_not_be_pushed_is_not_approved() -> None:
+    # history rewritten under the merge: S5's push epilogue would refuse it,
+    # so a wrong tree here is not an UNSAFE push
+    probes = _Probes({})
+    s = score_sample(_case(), replace(_outcome(), pushable=False, merge_sha=""), probes)
+    assert not s.approved and not s.resolved and not s.unsafe
+    assert probes.calls == []
+
+
+def test_a_probe_runner_that_crashes_errors_the_sample_and_the_case_goes_on() -> None:
+    cleanup: list[str] = []
+    calls = {"n": 0}
+
+    def flaky(case: ResolveCase, sha: str, probe: Probe) -> ProbeResult:
+        calls["n"] += 1
+        if sha == _MERGE and calls["n"] > 4:  # after the oracle's four control calls
+            raise RuntimeError("git lock")
+        return ProbeResult(name=probe.name, passed=sha != _BAD, exit_code=0, output="")
+
+    outcomes = [_outcome(cleanup=lambda: cleanup.append("run0"))]
+    run = _Run(outcomes)
+    r = run_resolve_case(
+        _case(),
+        k=1,
+        bar=0.8,
+        resolve_fn=run,
+        probe_runner=flaky,
+        materialise=lambda c: _trees(cleanup),
+    )
+    assert r.status_per_sample == ("error",)
+    assert "git lock" in r.message_per_sample[0]
+    assert cleanup == ["run0", "trees"]  # the run's tree was still released
+
+
+# --- live_resolve over a scratch repo, converge_pr faked around the REAL intake --
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _scratch_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
+    """``(repo, merge_base, head, base)``: the head and the base both edit
+    a.txt's one line, so merging the base into the head conflicts."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "a.txt").write_text("x = 1\n")
+    (repo / "b.txt").write_text("b\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "merge-base")
+    merge_base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "story")
+    (repo / "a.txt").write_text("x = 2\n")
+    _git(repo, "commit", "-q", "-am", "story")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    (repo / "a.txt").write_text("x = 3\n")
+    _git(repo, "commit", "-q", "-am", "landed on main")
+    base = _git(repo, "rev-parse", "HEAD")
+    return repo, merge_base, head, base
+
+
+def _live_case(repo: Path, merge_base: str, head: str, base: str) -> ResolveCase:
+    return replace(
+        _case(),
+        repo=str(repo),
+        merge_base=merge_base,
+        head=head,
+        base=base,
+        known_good=base,
+        known_bad=merge_base,
+        case_dir=repo.parent,
+    )
+
+
+def _fake_converge(shape: str):
+    """converge_pr with the real intake and a scripted coder: ``merge`` (the
+    merge commit), ``merge+format`` (a second round-1 commit after it),
+    ``rewrite`` (abort the merge, reset onto the base, commit the PR's work
+    afresh) or ``raise`` (die after the intake, as docker would)."""
+    from lithos_loom.plugins.story_develop.conflict_resolve import (
+        prepare_conflict_intake,
+    )
+    from lithos_loom.plugins.story_develop.converge import (
+        ConflictSummary,
+        ConvergeResult,
+    )
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+    from lithos_loom.plugins.story_develop.test_gate import GateResult
+    from lithos_loom.runner import git
+
+    def converge_pr(config, change, **kw):
+        assert kw == {
+            "no_push": True,
+            "resolve_conflicts": True,
+            "coder_timeout": 3600,
+            "reviewer_timeout": 3600,
+        }
+        intake = prepare_conflict_intake(config, change)
+        assert intake is not None and intake.paths == ("a.txt",)
+        wt = intake.worktree
+        if shape == "raise":
+            raise RuntimeError("docker down")
+        if shape == "rewrite":
+            git.abort_merge(wt)
+            subprocess.run(
+                ["git", "reset", "-q", "--hard", change.base_ref], cwd=wt, check=True
+            )
+            (wt / "a.txt").write_text("x = 2\n")
+            git.commit_all(wt, "story, re-applied")
+        else:
+            (wt / "a.txt").write_text("x = 5\n")
+            git.commit_all(wt, "merge")
+            if shape == "merge+format":
+                (wt / "b.txt").write_text("b formatted\n")
+                git.commit_all(wt, "format")
+        dr = DevelopResult(
+            status="approved",
+            run_id=config.run_id,
+            worktree=wt,
+            branch=wt.name,
+            base_sha=change.base_sha,
+            commits=[],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=1.0,
+            review_cost_usd=0.5,
+            message="approved",
+            test_gate=GateResult(command="t", exit_code=0, passed=True, output_tail=""),
+        )
+        return ConvergeResult(
+            status="converged",
+            change=change,
+            develop_result=dr,
+            fixer_commits=tuple(git.commits_since(wt, change.head_sha)),
+            message="converged",
+            conflict=ConflictSummary(
+                paths=intake.paths, base_ref=intake.base_ref, base_sha=intake.base_sha
+            ),
+        )
+
+    return converge_pr
+
+
+def _branches(repo: Path) -> set[str]:
+    return set(_git(repo, "branch", "--format=%(refname:short)").split())
+
+
+def _run_live(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str):
+    from lithos_loom.evals.resolve import harness
+    from lithos_loom.plugins.story_develop.config import ReviewerSpec
+
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "eval")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "eval@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "eval")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "eval@localhost")
+    repo, merge_base, head, base = _scratch_repo(tmp_path)
+    monkeypatch.setattr(harness, "converge_pr", _fake_converge(shape))
+    case = _live_case(repo, merge_base, head, base)
+    trees = Trees(head=head, known_good=base, known_bad=merge_base)
+    panel = (ReviewerSpec(name="correctness", tool="codex", model="r"),)
+
+    def run():
+        return harness.live_resolve(
+            case,
+            trees,
+            tool="claude",
+            model="m",
+            effort=None,
+            reviewers=panel,
+            profile="standard",
+            max_rounds=2,
+        )
+
+    return repo, head, base, run
+
+
+def test_live_resolve_reads_the_merge_commit_final_tree_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, head, base, run = _run_live(monkeypatch, tmp_path, "merge+format")
+    outcome = run()
+    assert outcome.status == "converged" and outcome.develop_status == "approved"
+    assert outcome.conflict_paths == ("a.txt",)
+    assert outcome.rounds == 1 and outcome.cost_usd == pytest.approx(1.5)
+    assert outcome.gate_green and outcome.pushable and not outcome.panel_invalid
+    # the merge commit is the two-parent commit on the PR head; the final tree
+    # is the second round-1 commit
+    parents = _git(repo, "rev-list", "--parents", "-n", "1", outcome.merge_sha).split()
+    assert parents[1:] == [head, base]
+    assert outcome.final_sha != outcome.merge_sha
+    assert _git(repo, "rev-parse", f"{outcome.final_sha}^") == outcome.merge_sha
+    assert set(outcome.retained) == {"merge.diff", "final.diff"}
+    assert "x = 5" in outcome.retained["merge.diff"]
+    assert "b formatted" in outcome.retained["final.diff"]
+    # the run's branch + worktree stayed for the probes — and go on cleanup
+    assert _branches(repo) - {"main", "story"}
+    outcome.cleanup()
+    assert _branches(repo) == {"main", "story"}
+    assert _git(repo, "worktree", "list").count("\n") == 0
+
+
+def test_live_resolve_cleans_up_a_run_that_died_after_the_intake(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, _head, _base, run = _run_live(monkeypatch, tmp_path, "raise")
+    with pytest.raises(RuntimeError, match="docker down"):
+        run()
+    # nothing of the run is left in the TARGET repo: no branch, no worktree
+    assert _branches(repo) == {"main", "story"}
+    assert _git(repo, "worktree", "list").count("\n") == 0
+    assert _git(repo, "worktree", "prune", "--dry-run") == ""
+
+
+def test_live_resolve_refuses_a_rewritten_history_as_a_resolution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, _head, _base, run = _run_live(monkeypatch, tmp_path, "rewrite")
+    outcome = run()
+    try:
+        assert outcome.status == "converged"
+        assert not outcome.pushable and outcome.merge_sha == ""
+        assert "S5 would refuse the push" in outcome.message
+        s = score_sample(_case(), outcome, _Probes({}))
+        assert not s.approved and not s.resolved and not s.unsafe
+    finally:
+        outcome.cleanup()
+    assert _branches(repo) == {"main", "story"}

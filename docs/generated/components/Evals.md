@@ -13,7 +13,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 |---|---|---:|---:|
 | `lithos_loom.evals` | XS | 0 | 0 |
 | `lithos_loom.evals.resolve` | XS | 0 | 0 |
-| `lithos_loom.evals.resolve.case` | S | 2 | 1 |
+| `lithos_loom.evals.resolve.case` | M | 2 | 1 |
 | `lithos_loom.evals.resolve.cli` | M | 0 | 2 |
 | `lithos_loom.evals.resolve.harness` | L | 7 | 7 |
 | `lithos_loom.evals.review` | XS | 0 | 0 |
@@ -55,7 +55,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - def `expected_fingerprint` — A stable hash of what the SCORER consumes: the case id and its probes.
 - def `materialise_trees` — ``(trees, cleanup)`` — each tree is its sha, or ``anchor + patch`` as an ephemeral commit (the head on ``merge_base``, the controls on ``base``); the build worktrees keep the commits reachable until ``cleanup``. Called once per case so K samples share the trees.
 - class `SampleScore`
-- def `score_sample` — Score one S5 run: the panel's verdict beside the oracle's, on the round-1 merge commit and on the final tree. No probe runs on a run that produced no merge commit, nor on an errored one.
+- def `score_sample` — Score one S5 run: the panel's verdict beside the oracle's, on the round-1 merge commit and on the final tree. No probe runs on a run that produced no merge commit, nor on an errored one (an infra death, a pause budget that ran out, a reviewer that gave no valid verdict). An approval only counts when S5 could have pushed the tree.
 - class `ResolveCaseResult` — Aggregated metrics for one case over K runs.
 - def `aggregate_resolve`
 - def `run_resolve_case` — Materialise the trees once, validate the oracle, run S5 *k* times, score each run against the oracle, aggregate.

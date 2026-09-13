@@ -27,18 +27,31 @@ resolution must satisfy:
 ``personas`` / ``profile`` name the panel and check-set the S5 loop runs on
 the composed tree, exactly as ``converge --resolve-conflicts`` would field
 them; ``title`` + ``ac.md`` are the PR's intent (the conflict brief and the
-coder's acceptance criteria).
+coder's acceptance criteria). The project's own develop settings — ``image``,
+``parity_command``, ``test_command``, ``check_commands``, ``check_states``,
+``artifacts_path`` — are declared by the case (what a ``--story`` run would
+resolve from the project's context doc), so the gate is the project's and
+the fixture is hermetic.
 """
 
 from __future__ import annotations
 
 import re
+import shlex
 import string
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from ...plugins.story_develop.config import parse_image
+from ...plugins.story_develop.config import (
+    parse_artifacts_path,
+    parse_check_commands,
+    parse_check_states,
+    parse_image,
+    parse_parity_command,
+    parse_test_command,
+)
 from ...plugins.story_develop.personas import canonical_personas
 from ...plugins.story_develop.profiles import UnknownProfileError, get_profile
 
@@ -63,6 +76,11 @@ _CASE_KEYS = frozenset(
         "profile",
         "acceptance_criteria_file",
         "image",
+        "parity_command",
+        "test_command",
+        "check_commands",
+        "check_states",
+        "artifacts_path",
     }
 )
 _PROBE_KEYS = frozenset({"name", "command"})
@@ -78,7 +96,11 @@ class Probe:
     command: str
 
     def render(self, *, case_dir: Path, worktree: Path) -> str:
-        return self.command.format(case_dir=str(case_dir), worktree=str(worktree))
+        """The argv-ready command: each placeholder shell-quoted, so a path with
+        a space or a quote survives the ``shlex.split`` the runner does."""
+        return self.command.format(
+            case_dir=shlex.quote(str(case_dir)), worktree=shlex.quote(str(worktree))
+        )
 
 
 @dataclass(frozen=True)
@@ -100,7 +122,29 @@ class ResolveCase:
     known_bad: str = ""
     known_bad_patch: str | None = None  # patch form: base + patch
     image: str | None = None
+    # The project's develop settings a production `converge --story` run would
+    # resolve from its context doc — declared HERE so the fixture is hermetic
+    # and the gate the eval runs is the project's, not the profile catalog's
+    # auto-detection alone (three of lens #43's conflicted paths are generated
+    # docs; only the parity drift check sees a hand-merged one).
+    parity_command: str | None = None
+    test_command: str | None = None
+    check_commands: Mapping[str, str] = field(default_factory=dict)
+    check_states: Mapping[str, str] = field(default_factory=dict)
+    artifacts_path: str | None = None
     case_dir: Path | None = None
+
+    def develop_settings(self) -> dict:
+        """The declared project settings, as ``DevelopConfig`` kwargs."""
+        out: dict = {
+            "check_commands": dict(self.check_commands),
+            "check_states": dict(self.check_states),
+        }
+        for key in ("image", "parity_command", "test_command", "artifacts_path"):
+            value = getattr(self, key)
+            if value is not None:
+                out[key] = value
+        return out
 
     @property
     def tree_label(self) -> str:
@@ -143,8 +187,14 @@ def load_resolve_case(case_dir: Path) -> ResolveCase:
     known_bad, known_bad_patch = _tree_spec(
         cid, case_dir, case, "known_bad", "known_bad_patch"
     )
+    where = f"case {cid}"
     try:
-        image = parse_image(case.get("image"), where=f"case {cid}")
+        image = parse_image(case.get("image"), where=where)
+        parity_command = parse_parity_command(case.get("parity_command"), where=where)
+        test_command = parse_test_command(case.get("test_command"), where=where)
+        check_commands = parse_check_commands(case.get("check_commands"), where=where)
+        check_states = parse_check_states(case.get("check_states"), where=where)
+        artifacts_path = parse_artifacts_path(case.get("artifacts_path"), where=where)
     except ValueError as exc:
         raise ValueError(str(exc)) from exc
 
@@ -204,6 +254,11 @@ def load_resolve_case(case_dir: Path) -> ResolveCase:
         known_bad=known_bad,
         known_bad_patch=known_bad_patch,
         image=image,
+        parity_command=parity_command,
+        test_command=test_command,
+        check_commands=check_commands,
+        check_states=check_states,
+        artifacts_path=artifacts_path,
         case_dir=case_dir,
     )
 
