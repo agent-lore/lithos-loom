@@ -95,6 +95,33 @@ CLOSED (the renderers of a board row are enumerable from the templates
 dir), so an enumerate-the-rest lens is admissible under the RH-1 rule —
 control in-session first; 1–3/5 → not decisive at K=5: pay K≈20 or leave
 it as a regression floor only.
+
+FIRST READING (2026-09-13, report ~/lithos-loom-eval-reports/
+lens83-first-2026-09-13; panel = correctness on codex gpt-5.6-sol high;
+judge = claude-opus-5): catch 3/5 (95% CI 23–88%), severity-correct 3/3
+(all critical), defect-scoped fp 0/5, no errored sample, gate green on
+every sample of both heads. AUDITED: all three catches reach the gap from
+the tree — each names gate_row.html's `<article>` carrying only
+`data-gate-row`, the handler's `[data-task-row]` selector at tasks.js:385
+and the missing server-built `data-panel-url`, and two cite REQUIREMENTS
+§5.2's "gate rows" / §5.5 — so the class is real and catchable, and the two
+misses (samples 0 and 2, three and two findings each, all elsewhere: the
+reconcile race on a stale `selected`, the whitespace-stripped selection id,
+the degraded-Lithos `?selected=` render, the panel-opens counter) are
+single-pass variance of the #239 shape, not a blind spot. Under the
+decision rule this is the MID BAND: not decisive at K=5 — the case stays a
+frontier regression floor (a move to 0/5 or 5/5 is what a later K=5 can
+read), and no lens is bought on it; the lever it points at is the #208
+per-criterion AC→evidence checklist, since every miss reviewed the diff and
+never enumerated the board's row renderers. Noise: the known-good blocked
+4/5 on findings shared by both heads and unrelated to the seed — the
+`_selected_id().strip()` vs arbitrary-id contract (4/5, both arms; SSR and
+client parse the selection differently), `?selected=` rendering no panel
+under a degraded Lithos (3/5), the detail page's `Blocks:` line guarded off
+for terminal tasks without dependents (2/5), the panel chain's missing
+`cycle:` line (1/5), and the declared "(no project)" residue (1/5) — those
+are claims about what SHIPPED to lens main and are escape-review material
+for lens, not this case's fp.
 """
 ac_provenance = "replay"   # the real T2-A6 story body the panel reviewed against
 tier = "frontier"          # the first escape-review mint; unmeasured until its first K=5 run
