@@ -34,7 +34,9 @@ class AdmissionWaker:
     republish that project's held stories — in release order — so the
     runner re-asks admission now rather than after the re-check backoff. A
     nudge only — the sleeper is the fallback, and admission itself enforces
-    the order at every ask."""
+    the order at every ask. A story's own terminal event is the other thing
+    it carries: :meth:`Admission.discard` releases the scheduler's memory of
+    it (PR #398 review), so that memory is bounded by the open stories."""
 
     bus: EventBus
     admission: Admission
@@ -46,7 +48,6 @@ class AdmissionWaker:
                 "lithos.task.completed",
                 "lithos.task.cancelled",
             ),
-            match={"task_type": "gate"},
             name="admission-waker",
         )
 
@@ -69,6 +70,12 @@ class AdmissionWaker:
 
     async def _handle(self, event: Event) -> None:
         metadata = event.payload.get("metadata") or {}
+        if event.payload.get("task_type") != "gate":
+            if event.type != "lithos.task.created":
+                task_id = event.payload.get("id")
+                if isinstance(task_id, str) and task_id:
+                    await self.admission.discard(task_id)
+            return
         if not _frees_a_slot(event.type, metadata):
             return
         project = project_of(metadata)  # None → the projectless bucket

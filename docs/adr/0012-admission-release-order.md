@@ -77,7 +77,13 @@ the override. In full:
    above one (or unlimited under the total cap) every free slot is filled,
    not one. The order is over `(route, story)` waits, so a story two
    PR-producing routes hold is two runs and two slots, and the story
-   behind it is entitled only to a third. The waker's sweep is now
+   behind it is entitled only to a third. One story's waits share its
+   rank and place, and the guarantee is deterministic **story** selection:
+   which of a story's routes runs first is whichever asks first (PR #398
+   review). A nudge for the story reaches every route that matches it, so
+   refusing the asker in favour of a sibling route would nudge the asker
+   straight back into the same refusal — a spin, in a design whose only
+   failure mode is meant to be a stall. The waker's sweep is now
    `Admission.wake`, which counts the bucket's headroom first and
    republishes only the held stories entitled to it, in release order;
    every nudge re-enters `admit`, which enforces the same order at the
@@ -108,9 +114,12 @@ the override. In full:
    (re-tagged to park it — a routine gesture — or onto another route: that
    runner would never receive the nudge, and another route matching is no
    help) is dropped at the next pick, the check per route from the tags
-   each ask reports; a story held in one bucket and admitted under another
-   leaves no wait behind (a phantom head that never asks there and, once
-   processed, can never be forgotten). What remains — a matched, ready
+   each ask reports; a story is in one project at a time, so a held wait
+   whose story now lives in another project is dropped at the pick, and an
+   ask that moves a story out of a bucket wakes that bucket once the ask
+   is over — its departed head may have been the one a free slot was
+   waiting for (PR #398 review) — so it leaves no phantom head behind (one
+   that never asks there and, once processed, can never be forgotten). What remains — a matched, ready
    head whose runner never asks — is named in the log every tenth nudge it
    does not answer.
 8. **Fail closed on the reads, per story.** A held story that cannot be
@@ -149,7 +158,10 @@ this decision also meets.
   first-asked order restarts with the process. Priority survives the
   restart because it is the task's own field. The first-asked record is
   kept for every story that ever asked, for as long as the story is open
-  — released when a pick finds it terminal or gone.
+  — released by the story's own `completed` / `cancelled` event (the
+  waker carries it to `Admission.discard`) or when a pick finds it
+  terminal or gone, so the scheduler's memory is bounded by the open
+  stories (PR #398 review).
 - `AdmissionWaker` no longer reads Lithos and moved to its own module
   (`subscriptions/admission_waker.py`); the Lithos reads — the dials, open
   gates, terminal-story gates, escalated gates — moved to

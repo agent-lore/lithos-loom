@@ -106,7 +106,7 @@ from lithos_loom.subscriptions.admission_count import (
     live_gates,
     open_gates,
 )
-from lithos_loom.subscriptions.dispatch_guards import task_payload
+from lithos_loom.subscriptions.dispatch_guards import project_of, task_payload
 from lithos_loom.task_line import PRIORITY_EMOJI
 
 __all__ = [
@@ -261,7 +261,12 @@ class Admission:
         head would otherwise strand the stories behind it until their
         sleepers fire (review round 2). Never raises — it sits on the
         runner's dispatch path."""
-        for bucket in list(self._deferred):
+        # membership first, the lock only where it holds a wait: this runs
+        # on every story's terminal event, most of which never asked
+        held_in = [
+            b for b, w in self._deferred.items() if any(s == task_id for _r, s in w)
+        ]
+        for bucket in held_in:
             async with self._lock(bucket):
                 waiting = self._deferred.get(bucket, set())
                 gone = {w for w in waiting if w[1] == task_id}
@@ -272,6 +277,17 @@ class Admission:
                 for wait in gone:
                     self._drop_wait(wait)
                 await self._wake_safely(bucket)
+
+    async def discard(self, task_id: str) -> None:
+        """The story is terminal (its ``completed`` / ``cancelled`` event, via
+        the waker): every wait on it ends, the buckets it was held in are
+        woken, and its first-asked place and seen rank are released — the
+        scheduler's memory is bounded by the OPEN stories (PR #398 review).
+        A story that never asked costs nothing here: no lock is taken."""
+        if self._first_asked.pop(task_id, None) is None:
+            return
+        self._rank_seen.pop(task_id, None)
+        await self.forget(task_id)
 
     async def release(self, task_id: str, *, route: str) -> None:
         """*route*'s run of the admitted story ended (delivered, failed,
@@ -306,23 +322,32 @@ class Admission:
             waiting.discard(wait)
         self._unanswered.pop(wait, None)
 
-    def _defer(self, bucket: str, route: str, task_id: str) -> None:
+    def _defer(self, bucket: str, route: str, task_id: str, *, left: set[str]) -> None:
         # A story is in one project at a time: a wait left in another bucket
         # would be a phantom head there, never asking, never forgotten
         # (review round 2). This is the one mutation of another bucket's
         # state outside that bucket's lock; a pick there that already
         # ordered the stale wait nudges once for nothing and self-heals.
-        for other, waiting in self._deferred.items():
-            if other != bucket:
-                waiting.discard((route, task_id))
+        # The bucket it left is woken once this ask is over (*left*): its
+        # departed head may have been the one entitled to a free slot.
+        left.update(self._leave_others(bucket, (route, task_id)))
         self._deferred.setdefault(bucket, set()).add((route, task_id))
 
-    def _admit(self, bucket: str, route: str, task_id: str) -> None:
+    def _admit(self, bucket: str, route: str, task_id: str, *, left: set[str]) -> None:
         # only THIS route's wait ends (round 2: another route's stays keyed)
-        for waiting in self._deferred.values():
-            waiting.discard((route, task_id))
+        left.update(self._leave_others(bucket, (route, task_id)))
+        self._deferred.get(bucket, set()).discard((route, task_id))
         self._in_flight.setdefault(bucket, set()).add((route, task_id))
         self._held_notified.discard(bucket)  # the cap cleared: re-arm the finding
+
+    def _leave_others(self, bucket: str, wait: tuple[str, str]) -> set[str]:
+        """Remove *wait* from every bucket but *bucket*; the buckets it left."""
+        left: set[str] = set()
+        for other, waiting in self._deferred.items():
+            if other != bucket and wait in waiting:
+                waiting.discard(wait)
+                left.add(other)
+        return left
 
     async def admit(
         self,
@@ -346,11 +371,12 @@ class Admission:
         bucket = _bucket(project)
         if tags is not None:
             self._route_tags[route] = tuple(tags)
+        left: set[str] = set()  # buckets this ask moved the story out of
         async with self._lock(bucket):
             self._first_asked.setdefault(task_id, next(self._ask_seq))
             self._unanswered.pop((route, task_id), None)  # it asked
             try:
-                return await self._decide(route, task_id, project, bucket)
+                verdict = await self._decide(route, task_id, project, bucket, left)
             except Exception:
                 logger.exception(
                     "%s: cannot decide admission for %s (bucket %r); holding it "
@@ -359,18 +385,29 @@ class Admission:
                     task_id,
                     bucket,
                 )
-                self._defer(bucket, route, task_id)
-                return AdmissionVerdict(False, "unreadable")
+                self._defer(bucket, route, task_id, left=left)
+                verdict = AdmissionVerdict(False, "unreadable")
+        for other in sorted(left):
+            # A re-homed story was a head there and may have been the one a
+            # free slot was waiting for (PR #398 review): wake it, outside
+            # this bucket's lock — never two bucket locks at once.
+            await self.wake(other or None)
+        return verdict
 
     async def _decide(
-        self, route: str, task_id: str, project: str | None, bucket: str
+        self,
+        route: str,
+        task_id: str,
+        project: str | None,
+        bucket: str,
+        left: set[str],
     ) -> AdmissionVerdict:
         limits = await limits_for(self._lithos, project, self._defaults)
         if limits is None:
-            self._defer(bucket, route, task_id)
+            self._defer(bucket, route, task_id, left=left)
             return AdmissionVerdict(False, "unreadable")
         if limits.limit == 0 and limits.total == 0:
-            self._admit(bucket, route, task_id)
+            self._admit(bucket, route, task_id, left=left)
             return AdmissionVerdict(True, "unlimited", limits=limits)
         asker = (route, task_id)
         others = [w for w in self._deferred.get(bucket, ()) if w != asker]
@@ -379,13 +416,13 @@ class Admission:
         )
         facts = (len(room.gates), room.escalated, limits, room.urls, room.running)
         if room.at_cap:
-            self._defer(bucket, route, task_id)
+            self._defer(bucket, route, task_id, left=left)
             await self._notify_held(
                 task_id, bucket, room.gates, limits, room.escalated, room.running
             )
             return AdmissionVerdict(False, "total_cap", *facts)
         if room.free == 0:
-            self._defer(bucket, route, task_id)
+            self._defer(bucket, route, task_id, left=left)
             self._held_notified.discard(bucket)  # under the cap: re-arm
             return AdmissionVerdict(False, "limit", *facts)
         # Slots are free. They go to the front of the bucket's release order
@@ -393,12 +430,12 @@ class Admission:
         # here so the order cannot depend on whose nudge arrived first. With
         # no other wait there is nothing to order and no read.
         if not others:
-            self._admit(bucket, route, task_id)
+            self._admit(bucket, route, task_id, left=left)
             return AdmissionVerdict(True, "admitted", *facts)
         order = await self._release_order(bucket, asker=asker)
         entitled = order[: room.free]
         if asker not in [w for w, _t in entitled]:
-            self._defer(bucket, route, task_id)
+            self._defer(bucket, route, task_id, left=left)
             self._held_notified.discard(bucket)
             logger.info(
                 "%s: %s is queued behind %s in bucket %r (%d free slot(s)); "
@@ -411,7 +448,7 @@ class Admission:
             )
             await self._nudge_all(entitled, asker=None, unanswered=True)
             return AdmissionVerdict(False, "queued", *facts)
-        self._admit(bucket, route, task_id)
+        self._admit(bucket, route, task_id, left=left)
         # the places left go to the next in order
         await self._nudge_all(entitled, asker=asker, unanswered=False)
         return AdmissionVerdict(True, "admitted", *facts)
@@ -530,9 +567,13 @@ class Admission:
         included: one story's read never loses the sweep — keeps its place
         at the rank it was last seen (the default if never) and is returned
         without a task, so it cannot be nudged. The asker is never dropped:
-        whether it is still open is the claim's to tell. Among one story's
-        waits the asker's own sorts first: they share the story's rank and
-        place, and the asker is the one here."""
+        whether it is still open is the claim's to tell. One story's waits
+        share its rank and place, and the asker's own sorts first among
+        them: the guarantee is deterministic STORY selection — which of a
+        story's routes runs first is whichever asks first, because a nudge
+        for the story reaches every route that matches it, so refusing the
+        asker in favour of a sibling route would nudge the asker straight
+        back into the same refusal (PR #398 review)."""
         waits = set(self._deferred.get(bucket, ()))
         if asker is not None:
             waits.add(asker)
@@ -544,8 +585,24 @@ class Admission:
                 if story != asking and (task is None or task.status != "open"):
                     self._drop_story(story)
                     continue
+                home = _bucket(project_of(task.metadata)) if task else bucket
                 for wait in [w for w in waits if w[1] == story and w != asker]:
-                    if not self._matched(task, route=wait[0]):
+                    if home != bucket:
+                        # PR #398 review: a story moved to another project
+                        # is not this bucket's head; it asks there, and the
+                        # wait it would leave behind must not hold this one.
+                        logger.info(
+                            "%s: held story %s now lives in bucket %r, not %r; "
+                            "dropping its wait (it keeps its place; its own "
+                            "re-check re-asks under its project)",
+                            _SUBSYSTEM,
+                            story,
+                            home,
+                            bucket,
+                        )
+                    elif self._matched(task, route=wait[0]):
+                        continue
+                    else:
                         logger.info(
                             "%s: route %s no longer matches held story %s; "
                             "dropping its wait (the story keeps its place)",
@@ -553,8 +610,8 @@ class Admission:
                             wait[0],
                             story,
                         )
-                        self._drop_wait(wait)
-                        waits.discard(wait)
+                    self._drop_wait(wait)
+                    waits.discard(wait)
                 if not any(s == story for _r, s in waits):
                     continue
                 rank = _rank(task.metadata if task is not None else None)

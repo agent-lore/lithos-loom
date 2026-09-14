@@ -835,9 +835,9 @@ async def test_admitting_one_route_keeps_another_routes_deferral() -> None:
     _d, gate = await _delivered(client, number=1)
     story = await _story(client)
     adm = _admission(client, limit=1)
-    assert not (await adm.admit(route="a", task_id=story, project=_PROJECT)).admitted
+    assert not (await adm.admit(route="b", task_id=story, project=_PROJECT)).admitted
     await client.task_complete(task_id=gate, agent=_AGENT)
-    assert (await adm.admit(route="b", task_id=story, project=_PROJECT)).admitted
+    assert (await adm.admit(route="a", task_id=story, project=_PROJECT)).admitted
 
     assert adm.deferred(_PROJECT) == frozenset({story})
     await adm.forget(story)  # the story left the open set: every route's wait ends
@@ -1553,6 +1553,103 @@ async def test_release_and_forget_never_raise() -> None:
     await adm.forget(waiting)
 
     assert adm.deferred(_PROJECT) == frozenset()
+
+
+# ── PR #398 review: a re-homed head, the route tie-break, bounded memory ──
+
+
+async def test_a_head_moved_to_another_project_does_not_hold_the_bucket_it_left() -> (
+    None
+):
+    """The review's sequence: the head is moved to project B before A's slot
+    frees. A's wake must see it is no longer A's and nudge the next story,
+    not the departed head."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    moved, stayed = await _story(client, "moved"), await _story(client, "stayed")
+    await _hold_in_order(adm, moved, stayed)
+    await client.task_update(task_id=moved, agent=_AGENT, metadata={"project": "B"})
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    assert await adm.wake(_PROJECT) == 1
+
+    assert _nudged(probe) == [stayed]
+    assert adm.deferred(_PROJECT) == frozenset({stayed})
+
+
+async def test_a_head_admitted_elsewhere_wakes_the_bucket_it_left() -> None:
+    """The other order: A's slot is free, the head asks under B and is
+    admitted there. Its wait leaves A, so A is woken for the next story."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    moved, stayed = await _story(client, "moved"), await _story(client, "stayed")
+    await _hold_in_order(adm, moved, stayed)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+    await client.task_update(task_id=moved, agent=_AGENT, metadata={"project": "B"})
+
+    assert (await adm.admit(route=_ROUTE, task_id=moved, project="B")).admitted
+
+    assert _nudged(probe) == [stayed]
+    assert adm.deferred(_PROJECT) == frozenset({stayed})
+
+
+async def test_one_storys_routes_run_in_the_order_they_ask() -> None:
+    """One story, two PR-producing routes, one slot: the guarantee is which
+    STORY leaves, not which of its routes. Refusing the asker for a sibling
+    route would nudge the story — and so the asker — straight back into the
+    same refusal: a spin, in a design whose only failure mode is a stall."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    story = await _story(client)
+    for route in ("a", "z"):
+        held = await adm.admit(route=route, task_id=story, project=_PROJECT)
+        assert held.reason == "limit"
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    assert (await adm.admit(route="z", task_id=story, project=_PROJECT)).admitted
+
+    assert _nudged(probe) == []  # nothing to re-ask: the slot is taken
+    assert adm.deferred(_PROJECT) == frozenset({story})  # route a still waits
+
+
+async def test_a_terminal_story_gives_up_its_place() -> None:
+    """Every ask is remembered so a story that ran and returns keeps its
+    place; the story's terminal event (via the waker) is what releases that
+    memory. A story completed and later reopened is a newcomer."""
+    import dataclasses
+
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    waker = AdmissionWaker(bus=bus, admission=adm)
+    old = await _story(client, "old")
+    assert (await adm.admit(route=_ROUTE, task_id=old, project=_PROJECT)).admitted
+    new = await _story(client, "new")
+    await _hold_in_order(adm, new)
+    await client.task_complete(task_id=old, agent=_AGENT)
+    await bus.publish(_gate_event(client, old, type_="lithos.task.completed"))
+    await _run_for(waker)
+    await adm.release(old, route=_ROUTE)
+    _nudged(probe)  # the release woke `new`; not what this test is about
+    client._tasks[old] = dataclasses.replace(  # noqa: SLF001 — reopened by hand
+        client._tasks[old],  # noqa: SLF001
+        status="open",
+    )
+
+    late = await adm.admit(route=_ROUTE, task_id=old, project=_PROJECT)
+
+    assert not late.admitted and late.reason == "queued"
+    assert _nudged(probe) == [new]
 
 
 # ── #372: a terminal story whose delivered PR is still open ──────────────────

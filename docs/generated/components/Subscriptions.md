@@ -32,9 +32,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._project_settings` | S | 1 | 7 |
 | `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
-| `lithos_loom.subscriptions.admission` | M | 2 | 0 |
+| `lithos_loom.subscriptions.admission` | L | 2 | 0 |
 | `lithos_loom.subscriptions.admission_count` | S | 1 | 4 |
-| `lithos_loom.subscriptions.admission_waker` | XS | 1 | 0 |
+| `lithos_loom.subscriptions.admission_waker` | S | 1 | 0 |
 | `lithos_loom.subscriptions.conflict_resolve_dispatch` | M | 2 | 1 |
 | `lithos_loom.subscriptions.conflict_resolve_outcome` | S | 0 | 9 |
 | `lithos_loom.subscriptions.conflict_resolve_record` | S | 2 | 1 |
@@ -154,7 +154,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `escalated_count` — How many of *gates* wait on a story that an OPEN loom ``human`` gate structurally blocks. The human gate's ``waits_on_gate`` edge is the authority (review #368 F4): gate creation is not atomic, and a gate task whose edge never landed blocks nothing — its ``story_id`` alone must not free a slot. Unreadable → 0 (every gate counts).
 
 ### `lithos_loom.subscriptions.admission_waker`
-- class `AdmissionWaker` — One subscriber per route-runner child: when a ``pr`` gate closes or a loom ``human`` gate escalates one, ask :meth:`Admission.wake` to republish that project's held stories — in release order — so the runner re-asks admission now rather than after the re-check backoff. A nudge only — the sleeper is the fallback, and admission itself enforces the order at every ask.
+- class `AdmissionWaker` — One subscriber per route-runner child: when a ``pr`` gate closes or a loom ``human`` gate escalates one, ask :meth:`Admission.wake` to republish that project's held stories — in release order — so the runner re-asks admission now rather than after the re-check backoff. A nudge only — the sleeper is the fallback, and admission itself enforces the order at every ask. A story's own terminal event is the other thing it carries: :meth:`Admission.discard` releases the scheduler's memory of it (PR #398 review), so that memory is bounded by the open stories.
 
 ### `lithos_loom.subscriptions.conflict_resolve_dispatch`
 - def `spawn_resolve` — Run the resolve subprocess (cancellation-safe, bounded).
