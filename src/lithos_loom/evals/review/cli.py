@@ -86,7 +86,8 @@ def review(
         None,
         "--reviewer",
         help="Explicitly enumerate the panel (repeatable canonical persona "
-        "names); wins over --profile's panel.",
+        "names, or code-quality for the brief-less generalist); wins over "
+        "--profile's panel.",
     ),
     reviewer_override: list[str] | None = typer.Option(
         None,

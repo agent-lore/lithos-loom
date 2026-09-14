@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.plugins.story_develop.converge.converge_pr"
       }
     ],
-    "total_functions": 1573
+    "total_functions": 1574
   },
   "domain": {
     "associations": 2,
@@ -414,13 +414,13 @@
       },
       "Evals": {
         "classes": 28,
-        "functions": 194,
+        "functions": 195,
         "largest_module": "lithos_loom.evals.resolve.harness",
         "largest_module_lines": 796,
-        "lines": 6414,
+        "lines": 6439,
         "modules": 23,
-        "public_symbols": 95,
-        "sloc": 5376
+        "public_symbols": 96,
+        "sloc": 5399
       },
       "GitHub": {
         "classes": 18,
@@ -555,13 +555,13 @@
       "lithos_loom.plugins.story_develop.rounds",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 61331,
+    "total_lines": 61356,
     "total_modules": 174,
-    "total_sloc": 49764
+    "total_sloc": 49787
   },
   "tests": {
     "ratio": 1.59,
-    "src_lines": 61331,
-    "test_lines": 97354
+    "src_lines": 61356,
+    "test_lines": 97376
   }
 }

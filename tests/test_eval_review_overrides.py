@@ -173,6 +173,28 @@ def test_unknown_reviewer_name_raises() -> None:
         resolve_panel(_case(), reviewers=["corectness"])
 
 
+def test_generalist_builtin_reviewer_is_a_selectable_arm() -> None:
+    """The zero-config generalist (``code-quality``, no persona brief) is a
+    panel a run may field — the cold-generalist arm of the escape-corpus
+    reading: does a reviewer with NO persona narrowness reproduce the
+    operator's findings? It is not a canonical persona, so a case file
+    still cannot name it (unchanged: load_case fails closed)."""
+    from lithos_loom.plugins.story_develop.config import DEFAULT_REVIEWER_NAME
+
+    _, panel = resolve_panel(_case(), reviewers=[DEFAULT_REVIEWER_NAME])
+    (spec,) = panel
+    assert spec.name == DEFAULT_REVIEWER_NAME
+    assert spec.system_prompt is None  # no brief: the generalist
+    assert spec.model is None  # #304: resolved from default_models later
+    # overrides reach it like any persona; the registry itself is untouched
+    overrides = parse_reviewer_overrides([f"{DEFAULT_REVIEWER_NAME}.model=m"])
+    _, panel = resolve_panel(
+        _case(), reviewers=[DEFAULT_REVIEWER_NAME], overrides=overrides
+    )
+    assert panel[0].model == "m"
+    assert DEFAULT_REVIEWER_NAME not in canonical_personas()
+
+
 def test_overrides_apply_on_top_of_profile_panel() -> None:
     overrides = parse_reviewer_overrides(["correctness.model=some-model"])
     _, panel = resolve_panel(_case(), profile="thorough", overrides=overrides)
