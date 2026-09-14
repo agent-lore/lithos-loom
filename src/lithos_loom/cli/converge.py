@@ -560,9 +560,10 @@ def _render(result: ConvergeResult) -> str:
     for o in result.external_outcomes:
         where = f" ({o.finding.path}:{o.finding.line})" if o.finding.path else ""
         detail = f" — {o.detail}" if o.detail else ""
+        note = f" [note: {o.note}]" if o.note else ""
         lines.append(
             f"  external [{o.finding_id}] by {o.finding.author}{where}: "
-            f"{o.disposition}{detail}"
+            f"{o.disposition}{detail}{note}"
         )
     for f in result.deferred_findings:
         # 819370e5 (PR #342 review): converge has no Lithos source task, so

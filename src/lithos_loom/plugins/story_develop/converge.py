@@ -238,7 +238,8 @@ def converge_pr(
         )
 
         def _external_epilogue(result: DevelopResult) -> tuple[ExternalOutcome, ...]:
-            # #387: the threads are answered from the coder's FINAL handoff
+            # #387/#399: the threads are answered from the coder's acks across
+            # every round — the final one wins when decisive
             return final_round_outcomes(
                 handoff_dir=config.handoff_dir,
                 run_id=config.run_id,

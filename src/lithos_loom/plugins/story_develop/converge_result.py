@@ -181,6 +181,7 @@ class ConvergeResult:
                 "thread_url": o.finding.thread_url,
                 "disposition": o.disposition,
                 "detail": o.detail,
+                "note": o.note,
             }
             for o in self.external_outcomes
         ]

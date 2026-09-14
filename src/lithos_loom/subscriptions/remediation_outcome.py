@@ -186,9 +186,12 @@ async def record_result(
             continue
         where = f" ({o['thread_url']})" if o.get("thread_url") else ""
         detail = f" — {o['detail']}" if o.get("detail") else ""
+        # #399: how the epilogue read a final ack that disagreed with an
+        # earlier round's — shown here, never on the reviewer's thread
+        drift = f" [note: {o['note']}]" if o.get("note") else ""
         lines.append(
             f"- {o.get('finding_id', '?')} by {o.get('author', '?')}: "
-            f"{o.get('disposition', '?')}{detail}{where}"
+            f"{o.get('disposition', '?')}{detail}{where}{drift}"
         )
     cost = data.get("total_cost_usd")
     if isinstance(cost, int | float):
