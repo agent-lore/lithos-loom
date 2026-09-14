@@ -784,6 +784,49 @@ findings, run through the four buckets above.
   case stays a frontier regression floor and buys no lens; the known-good
   noise (4/5 blocked) is five shared claims about what shipped to lens
   main, listed in the case, for lens's own escape review.
+- **2026-09-14 — the lens T2 strand, PRs #78 / #79 / #81 / #84 / #87 (the
+  operator's codex-backed reviews on every delivered T2 PR, run through the
+  four buckets in one sitting).** Nine validated external findings on five
+  merged loom-authored PRs, EVERY one bucket 1 — zero bucket 2 (nothing
+  needed knowledge the sandbox lacks), zero bucket 3 (nothing pre-existing),
+  zero bucket 4 (no invalid claim; the two `Not changed — triage` replies on
+  #78 refuted claims already fixed at the head, not wrong claims). Minted
+  four cases, one per PR, two findings each where the diff carried two:
+  `lens78-fanout-work-bounds` (A1, correctness + security, 8 rounds, 0
+  findings: the node guard costs unbounded work to evaluate; epic membership
+  reads bypass the session reservation), `lens79-active-projection-chain`
+  (A2, correctness + security, 2 rounds, 0 findings: the active chain
+  condensed over all-edge SCCs; the focus chain's backward tie-break),
+  `lens81-cycle-authority-coverage` (A3, correctness + test-quality, 7
+  rounds, 0 OPEN findings: the cycle-signal fan-out unbounded before the
+  queue; an out-of-scope ghost's blocked row promoted into cycle authority),
+  `lens87-chain-trace-projection` (A4, twelve rounds across story-develop +
+  converge: the canvas chain trace resolved through the display SCC instead
+  of the active projection's — the server docstring names the case). Every
+  known-good is the AUTHENTIC fix, a direct descendant of the defect head:
+  the operator's single hand commit on #78, round 1 of loom's own
+  `converge --from-github` remediation on the other three. Not minted:
+  #84's two P2s (the dashboard bug story 02d9019a — a banner claiming a
+  frontier-only row is "not shown in any section" while the terminal read
+  places it; the healthy stripe asserted over an unplaced row) are bucket 1
+  but the class is lens43-degraded-contract's (an affirmative claim the
+  reads do not support, REQUIREMENTS §14) and one case per class holds; the
+  second was also held by the panel to contradict the story's AC until the
+  AC was amended, so scoring it would punish AC conformance. #80, #85, #86
+  drew no external finding (#85's blocker was a rebase).
+  **The reading BEFORE any number:** two blind-spot classes recurred across
+  slices — (i) *resource-bound completeness*: "the semaphore limits it" was
+  accepted as a bound on queued work twice, in graph_scope (A1) and
+  graph_cycles (A3), one week apart, by two different panels; (ii)
+  *partition reuse across projections*: a derived claim about the ACTIVE
+  projection resolved through a partition built over ALL edges, on the
+  server (A2) and then on the client (A4) with the server's own docstring
+  naming the divergence. A reviewer that had read A2's remediation would
+  have caught A4's. Both classes are CLOSED (enumerable projections; every
+  queue has a count), so under the RH-1 rule a lens is admissible if the
+  first readings come in at 0/5 — and a cold generalist arm on the same
+  cases (`--reviewer code-quality`) is what separates "the personas'
+  narrowness" from "the panel's context" as the lever. Readings pending.
 
 ## Scoring (how a finding matches)
 

@@ -1,0 +1,150 @@
+[case]
+id = "lens81-cycle-authority-coverage"
+description = """
+lens PR #81 escape (T2-A3, story-develop run 8a856bbc): the standard panel
+(correctness + test-quality, 7 rounds, $109.22; it caught two criticals of
+its own over those rounds — an absent answer read as a negative one — and
+approved with zero open findings). The external reviewer's first pass found
+no blocker; the re-review at the delivered head b0368ed found two P1s
+(https://github.com/agent-lore/lithos-lens/pull/81#issuecomment-5633591404),
+both in the D4 cycle-signal machinery: (1) `coverage_projects()` accepts
+every project-looking tag on every covered task (the vendored
+`lithos_task_create` contract puts no maximum on the tags array), and
+graph_cycles.py builds two `task_blocked` reads per project and hands the
+whole plan to `asyncio.gather` — the semaphores bound only simultaneous
+calls, not the queued coroutines or total work, and the per-call timeout
+starts only after both gates are acquired, so there is no whole-phase
+deadline: one task with 1,000 valid `project:*` tags made 2,000
+`task_blocked` calls in the reviewer's probe, per graph-page request;
+(2) a project-scoped `task_blocked` read legitimately returns tasks outside
+the fetched graph, and `_signal()` puts every such row into `blocked` /
+`flagged` while `build_graph_page()` passes them all to topology — so an
+upstream ghost G (edge G → A, A in scope) with a cycle blocker whose other
+member is outside the scope renders `(G.in_cycle, A.blocked_via_cycle,
+cycle_count) == (True, True, 1)`: a cycle callout invented for a task whose
+edges were never fetched, propagated as blocking onto real in-scope work,
+contradicting the adjacent comment that ghosts carry no cycle authority.
+
+Escape-review provenance (README §"Escape review"): bucket 1 ×2 — the
+panel reviewed this exact diff over seven rounds, both defects are in it,
+and catching them needs only the tree plus reasoning (the story body
+defines the coverage set and says a ghost's edges are never fetched; the
+vendored contract shows tags are unbounded). BLIND-SPOT CLASSES: (1)
+resource-bound completeness — queued work must be bounded BEFORE the queue
+is built and the phase needs its own deadline; "the semaphore limits it"
+is not a bound — the SAME class the panel had let through in
+lens78-fanout-work-bounds one slice earlier (a different module, a
+different panel member); (2) authority coverage — a derived verdict (in a
+cycle / blocked via cycle) may only be asserted for nodes whose inputs
+(edges) were fetched; rows a scoped read returns about out-of-scope tasks
+are data, not authority. Two findings, two classes, one diff: one case.
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout.
+FULL-FEATURE diff as the panel approved it (base = lens main e2347d6, the
+#79 squash merge = the story's own merge-base; defect patch = delivered r7
+head b0368ed, the head the reviewer validated: make check 1,219 passed / 16
+skipped, e2e 60, CI green).
+
+PAIRING: defect + its AUTHENTIC FIX (the lens22 shape). known-good.patch is
+`git diff e2347d6..8b7f6c8` — round 1 of loom's own remediation
+(`converge --from-github`): graph_cycles.py caps the read plan before it is
+queued and puts a deadline on the whole phase, degrading the affected
+in-scope verdicts to `cycle status unknown` with the banner rather than
+treating a truncated set as cycle-free; topology / callout authority is
+filtered to non-ghost in-scope ids and ghost flagged / cycle rendering is
+gated; route-level regressions for the many-project task, the slow client
+and the upstream-ghost case; SPECIFICATION, manual and metrics regenerated.
+NOT the merged head 50723ea: rounds 2–4 addressed the converge panel's own
+findings on the fixed tree.
+
+RH-5 DECLARATION: two declared defects, the two externally-caught escapes.
+The reviewer's first pass also recorded two non-defects (graph_layout.py at
+799/800 lines; the cycle logic has no production exercise — all 20 real
+scopes report 0 cycles) — findings about those are neither expected nor
+fp. Both heads pass lens's own `make check` (the reviewer's validation on
+b0368ed; the remediation gate on 8b7f6c8). MDE, STATED BEFORE ANY PAID
+ARM: prior = one live run at 0 open findings over 7 rounds (the panel was
+BUSY on this diff — it found two criticals — which makes a 0/5 here more
+informative than lens83's: not a quiet panel, a panel looking elsewhere).
+Decision rule as lens83's; both classes are CLOSED (every queued read has
+a count; every asserted verdict has an input set) so a lens is admissible
+at 0/5 under the RH-1 rule.
+"""
+ac_provenance = "replay"   # the real T2-A3 story body the panel reviewed against
+tier = "frontier"
+repo = "../lithos-lens"
+base = "e2347d6597abeab0a39ad6271137d8f2197637a3"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+
+[[expected]]
+file = "src/lithos_lens/graph_cycles.py"
+keywords = [
+    "coverage_projects",
+    "bound",
+    "unbounded",
+    "cap",
+    "deadline",
+    "gather",
+    "tags",
+    "project:",
+    "fan-out",
+    "fanout",
+    "task_blocked",
+]
+min_severity = "major"
+mechanism = """
+The cycle-signal fan-out is unbounded before the read queue exists:
+`coverage_projects()` accepts every project-looking tag on every covered task
+(the vendored task contract puts no maximum on a task's tags), the code
+constructs two scoped `task_blocked` reads per project and passes the entire
+plan to `asyncio.gather`; the semaphores limit only simultaneous calls, not
+the number of queued coroutines or total work, and the per-call timeout
+starts only after both gates are acquired, so the phase as a whole has no
+deadline. One task carrying many valid `project:*` tags makes every graph
+page request issue thousands of `task_blocked` calls and consume unbounded
+memory / upstream work / time. A match names the unbounded or uncapped
+number of blocked reads driven by tags / coverage projects, the missing
+hard bound before the queue is built, or the missing whole-phase deadline
+(and, ideally, that a truncated coverage must degrade to `unknown`, never
+cycle-free). NOT a match: the ghost-authority finding (the other expected);
+the truncation-at-limit banner (correct); the projectless-child rule.
+"""
+
+[[expected]]
+file = "src/lithos_lens/graph_cycles.py"
+keywords = [
+    "ghost",
+    "out-of-scope",
+    "outside the scope",
+    "_signal",
+    "authority",
+    "blocked_via_cycle",
+    "in_cycle",
+    "callout",
+    "topology",
+    "flagged",
+]
+min_severity = "major"
+mechanism = """
+An out-of-scope ghost's blocked row is promoted into this graph's cycle
+authority: a project-scoped `task_blocked` read legitimately returns tasks
+that are not in the fetched graph, `_signal()` puts all such rows into
+`blocked` / `flagged`, and `build_graph_page()` passes all of them to
+topology. With real task A in scope, upstream ghost G and edge G → A, a
+cycle blocker for G whose other member is outside the scope renders G
+in a cycle and A blocked via cycle with a cycle callout — a cycle invented
+for a task whose edges were never fetched, propagated as blocking onto
+in-scope work, contrary to the rule that ghosts carry no cycle authority. A
+match says ghost / out-of-scope blocked rows feed the cycle callout,
+topology or `blocked_via_cycle` marking (or that authority must be
+filtered to non-ghost in-scope ids), whether anchored in graph_cycles.py or
+graph_page.py. NOT a match: the fan-out bound (the other expected); the
+"through tasks outside this scope" listing for in-scope tasks Lithos flags
+(correct); ghost row rendering (chip, links).
+"""

@@ -1,0 +1,121 @@
+[case]
+id = "lens87-chain-trace-projection"
+description = """
+lens PR #87 escape (T2-A4): story-develop run aabb134f ended max_rounds
+after 8 rounds ($121.64, four open test-quality majors, correctness
+green), the PR was opened by hand and a hand-run `converge` (82dfe33b, 4
+more rounds, correctness LGTM by round 4, gate green) produced head
+19202ab — twelve panel rounds in all, correctness + test-quality, and the
+external reviewer's first pass found one P1 in the Conversation tab
+(https://github.com/agent-lore/lithos-lens/pull/87#issuecomment-5665261576):
+graph.js's `condensationOf()` traces the longest-chain overlay through
+`node.cycle`, the SCC id built from ALL dependency edges (the display
+topology), while `payload.longest_chain.nodes` names condensations built
+from the ACTIVE-edge projection — partitions that legitimately differ. In
+an epic graph (completed children included by default) `A(open) → B(open)`
+is active while `B → C(completed)` and `C → A` are inactive: the display
+cycle is {A,B,C}, the active chain is A → B, and `condensationOf()` maps
+both chain endpoints to A, so the trace collapses / mis-draws exactly the
+mixed active/inactive cycle the server side was fixed for.
+
+Escape-review provenance (README §"Escape review"): bucket 1 — the panel
+reviewed this exact diff (twelve rounds of it), the defect is in it, and
+catching it needs only the tree plus reasoning: the server's own
+`_active_condensed` docstring (graph_layout.py, in the reviewed checkout
+since the #79 remediation) names the mixed-status cycle as the case where
+the two condensations differ, and the payload contract the diff consumes
+(`longest_chain.nodes` vs each node's `cycle`) is in the same tree.
+BLIND-SPOT CLASS: partition reuse across projections — the client half of
+the EXACT class the external reviewer had caught on the server side in
+lens79-active-projection-chain one slice earlier: a derived overlay
+("trace the active chain") resolved through a partition (display SCC
+membership) computed over a different edge set. The second recurrence of
+the class, this time with the tree naming the case in a docstring — the
+panel does not read a consumer against its producer's stated caveats. It
+is also the first escape the standing process ingested end to end on a
+HUMAN review (the watcher dispatched the remediation off the reviewer's
+comment; loom #399 is the false "Not changed" reply that run's epilogue
+produced).
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout.
+FULL-FEATURE diff as the reviewer saw it (base = lens main 9afee57, the
+#86 squash merge = the branch's merge-base; defect patch = 9afee57..19202ab,
+the head the reviewer validated: make check 1,458 passed / 16 skipped, e2e
+104, CI green).
+
+PAIRING: defect + its AUTHENTIC FIX (the lens22 shape). known-good.patch is
+`git diff 9afee57..eb578fe` — round 1 of loom's remediation run 505ad2f8
+(`converge --from-github`): `BlockingChain.members` carries the active
+projection's own condensation membership beside `nodes`,
+`graph_view.payload_json` emits it as `longest_chain.members`, graph.js
+traces through `chainCondensationOf()` built from that instead of
+`node.cycle`, the mixed active/inactive cycle is a JS regression test;
+SPECIFICATION, architecture.toml and metrics regenerated. NOT the pushed
+head 4589b6d: rounds 2–4 addressed the converge panel's own findings on
+the fixed tree (a pending-panel-open supersede predicate, harness release
+ordering).
+
+RH-5 DECLARATION: one declared defect, the externally-caught escape. The
+head carries the converge panel's later findings present-but-undeclared at
+BOTH heads (the round-1 fix does not touch them): a node tap landing while
+a panel open is still pending, and the graph test harness's `hold` mode —
+shared findings, `noise` never `fp`. Both heads pass lens's own `make
+check` (the reviewer's validation on 19202ab; the remediation gate on
+eb578fe). MDE, STATED BEFORE ANY PAID ARM: prior = twelve live rounds at
+zero findings on this defect. Decision rule as lens83's; the class is
+CLOSED (the projections a consumer can resolve a chain through are
+enumerable, and the producer's docstring lists them), so a
+read-the-producer's-caveats lens is admissible at 0/5 under the RH-1 rule
+— and a 0/5 here beside lens79's number would say the class is
+persona-independent.
+"""
+ac_provenance = "replay"   # the real T2-A4 story body the panel reviewed against
+tier = "frontier"
+repo = "../lithos-lens"
+base = "9afee57d34f35095c4d6392f81865bab49cb93f3"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+
+[[expected]]
+# `file` is the harm site (the client trace). A reviewer may anchor the
+# same finding at the producer — graph_layout.py / graph_view.py, where the
+# payload lacks the active condensation membership the client needs — the
+# judge rescues that phrasing.
+file = "src/lithos_lens/static/graph.js"
+keywords = [
+    "condensationOf",
+    "node.cycle",
+    "cycle",
+    "longest_chain",
+    "active",
+    "display",
+    "SCC",
+    "projection",
+    "condens",
+    "members",
+]
+min_severity = "major"
+mechanism = """
+The longest-chain trace on the canvas resolves the chain's condensation
+nodes through `node.cycle` — each node's SCC membership computed over ALL
+dependency edges for the display topology — while `payload.longest_chain
+.nodes` identifies condensations built over the ACTIVE-edge projection
+(`_active_condensed`, whose docstring names this divergence). The two
+partitions legitimately differ whenever a cycle is closed by inactive
+edges: in an epic graph, `A(open) → B(open)` active with `B → C(completed)`
+and `C → A` inactive gives display cycle {A,B,C} but active chain A → B, and
+`condensationOf()` maps both chain endpoints to the same compound node, so
+the trace is collapsed or drawn along the wrong path. A match says the
+chain overlay / trace uses the display cycle (all-edge SCC, `node.cycle`,
+the compound parent) to map or expand `longest_chain.nodes`, or that the
+payload gives the client no active-projection membership to trace through,
+or reproduces the mixed active/inactive cycle. NOT a match: arrowhead /
+legend / overlay toggles; the `focus=` panel transitions; the refresh pill;
+the isolate toggle; test-harness findings (hold / release ordering); the
+pending-panel-open supersede race.
+"""
