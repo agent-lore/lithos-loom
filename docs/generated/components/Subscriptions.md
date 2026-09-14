@@ -32,7 +32,9 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._project_settings` | S | 1 | 7 |
 | `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
-| `lithos_loom.subscriptions.admission` | M | 4 | 0 |
+| `lithos_loom.subscriptions.admission` | M | 2 | 0 |
+| `lithos_loom.subscriptions.admission_count` | S | 1 | 4 |
+| `lithos_loom.subscriptions.admission_waker` | XS | 1 | 0 |
 | `lithos_loom.subscriptions.conflict_resolve_dispatch` | M | 2 | 1 |
 | `lithos_loom.subscriptions.conflict_resolve_outcome` | S | 0 | 9 |
 | `lithos_loom.subscriptions.conflict_resolve_record` | S | 2 | 1 |
@@ -141,10 +143,18 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
 
 ### `lithos_loom.subscriptions.admission`
-- class `AdmissionLimits` — ``limit`` bounds non-escalated open ``pr`` gates; ``total`` bounds all of them. ``0`` = unlimited.
 - class `AdmissionVerdict` — What :meth:`Admission.admit` decided and why.
 - class `Admission` — The per-process admission gate every PR-producing route consults.
-- class `AdmissionWaker` — One subscriber per route-runner child: when a ``pr`` gate closes or a loom ``human`` gate escalates one, republish that project's deferred stories so the runner re-asks admission now rather than after the re-check backoff. A nudge only — the sleeper is the fallback.
+
+### `lithos_loom.subscriptions.admission_count`
+- class `AdmissionLimits` — ``limit`` bounds non-escalated open ``pr`` gates; ``total`` bounds all of them. ``0`` = unlimited.
+- def `open_gates` — The bucket's open gates of *gate_type* — one filtered read for a project; for the projectless bucket, every open gate of the type that names no project (``metadata_match`` cannot say "absent").
+- def `limits_for` — The project's dials, or ``None`` when its context doc cannot be read — the caller holds the story rather than guess. Projectless work has no doc: the host defaults.
+- def `live_gates` — *gates* minus those whose waiter is terminal (#372). A waiter that cannot be read, or that Lithos no longer returns ("gone" is not "done"), keeps its gate counted — fail closed, as the escalation read does. The story is named by the gate's ``story_id`` metadata first (the cheap link, as ``_escalated_count`` reads it) and the ``waits_on_gate`` edge only for an older gate: ``create_pr_gate`` writes both or neither, so they disagree only after a hand edit.
+- def `escalated_count` — How many of *gates* wait on a story that an OPEN loom ``human`` gate structurally blocks. The human gate's ``waits_on_gate`` edge is the authority (review #368 F4): gate creation is not atomic, and a gate task whose edge never landed blocks nothing — its ``story_id`` alone must not free a slot. Unreadable → 0 (every gate counts).
+
+### `lithos_loom.subscriptions.admission_waker`
+- class `AdmissionWaker` — One subscriber per route-runner child: when a ``pr`` gate closes or a loom ``human`` gate escalates one, ask :meth:`Admission.wake` to republish that project's held stories — in release order — so the runner re-asks admission now rather than after the re-check backoff. A nudge only — the sleeper is the fallback, and admission itself enforces the order at every ask.
 
 ### `lithos_loom.subscriptions.conflict_resolve_dispatch`
 - def `spawn_resolve` — Run the resolve subprocess (cancellation-safe, bounded).
@@ -293,5 +303,6 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - [ADR 0006 — Review-panel variance: measure before reducing](../../adr/0006-review-variance-measure-before-reducing.md)
 - [ADR 0007 — Subscription handlers are hand-wired, not discovered](../../adr/0007-subscription-registration-hand-wired.md)
 - [ADR 0008 — story-develop's PR access runs through the typed GitHubClient, gh CLI kept only for local-checkout conveniences](../../adr/0008-story-develop-pr-access-seam.md)
+- [ADR 0012 — Serial-admission release order: priority, then first-held order; the choice lives in `Admission`](../../adr/0012-admission-release-order.md)
 
 [← all generated docs](../README.md)

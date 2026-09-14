@@ -34,11 +34,8 @@ from lithos_loom.cursor_store import CursorStore
 from lithos_loom.lithos_client import LithosClient
 from lithos_loom.notifications import build_notifier
 from lithos_loom.sources.lithos_event_stream import LithosEventStream
-from lithos_loom.subscriptions.admission import (
-    Admission,
-    AdmissionLimits,
-    AdmissionWaker,
-)
+from lithos_loom.subscriptions.admission import Admission, AdmissionLimits
+from lithos_loom.subscriptions.admission_waker import AdmissionWaker
 from lithos_loom.subscriptions.escalation_resolver import EscalationResolver
 from lithos_loom.subscriptions.route_runner import RouteRunner
 
@@ -84,6 +81,7 @@ async def _amain(cfg: LoomConfig) -> int:
                 limit=cfg.orchestrator.max_open_delivered_prs,
                 total=cfg.orchestrator.max_open_delivered_prs_total,
             ),
+            bus=bus,
         )
         runners = [
             RouteRunner(
@@ -102,7 +100,7 @@ async def _amain(cfg: LoomConfig) -> int:
         resolver = EscalationResolver(
             bus=bus, lithos=lithos, agent_id=cfg.orchestrator.agent_id
         )
-        waker = AdmissionWaker(bus=bus, lithos=lithos, admission=admission)
+        waker = AdmissionWaker(bus=bus, admission=admission)
         logger.info(
             "route-runner child: starting event-stream + %d route runners (%s) "
             "+ escalation resolver + admission waker",

@@ -66,7 +66,8 @@ PRIORITY_EMOJI: dict[str, str] = {
 
 Values: ``highest`` / ``high`` / ``medium`` / ``low`` / ``lowest``.
 Declared highest → lowest; the order is load-bearing for the importer's
-precedence tie-break (see :data:`EMOJI_TO_PRIORITY`). Strict
+precedence tie-break (see :data:`EMOJI_TO_PRIORITY`) and for serial
+admission's release order (``subscriptions/admission.py``, ADR 0012). Strict
 case-sensitive match: the Lithos surface owns this enum, and a
 non-canonical value simply drops the marker rather than guessing."""
 

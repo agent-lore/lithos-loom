@@ -27,8 +27,9 @@ from lithos_loom.subscriptions.admission import (
     TOTAL_KEY,
     Admission,
     AdmissionLimits,
-    AdmissionWaker,
 )
+from lithos_loom.subscriptions.admission_waker import AdmissionWaker
+from lithos_loom.task_line import PRIORITY_EMOJI
 from tests.support import FakeLithosClient, make_note
 
 _PROJECT = "lens"
@@ -36,13 +37,31 @@ _AGENT = "loom"
 _ROUTE = "story-develop"
 
 
+def _probe(bus: EventBus) -> Subscription:
+    """Subscribed the way a PR-producing route runner is — on the trigger
+    tag — so every nudge asserted here is one a runner would receive."""
+    return bus.subscribe(
+        event_types=("lithos.task.updated",),
+        match={"tags": ["trigger:story-develop"]},
+        name="probe",
+    )
+
+
 def _admission(
-    client: FakeLithosClient, *, limit: int = 1, total: int = 3
+    client: FakeLithosClient,
+    *,
+    limit: int = 1,
+    total: int = 3,
+    bus: EventBus | None = None,
 ) -> Admission:
+    if bus is None:
+        bus = EventBus()
+        _probe(bus)  # a route subscribed: held stories stay matchable
     return Admission(
         lithos=client,
         agent_id=_AGENT,
         defaults=AdmissionLimits(limit=limit, total=total),
+        bus=bus,
     )
 
 
@@ -407,10 +426,6 @@ async def test_an_unreadable_human_gate_list_counts_every_gate() -> None:
 # ── the waker ────────────────────────────────────────────────────────────
 
 
-def _probe(bus: EventBus) -> Subscription:
-    return bus.subscribe(event_types=("lithos.task.updated",), name="probe")
-
-
 def _gate_event(client: FakeLithosClient, gate_id: str, *, type_: str) -> Event:
     gate = client._tasks[gate_id]  # noqa: SLF001 — the fake's own store
     return Event(
@@ -446,11 +461,11 @@ async def _deferred_behind(client: FakeLithosClient, adm: Admission) -> tuple[st
 
 async def test_a_closed_pr_gate_wakes_the_projects_deferred_stories() -> None:
     client = FakeLithosClient(agent_id=_AGENT)
-    adm = _admission(client, limit=1)
-    story, gate = await _deferred_behind(client, adm)
     bus = EventBus()
+    adm = _admission(client, limit=1, bus=bus)
+    story, gate = await _deferred_behind(client, adm)
     probe = _probe(bus)
-    waker = AdmissionWaker(bus=bus, lithos=client, admission=adm)
+    waker = AdmissionWaker(bus=bus, admission=adm)
 
     await client.task_complete(task_id=gate, agent=_AGENT)
     await bus.publish(_gate_event(client, gate, type_="lithos.task.completed"))
@@ -465,12 +480,12 @@ async def test_a_closed_pr_gate_wakes_the_projects_deferred_stories() -> None:
 
 async def test_a_newly_escalated_gate_wakes_the_projects_deferred_stories() -> None:
     client = FakeLithosClient(agent_id=_AGENT)
-    adm = _admission(client, limit=1)
+    bus = EventBus()
+    adm = _admission(client, limit=1, bus=bus)
     story, gate = await _deferred_behind(client, adm)
     delivered = client._tasks[gate].metadata["story_id"]  # noqa: SLF001
-    bus = EventBus()
     probe = _probe(bus)
-    waker = AdmissionWaker(bus=bus, lithos=client, admission=adm)
+    waker = AdmissionWaker(bus=bus, admission=adm)
 
     human = await _escalate(client, delivered)
     await bus.publish(_gate_event(client, human, type_="lithos.task.created"))
@@ -482,12 +497,12 @@ async def test_a_newly_escalated_gate_wakes_the_projects_deferred_stories() -> N
 
 async def test_a_created_pr_gate_and_other_projects_do_not_wake() -> None:
     client = FakeLithosClient(agent_id=_AGENT)
-    adm = _admission(client, limit=1)
+    bus = EventBus()
+    adm = _admission(client, limit=1, bus=bus)
     _story_id, gate = await _deferred_behind(client, adm)
     _other_story, other_gate = await _delivered(client, number=9, project="other")
-    bus = EventBus()
     probe = _probe(bus)
-    waker = AdmissionWaker(bus=bus, lithos=client, admission=adm)
+    waker = AdmissionWaker(bus=bus, admission=adm)
 
     await bus.publish(_gate_event(client, gate, type_="lithos.task.created"))
     await client.task_complete(task_id=other_gate, agent=_AGENT)
@@ -499,12 +514,12 @@ async def test_a_created_pr_gate_and_other_projects_do_not_wake() -> None:
 
 async def test_a_story_no_longer_open_is_forgotten_not_nudged() -> None:
     client = FakeLithosClient(agent_id=_AGENT)
-    adm = _admission(client, limit=1)
+    bus = EventBus()
+    adm = _admission(client, limit=1, bus=bus)
     story, gate = await _deferred_behind(client, adm)
     await client.task_cancel(task_id=story, agent=_AGENT)
-    bus = EventBus()
     probe = _probe(bus)
-    waker = AdmissionWaker(bus=bus, lithos=client, admission=adm)
+    waker = AdmissionWaker(bus=bus, admission=adm)
 
     await client.task_complete(task_id=gate, agent=_AGENT)
     await bus.publish(_gate_event(client, gate, type_="lithos.task.completed"))
@@ -516,16 +531,16 @@ async def test_a_story_no_longer_open_is_forgotten_not_nudged() -> None:
 
 async def test_the_waker_survives_a_failed_read_and_keeps_the_story() -> None:
     client = FakeLithosClient(agent_id=_AGENT)
-    adm = _admission(client, limit=1)
+    bus = EventBus()
+    adm = _admission(client, limit=1, bus=bus)
     story, gate = await _deferred_behind(client, adm)
 
     async def failing_task_get(**kwargs: Any) -> Any:
         raise LithosClientError("server_error", "lithos down")
 
     client.task_get = failing_task_get  # type: ignore[method-assign]
-    bus = EventBus()
     probe = _probe(bus)
-    waker = AdmissionWaker(bus=bus, lithos=client, admission=adm)
+    waker = AdmissionWaker(bus=bus, admission=adm)
 
     await bus.publish(_gate_event(client, gate, type_="lithos.task.completed"))
     await _run_for(waker)
@@ -551,7 +566,7 @@ async def test_an_admitted_story_holds_its_slot_until_its_run_ends() -> None:
     assert refused.open_gates == 0 and refused.in_flight == 1
     assert adm.deferred(_PROJECT) == frozenset({second})
 
-    adm.release(first, route=_ROUTE)
+    await adm.release(first, route=_ROUTE)
     assert (await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)).admitted
 
 
@@ -587,7 +602,7 @@ async def test_a_closed_gate_wakes_but_an_in_flight_story_still_holds() -> None:
         await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)
     ).admitted
     # the run ends without a PR (failed): the slot frees with the release
-    adm.release(first, route=_ROUTE)
+    await adm.release(first, route=_ROUTE)
     assert (await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)).admitted
 
 
@@ -609,7 +624,7 @@ async def test_the_held_finding_fires_again_after_the_cap_clears() -> None:
     ).reason == "total_cap"
     await client.task_complete(task_id=gates[0], agent=_AGENT)
     assert (await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)).admitted
-    adm.release(story, route=_ROUTE)
+    await adm.release(story, route=_ROUTE)
     await _delivered(client, number=4)
     other = await _story(client, "other")
     assert (
@@ -758,13 +773,13 @@ async def test_a_human_gate_without_its_edge_does_not_escalate() -> None:
 
 async def test_a_closed_projectless_gate_wakes_projectless_deferred_stories() -> None:
     client = FakeLithosClient(agent_id=_AGENT)
-    adm = _admission(client, limit=1)
+    bus = EventBus()
+    adm = _admission(client, limit=1, bus=bus)
     _d, gate = await _delivered(client, number=1, project=None)
     story = await _story(client, "waiting", project=None)
     assert not (await adm.admit(route=_ROUTE, task_id=story, project=None)).admitted
-    bus = EventBus()
     probe = _probe(bus)
-    waker = AdmissionWaker(bus=bus, lithos=client, admission=adm)
+    waker = AdmissionWaker(bus=bus, admission=adm)
 
     await client.task_complete(task_id=gate, agent=_AGENT)
     await bus.publish(_gate_event(client, gate, type_="lithos.task.completed"))
@@ -806,9 +821,9 @@ async def test_a_release_frees_only_that_routes_reservation() -> None:
     adm = _admission(client, limit=1)
     assert (await adm.admit(route="a", task_id=story, project=_PROJECT)).admitted
 
-    adm.release(story, route="b")  # a route that never held it
+    await adm.release(story, route="b")  # a route that never held it
     assert not (await adm.admit(route="a", task_id=other, project=_PROJECT)).admitted
-    adm.release(story, route="a")
+    await adm.release(story, route="a")
     assert (await adm.admit(route="a", task_id=other, project=_PROJECT)).admitted
 
 
@@ -825,7 +840,718 @@ async def test_admitting_one_route_keeps_another_routes_deferral() -> None:
     assert (await adm.admit(route="b", task_id=story, project=_PROJECT)).admitted
 
     assert adm.deferred(_PROJECT) == frozenset({story})
-    adm.forget(story)  # the story left the open set: every route's wait ends
+    await adm.forget(story)  # the story left the open set: every route's wait ends
+    assert adm.deferred(_PROJECT) == frozenset()
+
+
+# ── release order (561db86a / ADR 0012) ─────────────────────────────────
+#
+# Which held story takes a freed slot: `metadata.priority` first (the
+# default — none set — between low and medium), then the order the stories
+# were first held. The choice is made INSIDE Admission, so a sleeper's
+# re-ask cannot pre-empt the waker's sweep.
+
+
+_TAGS = ("trigger:story-develop",)  # what the story-develop route matches on
+
+
+async def _hold_in_order(
+    adm: Admission, *stories: str, project: str | None = _PROJECT
+) -> None:
+    """Refuse *stories* in the given order, each behind the open gate — as
+    the story-develop route asks, its match tags reported."""
+    for story in stories:
+        verdict = await adm.admit(
+            route=_ROUTE, task_id=story, project=project, tags=_TAGS
+        )
+        assert not verdict.admitted and verdict.reason == "limit"
+
+
+async def _prioritised(client: FakeLithosClient, title: str, priority: str) -> str:
+    return await client.task_create(
+        title=title,
+        agent=_AGENT,
+        tags=["trigger:story-develop"],
+        metadata={"project": _PROJECT, "priority": priority},
+    )
+
+
+async def _release_sequence(
+    adm: Admission, probe: Subscription, *, project: str | None = _PROJECT
+) -> list[str]:
+    """Drain one slot's worth of the bucket: admit whatever was nudged,
+    end its run without a gate (the slot frees, the next is woken), repeat.
+    The order stories are admitted in IS the release order."""
+    sequence: list[str] = []
+    while nudged := _nudged(probe):
+        assert len(nudged) == 1, nudged  # one slot: one story entitled
+        story = nudged[0]
+        assert (await adm.admit(route=_ROUTE, task_id=story, project=project)).admitted
+        sequence.append(story)
+        await adm.release(story, route=_ROUTE)
+    return sequence
+
+
+def _nudged(probe: Subscription) -> list[str]:
+    ids: list[str] = []
+    while not probe.queue.empty():
+        event = probe.queue.get_nowait()
+        assert event.origin == ADMISSION_RECHECK_ORIGIN
+        ids.append(event.payload["id"])
+    return ids
+
+
+async def test_held_stories_are_released_in_the_order_they_were_held() -> None:
+    """The old key was the UUID string; the fake's ids ascend with creation,
+    so holding them in reverse creation order tells the two apart."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    created = [await _story(client, t) for t in ("first made", "second", "third")]
+    held_order = list(reversed(created))
+    await _hold_in_order(adm, *held_order)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    assert await adm.wake(_PROJECT) == 1  # one slot: only the head is told
+
+    assert await _release_sequence(adm, probe) == held_order
+
+
+async def test_a_re_refused_story_keeps_its_place() -> None:
+    """The sleeper re-asks every held story; a refusal must not send it to
+    the back of the queue."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+    await _hold_in_order(adm, first)  # its sleeper fired again
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    assert await _release_sequence(adm, probe) == [first, second]
+
+
+async def test_the_sleeper_cannot_pre_empt_the_head_of_the_queue() -> None:
+    """A slot frees and the SECOND held story's re-check fires first. The
+    choice lives in Admission: it refuses the late asker as ``queued`` and
+    nudges the head itself, so the order does not depend on which producer
+    — waker or sleeper — publishes first."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    late = await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)
+
+    assert not late.admitted and late.reason == "queued"
+    assert _nudged(probe) == [first]
+    assert adm.deferred(_PROJECT) == frozenset({first, second})
+    assert (await adm.admit(route=_ROUTE, task_id=first, project=_PROJECT)).admitted
+    again = await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)
+    assert not again.admitted and again.reason == "limit"
+    assert _nudged(probe) == []  # no slot: nothing to nudge
+
+
+async def test_a_priority_above_the_default_jumps_the_queue() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    plain = await _story(client, "plain")
+    medium = await _prioritised(client, "medium", "medium")
+    highest = await _prioritised(client, "highest", "highest")
+    high = await _prioritised(client, "high", "high")
+    await _hold_in_order(adm, plain, medium, highest, high)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    assert await _release_sequence(adm, probe) == [highest, high, medium, plain]
+
+
+async def test_a_priority_below_the_default_yields_to_it() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    low = await _prioritised(client, "low", "low")
+    lowest = await _prioritised(client, "lowest", "lowest")
+    plain = await _story(client, "plain")
+    await _hold_in_order(adm, low, lowest, plain)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    assert await _release_sequence(adm, probe) == [plain, low, lowest]
+
+
+@pytest.mark.parametrize("priority", ["bogus", 3, None])
+async def test_an_unknown_priority_is_the_default(priority: Any) -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    plain = await _story(client, "plain")
+    odd = await client.task_create(
+        title="odd",
+        agent=_AGENT,
+        tags=["trigger:story-develop"],
+        metadata={"project": _PROJECT, "priority": priority},
+    )
+    await _hold_in_order(adm, odd, plain)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    assert await _release_sequence(adm, probe) == [odd, plain]
+
+
+async def test_a_priority_raised_while_held_is_read_at_release() -> None:
+    """The operator's lever: mark a waiting story up (Obsidian / lens /
+    task_update) and it leaves first — the priority is read when the slot
+    frees, not remembered from the refusal."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+    await client.task_update(
+        task_id=second, agent=_AGENT, metadata={"priority": "high"}
+    )
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    assert await _release_sequence(adm, probe) == [second, first]
+
+
+async def test_a_newcomer_queues_behind_the_stories_already_held() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    held = await _story(client, "held")
+    await _hold_in_order(adm, held)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+    newcomer = await _story(client, "newcomer")
+
+    verdict = await adm.admit(route=_ROUTE, task_id=newcomer, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.reason == "queued"
+    assert _nudged(probe) == [held]
+    assert adm.deferred(_PROJECT) == frozenset({held, newcomer})
+    assert (await adm.admit(route=_ROUTE, task_id=held, project=_PROJECT)).admitted
+
+
+async def test_a_newcomer_with_a_higher_priority_takes_the_slot_first() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    held = await _story(client, "held")
+    await _hold_in_order(adm, held)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+    urgent = await _prioritised(client, "urgent", "high")
+
+    assert (await adm.admit(route=_ROUTE, task_id=urgent, project=_PROJECT)).admitted
+
+    assert _nudged(probe) == []
+    assert adm.deferred(_PROJECT) == frozenset({held})
+
+
+async def test_a_lone_asker_is_admitted_without_reading_the_queue() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=1)
+    story = await _story(client)
+
+    assert (await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)).admitted
+
+    assert not client.called("task_get")
+
+
+async def test_a_held_story_no_longer_open_is_dropped_from_the_order() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+    await client.task_cancel(task_id=first, agent=_AGENT)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    assert (await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)).admitted
+
+    assert _nudged(probe) == []
+    assert adm.deferred(_PROJECT) == frozenset()
+
+
+async def test_an_unreadable_head_keeps_its_place_and_holds_the_rest() -> None:
+    """Fail closed: a head that cannot be read is not skipped (its priority
+    is unknown, its place is not); nothing can be nudged for it, so its
+    own re-check sleeper is the retry."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+    real_task_get = client.task_get
+
+    async def flaky_task_get(**kwargs: Any) -> Any:
+        if kwargs["task_id"] == first:
+            raise LithosClientError("server_error", "lithos down")
+        return await real_task_get(**kwargs)
+
+    client.task_get = flaky_task_get  # type: ignore[method-assign]
+
+    verdict = await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.reason == "queued"
+    assert _nudged(probe) == []
+    assert adm.deferred(_PROJECT) == frozenset({first, second})
+
+
+async def test_the_projectless_bucket_is_ordered_the_same_way() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1, project=None)
+    first = await _story(client, "first", project=None)
+    urgent = await client.task_create(
+        title="urgent",
+        agent=_AGENT,
+        tags=["trigger:story-develop"],
+        metadata={"priority": "high"},
+    )
+    await _hold_in_order(adm, first, urgent, project=None)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(None)
+
+    assert await _release_sequence(adm, probe, project=None) == [urgent, first]
+
+
+async def test_two_stories_of_one_rank_leave_in_first_asked_order() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    created = [await _prioritised(client, t, "high") for t in ("made first", "second")]
+    await _hold_in_order(adm, *reversed(created))
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    assert await _release_sequence(adm, probe) == list(reversed(created))
+
+
+@pytest.mark.parametrize("priority", list(PRIORITY_EMOJI))
+async def test_every_priority_in_the_vocabulary_is_placed(priority: str) -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    marked = await _prioritised(client, "marked", priority)
+    plain = await _story(client, "plain")
+    await _hold_in_order(adm, marked, plain)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    jumps = priority in ("medium", "high", "highest")
+    expected = [marked, plain] if jumps else [plain, marked]
+    assert await _release_sequence(adm, probe) == expected
+
+
+# ── review round 2: every transition that frees a place re-nudges ────────
+
+
+async def test_a_head_that_leaves_the_queue_wakes_the_stories_behind_it() -> None:
+    """A blocks edge lands on the head while it waits: its runner finds it
+    not ready and forgets it. The slot is free and the next story must not
+    wait for its sleeper (up to 15 min) to find out."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+    late = await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)
+    assert late.reason == "queued" and _nudged(probe) == [first]
+
+    await adm.forget(first)
+
+    assert _nudged(probe) == [second]
+    assert adm.deferred(_PROJECT) == frozenset({second})
+    assert (await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)).admitted
+
+
+async def test_a_run_that_ends_without_a_gate_wakes_the_bucket() -> None:
+    """A failed / interrupted run frees its slot with no gate event for the
+    waker to see; the release itself must nudge the next story."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    first, second = await _story(client, "first"), await _story(client, "second")
+    assert (await adm.admit(route=_ROUTE, task_id=first, project=_PROJECT)).admitted
+    await _hold_in_order(adm, second)
+
+    await adm.release(first, route=_ROUTE)
+
+    assert _nudged(probe) == [second]
+
+
+async def test_a_raw_transport_error_on_one_story_does_not_lose_the_sweep() -> None:
+    """The client re-raises the raw transport exception once its reconnects
+    are spent (review #368 F3); one unreadable story keeps its place and
+    the other entitled story still goes out."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=2, bus=bus)
+    gates = [(await _delivered(client, number=n))[1] for n in (1, 2)]
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+    for gate in gates:
+        await client.task_complete(task_id=gate, agent=_AGENT)
+    real_task_get = client.task_get
+
+    async def broken_task_get(**kwargs: Any) -> Any:
+        if kwargs["task_id"] == first:
+            raise RuntimeError("connection reset")
+        return await real_task_get(**kwargs)
+
+    client.task_get = broken_task_get  # type: ignore[method-assign]
+
+    assert await adm.wake(_PROJECT) == 1
+
+    assert _nudged(probe) == [second]
+    assert adm.deferred(_PROJECT) == frozenset({first, second})
+
+
+async def test_a_flapping_read_keeps_the_last_seen_rank() -> None:
+    """Ranking an unreadable story at the default would move a high-priority
+    head behind the default-priority story on every failed read — and each
+    swap nudges the other, with the slot idle. The last-seen rank holds."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    plain = await _story(client, "plain")
+    urgent = await _prioritised(client, "urgent", "high")
+    await _hold_in_order(adm, plain, urgent)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+    await adm.wake(_PROJECT)  # both read once: urgent is the head
+    assert _nudged(probe) == [urgent]
+    real_task_get = client.task_get
+
+    async def flaky_task_get(**kwargs: Any) -> Any:
+        if kwargs["task_id"] == urgent:
+            raise LithosClientError("server_error", "lithos down")
+        return await real_task_get(**kwargs)
+
+    client.task_get = flaky_task_get  # type: ignore[method-assign]
+
+    verdict = await adm.admit(route=_ROUTE, task_id=plain, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.reason == "queued"
+    assert _nudged(probe) == []  # the head cannot be nudged; its sleeper re-asks
+
+
+async def test_every_free_slot_is_filled_when_the_limit_allows() -> None:
+    """The head rule binds only while askers outnumber free slots: with two
+    slots free, the second in order is admitted too, not queued."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=2, bus=bus)
+    gates = [(await _delivered(client, number=n))[1] for n in (1, 2)]
+    first, second, third = [
+        await _story(client, t) for t in ("first", "second", "third")
+    ]
+    await _hold_in_order(adm, first, second, third)
+    for gate in gates:
+        await client.task_complete(task_id=gate, agent=_AGENT)
+
+    late = await adm.admit(route=_ROUTE, task_id=third, project=_PROJECT)
+    assert late.reason == "queued" and _nudged(probe) == [first, second]
+    assert (await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)).admitted
+    assert _nudged(probe) == [first]  # the slot left goes to the next in order
+    assert (await adm.admit(route=_ROUTE, task_id=first, project=_PROJECT)).admitted
+    assert _nudged(probe) == []
+    assert (
+        await adm.admit(route=_ROUTE, task_id=third, project=_PROJECT)
+    ).reason == "limit"
+
+
+async def test_an_unlimited_limit_under_a_total_cap_admits_every_free_slot() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=0, total=2, bus=bus)
+    gates = [(await _delivered(client, number=n))[1] for n in (1, 2)]
+    first, second = await _story(client, "first"), await _story(client, "second")
+    for story in (first, second):
+        verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
+        assert verdict.reason == "total_cap"
+    for gate in gates:
+        await client.task_complete(task_id=gate, agent=_AGENT)
+
+    assert (await adm.admit(route=_ROUTE, task_id=second, project=_PROJECT)).admitted
+
+    assert _nudged(probe) == [first]
+
+
+async def test_a_story_whose_run_ended_keeps_its_place_when_it_asks_again() -> None:
+    """A usage-limit resume re-asks admission (T10). It asked first, so it
+    is first — not a newcomer behind everything that queued while it ran."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    resumed, waiting = await _story(client, "resumed"), await _story(client, "waiting")
+    assert (await adm.admit(route=_ROUTE, task_id=resumed, project=_PROJECT)).admitted
+    await _hold_in_order(adm, waiting)
+    await adm.release(resumed, route=_ROUTE)  # interrupted: the slot frees
+    assert _nudged(probe) == [waiting]
+
+    assert (await adm.admit(route=_ROUTE, task_id=resumed, project=_PROJECT)).admitted
+
+    assert adm.deferred(_PROJECT) == frozenset({waiting})
+    assert (
+        await adm.admit(route=_ROUTE, task_id=waiting, project=_PROJECT)
+    ).reason == ("limit")
+
+
+async def test_a_story_admitted_under_a_new_project_leaves_no_phantom_head() -> None:
+    """A story re-homed to another project while held would otherwise stay
+    the old bucket's head forever — never asking there, never forgotten."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    moved, stayed = await _story(client, "moved"), await _story(client, "stayed")
+    await _hold_in_order(adm, moved, stayed)
+    await client.task_update(task_id=moved, agent=_AGENT, metadata={"project": "other"})
+    assert (await adm.admit(route=_ROUTE, task_id=moved, project="other")).admitted
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    assert (await adm.admit(route=_ROUTE, task_id=stayed, project=_PROJECT)).admitted
+
+    assert _nudged(probe) == []
+    assert adm.deferred(_PROJECT) == frozenset()
+
+
+# ── review round 3: a head nobody can dispatch, and wakes that cost nothing ──
+
+
+@pytest.mark.parametrize("new_tags", [["parked"], ["trigger:docs"]])
+async def test_a_held_wait_its_route_no_longer_matches_is_dropped(
+    new_tags: list[str],
+) -> None:
+    """Re-tagging a held story — to park it, or onto ANOTHER route — means
+    this route's runner never receives its nudge, so the wait never asks
+    and never steps aside: as head it would stop the bucket. The check is
+    per route (review round 3): another route matching is no help."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    bus.subscribe(  # the other route's runner: it would hear the nudge
+        event_types=("lithos.task.updated",),
+        match={"tags": ["trigger:docs"]},
+        name="route-runner-docs",
+    )
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    parked, other = await _story(client, "parked"), await _story(client, "other")
+    await _hold_in_order(adm, parked, other)
+    await client.task_update(task_id=parked, agent=_AGENT, tags=new_tags)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    verdict = await adm.admit(route=_ROUTE, task_id=other, project=_PROJECT, tags=_TAGS)
+    assert verdict.admitted
+
+    assert _nudged(probe) == []
+    assert adm.deferred(_PROJECT) == frozenset()
+
+
+async def test_a_story_that_steps_aside_keeps_its_place() -> None:
+    """A Lithos blip makes every runner's readiness read fail; each drops
+    its wait. Recovery must not reorder the queue — that was the incident
+    (ADR 0012 context) — so the story that asked first is still first."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+    await adm.forget(first, route=_ROUTE)
+    await adm.forget(second, route=_ROUTE)
+    assert adm.deferred(_PROJECT) == frozenset()
+    await _hold_in_order(adm, second, first)  # recovery: second's sleeper first
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    assert _nudged(probe) == [first]
+
+
+async def test_forgetting_one_routes_wait_keeps_the_other_routes() -> None:
+    """Readiness is route-scoped (the frontier page is the route's): route
+    B's inconclusive read must not cost route A its wait."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=1)
+    await _delivered(client, number=1)
+    story = await _story(client)
+    for route in ("a", "b"):
+        held = await adm.admit(route=route, task_id=story, project=_PROJECT)
+        assert held.reason == "limit"
+
+    await adm.forget(story, route="b")
+
+    assert adm.deferred(_PROJECT) == frozenset({story})
+
+
+async def test_an_unreadable_context_doc_nudges_every_held_story() -> None:
+    """The headroom cannot be counted, so the wake cannot know how many are
+    entitled: every held story is told and each ask decides for itself."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    _d, gate = await _delivered(client, number=1)
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    async def failing_note_read(**kwargs: Any) -> Any:
+        raise LithosClientError("server_error", "lithos down")
+
+    client.note_read = failing_note_read  # type: ignore[method-assign]
+    _context_doc(client, {})  # the doc exists, and cannot be read
+
+    assert await adm.wake(_PROJECT) == 2
+
+    assert _nudged(probe) == [first, second]
+    assert (await adm.admit(route=_ROUTE, task_id=first, project=_PROJECT)).reason == (
+        "unreadable"
+    )
+
+
+async def test_a_delivered_run_ending_does_not_nudge_a_full_bucket() -> None:
+    """Delivery is the commonest release, and its slot is now its gate's:
+    nudging the held stories would only buy each a `limit` refusal."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    delivered = await _story(client, "delivered")
+    assert (await adm.admit(route=_ROUTE, task_id=delivered, project=_PROJECT)).admitted
+    waiting = await _story(client, "waiting")
+    await _hold_in_order(adm, waiting)
+    await create_pr_gate(
+        client,
+        story_id=delivered,
+        story_title="delivered",
+        pr_url="https://github.com/agent-lore/lithos-lens/pull/1",
+        project=_PROJECT,
+        agent=_AGENT,
+    )
+
+    await adm.release(delivered, route=_ROUTE)
+
+    assert _nudged(probe) == []
+    assert adm.deferred(_PROJECT) == frozenset({waiting})
+
+
+async def test_a_head_leaving_a_full_bucket_does_not_nudge() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, bus=bus)
+    await _delivered(client, number=1)  # the gate stays open
+    first, second = await _story(client, "first"), await _story(client, "second")
+    await _hold_in_order(adm, first, second)
+
+    await adm.forget(first)
+
+    assert _nudged(probe) == []
+    assert adm.deferred(_PROJECT) == frozenset({second})
+
+
+async def test_one_story_on_two_routes_takes_two_slots_and_no_more() -> None:
+    """The order is over (route, story) waits: a story two PR-producing
+    routes hold is two runs and two slots, and the story behind it is
+    entitled only to a third."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=2, bus=bus)
+    gates = [(await _delivered(client, number=n))[1] for n in (1, 2)]
+    shared, other = await _story(client, "shared"), await _story(client, "other")
+    for route in ("a", "b"):
+        assert (
+            await adm.admit(route=route, task_id=shared, project=_PROJECT)
+        ).reason == ("limit")
+    await _hold_in_order(adm, other)
+    for gate in gates:
+        await client.task_complete(task_id=gate, agent=_AGENT)
+
+    assert (await adm.admit(route="a", task_id=shared, project=_PROJECT)).admitted
+    assert _nudged(probe) == [shared]  # for route b's wait, not for `other`
+    assert (await adm.admit(route="b", task_id=shared, project=_PROJECT)).admitted
+    assert _nudged(probe) == []
+    held = await adm.admit(route=_ROUTE, task_id=other, project=_PROJECT)
+    assert held.reason == "limit"
+
+
+async def test_release_and_forget_never_raise() -> None:
+    """Both sit on the runner's dispatch path (`release` in a `finally`):
+    a wake that blows up must not replace the run's own outcome."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=1)
+    running, waiting = await _story(client, "running"), await _story(client, "waiting")
+    assert (await adm.admit(route=_ROUTE, task_id=running, project=_PROJECT)).admitted
+    await _hold_in_order(adm, waiting)
+
+    async def broken(**kwargs: Any) -> Any:
+        raise RuntimeError("connection reset")
+
+    client.task_list = broken  # type: ignore[method-assign]
+    client.task_get = broken  # type: ignore[method-assign]
+
+    await adm.release(running, route=_ROUTE)
+    await adm.forget(waiting)
+
     assert adm.deferred(_PROJECT) == frozenset()
 
 

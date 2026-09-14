@@ -28,6 +28,8 @@ max_open_delivered_prs = 1
 # gates still excluded). Reaching it stops dispatch for the project and posts
 # [AdmissionHeld]. 0 = unlimited, otherwise must be >= max_open_delivered_prs.
 max_open_delivered_prs_total = 3
+# Held stories take a freed slot by metadata.priority (highest first; none
+# set = between low and medium), then in the order they first asked — ADR 0012.
 
 [projects.lithos-lens]
 repo = "/home/you/projects/lithos/code/lithos-lens"
