@@ -62,6 +62,11 @@ class RemediationBudget:
     # spare). Empty on a record written before the reason existed, which
     # was always an exhaustion.
     needs_human_reason: str = ""
+    # #380: a reported-not-remediated run (`already_clean` / `triage_rejected`
+    # — nothing to change) refunds its round ONCE per budget — a paid run, so
+    # an unbounded refund would remove the S5b spend bound; a fresh budget (a
+    # human push, or a completed decision gate — PR #396 review) re-grants it.
+    no_change_refunded: bool = False
 
     def as_marker(self) -> dict[str, Any]:
         return {
@@ -71,6 +76,7 @@ class RemediationBudget:
             "last_seen_head_sha": self.last_seen_head_sha,
             "needs_human_gate_id": self.needs_human_gate_id,
             "needs_human_reason": self.needs_human_reason,
+            "no_change_refunded": self.no_change_refunded,
         }
 
 
@@ -91,6 +97,7 @@ def read_budget(gate: Any, pr_url: str) -> RemediationBudget:
         last_seen_head_sha=seen_sha if isinstance(seen_sha, str) else "",
         needs_human_gate_id=gate_id if isinstance(gate_id, str) else "",
         needs_human_reason=reason if isinstance(reason, str) else "",
+        no_change_refunded=raw.get("no_change_refunded") is True,
     )
 
 

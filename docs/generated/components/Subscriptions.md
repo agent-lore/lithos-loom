@@ -52,7 +52,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.reconciliation_state` | M | 3 | 3 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 3 |
-| `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 9 |
+| `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 10 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -263,10 +263,11 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.remediation_escalation`
 - def `escalate_if_exhausted` — Raise the needs-human gate when *budget* is spent and the PR is still not converged. Returns ``None`` when nothing was needed or the gate landed, else the problem that stopped the gate (for the caller's ``[Friction]``). Never raises.
 - def `escalate_disputed` — #387: the loop made an external fix and then undid it — the reviewer and the story's acceptance criteria disagree (lens #84: "Fixed in" was posted over a net no-op). A decision, not a re-run: raise the gate NOW, whatever the budget says, once per budget; the marker then holds dispatch until a human push. Same return contract as :func:`escalate_if_exhausted`.
-- def `decision_pending` — A loom remediation gate on this budget — a reverted fix (#387, raised with rounds to spare) or an exhausted budget — holds every dispatch, ``consider`` and a parked trigger alike, while it is OPEN. The gate IS the budget's stop, and the operator's decision need not involve a push ("answer the reviewer, leave the code"), so the gate going terminal is the release AND the operator's consent to continue: the marker on the ``pr`` gate *gate_id* forgets it and the budget re-arms (rounds reset, loom's push attribution kept — the own-sha skip must still hold), as a human push would (PR #389 review: the motivating run was the last budgeted round). An unreadable gate holds (fail closed); a gate that no longer exists can never be completed, so it releases.
+- def `decision_pending` — A loom remediation gate on this budget — a reverted fix (#387, raised with rounds to spare) or an exhausted budget — holds every dispatch, ``consider`` and a parked trigger alike, while it is OPEN. The gate IS the budget's stop, and the operator's decision need not involve a push ("answer the reviewer, leave the code"), so the gate going terminal is the release AND the operator's consent to continue: the marker on the ``pr`` gate *gate_id* forgets it and the budget re-arms (rounds reset, the once-per-budget reported-not-remediated refund re-granted, loom's push attribution kept — the own-sha skip must still hold), as a human push would (PR #389 review: the motivating run was the last budgeted round). An unreadable gate holds (fail closed); a gate that no longer exists can never be completed, so it releases.
 
 ### `lithos_loom.subscriptions.remediation_outcome`
 - def `post_finding` — Best-effort finding post (the story may have completed mid-run).
+- def `write_marker_strict` — A gate-marker write that keeps a budget round or a parked trigger: retried with backoff, and NEVER raising — a raw transport error propagates past the client's own recovery (``lithos_client._invoke``) and must land here, not in ``ExternalRemediation._run``'s crash handler, which re-reads the ORIGINAL reserved budget and can raise a false ``remediation_exhausted`` gate over a round that was refunded. Returns the last failure, or ``None`` when the write landed.
 - def `escalate_or_report` — PRD S5b: exhaustion → human gate; a gate that could not be raised is said so on the story instead of vanishing.
 - def `record_result` — Record a run that produced a JSON result: marker, finding, log, and the exhaustion escalation when the CLI reports it did not succeed.
 - def `refusal_key` — What the sweep observes about the mapped checkout — the settle key a repo-mismatch refusal (the sweep's own, or the CLI's) is de-duped on.

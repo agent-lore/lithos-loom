@@ -28,11 +28,12 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
 | `lithos_loom.plugins.story_develop.conflict_resolve` | M | 3 | 5 |
 | `lithos_loom.plugins.story_develop.containers` | S | 0 | 5 |
-| `lithos_loom.plugins.story_develop.converge` | L | 2 | 1 |
+| `lithos_loom.plugins.story_develop.converge` | L | 0 | 1 |
+| `lithos_loom.plugins.story_develop.converge_result` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
-| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 10 |
+| `lithos_loom.plugins.story_develop.external_reviews` | M | 3 | 14 |
 | `lithos_loom.plugins.story_develop.external_triage` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
@@ -43,7 +44,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
-| `lithos_loom.plugins.story_develop.loop_entry` | XS | 2 | 0 |
+| `lithos_loom.plugins.story_develop.loop_entry` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
@@ -55,7 +56,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
-| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 12 |
+| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 13 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
@@ -162,9 +163,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `stop_container` — Force-remove the container; never raises (teardown must be best-effort).
 
 ### `lithos_loom.plugins.story_develop.converge`
+- def `converge_pr` — Run the review-convergence loop against an existing PR *change*.
+
+### `lithos_loom.plugins.story_develop.converge_result`
 - class `ConflictSummary` — Resolve mode (PRD S5): what the run set out to resolve.
 - class `ConvergeResult` — Outcome of a :func:`converge_pr` run.
-- def `converge_pr` — Run the review-convergence loop against an existing PR *change*.
 
 ### `lithos_loom.plugins.story_develop.daemon_io`
 - def `read_task_payload` — Parse the runner's ``task.json`` into a :class:`TaskContext`.
@@ -209,9 +212,13 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `ExternalOutcome` — What happened to one injected external finding, for the reply epilogue.
 - class `CoderAck` — One line of the coder's ``## External findings`` acknowledgement.
 - def `ack_instruction` — The prompt block that makes the coder's per-id acknowledgement a hard contract, appended to EVERY external-mode coder prompt (round 1's cold start and each fix round — #387: the threads are answered from the FINAL handoff, so a later round that undoes a fix must say so).
+- def `ack_section` — The coder handoff's ``## External findings`` section verbatim (header included), or ``""``. The round-1 reviewer prompt renders the coder's ``## Summary`` paragraph only, so the panel judging a no-change claim (PR #396 review) is shown the claim itself by appending this.
 - def `parse_coder_acks` — Parse the coder handoff's ``## External findings`` acknowledgements.
 - def `outcomes_after_loop` — Fold triage rejections + the coder's per-id claims into per-finding outcomes, in the injection order (``id_map`` preserves it).
 - def `final_round_outcomes` — The converge epilogue's dispositions, read from the coder's FINAL handoff (#387: lens #84's round 1 said FIXED, round 3 reverted it, and the threads were answered from round 1) — the mandated ``## External findings`` acks plus any ``## Findings`` dispute block — and checked against the tree: a run whose final tree equals the PR head outside the generated paths undid its fix. The ack section is scoped to the injected ids by construction; the ``## Findings`` block is read in round 1 only (a later round's belongs to the panel). A final round without the section carries no earlier claim forward (the safe direction).
+- def `nothing_to_change` — #380: every injected finding was refuted by triage or dispositioned ``no_change_needed`` — which the loop APPROVED (an unapproved claim reads ``unaddressed``, so this is never true on the coder's word alone) — the run had nothing to do, so a loop that committed nothing is ``already_clean`` (reported, not remediated), not a failure. False when there is no external finding at all.
+- def `claims_nothing_to_change` — PR #396 review (High): whether the round's coder handoff claims that EVERY injected finding needs no change — the one shape in which a round-1 coder may commit nothing and still be reviewed: the loop admits the empty round (``LoopEntry.no_change_claim``) and its gate + panel judge the claim at the unchanged head. Anything short of that — a ``FIXED`` over an unchanged tree, a ``DISPUTED``, an omitted id, no section, no handoff, nothing injected — is not a reviewable claim, and round 1's no-commit exit stands.
+- def `render_external_context` — The panel's context in external mode (PR #396 review): the injected findings by the id the coder saw — author, location, body, fenced so reviewer prose cannot become prompt prose — and the rule that the coder's per-id acknowledgement is a claim for the panel to verify: a ``NO CHANGE NEEDED`` or ``DISPUTED`` a reviewer disagrees with is a finding of theirs. Without it the panel would review the PR blind to what was claimed, and a round-1 no-change claim (admitted for review with nothing committed) would rest on the coder's word.
 - def `undecided_note` — The status-line suffix for a converged run that left an external finding ``reverted`` (#387) — the tree converged, the decision did not.
 - def `pr_number_from_spec` — PR number from a converge change spec (``142`` / ``#142`` / a PR URL).
 
@@ -394,6 +401,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `fast_gate_phase` — #140/ADR §4: run the FAST deterministic checks on the round's new commit (candidate-staged checks are deferred to :func:`approval_phase`). Never terminal.
 - def `panel_phase` — Run the reviewer panel — the one shared primitive (#154). Sets ``ctx.final_reviews`` / accrues ``ctx.review_cost``.
 - def `approval_phase` — Seal approval when ALL reviewers pass their OWN threshold this round (PRD #7). Runs the expensive candidate-staged checks once per committed tree (#140) and holds approval while a *required* check blocks (floor). Approval takes precedence over the same-round cost ceiling (the spend already happened).
+- def `no_change_verdict_phase` — The admitted no-change round (commit_phase, PR #396 review) is a VALIDATION pass, not an entry to the fix loop: approval sealed it in :func:`approval_phase`; reaching here means the panel rejected the coder's claim, or a required check is red on the unchanged head and the floor held. End the run with that rationale — a trigger that asked for nothing (an approval comment ingested as a finding, #380) must never drive paid rounds, nor push unrelated commits onto a delivered PR (opus round 2); the converge epilogue reports the claim unaddressed.
 - def `deadlock_phase` — T7 dispute escalation: a coder-disputed finding the reviewer kept blocking for 2 consecutive rounds stops the run with a human breadcrumb rather than grinding to max_rounds.
 - def `stall_phase` — T7 stall guard, keyed off finding IDENTITY: an empty round commit or an unchanged blocking set, two rounds running, stops the run.
 - def `run_round` — Sequence one develop round's phases. Returns the first phase's :class:`CycleExit` (terminating the loop), or ``None`` to continue to the next round. The order — and the TWO ``cost_ceiling_phase`` calls straddling approval — is load-bearing (see :func:`cost_ceiling_phase`).

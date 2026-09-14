@@ -420,6 +420,7 @@ def test_ack_instruction_names_every_id_and_the_section() -> None:
     assert "omit" in text.lower()  # the never-omit-silently steering
     # #387: the contract holds in EVERY round and knows a reverted fix
     assert "REVERTED" in text
+    assert "NO CHANGE NEEDED" in text  # #380: and a finding that is not a defect
     assert "every round" in text.lower()
 
 
@@ -474,6 +475,45 @@ def test_final_round_outcomes_reads_the_findings_block_in_round_one_only(
     assert r1.disposition == "disputed" and r1.detail == "deliberate decision"
     (r2,) = outcomes(2)
     assert r2.disposition == "fixed" and r2.detail == "guarded it"
+
+
+def test_parse_coder_acks_reads_a_no_change_needed_verdict() -> None:
+    """#380 (lens #83): an approval verdict injected as a finding is
+    dispositioned by the coder as NOT a defect — a fourth word, so the
+    outcome parser can read what the coder already writes."""
+    text = (
+        "## Status: LGTM\n## Summary\nnothing to do\n"
+        "## External findings\n"
+        "- f-001: NO CHANGE NEEDED — an approval verdict, not a defect\n"
+        "- f-002: no_change_needed — the claim describes the intended behaviour\n"
+    )
+    acks = parse_coder_acks(text, ["f-001", "f-002"])
+    assert acks["f-001"].verdict == "no_change_needed"
+    assert acks["f-001"].detail == "an approval verdict, not a defect"
+    assert acks["f-002"].verdict == "no_change_needed"
+
+
+def test_outcomes_no_change_needed_is_its_own_disposition() -> None:
+    # not a fix (nothing landed) and not a dispute (the coder agrees with the
+    # reviewer that there is nothing to change) — but, like `fixed`, a claim
+    # the LOOP must have approved (PR #396 review: the coder alone never
+    # disposes an external finding; the gate + panel judge the unchanged head)
+    id_map = {"f-001": _finding()}
+    acks = {"f-001": CoderAck(verdict="no_change_needed", detail="an approval")}
+    (o,) = outcomes_after_loop(id_map, {}, {}, acks, loop_approved=True)
+    assert o.disposition == "no_change_needed" and o.detail == "an approval"
+
+
+def test_outcomes_no_change_needed_needs_the_loops_approval() -> None:
+    # the panel rejected the claim (or the loop died before judging it): the
+    # thread gets no "no change needed" answer — unaddressed, naming the
+    # unvalidated claim
+    id_map = {"f-001": _finding()}
+    acks = {"f-001": CoderAck(verdict="no_change_needed", detail="an approval")}
+    (o,) = outcomes_after_loop(id_map, {}, {}, acks, loop_approved=False)
+    assert o.disposition == "unaddressed"
+    assert "NO CHANGE NEEDED" in o.detail and "an approval" in o.detail
+    assert "not approve" in o.detail
 
 
 def test_parse_coder_acks_reads_a_reverted_verdict() -> None:
@@ -613,3 +653,125 @@ def test_finding_carries_identity_and_the_adapters_reply_capability() -> None:
         finding = ext_mod.finding_from_activity(row, source="human", trusted=True)
         assert (finding.stream, finding.activity_id) == (adapter.stream, 99)
         assert finding.reply_mode is adapter.reply_mode
+
+
+# ── PR #396 review: a no-change claim is reviewed, not believed ─────────────
+
+
+def test_claims_nothing_to_change_reads_the_rounds_handoff(tmp_path: Path) -> None:
+    """The predicate that admits an empty round 1 for review — true only when
+    the round's handoff acknowledges EVERY injected id NO CHANGE NEEDED; a
+    FIXED (a contradiction over an unchanged tree), a DISPUTED, an omitted id
+    or a missing handoff is not a claim the loop reviews — exit C stands."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+    from lithos_loom.plugins.story_develop.external_reviews import (
+        claims_nothing_to_change,
+    )
+
+    hd = tmp_path / "handoff"
+    hd.mkdir()
+    ids = ["f-001", "f-002"]
+    assert claims_nothing_to_change(hd, 1, ids) is False  # no handoff yet
+    path = hd / handoff_mod.coder_handoff_name(1)
+    head = "## Status: LGTM\n## Summary\nx\n## External findings\n"
+    path.write_text(
+        head + "- f-001: NO CHANGE NEEDED — a\n- f-002: no change needed — b\n"
+    )
+    assert claims_nothing_to_change(hd, 1, ids) is True
+    path.write_text(head + "- f-001: FIXED — a\n- f-002: NO CHANGE NEEDED — b\n")
+    assert claims_nothing_to_change(hd, 1, ids) is False
+    path.write_text(head + "- f-001: DISPUTED — a\n- f-002: NO CHANGE NEEDED — b\n")
+    assert claims_nothing_to_change(hd, 1, ids) is False
+    path.write_text(head + "- f-001: NO CHANGE NEEDED — a\n")  # f-002 omitted
+    assert claims_nothing_to_change(hd, 1, ids) is False
+    path.write_text("## Status: LGTM\n## Summary\nnothing\n")  # no section
+    assert claims_nothing_to_change(hd, 1, ids) is False
+    # the round matters: round 2's handoff is not round 1's claim
+    assert claims_nothing_to_change(hd, 2, ids) is False
+    assert claims_nothing_to_change(hd, 1, []) is False  # nothing injected
+
+
+def test_render_external_context_names_every_finding_for_the_panel() -> None:
+    """The panel judging a no-change claim must know WHAT was claimed: the
+    context names each injected finding (author, location, body — fenced so
+    reviewer prose cannot become prompt prose) and tells the reviewers that a
+    NO CHANGE NEEDED they disagree with is a finding of theirs."""
+    from lithos_loom.plugins.story_develop.external_reviews import (
+        render_external_context,
+    )
+
+    findings = {
+        "f-001": _finding(),
+        "f-002": ExternalFinding(
+            author="reviewer-bot",
+            source="bot",
+            trusted=True,
+            stream=ReviewStream.CONVERSATION,
+            activity_id=9,
+            reply_mode=ReplyMode.CONVERSATION,
+            thread_url="https://github.com/o/r/pull/1#issuecomment-9",
+            head_sha="",
+            body="good to merge — the ``` guard ``` exists",
+        ),
+    }
+
+    ctx = render_external_context(findings)
+
+    assert ctx.startswith("## External review findings under remediation")
+    assert "f-001" in ctx and "f-002" in ctx
+    assert "reviewer-bot" in ctx and "good to merge" in ctx
+    assert "src/x.py:12" in ctx  # the inline finding's location
+    assert "NO CHANGE NEEDED" in ctx and "finding of yours" in ctx
+    assert "````" in ctx  # the fence outgrows the body's own backticks
+    assert render_external_context({}) == ""
+
+
+def test_ack_section_returns_the_coders_acknowledgement_block() -> None:
+    """opus round 2 (High): the round-1 panel must see the claim it judges —
+    the coder summary the reviewer prompt renders is the `## Summary`
+    paragraph only, so the acknowledgement section is appended to it."""
+    from lithos_loom.plugins.story_develop.external_reviews import ack_section
+
+    text = (
+        "## Status: LGTM\n## Summary\nnothing to change\n"
+        "## External findings\n"
+        "- f-001: NO CHANGE NEEDED — an approval verdict\n"
+        "- f-002: FIXED — guarded it\n"
+        "## Findings\n- finding_id: f-009\n"
+    )
+    section = ack_section(text)
+    assert section.startswith("## External findings")
+    assert "f-001: NO CHANGE NEEDED — an approval verdict" in section
+    assert "f-002: FIXED" in section
+    assert "f-009" not in section  # the next section is not swept in
+    assert ack_section("## Status: LGTM\n## Summary\nx\n") == ""
+
+
+def test_outcomes_the_ack_section_outranks_the_findings_block() -> None:
+    """opus round 2 (Medium): a coder that writes NO CHANGE NEEDED on the
+    mandated channel AND disputes the same id formally in round 1's
+    `## Findings` block is admitted for review on the ack; the epilogue must
+    read the same channel first, or an approved no-change run ends `failed`
+    over a "contradiction" that is not one. The ack decides; the block only
+    speaks for an id with no ack."""
+    from lithos_loom.plugins.story_develop.handoff import Finding
+
+    id_map = {"f-001": _finding(), "f-002": _finding(activity_id=8)}
+    claims = {
+        fid: Finding(
+            finding_id=fid,
+            severity="minor",
+            status="disputed",
+            files=[],
+            rationale="r",
+            coder_response="deliberate decision",
+        )
+        for fid in id_map
+    }
+    acks = {"f-001": CoderAck(verdict="no_change_needed", detail="an approval")}
+    o1, o2 = outcomes_after_loop(id_map, {}, claims, acks, loop_approved=True)
+    assert o1.disposition == "no_change_needed" and o1.detail == "an approval"
+    assert o2.disposition == "disputed" and o2.detail == "deliberate decision"
+    acks = {"f-001": CoderAck(verdict="fixed", detail="guarded it")}
+    (o1, _) = outcomes_after_loop(id_map, {}, claims, acks, loop_approved=True)
+    assert o1.disposition == "fixed"

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +48,7 @@ from lithos_loom.github_review_streams import (
 
 from ...runner import git
 from . import handoff
+from .conflict_resolve import fence
 from .findings import FindingLedger
 from .github_access import github_call
 from .panel import ReviewOutcome
@@ -64,6 +65,8 @@ __all__ = [
     "adapter_for",  # re-export: same seam — the stream's reply capability
     "issue_comment_reply_body",  # re-export: same reason, for the reply epilogue
     "ack_instruction",
+    "ack_section",
+    "claims_nothing_to_change",
     "external_intake_reviews",
     "fetch_external_findings",
     "finding_from_activity",
@@ -71,6 +74,7 @@ __all__ = [
     "outcomes_after_loop",
     "parse_coder_acks",
     "pr_number_from_spec",
+    "render_external_context",
 ]
 
 
@@ -226,7 +230,8 @@ class ExternalOutcome:
     """What happened to one injected external finding, for the reply epilogue.
 
     ``disposition``: ``rejected`` (triage refuted it, ``detail`` = the cited
-    evidence), ``fixed`` / ``disputed`` / ``reverted`` (the coder's per-id
+    evidence), ``fixed`` / ``disputed`` / ``reverted`` / ``no_change_needed``
+    (#380: not a defect — the coder agrees nothing should change) (the coder's per-id
     acknowledgement in its FINAL handoff, ``detail`` = its one-line response
     — ``reverted`` is a fix a later round undid, #387: the reviewer and the
     story's acceptance criteria disagree, an operator decision), or
@@ -246,7 +251,7 @@ class ExternalOutcome:
 class CoderAck:
     """One line of the coder's ``## External findings`` acknowledgement."""
 
-    verdict: str  # "fixed" | "disputed" | "reverted"
+    verdict: str  # "fixed" | "disputed" | "reverted" | "no_change_needed"
     detail: str = ""
 
 
@@ -264,7 +269,8 @@ _ACK_SECTION_RE = re.compile(
 # One ack per LINE (the same anchoring rule as the triage verdict regex — an
 # unanchored pattern would let one line's detail swallow the next).
 _ACK_RE = re.compile(
-    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*(?P<verdict>FIXED|DISPUTED|REVERTED)"
+    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*"
+    r"(?P<verdict>FIXED|DISPUTED|REVERTED|NO[ \t_]+CHANGE[ \t_]+NEEDED)"
     r"[ \t]*(?:[—–:-]+[ \t]*(?P<detail>.*\S))?[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -294,13 +300,29 @@ that finding AS OF THIS HANDOFF:
 - f-001: FIXED — <one line: what you changed, and where>
 - f-002: DISPUTED — <one line: why the finding is wrong>
 - f-003: REVERTED — <one line: why you undid a fix from an earlier round>
+- f-004: NO CHANGE NEEDED — <one line: why there is nothing to change>
 
 Use FIXED only for a finding whose fix is in the tree NOW. A fix you undid
 this round (a reviewer holds it contradicts the acceptance criteria, say) is
 REVERTED, never FIXED — the operator decides between the two contracts, not
-you. An id you omit is treated as NOT addressed and its thread gets no answer
-— never omit one silently, and repeat the section in every round.
+you. NO CHANGE NEEDED is for a finding that is not a defect at all — an
+approval verdict, a description of the intended behaviour, something already
+in the tree — where you agree with the reviewer that nothing should change
+(DISPUTED is for a claim you say is wrong). An id you omit is treated as NOT
+addressed and its thread gets no answer — never omit one silently, and repeat
+the section in every round.
 """
+
+
+def ack_section(text: str) -> str:
+    """The coder handoff's ``## External findings`` section verbatim (header
+    included), or ``""``. The round-1 reviewer prompt renders the coder's
+    ``## Summary`` paragraph only, so the panel judging a no-change claim
+    (PR #396 review) is shown the claim itself by appending this."""
+    section = _ACK_SECTION_RE.search(text)
+    if section is None:
+        return ""
+    return section.group(0).strip()
 
 
 def parse_coder_acks(text: str, finding_ids: Sequence[str]) -> dict[str, CoderAck]:
@@ -320,8 +342,9 @@ def parse_coder_acks(text: str, finding_ids: Sequence[str]) -> dict[str, CoderAc
         fid = line.group("fid")
         if fid not in known:
             continue
+        verdict = re.sub(r"[ \t_]+", "_", line.group("verdict").strip().lower())
         acks[fid] = CoderAck(
-            verdict=line.group("verdict").lower(),
+            verdict=verdict,
             detail=(line.group("detail") or "").strip(),
         )
     return acks
@@ -350,11 +373,15 @@ def outcomes_after_loop(
     validated) AND, when known, a tree that MOVED (*tree_changed*, #387: an
     approved run whose final tree equals the PR head outside the generated
     paths undid its own fix — ``reverted``, whatever the handoff says). A
-    ``REVERTED`` acknowledgement is ``reverted``. A dispute counts from
-    either channel — the ``## Findings`` block only in round 1, see
-    :func:`final_round_outcomes`:
-    the shared ``## Findings`` block contract, or a ``DISPUTED``
-    acknowledgement line. Everything else is ``unaddressed`` —
+    ``REVERTED`` acknowledgement is ``reverted``. ``no_change_needed`` needs
+    the same ``loop_approved`` (PR #396 review: the loop admits a round-1
+    no-change claim for review and its gate + panel judge the unchanged
+    head; an unapproved claim is ``unaddressed``, never answered as "no
+    change needed"). A dispute counts from either channel — a ``DISPUTED``
+    acknowledgement line, or the shared ``## Findings`` block contract for an
+    id with NO acknowledgement (the block is read in round 1 only, see
+    :func:`final_round_outcomes`; the ack channel outranks it). Everything
+    else is ``unaddressed`` —
     *missing_ack_detail* is the reason recorded when there is no ack at all.
     """
     out: list[ExternalOutcome] = []
@@ -364,7 +391,11 @@ def outcomes_after_loop(
             continue
         claim = coder_findings.get(fid)
         ack = acks.get(fid)
-        if (claim is not None and claim.status == "disputed") or (
+        # The mandated ack channel outranks the round-1 `## Findings` block
+        # (opus round 2): the block speaks only for an id with no ack, or
+        # the same handoff could admit a no-change claim for review and then
+        # read as a formal dispute — a "contradiction" that is not one.
+        if (ack is None and claim is not None and claim.status == "disputed") or (
             ack is not None and ack.verdict == "disputed"
         ):
             detail = (
@@ -376,6 +407,32 @@ def outcomes_after_loop(
             continue
         if ack is not None and ack.verdict == "reverted":
             out.append(ExternalOutcome(fid, ext, "reverted", detail=ack.detail))
+            continue
+        if ack is not None and ack.verdict == "no_change_needed":
+            # #380: not a defect (an approval verdict, intended behaviour) —
+            # nothing landed and nothing had to. Like `fixed`, a claim the
+            # LOOP must have approved (PR #396 review: the coder alone never
+            # disposes an external finding — the gate + panel judged the
+            # unchanged head, or the claim is unvalidated and no thread is
+            # answered with it).
+            if loop_approved:
+                out.append(
+                    ExternalOutcome(fid, ext, "no_change_needed", detail=ack.detail)
+                )
+            else:
+                out.append(
+                    ExternalOutcome(
+                        fid,
+                        ext,
+                        "unaddressed",
+                        detail=(
+                            "the coder acknowledged NO CHANGE NEEDED "
+                            f"({ack.detail or 'no reason given'}) but the loop "
+                            "did not approve the unchanged head — the claim is "
+                            "unvalidated"
+                        ),
+                    )
+                )
             continue
         if ack is not None and ack.verdict == "fixed" and loop_approved:
             if tree_changed is False:
@@ -468,6 +525,94 @@ def final_round_outcomes(
         loop_approved=loop_approved,
         tree_changed=tree_changed,
         missing_ack_detail=missing,
+    )
+
+
+def nothing_to_change(outcomes: Sequence[ExternalOutcome]) -> bool:
+    """#380: every injected finding was refuted by triage or dispositioned
+    ``no_change_needed`` — which the loop APPROVED (an unapproved claim reads
+    ``unaddressed``, so this is never true on the coder's word alone) — the
+    run had nothing to do, so a loop that committed nothing is
+    ``already_clean`` (reported, not remediated), not a failure. False when
+    there is no external finding at all."""
+    return bool(outcomes) and all(
+        o.disposition in ("rejected", "no_change_needed") for o in outcomes
+    )
+
+
+def claims_nothing_to_change(
+    handoff_dir: Path, round_no: int, finding_ids: Sequence[str]
+) -> bool:
+    """PR #396 review (High): whether the round's coder handoff claims that
+    EVERY injected finding needs no change — the one shape in which a
+    round-1 coder may commit nothing and still be reviewed: the loop admits
+    the empty round (``LoopEntry.no_change_claim``) and its gate + panel
+    judge the claim at the unchanged head. Anything short of that — a
+    ``FIXED`` over an unchanged tree, a ``DISPUTED``, an omitted id, no
+    section, no handoff, nothing injected — is not a reviewable claim, and
+    round 1's no-commit exit stands.
+    """
+    if not finding_ids:
+        return False
+    try:
+        text = (handoff_dir / handoff.coder_handoff_name(round_no)).read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return False
+    acks = parse_coder_acks(text, finding_ids)
+    return all(
+        (ack := acks.get(fid)) is not None and ack.verdict == "no_change_needed"
+        for fid in finding_ids
+    )
+
+
+def render_external_context(findings: Mapping[str, ExternalFinding]) -> str:
+    """The panel's context in external mode (PR #396 review): the injected
+    findings by the id the coder saw — author, location, body, fenced so
+    reviewer prose cannot become prompt prose — and the rule that the coder's
+    per-id acknowledgement is a claim for the panel to verify: a ``NO CHANGE
+    NEEDED`` or ``DISPUTED`` a reviewer disagrees with is a finding of theirs.
+    Without it the panel would review the PR blind to what was claimed, and a
+    round-1 no-change claim (admitted for review with nothing committed)
+    would rest on the coder's word."""
+    if not findings:
+        return ""
+    entries = []
+    for fid, f in findings.items():
+        if f.path:
+            where = f"{f.path}:{f.line}" if f.line else f.path
+        else:
+            where = "the PR as a whole (a conversation comment)"
+        entries.append(f"{fid} — [{f.author}] at {where}:\n{' '.join(f.body.split())}")
+    body = "\n\n".join(entries)
+    body_fence = fence(body)
+    return "\n".join(
+        [
+            "## External review findings under remediation",
+            "",
+            (
+                "This run was dispatched to act on findings raised by EXTERNAL "
+                "reviewers on the PR's own threads, injected under these ids:"
+            ),
+            "",
+            body_fence,
+            body,
+            body_fence,
+            "",
+            (
+                "The coder's handoff acknowledges each id in its `## External "
+                "findings` section — FIXED, DISPUTED, REVERTED or NO CHANGE NEEDED "
+                "— and every acknowledgement is a claim for you to verify against "
+                "the tree, never a verdict: the external reviewer proposes, this "
+                "panel disposes. A NO CHANGE NEEDED or DISPUTED you disagree with "
+                "(the finding names a real defect the tree still carries) is a "
+                "finding of yours, with the defect as its rationale; a FIXED you "
+                "cannot confirm in the diff is one too. When the coder committed "
+                "nothing this round, the change under review is the PR head as it "
+                "stands, and the question is exactly whether that claim holds."
+            ),
+        ]
     )
 
 

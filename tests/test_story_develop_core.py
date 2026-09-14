@@ -2177,6 +2177,127 @@ def test_converge_entry_seeds_round_one_and_reuses_loop(
     assert branch and branch != "HEAD"
 
 
+_NO_CHANGE_HANDOFF = (
+    "## Status: LGTM\n## Summary\nNothing to change.\n"
+    "## External findings\n- f-001: NO CHANGE NEEDED — an approval verdict\n"
+)
+
+
+def _no_change_entry(config: DevelopConfig):
+    """A LoopEntry on a PR head one commit past the base whose round-1 coder
+    is expected to claim no change (the external-mode #380 shape)."""
+    from lithos_loom.plugins.story_develop.develop import LoopEntry
+    from lithos_loom.runner import git, worktree
+
+    base = git.base_sha(config.repo)
+    (config.repo / "pr.txt").write_text("pr change\n")
+    subprocess.run(
+        ["git", "add", "-A"], cwd=config.repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "the PR commit"],
+        cwd=config.repo,
+        check=True,
+        capture_output=True,
+    )
+    head = git.base_sha(config.repo)
+    return LoopEntry(
+        worktree_factory=lambda cfg: worktree.create_on_branch(
+            cfg.repo, head, cfg.description, parent=cfg.worktree_parent
+        ),
+        base_override=git.RangeBase(base),
+        intake_reviews=[],
+        intake_check_set=None,
+        no_change_claim=lambda round_no: True,
+    )
+
+
+def test_a_no_change_round_one_is_judged_by_the_gate_and_panel(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #396 review (High): in external mode the round-1 coder may commit
+    nothing because every injected finding needs no change (#380) — a CLAIM
+    about the PR head. The loop admits the empty round and the fast checks +
+    the panel judge the unchanged head: approval is the loop's, never the
+    coder's word alone."""
+    from dataclasses import replace
+
+    cfg = replace(config, test_command="fake-tests")
+    state = _install_fakes(
+        monkeypatch,
+        cfg,
+        write_source=False,  # the coder changes nothing
+        coder_handoffs={1: _NO_CHANGE_HANDOFF},
+        reviews=[{"text": _LGTM}],
+    )
+    entry = _no_change_entry(cfg)
+
+    result = develop_mod.develop(cfg, entry=entry)
+
+    assert result.status == "approved" and result.rounds == 1
+    assert state["gate_calls"]  # the fast checks ran on the unchanged head
+    assert [c[0] for c in state["review_calls"]] == [1]  # the panel judged it
+    assert _commit_count_since_base(result) == 1  # the PR's own commit only
+    # opus round 2 (High): the panel must SEE the claim it is asked to
+    # judge — the round-1 reviewer prompt carries the coder's acknowledgement
+    # lines, not just its Summary paragraph
+    assert "NO CHANGE NEEDED — an approval verdict" in state["review_prompts"][0]
+
+
+def test_a_no_change_claim_the_panel_rejects_ends_the_run_with_its_rationale(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression the review asked for: the panel disagrees with the
+    coder's NO CHANGE NEEDED (a real defect mislabelled) — the run is NOT
+    approved on the coder's word. The admitted round is a VALIDATION pass,
+    not an entry to the fix loop (opus round 2): a rejected claim ends the
+    run right there with the panel's rationale, so a trigger that asked for
+    nothing never drives paid rounds or unrelated pushes onto a delivered
+    PR."""
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        write_source=False,
+        coder_handoffs={1: _NO_CHANGE_HANDOFF},
+        reviews=[{"text": _FINDINGS_MAJOR}],
+    )
+    entry = _no_change_entry(config)
+
+    result = develop_mod.develop(config, entry=entry)
+
+    assert result.status == "failed" and result.rounds == 1
+    assert "rejected the coder's no-change claim" in result.failure_reason
+    assert "needs work" in result.failure_reason  # the panel's rationale
+    assert [c[0] for c in state["coder_calls"]] == [1]  # no round 2
+    assert _commit_count_since_base(result) == 1  # nothing was ever committed
+
+
+def test_a_no_change_claim_under_a_red_required_check_ends_the_run(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the panel passes but a required check is red on the unchanged head:
+    # the floor holds approval, and the validation pass ends the run naming
+    # the check rather than looping
+    from dataclasses import replace
+
+    cfg = replace(config, test_command="fake-tests")
+    _install_fakes(
+        monkeypatch,
+        cfg,
+        write_source=False,
+        coder_handoffs={1: _NO_CHANGE_HANDOFF},
+        reviews=[{"text": _LGTM}],
+        gates=[False],
+    )
+    entry = _no_change_entry(cfg)
+
+    result = develop_mod.develop(cfg, entry=entry)
+
+    assert result.status == "failed" and result.rounds == 1
+    assert "required check" in result.failure_reason
+    assert _commit_count_since_base(result) == 1
+
+
 def _pr_entry(config: DevelopConfig, post_commit_pass):
     """A LoopEntry on a PR head one commit past the base (the converge shape),
     carrying *post_commit_pass* — the S4 resolve-mode regenerate seam."""

@@ -47,6 +47,7 @@ from . import (
     check_runner,
     containers,
     engines,
+    external_reviews,
     handoff,
     panel,
     run_outcome,
@@ -190,14 +191,26 @@ def _render_panel_findings(outcomes: list[ReviewOutcome]) -> str:
 
 
 def _coder_summary(config: DevelopConfig, round_no: int) -> str:
-    """Best-effort read of the coder's round-*round_no* summary (seeds review)."""
+    """Best-effort read of the coder's round-*round_no* summary (seeds review).
+
+    In external mode the handoff's ``## External findings`` acknowledgements
+    ride along (PR #396 review): the round-1 panel is asked to judge the
+    coder's per-id claims — a no-change claim above all — so it must see
+    them, and the reviewer template renders only this summary.
+    """
     path = config.handoff_dir / handoff.coder_handoff_name(round_no)
     try:
-        return handoff.parse_review_handoff(
-            path.read_text(encoding="utf-8")
-        ).summary or ("(the coder wrote no summary)")
-    except (HandoffError, OSError):
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         return "(coder summary unavailable)"
+    try:
+        summary = handoff.parse_review_handoff(text).summary or (
+            "(the coder wrote no summary)"
+        )
+    except HandoffError:
+        summary = "(coder summary unavailable)"
+    acks = external_reviews.ack_section(text)
+    return f"{summary}\n\n{acks}" if acks else summary
 
 
 # ARCH-1.S8 (public-surface flip): the S2/S4/S5 back-compat aliases and the
@@ -498,6 +511,7 @@ def develop(
         pre_commit_guard=entry.pre_commit_guard if entry is not None else None,
         post_commit_pass=entry.post_commit_pass if entry is not None else None,
         review_context=entry.review_context if entry is not None else "",
+        no_change_claim=entry.no_change_claim if entry is not None else None,
     )
 
     # The default outcome is "max_rounds" — the exit the loop lands on when it

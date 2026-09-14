@@ -802,6 +802,118 @@ def test_commit_phase_honours_the_pre_commit_guard(
     assert after == before and ctx.new_commit is None
 
 
+def test_commit_phase_admits_a_round_one_no_change_claim_for_review(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """PR #396 review (High): a round-1 coder that committed nothing because
+    every injected finding needs no change has made a CLAIM about the PR
+    head, and the loop's own gate + panel judge it there — never the coder
+    alone. The entry's predicate admits the empty round: no exit, nothing
+    committed, the unchanged head is the gated tree."""
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = tmp_git_repo
+    ctx.gated_sha = None
+    head = _head(tmp_git_repo)
+    asked: list[int] = []
+
+    def claim(round_no: int) -> bool:
+        asked.append(round_no)
+        return True
+
+    ctx.no_change_claim = claim
+
+    exit_ = rounds_mod.commit_phase(ctx, 1)
+
+    assert exit_ is None
+    assert asked == [1]
+    assert ctx.new_commit is None and ctx.gated_sha == head
+    assert _head(tmp_git_repo) == head  # nothing committed
+
+
+def test_commit_phase_keeps_exit_c_when_no_change_is_not_claimed(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    # the predicate says the handoff does NOT claim no-change for every id
+    # (a FIXED over an unchanged tree, an omitted id): exit C as before
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = tmp_git_repo
+    ctx.gated_sha = None
+    ctx.no_change_claim = lambda round_no: False
+
+    exit_ = rounds_mod.commit_phase(ctx, 1)
+
+    assert exit_ is not None and exit_.status == "failed"
+    assert exit_.failure_reason == "round 1: coder produced no commit"
+    assert ctx.gated_sha is None
+
+
+def test_fast_gate_phase_runs_the_checks_on_an_admitted_unchanged_head(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """The admitted no-change round has no commit and — in external mode — no
+    intake check-set describing the head, so the fast checks run on the
+    gated head itself: a required red check then holds the claim's approval
+    through the floor like any round's."""
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = tmp_git_repo
+    ctx.gated_sha = None
+    ran: list[str] = []
+    ctx.fast_checks = (
+        Check(name="tests", command="make test", state="required", stage="fast"),
+    )
+
+    def fake_run_check_set(cfg, wt, sha, round_no, checks, ledger):
+        ran.append(sha)
+        return CheckSetResult(())
+
+    ctx.services = rounds_mod.Services(
+        run_turn=ctx.services.run_turn,
+        sleep=ctx.services.sleep,
+        start_container=ctx.services.start_container,
+        stop_container=ctx.services.stop_container,
+        run_check_set=fake_run_check_set,
+    )
+    ctx.no_change_claim = lambda round_no: True
+    assert rounds_mod.commit_phase(ctx, 1) is None
+
+    assert rounds_mod.fast_gate_phase(ctx, 1) is None
+
+    assert ran == [_head(tmp_git_repo)]
+    assert ctx.check_set is not None
+
+
+def test_no_change_verdict_phase_ends_an_unapproved_validation_pass(
+    tmp_path: Path, tmp_git_repo: Path
+) -> None:
+    """opus round 2 (Medium): the admitted no-change round is a VALIDATION
+    pass — approval seals it above; a panel that rejects the claim (or a
+    red required check the floor holds on) ends the run here with the
+    rationale, never an entry to the fix loop over the whole PR."""
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.wt = tmp_git_repo
+    ctx.gated_sha = None
+    ctx.no_change_claim = lambda round_no: True
+    assert rounds_mod.commit_phase(ctx, 1) is None
+    ctx.final_reviews = [_failed_outcome()]  # the panel filed f-101
+
+    exit_ = rounds_mod.no_change_verdict_phase(ctx, 1)
+
+    assert exit_ is not None and exit_.status == "failed"
+    assert "rejected the coder's no-change claim" in exit_.failure_reason
+    assert "correctness" in exit_.failure_reason and "overflow" in exit_.failure_reason
+
+    # reviews passed but approval did not seal (a required check is red):
+    # the floor's reason, not a phantom panel rejection
+    ctx.final_reviews = [_passed()]
+    exit_ = rounds_mod.no_change_verdict_phase(ctx, 1)
+    assert exit_ is not None and "required check" in exit_.failure_reason
+
+    # an ordinary round (a commit, or not the admitted round) is untouched
+    ctx.no_change_round = False
+    assert rounds_mod.no_change_verdict_phase(ctx, 1) is None
+    assert rounds_mod.no_change_verdict_phase(ctx, 2) is None
+
+
 def test_round1_coder_prompt_uses_the_entry_template_and_extra_slots(
     tmp_path: Path, tmp_git_repo: Path
 ) -> None:

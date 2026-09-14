@@ -31,6 +31,7 @@ from lithos_loom.subscriptions.remediation_escalation import (
 
 __all__ = [
     "REFUND_RETRY_DELAYS",
+    "REPORTED_NOT_REMEDIATED",
     "REPO_MISMATCH_KEY",
     "escalate_or_report",
     "post_checkout_unresolved_refusal",
@@ -45,6 +46,15 @@ __all__ = [
 
 # Backoff between attempts to land the refund's state write (seconds).
 REFUND_RETRY_DELAYS: tuple[float, ...] = (0.5, 2.0, 5.0)
+
+# Run statuses that are reported, not remediated (#380): every injected
+# finding was refuted by triage (`triage_rejected` — the lens #84 route, PR
+# #396 review) or judged not a defect with the loop approving the unchanged
+# head (`already_clean`). Nothing was pushed and nothing had to be, so the
+# reserved round comes back — once per budget (:func:`_refund_no_change`).
+REPORTED_NOT_REMEDIATED: frozenset[str] = frozenset(
+    {"already_clean", "triage_rejected"}
+)
 
 
 async def post_finding(ctx: SubscriptionContext, story_id: str, summary: str) -> None:
@@ -67,6 +77,28 @@ async def post_finding(ctx: SubscriptionContext, story_id: str, summary: str) ->
             type(exc).__name__,
             exc,
         )
+
+
+async def write_marker_strict(
+    ctx: SubscriptionContext, *, gate_id: str, marker: dict[str, Any]
+) -> Exception | None:
+    """A gate-marker write that keeps a budget round or a parked trigger:
+    retried with backoff, and NEVER raising — a raw transport error
+    propagates past the client's own recovery (``lithos_client._invoke``)
+    and must land here, not in ``ExternalRemediation._run``'s crash handler,
+    which re-reads the ORIGINAL reserved budget and can raise a false
+    ``remediation_exhausted`` gate over a round that was refunded. Returns
+    the last failure, or ``None`` when the write landed."""
+    failure: Exception | None = None
+    for delay in (0.0, *REFUND_RETRY_DELAYS):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await ctx.lithos.task_update(task_id=gate_id, metadata=marker)
+            return None
+        except Exception as exc:  # noqa: BLE001 — see above
+            failure = exc
+    return failure
 
 
 async def escalate_or_report(
@@ -161,6 +193,9 @@ async def record_result(
     cost = data.get("total_cost_usd")
     if isinstance(cost, int | float):
         lines.append(f"- spend ${cost:.2f}")
+    if status in REPORTED_NOT_REMEDIATED:
+        budget, note = await _refund_no_change(ctx, gate_id, budget, budget_limit)
+        lines.append(note)
     ctx.logger.info(
         "external-remediation: converge for %s finished: %s, round %d/%d%s%s",
         spec.pr_url,
@@ -222,6 +257,50 @@ async def record_result(
             detail=str(data.get("message") or status),
             cost=cost if isinstance(cost, int | float) else None,
         )
+
+
+async def _refund_no_change(
+    ctx: SubscriptionContext, gate_id: str, budget: RemediationBudget, limit: int
+) -> tuple[RemediationBudget, str]:
+    """#380: a reported-not-remediated run (:data:`REPORTED_NOT_REMEDIATED`
+    — every injected finding refuted by triage, or not a defect with the
+    loop approving the unchanged head; nothing committed) gives its reserved
+    round back: ONCE per budget (it is a paid run — triage, and for
+    `already_clean` a coder turn + a panel round — so an unbounded refund
+    would let five "thanks" comments be five paid runs at 0/2; the own-sha
+    skip and the no-JSON refund, the two precedents, spend nothing). A human
+    push is a fresh budget, and so is a completed decision gate (PR #396
+    review). The write is strict and never raises (opus round 1: an escaping
+    write would reach the crash handler's false-exhaustion path); a write
+    that still does not land leaves the round spent and says so."""
+    if budget.no_change_refunded:
+        return budget, (
+            "- nothing to change, but this budget's one reported-not-remediated "
+            f"refund was already used: the round stays spent "
+            f"({budget.rounds_used}/{limit})"
+        )
+    refund = dataclasses.replace(
+        budget, rounds_used=max(0, budget.rounds_used - 1), no_change_refunded=True
+    )
+    failure = await write_marker_strict(
+        ctx, gate_id=gate_id, marker={REMEDIATION_KEY: refund.as_marker()}
+    )
+    if failure is None:
+        return refund, (
+            f"- nothing to change: the round is refunded ({refund.rounds_used}/{limit})"
+        )
+    ctx.logger.warning(
+        "[Friction] external-remediation: no-change refund for gate %s did not "
+        "land (%s); round %d/%d stays spent",
+        gate_id,
+        failure,
+        budget.rounds_used,
+        limit,
+    )
+    return budget, (
+        f"- nothing to change, but recording the refund did not land ({failure}): "
+        f"the round stays spent ({budget.rounds_used}/{limit})"
+    )
 
 
 # ── a mis-mapped checkout (PR #362 re-review 2 F2) ─────────────────────────
@@ -368,18 +447,7 @@ async def refund_infra_failed(
         REMEDIATION_KEY: refund.as_marker(),
         PENDING_KEY: {"pr_url": spec.pr_url},
     }
-    failure: Exception | None = None
-    for delay in (0.0, *REFUND_RETRY_DELAYS):
-        if delay:
-            await asyncio.sleep(delay)
-        try:
-            await ctx.lithos.task_update(task_id=gate_id, metadata=marker)
-            failure = None
-            break
-        except Exception as exc:  # noqa: BLE001 — a raw transport error
-            # propagates past the client's own recovery (lithos_client._invoke)
-            # and must land in this retry loop, not in the crash handler
-            failure = exc
+    failure = await write_marker_strict(ctx, gate_id=gate_id, marker=marker)
     if failure is None:
         ctx.logger.warning(
             "[Friction] external-remediation: converge for %s stopped on an "
@@ -469,18 +537,7 @@ async def refund_repo_mismatch(
             "actual_repo": actual,
         },
     }
-    failure: Exception | None = None
-    for delay in (0.0, *REFUND_RETRY_DELAYS):
-        if delay:
-            await asyncio.sleep(delay)
-        try:
-            await ctx.lithos.task_update(task_id=gate_id, metadata=marker)
-            failure = None
-            break
-        except Exception as exc:  # noqa: BLE001 — a raw transport error
-            # propagates past the client's own recovery (lithos_client._invoke)
-            # and must land in this retry loop, not in the crash handler
-            failure = exc
+    failure = await write_marker_strict(ctx, gate_id=gate_id, marker=marker)
     if failure is None:
         await post_finding(
             ctx,

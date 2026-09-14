@@ -837,7 +837,9 @@ async def test_reconcile_still_open_dispatches_remediation(
     tmp_path, monkeypatch
 ) -> None:
     """The full still-open chain: head observed, batch ingested, converge
-    dispatched, budget incremented on the gate."""
+    dispatched, the round reserved on the gate — and, the run having been
+    reported rather than remediated (`triage_rejected`), refunded on the
+    result (PR #396 review)."""
     import json as _json
     from pathlib import Path as _Path
 
@@ -878,7 +880,8 @@ async def test_reconcile_still_open_dispatches_remediation(
     await rem._task
     assert len(calls) == 1
     marker = (await _get(client, gate.id)).metadata[REMEDIATION_KEY]
-    assert marker["rounds_used"] == 1
+    assert marker["rounds_used"] == 0  # reserved at dispatch, refunded on the result
+    assert marker["no_change_refunded"] is True  # the once-per-budget allowance
     assert marker["last_seen_head_sha"] == "e" * 40  # observed pre-ingest
 
 

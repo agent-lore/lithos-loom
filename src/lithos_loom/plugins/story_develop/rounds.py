@@ -163,6 +163,9 @@ class RoundContext:
     pre_commit_guard: Callable[[Path], str | None] | None = None
     post_commit_pass: Callable[[Path, int], PostCommitOutcome] | None = None
     review_context: str = ""
+    # external mode (PR #396 review): admits a round-1 no-change claim for
+    # review instead of exit C — see LoopEntry
+    no_change_claim: Callable[[int], bool] | None = None
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -174,6 +177,10 @@ class RoundContext:
     prev_signature: frozenset | None = None
     final_reviews: list[ReviewOutcome] = field(default_factory=list)
     new_commit: str | None = None  # round-scoped: set by commit_phase
+    # round-scoped: commit_phase admitted round 1 with no commit as a
+    # no-change VALIDATION pass (PR #396 review) — no_change_verdict_phase
+    # then ends the run unless approval sealed it
+    no_change_round: bool = False
     # PRD S4 / PR #388 review: the post-commit pass's verdict for the latest
     # committed tree, joined to the check-set by fast_gate_phase (a required
     # row — red holds approval); None until a pass reports one
@@ -390,9 +397,11 @@ def commit_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Commit the round's work (excluding the handoff dir) and auto-format it in
     place (#134). Sets ``ctx.new_commit`` / ``ctx.gated_sha``.
 
-    Exits: C ``failed`` (round 1 produced no commit, or the entry's pre-commit
-    guard refused the tree — PRD S5: conflict markers left behind), C'
-    ``infra_failed`` (the entry's post-commit pass could not run — PRD S4).
+    Exits: C ``failed`` (round 1 produced no commit — unless the entry's
+    ``no_change_claim`` admits the empty round for review, PR #396 — or the
+    entry's pre-commit guard refused the tree — PRD S5: conflict markers left
+    behind), C' ``infra_failed`` (the entry's post-commit pass could not run
+    — PRD S4).
     """
     if ctx.pre_commit_guard is not None:
         refused = ctx.pre_commit_guard(ctx.wt)
@@ -407,6 +416,17 @@ def commit_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         ctx.wt, f"story-develop r{round_no}: {ctx.config.description}"
     )
     if round_no == 1 and new_commit is None:
+        if ctx.no_change_claim is not None and ctx.no_change_claim(round_no):
+            # PR #396 review (High): a round-1 coder that changed nothing
+            # because every injected finding needs no change has made a
+            # CLAIM about the PR head, and the loop's own gate + panel judge
+            # it there (the external reviewer proposes, the loop gate
+            # disposes) — never the coder alone. The unchanged head is the
+            # gated tree; the round goes on to the checks and the panel.
+            ctx.gated_sha = git.commit_sha(ctx.wt)
+            ctx.new_commit = None
+            ctx.no_change_round = True
+            return None
         return CycleExit(
             status="failed",
             failure_reason="round 1: coder produced no commit",
@@ -482,7 +502,14 @@ def fast_gate_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """#140/ADR §4: run the FAST deterministic checks on the round's new commit
     (candidate-staged checks are deferred to :func:`approval_phase`). Never
     terminal."""
-    if ctx.fast_checks and ctx.new_commit is not None:
+    target = ctx.new_commit
+    if target is None and round_no == 1 and ctx.check_set is None:
+        # The admitted no-change round (commit_phase, PR #396 review): no
+        # commit, and — in external mode — no intake check-set describing
+        # the head, so the checks run on the gated head itself; the floor
+        # would otherwise judge the claim on nothing.
+        target = ctx.gated_sha
+    if ctx.fast_checks and target is not None:
         # Overwrite unconditionally: on a gate infra error this clears to None
         # rather than letting a PRIOR commit's result (e.g. a stale RED) stand in
         # for this commit. A round with no new commit keeps the prior result — the
@@ -490,7 +517,7 @@ def fast_gate_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         check_set = ctx.services.run_check_set(
             ctx.config,
             ctx.wt,
-            ctx.new_commit,
+            target,
             round_no,
             ctx.fast_checks,
             ctx.gate_ledger,
@@ -714,6 +741,40 @@ def _artifact_review_pass(
     return None
 
 
+def no_change_verdict_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
+    """The admitted no-change round (commit_phase, PR #396 review) is a
+    VALIDATION pass, not an entry to the fix loop: approval sealed it in
+    :func:`approval_phase`; reaching here means the panel rejected the
+    coder's claim, or a required check is red on the unchanged head and the
+    floor held. End the run with that rationale — a trigger that asked for
+    nothing (an approval comment ingested as a finding, #380) must never
+    drive paid rounds, nor push unrelated commits onto a delivered PR (opus
+    round 2); the converge epilogue reports the claim unaddressed.
+
+    Exit: C'' ``failed``.
+    """
+    if round_no != 1 or not ctx.no_change_round:
+        return None
+    rejections = [
+        f"{r.reviewer}: {f.rationale}"
+        for r in ctx.final_reviews
+        for f in r.findings
+        if f.is_open
+    ]
+    if rejections:
+        why = "the panel rejected the coder's no-change claim — " + "; ".join(
+            rejections
+        )
+    else:
+        why = (
+            "the panel passed the unchanged head but a required check blocks "
+            "approval on it — the no-change claim is not validated"
+        )
+    return CycleExit(
+        status="failed", failure_reason=f"round 1: {why}", resume_after=None
+    )
+
+
 def deadlock_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """T7 dispute escalation: a coder-disputed finding the reviewer kept blocking
     for 2 consecutive rounds stops the run with a human breadcrumb rather than
@@ -788,6 +849,7 @@ def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
         fast_gate_phase,
         panel_phase,
         approval_phase,
+        no_change_verdict_phase,
         deadlock_phase,
         stall_phase,
         lambda c, r: cost_ceiling_phase(c, r, when="post_review"),
