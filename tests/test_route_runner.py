@@ -3128,25 +3128,38 @@ async def test_runner_recovers_a_retry_dropped_by_a_full_queue(
 class _StubAdmission:
     """An admission gate answering a scripted sequence of verdicts."""
 
-    def __init__(self, *admitted: bool) -> None:
+    def __init__(self, *admitted: bool, refusal: str = "limit") -> None:
         from lithos_loom.subscriptions.admission import AdmissionLimits
 
         self._answers = list(admitted)
+        self._refusal = refusal
         self._limits = AdmissionLimits(limit=1, total=3)
         self.calls: list[tuple[str, str, str | None]] = []
         self.released: list[tuple[str, str]] = []
+        self.forgotten: list[str] = []
 
-    def release(self, task_id: str, *, route: str) -> None:
+    async def release(self, task_id: str, *, route: str) -> None:
         self.released.append((task_id, route))
 
-    async def admit(self, *, route: str, task_id: str, project: str | None) -> Any:
+    async def forget(self, task_id: str, *, route: str | None = None) -> None:
+        self.forgotten.append(task_id)
+
+    async def admit(
+        self,
+        *,
+        route: str,
+        task_id: str,
+        project: str | None,
+        tags: tuple[str, ...] = (),
+    ) -> Any:
+        self.tags = tags
         from lithos_loom.subscriptions.admission import AdmissionVerdict
 
         self.calls.append((route, task_id, project))
         admitted = self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
         return AdmissionVerdict(
             admitted=admitted,
-            reason="admitted" if admitted else "limit",
+            reason="admitted" if admitted else self._refusal,
             open_gates=0 if admitted else 1,
             escalated=0,
             limits=self._limits,
@@ -3172,6 +3185,7 @@ async def test_runner_defers_a_refused_story_and_rechecks(tmp_path: Path) -> Non
 
     lithos.task_claim.assert_not_awaited()
     assert admission.calls == [("story-develop", "task-1", "lens")]
+    assert admission.tags == ("trigger:story-develop",)  # what its runner matches
     # the re-check sleeper is the fallback nudge; the waker is the fast path
     assert runner._rechecker.pending("task-1") is True
 
@@ -3218,6 +3232,71 @@ async def test_admission_is_asked_only_for_a_ready_story(tmp_path: Path) -> None
 
     lithos.task_claim.assert_not_awaited()
     assert admission.calls == []
+
+
+async def test_a_queued_refusal_arms_the_recheck_sleeper(tmp_path: Path) -> None:
+    """ADR 0012: a refusal can now happen while a slot is FREE (another held
+    story is ahead). The never-gives-up sleeper is the fallback for a
+    dropped head nudge, so it must be armed on this refusal too."""
+    bus = EventBus()
+    admission = _StubAdmission(False, refusal="queued")
+    runner, lithos = _delivering_runner(bus, tmp_path, admission)
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_awaited()
+    assert runner._rechecker.pending("task-1") is True
+
+
+async def test_an_undetermined_readiness_steps_aside_in_the_admission_queue(
+    tmp_path: Path,
+) -> None:
+    """Unknown is not "not ready", but a head that cannot answer holds the
+    bucket just the same; it gives up its place and re-joins when it asks."""
+    bus = EventBus()
+    admission = _StubAdmission(True)
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, route=_route(completes_task=False)
+    )
+    lithos.task_get.return_value = _open_task()
+    lithos.task_ready.return_value = _ready(
+        *(f"other-{i}" for i in range(READY_QUERY_LIMIT))
+    )
+    lithos.task_blocked.return_value = [
+        SimpleNamespace(task=_open_task(f"blocked-{i}"), blockers=())
+        for i in range(READY_QUERY_LIMIT)
+    ]
+    runner.admission = admission
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    assert admission.calls == []
+    assert admission.forgotten == ["task-1"]
+    assert runner._rechecker.pending("task-1") is True
+
+
+async def test_a_story_off_the_ready_frontier_leaves_the_admission_queue(
+    tmp_path: Path,
+) -> None:
+    """Admission releases held stories in order and nudges the head (ADR
+    0012). A head that is no longer ready — a blocks edge added while it
+    waited — never asks admission, so unless the runner tells admission it
+    left the frontier, every story behind it is held forever."""
+    bus = EventBus()
+    admission = _StubAdmission(True)
+    runner, lithos = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        route=_route(completes_task=False),
+        ready_ids=("someone-else",),
+    )
+    runner.admission = admission
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_awaited()
+    assert admission.calls == []
+    assert admission.forgotten == ["task-1"]
 
 
 async def test_admission_recheck_nudge_claims_once_admitted(tmp_path: Path) -> None:

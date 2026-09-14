@@ -54,4 +54,8 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 - Depends on: [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md)
 - Used by: [Cli](Cli.md), [Render](Render.md), [Sources](Sources.md), [Subscriptions](Subscriptions.md)
 
+## ADRs
+
+- [ADR 0012 — Serial-admission release order: priority, then first-held order; the choice lives in `Admission`](../../adr/0012-admission-release-order.md)
+
 [← all generated docs](../README.md)

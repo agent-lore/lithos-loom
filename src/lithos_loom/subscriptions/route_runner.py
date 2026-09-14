@@ -272,6 +272,15 @@ class RouteRunner:
         # replay (US11 retired the `loom_delivered` short-circuit). FAILED
         # stories are the decline above; readiness guards blocked + gated.
         ready = await self._is_ready(task_id, metadata)
+        # S6: PR-producing routes claim only under the project's delivered-PR limit.
+        admission = None if self.route.completes_task else self.admission
+        if not ready and admission is not None:
+            # ADR 0012: admission releases held stories in order and nudges
+            # the head; a head that cannot ask — not ready, or a readiness
+            # Lithos will not settle or could not read — must step aside or
+            # it holds everything behind it. It keeps its place for when it
+            # asks again.
+            await admission.forget(task_id, route=self.route.name)
         if ready is None:
             self._rechecker.schedule(task_id)
             return
@@ -283,11 +292,12 @@ class RouteRunner:
                 task_id,
             )
             return
-        # S6: PR-producing routes claim only under the project's delivered-PR limit.
-        admission = None if self.route.completes_task else self.admission
         if admission is not None:
             verdict = await admission.admit(
-                route=self.route.name, task_id=task_id, project=project_of(metadata)
+                route=self.route.name,
+                task_id=task_id,
+                project=project_of(metadata),
+                tags=self.route.match.tags,
             )
             if not verdict.admitted:
                 logger.info(
@@ -308,7 +318,7 @@ class RouteRunner:
             await self._claim_and_run(task_id, payload)
         finally:
             if admission is not None:  # the reservation ends with the run
-                admission.release(task_id, route=self.route.name)
+                await admission.release(task_id, route=self.route.name)
 
     async def _claim_and_run(self, task_id: str, payload: Mapping[str, Any]) -> None:
         try:
