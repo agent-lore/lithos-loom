@@ -51,10 +51,12 @@ from .external_reviews import (
     ExternalFinding,
     ExternalOutcome,
     ack_instruction,
+    claims_nothing_to_change,
     external_intake_reviews,
     final_round_outcomes,
     nothing_to_change,
     outcomes_after_loop,
+    render_external_context,
     undecided_note,
 )
 from .external_triage import triage_external_findings
@@ -221,6 +223,18 @@ def converge_pr(
             # coder must state FIXED/DISPUTED for every injected id, and the
             # epilogue below refuses a `fixed` disposition without that ack.
             external_ack=ack_instruction(surviving_ids),
+            # PR #396 review (High): a round-1 coder that commits nothing
+            # because every injected id needs no change (#380) has made a
+            # claim — the loop admits the empty round as a VALIDATION pass:
+            # its gate + panel judge the unchanged head, told what was
+            # claimed; approval → already_clean, rejection ends the run
+            # (never an entry to the fix loop over the whole PR).
+            no_change_claim=lambda round_no: claims_nothing_to_change(
+                config.handoff_dir, round_no, surviving_ids
+            ),
+            review_context=render_external_context(
+                {fid: id_map[fid] for fid in surviving_ids}
+            ),
         )
 
         def _external_epilogue(result: DevelopResult) -> tuple[ExternalOutcome, ...]:
@@ -491,7 +505,10 @@ def _nothing_to_change_message(outcomes: tuple[ExternalOutcome, ...]) -> str:
     if refuted:
         parts.append(f"{', '.join(refuted)} refuted by triage")
     why = "; ".join(parts)
-    return f"every external finding needed no change ({why}) — nothing to converge"
+    return (
+        f"every external finding needed no change ({why}); the gate and panel "
+        "approved the unchanged head — nothing to converge"
+    )
 
 
 def _loop_and_deliver(
@@ -543,24 +560,63 @@ def _loop_and_deliver(
     # (merge-base → HEAD includes the PR's original commits — the reporting gotcha).
     fixer_commits = tuple(git.commits_since(result.worktree, change.head_sha))
 
-    if (
-        result.status == "failed"  # exit C: round 1, no commit — never an infra death
-        and not fixer_commits
-        and nothing_to_change(external_outcomes)
-    ):
-        # #380 (lens #83): the round-1 coder changed nothing because every
-        # injected finding was refuted or not a defect (an approval verdict
-        # ingested as a finding) and said so per id — reported, not
-        # remediated: a success, never the `not_converged` that spent the
-        # last budget round and raised a needs-human gate on a mergeable PR.
+    if result.approved and not fixer_commits:
+        # The loop approved a tree it never changed — only the admitted
+        # round-1 no-change claim reaches here (PR #396 review: round 1 must
+        # otherwise commit). Nothing to push either way.
+        if nothing_to_change(external_outcomes):
+            # #380 (lens #83): every injected finding was refuted or not a
+            # defect (an approval verdict ingested as a finding), the coder
+            # said so per id, and the loop's own gate + panel APPROVED the
+            # unchanged head — reported, not remediated: a success, never
+            # the `not_converged` that spent the last budget round and
+            # raised a needs-human gate on a mergeable PR, and never on the
+            # coder's word alone (an unapproved claim is `unaddressed` and
+            # the run `not_converged`).
+            return ConvergeResult(
+                status="already_clean",
+                change=change,
+                develop_result=result,
+                intake_cost_usd=pre_loop_cost,
+                intake_deferred=intake_deferred,
+                external_outcomes=external_outcomes,
+                message=_nothing_to_change_message(external_outcomes),
+            )
+        # Defensive — the admitted round's handoff is the one the epilogue
+        # reads, so its acks are all no-change; should a claim of a fix ever
+        # ride on a tree the run never committed to, it is a claim with no
+        # fix behind it, NOT #387's "fixed, then reverted" (opus round 2:
+        # the watcher raises a `disputed` gate on `reverted`). Nothing to push.
+        unbacked = tuple(
+            dataclasses.replace(
+                o,
+                disposition="unaddressed",
+                detail=(
+                    "the coder claimed a fix that was never committed in this "
+                    "run — a claim with no fix behind it"
+                ),
+            )
+            if o.disposition in ("fixed", "reverted")
+            else o
+            for o in external_outcomes
+        )
+        claimed = ", ".join(
+            f"{o.finding_id} {o.disposition}"
+            for o in unbacked
+            if o.disposition not in ("rejected", "no_change_needed")
+        )
         return ConvergeResult(
-            status="already_clean",
+            status="failed",
             change=change,
             develop_result=result,
             intake_cost_usd=pre_loop_cost,
             intake_deferred=intake_deferred,
-            external_outcomes=external_outcomes,
-            message=_nothing_to_change_message(external_outcomes),
+            external_outcomes=unbacked,
+            message=(
+                "the loop approved the unchanged PR head, but the final handoff "
+                f"does not claim no change for every external finding ({claimed}) "
+                "— nothing was committed, so there is nothing to push"
+            ),
         )
     if not result.approved:
         return ConvergeResult(

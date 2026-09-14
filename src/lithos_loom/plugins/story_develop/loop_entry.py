@@ -91,3 +91,12 @@ class LoopEntry:
     # conflicted paths and both parents, so a reviewer can see a resolution
     # that took the base version — invisible in the fork-point diff.
     review_context: str = ""
+    # External mode (PR #396 review): ``(round_no) -> bool`` — whether the
+    # round's coder handoff claims that EVERY injected finding needs no
+    # change. Round 1 must otherwise commit (exit C); a true claim admits the
+    # empty round instead as a VALIDATION pass: the loop's own gate + panel
+    # judge it at the unchanged head — approval seals the run, rejection ends
+    # it with the rationale (never an entry to the fix loop) — the external
+    # reviewer proposes, the loop gate disposes, never the coder alone. None
+    # (the default) keeps exit C.
+    no_change_claim: Callable[[int], bool] | None = None

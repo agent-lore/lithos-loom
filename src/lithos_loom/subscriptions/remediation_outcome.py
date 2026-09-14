@@ -31,6 +31,7 @@ from lithos_loom.subscriptions.remediation_escalation import (
 
 __all__ = [
     "REFUND_RETRY_DELAYS",
+    "REPORTED_NOT_REMEDIATED",
     "REPO_MISMATCH_KEY",
     "escalate_or_report",
     "post_checkout_unresolved_refusal",
@@ -45,6 +46,15 @@ __all__ = [
 
 # Backoff between attempts to land the refund's state write (seconds).
 REFUND_RETRY_DELAYS: tuple[float, ...] = (0.5, 2.0, 5.0)
+
+# Run statuses that are reported, not remediated (#380): every injected
+# finding was refuted by triage (`triage_rejected` — the lens #84 route, PR
+# #396 review) or judged not a defect with the loop approving the unchanged
+# head (`already_clean`). Nothing was pushed and nothing had to be, so the
+# reserved round comes back — once per budget (:func:`_refund_no_change`).
+REPORTED_NOT_REMEDIATED: frozenset[str] = frozenset(
+    {"already_clean", "triage_rejected"}
+)
 
 
 async def post_finding(ctx: SubscriptionContext, story_id: str, summary: str) -> None:
@@ -183,7 +193,7 @@ async def record_result(
     cost = data.get("total_cost_usd")
     if isinstance(cost, int | float):
         lines.append(f"- spend ${cost:.2f}")
-    if status == "already_clean":
+    if status in REPORTED_NOT_REMEDIATED:
         budget, note = await _refund_no_change(ctx, gate_id, budget, budget_limit)
         lines.append(note)
     ctx.logger.info(
@@ -252,19 +262,22 @@ async def record_result(
 async def _refund_no_change(
     ctx: SubscriptionContext, gate_id: str, budget: RemediationBudget, limit: int
 ) -> tuple[RemediationBudget, str]:
-    """#380: an `already_clean` run — every injected finding refuted or not a
-    defect, nothing committed — is reported, not remediated, and its
-    reserved round comes back: ONCE per budget (it is a paid run — triage +
-    a coder turn — so an unbounded refund would let five "thanks" comments
-    be five paid runs at 0/2; the own-sha skip and the no-JSON refund, the
-    two precedents, spend nothing). A human push is a fresh budget. The
-    write is strict and never raises (opus round 1: an escaping write would
-    reach the crash handler's false-exhaustion path); a write that still
-    does not land leaves the round spent and says so."""
+    """#380: a reported-not-remediated run (:data:`REPORTED_NOT_REMEDIATED`
+    — every injected finding refuted by triage, or not a defect with the
+    loop approving the unchanged head; nothing committed) gives its reserved
+    round back: ONCE per budget (it is a paid run — triage, and for
+    `already_clean` a coder turn + a panel round — so an unbounded refund
+    would let five "thanks" comments be five paid runs at 0/2; the own-sha
+    skip and the no-JSON refund, the two precedents, spend nothing). A human
+    push is a fresh budget, and so is a completed decision gate (PR #396
+    review). The write is strict and never raises (opus round 1: an escaping
+    write would reach the crash handler's false-exhaustion path); a write
+    that still does not land leaves the round spent and says so."""
     if budget.no_change_refunded:
         return budget, (
-            "- nothing to change, but this budget's one no-change refund was "
-            f"already used: the round stays spent ({budget.rounds_used}/{limit})"
+            "- nothing to change, but this budget's one reported-not-remediated "
+            f"refund was already used: the round stays spent "
+            f"({budget.rounds_used}/{limit})"
         )
     refund = dataclasses.replace(
         budget, rounds_used=max(0, budget.rounds_used - 1), no_change_refunded=True

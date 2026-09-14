@@ -62,7 +62,9 @@ class ConvergeResult:
     * ``already_clean`` — the intake did not block; no coder ran, nothing pushed.
       In external mode (#380): every injected finding was refuted by triage or
       dispositioned ``no_change_needed`` by the round-1 coder, which committed
-      nothing — reported, not remediated.
+      nothing, and the loop's own gate + panel APPROVED the unchanged head
+      (PR #396 review: the coder's word alone never disposes a finding) —
+      reported, not remediated.
       Reports on the PR **snapshot resolved before intake** (not a live re-check).
     * ``converged`` — the loop approved; the fixed branch was pushed (unless
       ``no_push``).
@@ -121,8 +123,9 @@ class ConvergeResult:
         """Every out-of-scope deferral this command produced (intake + loop).
 
         Both halves are needed: intake outcomes never enter the fix loop's
-        ledgers, and an ``already_clean`` exit has no ``develop_result`` at
-        all. May contain near-duplicates when the loop's fresh panel re-defers
+        ledgers, and a local-panel ``already_clean`` exit has no
+        ``develop_result`` at all (external mode's carries the validation
+        pass). May contain near-duplicates when the loop's fresh panel re-defers
         an intake finding — operator-visible, deliberately un-deduplicated.
         """
         loop = (

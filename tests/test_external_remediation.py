@@ -856,6 +856,7 @@ async def test_completing_the_decision_gate_at_the_budget_limit_re_arms_and_disp
         last_seen_head_sha="8d" * 20,
         needs_human_gate_id=decision,
         needs_human_reason="disputed",
+        no_change_refunded=True,  # this budget's refund was used before the gate
     )
     await client.task_update(
         task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: budget.as_marker()}
@@ -877,6 +878,9 @@ async def test_completing_the_decision_gate_at_the_budget_limit_re_arms_and_disp
     assert marker["needs_human_gate_id"] == "" and marker["needs_human_reason"] == ""
     assert marker["rounds_used"] == 1  # re-armed, then this dispatch's reservation
     assert marker["last_loom_pushed_sha"] == "8d" * 20  # attribution survives
+    # PR #396 review (Medium): a FRESH budget — the no-change refund is
+    # re-granted with the rounds, as a human push's new budget grants it
+    assert marker["no_change_refunded"] is False
 
     # ...and the parked-trigger path at the limit, same rule
     client2 = FakeLithosClient()
@@ -1816,6 +1820,83 @@ async def test_a_successful_triage_rejected_last_round_does_not_escalate(
     await rem._task
     assert await _human_gates(client) == []
     assert notifier.notices == []
+    # PR #396 review: reported-not-remediated — the round comes back
+    assert (await _marker(client, gate.id))["rounds_used"] == 0
+
+
+async def test_a_triage_rejected_run_refunds_the_round_once_per_budget(
+    tmp_path: Path,
+) -> None:
+    """PR #396 review (High): the lens #84 route on #380 — every external
+    claim refuted by triage as already addressed at this head — is reported,
+    not remediated, exactly like `already_clean`: the reserved round comes
+    back, bounded by the same once-per-budget allowance (a second reported
+    run keeps its round), and the last budgeted round raises no gate."""
+    from lithos_loom.subscriptions.remediation_outcome import record_result
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    payload = {
+        "status": "triage_rejected",
+        "succeeded": True,
+        "pushed": False,
+        "pushed_sha": "",
+        "total_cost_usd": 0.61,
+        "message": "triage rejected every external finding with cited evidence",
+        "external_outcomes": [
+            {
+                "finding_id": "f-001",
+                "author": "davesnowdon",
+                "disposition": "rejected",
+                "detail": "src/x.py:12 — the banner no longer exists at this head",
+            }
+        ],
+    }
+    await record_result(
+        _ctx(client),
+        gate_id=gate.id,
+        story_id=story,
+        spec=spec,
+        budget=RemediationBudget(pr_url=_PR_URL, rounds_used=1),
+        budget_limit=1,
+        notifier=None,
+        data=payload,
+    )
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 0 and marker["no_change_refunded"] is True
+    assert await _human_gates(client) == []  # the last round, refunded: no gate
+    outcome = next(f for f in _findings(client) if "remediation outcome" in f)
+    assert "triage_rejected" in outcome and "refunded" in outcome
+
+    # the allowance is ONE per budget, shared with already_clean
+    await client.task_update(
+        task_id=gate.id,
+        agent="a",
+        metadata={
+            REMEDIATION_KEY: dataclasses.replace(
+                read_budget(await client.task_get(task_id=gate.id), _PR_URL),
+                rounds_used=1,
+            ).as_marker()
+        },
+    )
+    await record_result(
+        _ctx(client),
+        gate_id=gate.id,
+        story_id=story,
+        spec=spec,
+        budget=RemediationBudget(
+            pr_url=_PR_URL, rounds_used=1, no_change_refunded=True
+        ),
+        budget_limit=1,
+        notifier=None,
+        data=_already_clean_payload(),
+    )
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1  # kept
+    outcomes = [f for f in _findings(client) if "remediation outcome" in f]
+    assert "already used" in outcomes[1]
 
 
 async def test_a_result_without_the_succeeded_flag_falls_back_to_status(

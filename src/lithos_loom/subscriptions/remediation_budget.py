@@ -62,9 +62,10 @@ class RemediationBudget:
     # spare). Empty on a record written before the reason existed, which
     # was always an exhaustion.
     needs_human_reason: str = ""
-    # #380: an `already_clean` run (nothing to change) refunds its round ONCE
-    # per budget — a paid run, so an unbounded refund would remove the S5b
-    # spend bound; a human push (a fresh budget) re-grants it.
+    # #380: a reported-not-remediated run (`already_clean` / `triage_rejected`
+    # — nothing to change) refunds its round ONCE per budget — a paid run, so
+    # an unbounded refund would remove the S5b spend bound; a fresh budget (a
+    # human push, or a completed decision gate — PR #396 review) re-grants it.
     no_change_refunded: bool = False
 
     def as_marker(self) -> dict[str, Any]:

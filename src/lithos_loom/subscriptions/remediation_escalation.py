@@ -231,11 +231,12 @@ async def decision_pending(
     the budget's stop, and the operator's decision need not involve a push
     ("answer the reviewer, leave the code"), so the gate going terminal is
     the release AND the operator's consent to continue: the marker on the
-    ``pr`` gate *gate_id* forgets it and the budget re-arms (rounds reset,
-    loom's push attribution kept — the own-sha skip must still hold), as a
-    human push would (PR #389 review: the motivating run was the last
-    budgeted round). An unreadable gate holds (fail closed); a gate that no
-    longer exists can never be completed, so it releases.
+    ``pr`` gate *gate_id* forgets it and the budget re-arms (rounds reset, the
+    once-per-budget reported-not-remediated refund re-granted, loom's push
+    attribution kept — the own-sha skip must still hold), as a human push
+    would (PR #389 review: the motivating run was the last budgeted round).
+    An unreadable gate holds (fail closed); a gate that no longer exists can
+    never be completed, so it releases.
     """
     decision_id = budget.needs_human_gate_id
     if not decision_id:
@@ -253,7 +254,13 @@ async def decision_pending(
     if decision is not None and getattr(decision, "status", "open") == "open":
         return budget, True
     released = dataclasses.replace(
-        budget, rounds_used=0, needs_human_gate_id="", needs_human_reason=""
+        budget,
+        rounds_used=0,
+        needs_human_gate_id="",
+        needs_human_reason="",
+        # a FRESH budget (PR #396 review): the reported-not-remediated refund
+        # is re-granted with the rounds, as a human push's new budget grants it
+        no_change_refunded=False,
     )
     ok = await write_marker(
         ctx,
