@@ -775,3 +775,235 @@ def test_outcomes_the_ack_section_outranks_the_findings_block() -> None:
     acks = {"f-001": CoderAck(verdict="fixed", detail="guarded it")}
     (o1, _) = outcomes_after_loop(id_map, {}, claims, acks, loop_approved=True)
     assert o1.disposition == "fixed"
+
+
+# --- #399: the acks are read across EVERY round, verdicts defined by the tree
+
+
+_LENS87_FIXTURES = Path(__file__).parent / "fixtures" / "converge_505ad2f8"
+
+
+def _history_outcomes(handoff_dir: Path, tmp_path: Path, rounds: int, ids: list[str]):
+    from lithos_loom.plugins.story_develop.external_reviews import (
+        final_round_outcomes,
+    )
+
+    return final_round_outcomes(
+        handoff_dir=handoff_dir,
+        run_id="r",
+        rounds=rounds,
+        loop_approved=True,
+        worktree=tmp_path,  # not a repo: the tree read is unknown (None)
+        head_sha="h" * 40,
+        generated_paths=(),
+        id_map={fid: _finding() for fid in ids},
+        rejections={},
+        surviving_ids=ids,
+    )
+
+
+def _write_rounds(handoff_dir: Path, sections: dict[int, str]) -> None:
+    from lithos_loom.plugins.story_develop.handoff import coder_handoff_name
+
+    handoff_dir.mkdir(exist_ok=True)
+    for round_no, acks in sections.items():
+        (handoff_dir / coder_handoff_name(round_no)).write_text(
+            "## Status: LGTM\n## Summary\nround.\n"
+            + ("## External findings\n" + acks if acks else ""),
+            encoding="utf-8",
+        )
+
+
+def test_ack_instruction_defines_the_verdicts_by_the_tree_not_the_round() -> None:
+    """#399: lens #87's coder read "as of this handoff" as "what I did this
+    round" and wrote NO CHANGE NEEDED over a fix it made in round 1. The
+    contract names the tree as the referent, says a fixed id stays FIXED in
+    every later handoff, defines NO CHANGE NEEDED as "never a defect", and
+    keeps the panel's same-looking ids out of the section."""
+    text = " ".join(ack_instruction(["f-001"]).split())  # wrapping-agnostic
+    assert "whichever round made it" in text
+    assert "stays FIXED in every later handoff" in text
+    assert "nothing was ever changed for it" in text
+    assert 'does NOT mean "nothing further this round"' in text
+    assert "its f-001 is not this f-001" in text  # the panel's ids never here
+
+
+def test_final_round_outcomes_a_round_one_fix_survives_a_final_no_change_needed(
+    tmp_path: Path,
+) -> None:
+    """The lens #87 run itself (505ad2f8, #399): f-001 FIXED in round 1, the
+    panel's unrelated f-001 attached to the id in rounds 2-3, round 4 says
+    NO CHANGE NEEDED — the fix is in the tree, so the disposition is
+    `fixed` with round 1's detail, and the drift is named in the note."""
+    (o,) = _history_outcomes(_LENS87_FIXTURES, tmp_path, 4, ["f-001"])
+    assert o.disposition == "fixed"
+    assert o.detail.startswith("the chain now carries its own")
+    assert o.note.startswith("FIXED in round 1 and every round since; the round 4 ")
+    assert "NO CHANGE NEEDED" in o.note and o.note.endswith("read as round 1's FIXED")
+
+
+def test_final_round_outcomes_only_round_ones_fixed_carries_forward(
+    tmp_path: Path,
+) -> None:
+    """Round 1 predates the panel, so its section can only speak of the
+    external ids; a later round's FIXED line may describe the panel's own
+    same-looking f-001 (lens #87 rounds 2-3). Any disagreement whose
+    trusted reading is not "round 1 said FIXED and every round since" is
+    unaddressed — no thread answered, the note says what the handoffs said
+    — a false "Fixed in" being the one unacceptable outcome (opus review)."""
+    cases = {
+        # fixed, reverted, "no change": the revert is never carried forward
+        "revert": {
+            1: "- f-001: FIXED — guarded it\n",
+            2: "- f-001: REVERTED — contradicts the acceptance criteria\n",
+            3: "- f-001: NO CHANGE NEEDED — nothing further this round\n",
+        },
+        # re-fixed in round 3: a later-round origin is not trusted
+        "refix": {
+            1: "- f-001: FIXED — guarded it\n",
+            2: "- f-001: REVERTED — the panel objected\n",
+            3: "- f-001: FIXED — guarded it the other way\n",
+            4: "- f-001: NO CHANGE NEEDED — unchanged since round 3\n",
+        },
+        # disputed in round 1, FIXED lines later (the contaminated shape)
+        "contaminated": {
+            1: "- f-001: DISPUTED — not a defect\n",
+            2: "- f-001: FIXED — correctness: the panel's own f-001\n",
+            3: "- f-001: NO CHANGE NEEDED — the reviewer closed it with LGTM\n",
+        },
+        # the streak from round 1 is broken by an omission
+        "gap": {
+            1: "- f-001: FIXED — guarded it\n",
+            2: "",
+            3: "- f-001: NO CHANGE NEEDED — nothing further\n",
+        },
+    }
+    for name, rounds in cases.items():
+        _write_rounds(tmp_path / name, rounds)
+        (o,) = _history_outcomes(tmp_path / name, tmp_path, len(rounds), ["f-001"])
+        assert o.disposition == "unaddressed", name
+        assert "NO CHANGE NEEDED" in o.note and "not answered" in o.note, name
+    (o,) = _history_outcomes(tmp_path / "revert", tmp_path, 3, ["f-001"])
+    assert "FIXED in round 1, REVERTED in round 2" in o.note
+    (o,) = _history_outcomes(tmp_path / "contaminated", tmp_path, 3, ["f-001"])
+    assert "FIXED in round 2" in o.note and "round 1" not in o.note
+
+
+def test_final_round_outcomes_a_loop_that_died_before_its_final_handoff(
+    tmp_path: Path,
+) -> None:
+    """`rounds` past the handoffs on disk (the loop died mid-round): no
+    final ack, nothing carried forward, the note names the missing handoff
+    rather than an omission the coder chose."""
+    _write_rounds(tmp_path / "h", {1: "- f-001: FIXED — guarded it\n"})
+    (o,) = _history_outcomes(tmp_path / "h", tmp_path, 2, ["f-001"])
+    assert o.disposition == "unaddressed" and o.detail == ""
+    assert o.note == "FIXED in round 1; no acknowledgement in the round 2 handoff"
+
+
+def test_outcomes_the_note_survives_the_tree_backstop_without_contradiction() -> None:
+    """F N over an unmoved tree: the backstop makes it `reverted` (#387);
+    the note describes the handoffs, never asserts what the tree carries."""
+    id_map = {"f-001": _finding()}
+    acks = {"f-001": CoderAck(verdict="fixed", detail="guarded it")}
+    notes = {
+        "f-001": "FIXED in round 1 and every round since; ... read as round 1's FIXED"
+    }
+    (o,) = outcomes_after_loop(
+        id_map, {}, {}, acks, loop_approved=True, tree_changed=False, notes=notes
+    )
+    assert o.disposition == "reverted" and "identical to the PR head" in o.detail
+    assert o.note == notes["f-001"] and "tree carries" not in o.note
+
+
+def test_resolve_ack_history_table() -> None:
+    """The resolver alone, over ack sequences (F/R/D/N/- per round): the
+    final ack stands when decisive; a final N carries round 1's F forward
+    only through an unbroken F streak; everything else is None."""
+    from lithos_loom.plugins.story_develop.external_reviews import (
+        resolve_ack_history,
+    )
+
+    verdict = {"F": "fixed", "R": "reverted", "D": "disputed", "N": "no_change_needed"}
+
+    def resolve(seq: str):
+        history = [
+            (
+                i + 1,
+                None if c == "-" else CoderAck(verdict=verdict[c], detail=f"d{i + 1}"),
+            )
+            for i, c in enumerate(seq)
+        ]
+        ack, note = resolve_ack_history(history)
+        return (ack.verdict if ack else None, ack.detail if ack else None, bool(note))
+
+    assert resolve("F") == ("fixed", "d1", False)
+    assert resolve("N") == ("no_change_needed", "d1", False)
+    assert resolve("FR") == ("reverted", "d2", False)
+    assert resolve("RF") == ("fixed", "d2", False)
+    assert resolve("FD") == ("disputed", "d2", False)
+    assert resolve("NN") == ("no_change_needed", "d2", False)
+    assert resolve("DN") == ("no_change_needed", "d2", False)
+    assert resolve("FN") == ("fixed", "d1", True)
+    assert resolve("FFFN") == ("fixed", "d1", True)
+    for broken in ("FRN", "FRFN", "DFN", "-FN", "NFN", "F-N", "FDFN", "RN", "FRRN"):
+        assert resolve(broken) == (None, None, True), broken
+    assert resolve("F-") == (None, None, True)
+    assert resolve("N-") == (None, None, False)
+    assert resolve("--") == (None, None, False)
+
+
+def test_final_round_outcomes_no_change_needed_throughout_carries_no_note(
+    tmp_path: Path,
+) -> None:
+    """The ordinary #380 shape is untouched: a finding never changed for is
+    `no_change_needed` on the final ack, nothing to remark on."""
+    _write_rounds(
+        tmp_path / "h",
+        {
+            1: "- f-001: NO CHANGE NEEDED — an approval verdict\n",
+            2: "- f-001: NO CHANGE NEEDED — an approval verdict\n",
+        },
+    )
+    (o,) = _history_outcomes(tmp_path / "h", tmp_path, 2, ["f-001"])
+    assert o.disposition == "no_change_needed"
+    assert o.detail == "an approval verdict"
+    assert o.note == ""
+
+
+def test_final_round_outcomes_a_final_fixed_or_reverted_stands_on_its_own(
+    tmp_path: Path,
+) -> None:
+    """A decisive final ack is the answer, whatever came before (#387's
+    rule): FIXED after a REVERTED is fixed; REVERTED after a FIXED is
+    reverted; neither carries a note."""
+    _write_rounds(
+        tmp_path / "h",
+        {
+            1: "- f-001: FIXED — guarded it\n- f-002: REVERTED — objected\n",
+            2: "- f-001: REVERTED — contradicts the AC\n- f-002: FIXED — redone\n",
+        },
+    )
+    a, b = _history_outcomes(tmp_path / "h", tmp_path, 2, ["f-001", "f-002"])
+    assert (a.disposition, a.detail, a.note) == ("reverted", "contradicts the AC", "")
+    assert (b.disposition, b.detail, b.note) == ("fixed", "redone", "")
+
+
+def test_final_round_outcomes_an_omitted_final_ack_names_the_earlier_claim(
+    tmp_path: Path,
+) -> None:
+    """Omission keeps the safe direction (#387: no "Fixed in" on a stale
+    claim) but the operator is told what was dropped: the note names the
+    round-1 FIXED the final section left out."""
+    _write_rounds(
+        tmp_path / "h",
+        {
+            1: "- f-001: FIXED — guarded it\n- f-002: FIXED — also guarded\n",
+            2: "- f-002: FIXED — also guarded\n",
+        },
+    )
+    a, b = _history_outcomes(tmp_path / "h", tmp_path, 2, ["f-001", "f-002"])
+    assert a.disposition == "unaddressed"
+    assert "round 2" in a.detail and "acknowledg" in a.detail
+    assert a.note == "FIXED in round 1; no acknowledgement in the round 2 handoff"
+    assert b.disposition == "fixed" and b.note == ""

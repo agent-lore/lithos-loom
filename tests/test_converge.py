@@ -1095,6 +1095,42 @@ def test_external_mode_a_final_round_without_acks_claims_nothing(
     assert "round 2" in o.detail and "acknowledg" in o.detail
 
 
+def test_external_mode_a_round_one_fix_survives_a_final_no_change_needed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """lens #87 (#399): round 1 acked FIXED, the loop went on to converge
+    the panel's own findings, and the final handoff said NO CHANGE NEEDED
+    ("nothing further this round"). The fix is in the pushed tree: the run
+    succeeds, the thread is answered `fixed` from round 1's acknowledgement,
+    and the drift rides the outcome as a note."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001",))
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nf-001: guarded it.\n"
+        "## External findings\n- f-001: FIXED — guarded the handle\n",
+        encoding="utf-8",
+    )
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
+        "## Status: LGTM\n## Summary\nthe panel's nit.\n"
+        "## External findings\n- f-001: NO CHANGE NEEDED — the reviewer closed "
+        "it with LGTM this round\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(config, _change(), external_findings=(_ext_finding(7),))
+
+    (o,) = result.external_outcomes
+    assert o.disposition == "fixed" and o.detail == "guarded the handle"
+    assert "round 1" in o.note and "round 2" in o.note
+    assert result.status == "converged" and result.succeeded
+    (row,) = result.to_json()["external_outcomes"]
+    assert row["disposition"] == "fixed" and row["note"] == o.note
+
+
 def test_external_mode_a_fixed_ack_over_an_unmoved_tree_is_not_fixed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -28,6 +28,7 @@ reviewer proposes, loom's gate disposes).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -73,6 +74,7 @@ __all__ = [
     "findings_to_handoff_text",
     "outcomes_after_loop",
     "parse_coder_acks",
+    "resolve_ack_history",
     "pr_number_from_spec",
     "render_external_context",
 ]
@@ -239,12 +241,19 @@ class ExternalOutcome:
     never acknowledged the id in its final handoff, or the tree never moved).
     The epilogue only *asserts* a fix in a thread reply when the branch was
     actually pushed; dispositions here are claims.
+
+    ``note`` (#399): how the disposition was read when the coder's final
+    acknowledgement and an earlier round's disagree — a final NO CHANGE
+    NEEDED over a round-1 FIXED, an omitted id an earlier round had fixed.
+    Shown where the operator reads the run (the outcome finding, the CLI
+    summary), never on the reviewer's thread.
     """
 
     finding_id: str
     finding: ExternalFinding
     disposition: str
     detail: str = ""
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -285,6 +294,14 @@ def ack_instruction(finding_ids: Sequence[str]) -> str:
     Every injected id is named explicitly so the coder cannot conform while
     silently dropping one — an omitted id parses to no ack and the finding
     lands ``unaddressed`` (its thread gets no "Fixed in" reply).
+
+    The verdicts are defined by the TREE, not by the round (#399: lens #87's
+    coder read "as of this handoff" as "what I did this round", wrote NO
+    CHANGE NEEDED over a fix it had made in round 1, and the thread was
+    answered "Not changed"). A fixed id stays FIXED in every later handoff;
+    NO CHANGE NEEDED means the finding was never a defect. The panel's own
+    findings reuse the same-looking ids (a panel ``f-001`` beside the
+    external ``f-001``) and belong in ``## Findings``, never here.
     """
     ids = ", ".join(finding_ids)
     return f"""
@@ -295,22 +312,35 @@ each thread is answered from your LAST handoff. In addition to the normal
 format, EVERY handoff you write in this run MUST contain a
 `{ACK_SECTION.lstrip("# ")}` section (header exactly `{ACK_SECTION}`) with
 exactly one line per finding id — every one of: {ids} — stating the state of
-that finding AS OF THIS HANDOFF:
+that finding IN THE TREE as of this handoff:
 
-- f-001: FIXED — <one line: what you changed, and where>
+- f-001: FIXED — <one line: what the fix is, and where>
 - f-002: DISPUTED — <one line: why the finding is wrong>
 - f-003: REVERTED — <one line: why you undid a fix from an earlier round>
-- f-004: NO CHANGE NEEDED — <one line: why there is nothing to change>
+- f-004: NO CHANGE NEEDED — <one line: why the finding was never a defect>
 
-Use FIXED only for a finding whose fix is in the tree NOW. A fix you undid
-this round (a reviewer holds it contradicts the acceptance criteria, say) is
-REVERTED, never FIXED — the operator decides between the two contracts, not
-you. NO CHANGE NEEDED is for a finding that is not a defect at all — an
-approval verdict, a description of the intended behaviour, something already
-in the tree — where you agree with the reviewer that nothing should change
-(DISPUTED is for a claim you say is wrong). An id you omit is treated as NOT
-addressed and its thread gets no answer — never omit one silently, and repeat
-the section in every round.
+The verdict describes the TREE, not this round's work:
+
+- FIXED: a fix for this finding is in the tree now, whichever round made it.
+  An id you fixed in an earlier round stays FIXED in every later handoff —
+  restate what the fix is and where (the thread is answered from your last
+  handoff's line). Never downgrade it because you touched nothing for it
+  this round.
+- REVERTED: a fix was made and is no longer in the tree (a reviewer holds it
+  contradicts the acceptance criteria, say) — never FIXED, and never NO
+  CHANGE NEEDED: the operator decides between the two contracts, not you.
+- NO CHANGE NEEDED: the finding was never a defect and nothing was ever
+  changed for it — an approval verdict, a description of the intended
+  behaviour, something already in the tree before this run. It does NOT mean
+  "nothing further this round".
+- DISPUTED: the claim is wrong.
+
+The ids here are the EXTERNAL findings' ids only. The review panel's own
+findings use the same-looking ids (its f-001 is not this f-001) and are
+answered in `## Findings` — never attach the panel's work, or any other work,
+to an external id. An id you omit is treated as NOT addressed and its thread
+gets no answer — never omit one silently, and repeat the section in every
+round.
 """
 
 
@@ -358,10 +388,16 @@ def outcomes_after_loop(
     *,
     loop_approved: bool = False,
     tree_changed: bool | None = None,
-    missing_ack_detail: str = "",
+    missing_ack_detail: str | Mapping[str, str] = "",
+    notes: Mapping[str, str] | None = None,
 ) -> tuple[ExternalOutcome, ...]:
     """Fold triage rejections + the coder's per-id claims into per-finding
     outcomes, in the injection order (``id_map`` preserves it).
+
+    *acks* are the EFFECTIVE acknowledgements — in the epilogue, the final
+    round's read against every earlier round's (#399,
+    :func:`resolve_ack_history`); *notes* say per id how that reading went
+    and ride the outcome unchanged, whatever its disposition.
 
     ``fixed`` requires BOTH halves of the evidence (PR #345 re-review 1): the
     coder's explicit ``FIXED`` acknowledgement for that id (*acks*, from the
@@ -382,81 +418,156 @@ def outcomes_after_loop(
     id with NO acknowledgement (the block is read in round 1 only, see
     :func:`final_round_outcomes`; the ack channel outranks it). Everything
     else is ``unaddressed`` —
-    *missing_ack_detail* is the reason recorded when there is no ack at all.
+    *missing_ack_detail* is the reason recorded when there is no ack at all
+    (one string, or one per id).
     """
     out: list[ExternalOutcome] = []
     for fid, ext in id_map.items():
         if fid in rejections:
             out.append(ExternalOutcome(fid, ext, "rejected", detail=rejections[fid]))
             continue
-        claim = coder_findings.get(fid)
-        ack = acks.get(fid)
-        # The mandated ack channel outranks the round-1 `## Findings` block
-        # (opus round 2): the block speaks only for an id with no ack, or
-        # the same handoff could admit a no-change claim for review and then
-        # read as a formal dispute — a "contradiction" that is not one.
-        if (ack is None and claim is not None and claim.status == "disputed") or (
-            ack is not None and ack.verdict == "disputed"
-        ):
-            detail = (
-                claim.coder_response
-                if claim is not None and claim.coder_response
-                else (ack.detail if ack is not None else "")
+        out.append(
+            dataclasses.replace(
+                _outcome_of(
+                    fid,
+                    ext,
+                    coder_findings.get(fid),
+                    acks.get(fid),
+                    loop_approved=loop_approved,
+                    tree_changed=tree_changed,
+                    missing_ack_detail=(
+                        missing_ack_detail.get(fid, "")
+                        if isinstance(missing_ack_detail, Mapping)
+                        else missing_ack_detail
+                    ),
+                ),
+                note=(notes or {}).get(fid, ""),
             )
-            out.append(ExternalOutcome(fid, ext, "disputed", detail=detail))
-            continue
-        if ack is not None and ack.verdict == "reverted":
-            out.append(ExternalOutcome(fid, ext, "reverted", detail=ack.detail))
-            continue
-        if ack is not None and ack.verdict == "no_change_needed":
-            # #380: not a defect (an approval verdict, intended behaviour) —
-            # nothing landed and nothing had to. Like `fixed`, a claim the
-            # LOOP must have approved (PR #396 review: the coder alone never
-            # disposes an external finding — the gate + panel judged the
-            # unchanged head, or the claim is unvalidated and no thread is
-            # answered with it).
-            if loop_approved:
-                out.append(
-                    ExternalOutcome(fid, ext, "no_change_needed", detail=ack.detail)
-                )
-            else:
-                out.append(
-                    ExternalOutcome(
-                        fid,
-                        ext,
-                        "unaddressed",
-                        detail=(
-                            "the coder acknowledged NO CHANGE NEEDED "
-                            f"({ack.detail or 'no reason given'}) but the loop "
-                            "did not approve the unchanged head — the claim is "
-                            "unvalidated"
-                        ),
-                    )
-                )
-            continue
-        if ack is not None and ack.verdict == "fixed" and loop_approved:
-            if tree_changed is False:
-                # round 1 must commit, so an APPROVED loop that ends at the
-                # PR head undid what it did — the decision shape, whatever
-                # the coder wrote
-                out.append(
-                    ExternalOutcome(
-                        fid,
-                        ext,
-                        "reverted",
-                        detail=(
-                            "acknowledged FIXED, but the final tree is identical "
-                            "to the PR head outside the generated paths — the "
-                            "fix was undone"
-                        ),
-                    )
-                )
-                continue
-            out.append(ExternalOutcome(fid, ext, "fixed", detail=ack.detail))
-            continue
-        detail = ack.detail if ack is not None else missing_ack_detail
-        out.append(ExternalOutcome(fid, ext, "unaddressed", detail=detail))
+        )
     return tuple(out)
+
+
+def _outcome_of(
+    fid: str,
+    ext: ExternalFinding,
+    claim: handoff.Finding | None,
+    ack: CoderAck | None,
+    *,
+    loop_approved: bool,
+    tree_changed: bool | None,
+    missing_ack_detail: str,
+) -> ExternalOutcome:
+    """One finding's disposition from its (effective) acknowledgement, the
+    round-1 dispute block and the loop's verdict — the rules of
+    :func:`outcomes_after_loop`."""
+    # The mandated ack channel outranks the round-1 `## Findings` block
+    # (opus round 2): the block speaks only for an id with no ack, or
+    # the same handoff could admit a no-change claim for review and then
+    # read as a formal dispute — a "contradiction" that is not one.
+    if (ack is None and claim is not None and claim.status == "disputed") or (
+        ack is not None and ack.verdict == "disputed"
+    ):
+        detail = (
+            claim.coder_response
+            if claim is not None and claim.coder_response
+            else (ack.detail if ack is not None else "")
+        )
+        return ExternalOutcome(fid, ext, "disputed", detail=detail)
+    if ack is not None and ack.verdict == "reverted":
+        return ExternalOutcome(fid, ext, "reverted", detail=ack.detail)
+    if ack is not None and ack.verdict == "no_change_needed":
+        # #380: not a defect (an approval verdict, intended behaviour) —
+        # nothing landed and nothing had to. Like `fixed`, a claim the
+        # LOOP must have approved (PR #396 review: the coder alone never
+        # disposes an external finding — the gate + panel judged the
+        # unchanged head, or the claim is unvalidated and no thread is
+        # answered with it).
+        if loop_approved:
+            return ExternalOutcome(fid, ext, "no_change_needed", detail=ack.detail)
+        return ExternalOutcome(
+            fid,
+            ext,
+            "unaddressed",
+            detail=(
+                "the coder acknowledged NO CHANGE NEEDED "
+                f"({ack.detail or 'no reason given'}) but the loop "
+                "did not approve the unchanged head — the claim is "
+                "unvalidated"
+            ),
+        )
+    if ack is not None and ack.verdict == "fixed" and loop_approved:
+        if tree_changed is False:
+            # round 1 must commit, so an APPROVED loop that ends at the
+            # PR head undid what it did — the decision shape, whatever
+            # the coder wrote
+            return ExternalOutcome(
+                fid,
+                ext,
+                "reverted",
+                detail=(
+                    "acknowledged FIXED, but the final tree is identical "
+                    "to the PR head outside the generated paths — the "
+                    "fix was undone"
+                ),
+            )
+        return ExternalOutcome(fid, ext, "fixed", detail=ack.detail)
+    detail = ack.detail if ack is not None else missing_ack_detail
+    return ExternalOutcome(fid, ext, "unaddressed", detail=detail)
+
+
+_DECISIVE = ("fixed", "reverted")
+
+
+def resolve_ack_history(
+    history: Sequence[tuple[int, CoderAck | None]],
+) -> tuple[CoderAck | None, str]:
+    """The effective acknowledgement for one id from its acks across every
+    round (``(round_no, ack-or-None)``, ascending), and a note when the
+    final round's does not stand on its own (#399).
+
+    The final round's ack is the answer whenever it is decisive —
+    ``FIXED`` / ``REVERTED`` / ``DISPUTED`` (#387: a later round that undoes
+    a fix says so, and wins). A final ``NO CHANGE NEEDED`` is not: the
+    verdict means "never a defect, nothing was ever changed", so an earlier
+    ``FIXED`` or ``REVERTED`` contradicts it. Only ONE earlier ack is
+    trusted to carry forward: round 1's ``FIXED``, restated ``FIXED`` in
+    every round between — round 1 predates the panel (external mode's
+    intake is the injected findings alone), so its section can only speak
+    of the external ids, whereas a later round's line may describe the
+    panel's own same-looking ``f-001`` (lens #87 did exactly that in rounds
+    2-3, and said "nothing further this round" in round 4 — the fix in the
+    pushed tree is round 1's). Any other disagreement — a later-round
+    origin, a revert or dispute or omission in between — is ``None``
+    (``unaddressed``: no thread is answered, a false "Fixed in" being the
+    one unacceptable outcome) with the note saying what the handoffs said.
+    An omitted final ack is ``None`` for the same reason.
+    """
+    if not history:  # unreachable from the epilogue (final_round >= 1)
+        return None, ""
+    final_round, final = history[-1]
+    if final is not None and final.verdict != "no_change_needed":
+        return final, ""
+    earlier = [(r, a) for r, a in history[:-1] if a is not None]
+    decisive = [(r, a) for r, a in earlier if a.verdict in _DECISIVE]
+    if not decisive:
+        return final, ""
+    said = ", ".join(f"{a.verdict.upper()} in round {r}" for r, a in decisive)
+    if final is None:
+        return None, f"{said}; no acknowledgement in the round {final_round} handoff"
+    unbroken_from_round_one = len(earlier) == final_round - 1 and all(
+        a.verdict == "fixed" for _r, a in earlier
+    )
+    if unbroken_from_round_one:
+        return earlier[0][1], (
+            f"FIXED in round 1 and every round since; the round {final_round} "
+            f"handoff said NO CHANGE NEEDED ({final.detail or 'no reason given'})"
+            " — read as round 1's FIXED"
+        )
+    return None, (
+        f"{said}; the round {final_round} handoff said NO CHANGE NEEDED "
+        f"({final.detail or 'no reason given'}) — the handoffs disagree and "
+        "no one round is trusted: not answered on the thread"
+    )
 
 
 def final_round_outcomes(
@@ -472,33 +583,61 @@ def final_round_outcomes(
     rejections: dict[str, str],
     surviving_ids: Sequence[str],
 ) -> tuple[ExternalOutcome, ...]:
-    """The converge epilogue's dispositions, read from the coder's FINAL
-    handoff (#387: lens #84's round 1 said FIXED, round 3 reverted it, and
-    the threads were answered from round 1) — the mandated ``## External
-    findings`` acks plus any ``## Findings`` dispute block — and checked
-    against the tree: a run whose final tree equals the PR head outside the
-    generated paths undid its fix. The ack section is scoped to the injected
-    ids by construction; the ``## Findings`` block is read in round 1 only
-    (a later round's belongs to the panel). A final round without the
-    section carries no earlier claim forward (the safe direction).
+    """The converge epilogue's dispositions, read from the coder's
+    handoffs of EVERY round — the mandated ``## External findings`` acks,
+    the final round's resolved against the earlier ones per id
+    (:func:`resolve_ack_history`, #399: lens #87's final "NO CHANGE NEEDED"
+    over a round-1 FIXED; #387: lens #84's round 1 said FIXED, round 3
+    reverted it, and the threads were answered from round 1 — a decisive
+    final ack still wins) plus round 1's ``## Findings`` dispute block —
+    and checked against the tree: a run whose final tree equals the PR
+    head outside the generated paths undid its fix. The ack section is
+    scoped to the injected ids by construction; the ``## Findings`` block
+    is read in round 1 only (a later round's belongs to the panel). A
+    final round without the section carries no earlier claim forward (the
+    safe direction) — the note names what was dropped.
     """
     coder_claims: dict[str, handoff.Finding] = {}
-    acks: dict[str, CoderAck] = {}
     final_round = max(rounds, 1)
-    coder_path = handoff_dir / handoff.coder_handoff_name(final_round)
-    try:
-        text = coder_path.read_text(encoding="utf-8")
-    except OSError:
-        text = ""  # loop died before that round's handoff → unaddressed
-    missing = ""
+    texts: dict[int, str] = {}
+    for round_no in range(1, final_round + 1):
+        try:
+            texts[round_no] = (
+                handoff_dir / handoff.coder_handoff_name(round_no)
+            ).read_text(encoding="utf-8")
+        except OSError:
+            texts[round_no] = ""  # loop died before that round's handoff
+    per_round = {r: parse_coder_acks(t, surviving_ids) for r, t in texts.items()}
+    acks: dict[str, CoderAck] = {}
+    notes: dict[str, str] = {}
+    for fid in surviving_ids:
+        ack, note = resolve_ack_history(
+            [(r, per_round[r].get(fid)) for r in sorted(per_round)]
+        )
+        if ack is not None:
+            acks[fid] = ack
+        if note:
+            notes[fid] = note
+            logger.warning("converge %s: %s: %s", run_id, fid, note)
+    missing: dict[str, str] = {}
+    text = texts[final_round]
     if text:
-        acks = parse_coder_acks(text, surviving_ids)
-        if not acks and final_round > 1:
-            missing = (
-                f"no acknowledgement in the round {final_round} coder handoff — "
-                "an earlier round's claim is not carried forward"
-            )
-            logger.warning("converge %s: %s", run_id, missing.split(" — ")[0])
+        stale = " — an earlier round's claim is not carried forward"
+        if not per_round[final_round]:
+            # no section at all (or nothing parseable in it)
+            reason = f"no acknowledgement in the round {final_round} coder handoff"
+            logger.warning("converge %s: %s", run_id, reason)
+            missing = {
+                fid: reason + (stale if final_round > 1 else "")
+                for fid in surviving_ids
+            }
+        else:
+            missing = {
+                fid: f"not acknowledged in the round {final_round} coder handoff"
+                + (stale if final_round > 1 else "")
+                for fid in surviving_ids
+                if fid not in per_round[final_round]
+            }
         if final_round == 1:
             # Round 1's `## Findings` block can only name the injected ids.
             # A later round's is the panel's dispute contract, whose ids
@@ -525,6 +664,7 @@ def final_round_outcomes(
         loop_approved=loop_approved,
         tree_changed=tree_changed,
         missing_ack_detail=missing,
+        notes=notes,
     )
 
 

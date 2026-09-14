@@ -394,6 +394,46 @@ async def test_dispatch_happy_path_runs_converge_and_records_outcome(
     assert "f-001" in outcome and "fixed" in outcome
 
 
+async def test_outcome_finding_carries_an_outcomes_note(tmp_path: Path) -> None:
+    """#399: the epilogue's note (a final NO CHANGE NEEDED read over an
+    earlier FIXED) is shown on the story's outcome finding, so the prompt
+    drift is visible where the operator reads the run — never on the
+    reviewer's thread, which gets the plain disposition."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(
+        {
+            "status": "converged",
+            "pushed": True,
+            "pushed_sha": "e5" * 20,
+            "rounds": 4,
+            "total_cost_usd": 3.5,
+            "external_outcomes": [
+                {
+                    "finding_id": "f-001",
+                    "author": _BOT,
+                    "disposition": "fixed",
+                    "detail": "guarded it",
+                    "note": (
+                        "fixed in round 1; the round 4 handoff said NO CHANGE NEEDED"
+                    ),
+                }
+            ],
+            "message": "converged and pushed",
+        }
+    )
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    outcome = next(f for f in _findings(client) if "remediation outcome" in f)
+    assert f"f-001 by {_BOT}: fixed — guarded it" in outcome
+    assert (
+        "[note: fixed in round 1; the round 4 handoff said NO CHANGE NEEDED]" in outcome
+    )
+
+
 async def test_second_dispatch_defers_while_one_is_in_flight(
     tmp_path: Path,
 ) -> None:
