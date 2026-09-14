@@ -172,6 +172,7 @@ async def _run_reconcile_pass(
         "merged": 0,
         "closed_unmerged": 0,
         "still_open": 0,
+        "waiter_resolved": 0,  # #372: story terminal, PR still open
         "gone": 0,
         "unparseable": 0,
         "error": 0,
@@ -255,6 +256,7 @@ async def _run_reconcile_pass(
     gate_summary = (
         f"{gate_counts['merged']} resolved / {gate_counts['closed_unmerged']} "
         f"closed-unmerged / {gate_counts['still_open']} awaiting-merge / "
+        f"{gate_counts['waiter_resolved']} waiter-resolved / "
         f"{gate_counts['gone']} deleted / {gate_counts['unparseable']} unparseable "
         f"/ {gate_counts['error']} error; human-gates: "
         f"{human_counts['waiter_resolved']} waiter-resolved / "

@@ -215,9 +215,19 @@ class Admission:
         gates = await self._open_gates(GATE_TYPE_PR, project)
         running = len(self._in_flight.get(bucket, set()) - {(route, task_id)})
         total = len(gates) + running
-        urls = tuple(_url_of(g) for g in gates)
         at_cap = bool(limits.total) and total >= limits.total
         at_limit = bool(limits.limit) and total >= limits.limit
+        if at_cap or at_limit:
+            # #372: a gate whose story is already terminal (the work landed
+            # via another PR, the issue mirror completed it, the PR stayed
+            # open) is the operator's PR, not loom's work-in-progress — it
+            # counts against neither cap. Read only when a cap is in
+            # question; the sweep completes such gates on its next pass.
+            gates = await self._live_gates(gates)
+            total = len(gates) + running
+            at_cap = bool(limits.total) and total >= limits.total
+            at_limit = bool(limits.limit) and total >= limits.limit
+        urls = tuple(_url_of(g) for g in gates)
         escalated = 0
         if at_cap or at_limit:
             escalated = await self._escalated_count(project, gates)
@@ -288,6 +298,46 @@ class Admission:
             )
             total = limit
         return AdmissionLimits(limit=limit, total=total)
+
+    async def _live_gates(self, gates: Sequence[Any]) -> list[Any]:
+        """*gates* minus those whose waiter is terminal (#372). A waiter that
+        cannot be read, or that Lithos no longer returns ("gone" is not
+        "done"), keeps its gate counted — fail closed, as the escalation read
+        does. The story is named by the gate's ``story_id`` metadata first
+        (the cheap link, as ``_escalated_count`` reads it) and the
+        ``waits_on_gate`` edge only for an older gate: ``create_pr_gate``
+        writes both or neither, so they disagree only after a hand edit."""
+        live: list[Any] = []
+        for gate in gates:
+            story = (gate.metadata or {}).get("story_id")
+            try:
+                if not (isinstance(story, str) and story):
+                    story = await waiter_of(self._lithos, gate.id)
+                waiter = (
+                    await self._lithos.task_get(task_id=story)
+                    if story is not None
+                    else None
+                )
+            except (LithosClientError, OSError) as exc:
+                logger.warning(
+                    "%s: cannot read the story behind gate %s (%s); counting it",
+                    _SUBSYSTEM,
+                    gate.id,
+                    exc,
+                )
+                live.append(gate)
+                continue
+            if waiter is not None and waiter.status != "open":
+                logger.info(
+                    "%s: pr gate %s waits on %s, already %s — not counted (#372)",
+                    _SUBSYSTEM,
+                    gate.id,
+                    story,
+                    waiter.status,
+                )
+                continue
+            live.append(gate)
+        return live
 
     async def _escalated_count(self, project: str | None, gates: Sequence[Any]) -> int:
         """How many of *gates* wait on a story that an OPEN loom ``human``

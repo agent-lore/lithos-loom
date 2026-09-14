@@ -2333,3 +2333,155 @@ async def test_a_reused_gate_is_told_its_pr_died() -> None:
     assert brief["pr_state"] == "closed_unmerged"
     assert "closed unmerged" in human.metadata["escalation_summary"]
     assert human.metadata["escalation_reason"] == "conflict_unresolved"
+
+
+# ── #372: a terminal story whose delivered PR is still OPEN ──────────────────
+
+
+@pytest.mark.parametrize("terminal", ["completed", "cancelled"])
+async def test_a_still_open_pr_whose_story_is_terminal_completes_the_gate(
+    terminal: str, tmp_path
+) -> None:
+    """#372, the sibling of #268: the story went terminal (completed by hand,
+    or by the issue mirror when the work landed via another PR) while its
+    delivered PR stayed OPEN. Until now that gate fell through to the
+    still-open branch every sweep — findings on a done story, review
+    ingestion and a paid remediation run nobody will read, merge-gate and
+    resolver subprocesses, an S6 admission slot held. The PR is the
+    operator's now: the sweep completes the `pr` gate (outcome `waiter
+    resolved`, marker `waiter_resolved`) BEFORE any dispatcher runs, posts
+    nothing on the story, and never nudges."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    if terminal == "completed":
+        await client.task_complete(task_id=story)
+    else:
+        await client.task_cancel(task_id=story)
+    github = _review_github(_open_pr())  # review activity that WOULD ingest
+    spawned: list[list[str]] = []
+
+    async def spawn(cmd):
+        spawned.append(cmd)
+        return 0, ""
+
+    rem = _remediation(tmp_path, spawn=spawn)
+
+    outcome = await reconcile_pr_gate(
+        gate, github, _ctx(client), ingest_reviews=True, remediation=rem
+    )
+
+    assert outcome == "waiter_resolved"
+    done = await _get(client, gate.id)
+    assert done.status == "completed"
+    assert done.metadata[MERGE_STATE_KEY] == "waiter_resolved"
+    assert done.metadata[MERGE_STATE_URL_KEY] == _PR_URL
+    assert client.findings == []  # nothing said on a story nobody will read
+    github.get_branch_tip.assert_not_called()  # landability never ran
+    github.list_pull_request_reviews.assert_not_called()  # no ingestion
+    assert spawned == [] and rem._task is None  # no paid run
+
+
+async def test_a_still_open_pr_whose_waiter_is_gone_keeps_the_old_branch() -> None:
+    # "gone" is not "done" (the human-gate hygiene's rule): a waiter Lithos
+    # cannot return leaves the gate on the ordinary still-open branch
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    real_get = client.task_get
+
+    async def get(**kw):
+        if kw.get("task_id") == story:
+            return None
+        return await real_get(**kw)
+
+    client.task_get = get  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(gate, _github(_open_pr()), _ctx(client))
+
+    assert outcome == "still_open"
+    assert (await _get(client, gate.id)).status == "open"
+
+
+async def test_a_still_open_pr_whose_story_cannot_be_read_holds_the_branch() -> None:
+    # fail closed: no dispatcher spends on a story Lithos could not describe;
+    # the whole branch retries next sweep
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    real_get = client.task_get
+
+    async def get(**kw):
+        if kw.get("task_id") == story:
+            raise LithosClientError("server_error", "lithos down")
+        return await real_get(**kw)
+
+    client.task_get = get  # type: ignore[method-assign]
+    github = _github(_open_pr())
+
+    outcome = await reconcile_pr_gate(gate, github, _ctx(client))
+
+    assert outcome == "error"
+    github.get_branch_tip.assert_not_called()
+    assert (await _get(client, gate.id)).status == "open"
+
+
+async def test_a_completed_storys_open_pr_gate_nudges_its_released_dependents() -> None:
+    """opus round 1 (M1): whoever completed the story by hand discarded its
+    `unblocked` answer (the issue mirror, an Obsidian tick), and this gate
+    is the only retry surface that survives its own completion — so, as on
+    the merged path for an already-terminal story, the released dependents
+    are recovered from the graph and nudged BEFORE the gate goes terminal,
+    and the fan-out is recorded on the gate."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+    await client.task_complete(task_id=story)  # the answer is discarded here
+
+    outcome = await reconcile_pr_gate(gate, _github(_open_pr()), _ctx(client))
+
+    assert outcome == "waiter_resolved"
+    nudges = [c for c in client.calls_to("task_update") if c["task_id"] == dependent]
+    assert [c["metadata"] for c in nudges] == [{}]
+    done = await _get(client, gate.id)
+    assert done.status == "completed"
+    assert done.metadata[NUDGE_RECOVERED_KEY]["nudged"] == [dependent]
+    assert dependent in [t.id for t in await client.task_ready()]
+
+
+async def test_a_cancelled_storys_open_pr_gate_nudges_nobody() -> None:
+    # a cancelled blocker keeps its dependents blocked: nothing to release
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    dependent = await _blocked_dependent(client, story)
+    await client.task_cancel(task_id=story)
+
+    outcome = await reconcile_pr_gate(gate, _github(_open_pr()), _ctx(client))
+
+    assert outcome == "waiter_resolved"
+    assert [
+        c for c in client.calls_to("task_update") if c["task_id"] == dependent
+    ] == []
+    assert (await _get(client, gate.id)).status == "completed"
+
+
+async def test_a_waiter_resolved_marker_that_does_not_land_holds_the_completion() -> (
+    None
+):
+    # the audit trail lands before the gate goes terminal, or the branch
+    # retries next sweep (L4)
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    await client.task_complete(task_id=story)
+    real_update = client.task_update
+
+    async def failing_update(**kw):
+        if kw.get("task_id") == gate.id and MERGE_STATE_KEY in (
+            kw.get("metadata") or {}
+        ):
+            raise LithosClientError("server_error", "lithos down")
+        return await real_update(**kw)
+
+    client.task_update = failing_update  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(gate, _github(_open_pr()), _ctx(client))
+
+    assert outcome == "error"
+    assert (await _get(client, gate.id)).status == "open"

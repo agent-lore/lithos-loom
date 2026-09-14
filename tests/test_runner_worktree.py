@@ -393,3 +393,85 @@ def test_create_on_branch_rejects_unknown_ref(
         worktree.create_on_branch(
             tmp_git_repo, "deadbeef" * 5, "task", parent=tmp_path / "w"
         )
+
+
+# ── #392: fetch_refspecs, the tolerance every fetch shares ───────────────────
+
+
+def _lock_race_stderr() -> str:
+    return (
+        f"error: cannot lock ref 'refs/remotes/origin/main': is at {'a' * 40} but "
+        f"expected {'0' * 40}\n"
+    )
+
+
+def test_fetch_refspecs_gives_up_after_a_second_lock_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import git
+
+    calls: list[list[str]] = []
+
+    def always_losing(argv, **kw):
+        calls.append(list(argv))
+        return 1, _lock_race_stderr()
+
+    monkeypatch.setattr(git, "run_group", always_losing)
+
+    problem = git.fetch_refspecs(tmp_path, ("pull/7/head", "main"))
+
+    assert "cannot lock ref" in problem
+    assert len(calls) == 2
+    assert calls[0][-2:] == ["pull/7/head", "main"]
+
+
+def test_fetch_refspecs_reports_a_hung_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import git
+
+    monkeypatch.setattr(git, "run_group", lambda argv, **kw: (None, ""))
+    assert "timed out" in git.fetch_refspecs(tmp_path, ("main",), timeout=1.0)
+
+
+def test_fetch_refspecs_does_not_retry_an_ordinary_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import git
+
+    calls: list[int] = []
+
+    def failing(argv, **kw):
+        calls.append(1)
+        return 128, "fatal: couldn't find remote ref main"
+
+    monkeypatch.setattr(git, "run_group", failing)
+
+    assert "couldn't find" in git.fetch_refspecs(tmp_path, ("main",))
+    assert len(calls) == 1
+
+
+def test_fetch_refspecs_reports_the_error_line_not_gits_trailing_boilerplate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opus round 1 (M2): for the very failure #392 is about, git's `error:`
+    is the FIRST stderr line and the last one is "remove the file manually
+    to continue." — the reason must name the ref and the lock, or the
+    merge-gate `crashed` record and the remediation `[Friction]` say
+    nothing useful."""
+    from lithos_loom.runner import git
+
+    stderr = (
+        "error: cannot lock ref 'refs/remotes/origin/main': Unable to create "
+        "'/r/.git/refs/remotes/origin/main.lock': File exists.\n\n"
+        "Another git process seems to be running in this repository, e.g.\n"
+        "an editor opened by 'git commit'. Please make sure all processes\n"
+        "are terminated then try again.\n"
+        "remove the file manually to continue.\n"
+    )
+    monkeypatch.setattr(git, "run_group", lambda argv, **kw: (1, stderr))
+
+    problem = git.fetch_refspecs(tmp_path, ("main",))
+
+    assert problem.startswith("error: cannot lock ref 'refs/remotes/origin/main'")
+    assert "remove the file manually" not in problem

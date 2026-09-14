@@ -18,6 +18,7 @@ from pathlib import Path
 
 from lithos_loom.github_client import PullRequest
 
+from ...runner import git
 from .github_access import github_call, repo_name_with_owner
 
 # A PR argument: ``#142``, bare ``142``, or a GitHub PR URL ending ``/pull/142``.
@@ -82,8 +83,24 @@ def _merge_base(repo: Path, a: str, b: str) -> str:
     return _run_git(repo, "merge-base", a, b)
 
 
+# A PR head's first fetch into a fresh checkout can be big; the daemon's
+# 60 s base-branch budget is too tight for it (#392 review, L6).
+PR_FETCH_TIMEOUT_SECONDS = 300.0
+
+
 def _git_fetch(repo: Path, *refspecs: str) -> None:
-    _run_git(repo, "fetch", "origin", *refspecs)
+    """Fetch the PR head + base with the daemon's tolerances (#392): a lost
+    ref-lock race against a concurrent fetch of the same moved base (the
+    sweep's merge-gate probe or a remediation converge beside a story-develop
+    worktree cut, #390) is retried once, a hung transport is killed with its
+    process group after :data:`PR_FETCH_TIMEOUT_SECONDS`, and no credential
+    prompt can block (``GIT_TERMINAL_PROMPT=0`` — on the operator's own
+    ``develop review`` an https helper that would have prompted now fails
+    plainly; use ``gh auth`` / ssh). Anything else still raises — the
+    callers' contract is unchanged."""
+    problem = git.fetch_refspecs(repo, refspecs, timeout=PR_FETCH_TIMEOUT_SECONDS)
+    if problem:
+        raise RuntimeError(f"git fetch origin {' '.join(refspecs)} failed: {problem}")
 
 
 def _gh_pr_view(repo: Path, number: str) -> PullRequest:
@@ -221,7 +238,15 @@ def _resolve_pr(
         )
     # Fetch the PR head (works for forks too) and the base branch so both
     # commits are local before we materialise a worktree / diff against them.
-    _git_fetch(repo, f"pull/{number}/head", base_ref_name)
+    # The base by EXPLICIT refspec (#390's lesson, #392 review M3): a
+    # checkout whose remote.origin.fetch is narrowed would otherwise report
+    # success and leave origin/<base> stale — and the S5c RangeBase below
+    # would hand the panel a range that includes work already on the base.
+    _git_fetch(
+        repo,
+        f"pull/{number}/head",
+        f"+refs/heads/{base_ref_name}:refs/remotes/origin/{base_ref_name}",
+    )
     if base_override:
         base_sha = _rev_parse(repo, base_override)
         live_base = ""

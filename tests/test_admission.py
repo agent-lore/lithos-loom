@@ -827,3 +827,75 @@ async def test_admitting_one_route_keeps_another_routes_deferral() -> None:
     assert adm.deferred(_PROJECT) == frozenset({story})
     adm.forget(story)  # the story left the open set: every route's wait ends
     assert adm.deferred(_PROJECT) == frozenset()
+
+
+# ── #372: a terminal story whose delivered PR is still open ──────────────────
+
+
+@pytest.mark.parametrize("terminal", ["completed", "cancelled"])
+async def test_a_gate_whose_story_is_terminal_counts_against_neither_cap(
+    terminal: str,
+) -> None:
+    """#372: the story went terminal (its work landed via another PR and the
+    issue mirror completed it) while the delivered PR stayed OPEN, so its
+    `pr` gate is still live. That PR is the operator's now, not loom's
+    work-in-progress: it holds no admission slot — under the limit and under
+    the total cap alike — or one such gate would stall the project's whole
+    story-develop route until a human noticed."""
+    client = FakeLithosClient(agent_id=_AGENT)
+    done, _gate = await _delivered(client, number=1)
+    if terminal == "completed":
+        await client.task_complete(task_id=done)
+    else:
+        await client.task_cancel(task_id=done)
+    story = await _story(client)
+    adm = _admission(client, limit=1, total=1)
+
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
+
+    assert verdict.admitted
+    assert verdict.open_gates == 0  # the dead-story gate is not counted
+
+
+async def test_a_gate_whose_waiter_cannot_be_read_still_counts() -> None:
+    # fail closed, as for the escalation read: a gate whose story Lithos
+    # cannot return ("gone" is not "done") keeps its slot
+    client = FakeLithosClient(agent_id=_AGENT)
+    done, _gate = await _delivered(client, number=1)
+    real_get = client.task_get
+
+    async def get(**kw):
+        if kw.get("task_id") == done:
+            return None
+        return await real_get(**kw)
+
+    client.task_get = get  # type: ignore[method-assign]
+    story = await _story(client)
+    adm = _admission(client, limit=1)
+
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.reason == "limit"
+    assert verdict.open_gates == 1
+
+
+async def test_a_waiter_read_that_fails_keeps_its_gate_counted() -> None:
+    # the unreadable arm (opus round 1, L3): a Lithos error on the story read
+    # is not "unreadable admission" — the gate simply keeps its slot
+    client = FakeLithosClient(agent_id=_AGENT)
+    done, _gate = await _delivered(client, number=1)
+    real_get = client.task_get
+
+    async def get(**kw):
+        if kw.get("task_id") == done:
+            raise LithosClientError("server_error", "lithos down")
+        return await real_get(**kw)
+
+    client.task_get = get  # type: ignore[method-assign]
+    story = await _story(client)
+    adm = _admission(client, limit=1)
+
+    verdict = await adm.admit(route=_ROUTE, task_id=story, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.reason == "limit"
+    assert verdict.open_gates == 1
