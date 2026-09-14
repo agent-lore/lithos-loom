@@ -55,26 +55,42 @@ def fetch_branch(
 ) -> str:
     """Fetch origin's *base_branch* into ``refs/remotes/origin/<base_branch>``.
 
-    Returns ``""`` on success, else the reason (for the caller's log). Never
-    raises, never prompts (``GIT_TERMINAL_PROMPT=0`` — a credential prompt
-    on the daemon's tty would block for the whole timeout), and a hung
-    transport is killed with its process group (the ssh / https helper
-    outlives a bare kill of ``git``). The refspec is explicit, so the
-    tracking ref is updated whatever ``remote.origin.fetch`` says (a checkout
-    narrowed to another branch would otherwise report success and leave it
-    stale). Two fetches of a moved base in one repo race on the ref's
-    compare-and-swap and the loser fails with ``cannot lock ref … is at X but
-    expected Y`` though both write X — that is retried once, not a failure
-    (#390 review).
+    Returns ``""`` on success, else the reason (for the caller's log). The
+    refspec is explicit, so the tracking ref is updated whatever
+    ``remote.origin.fetch`` says (a checkout narrowed to another branch would
+    otherwise report success and leave it stale). See :func:`fetch_refspecs`
+    for the tolerance every fetch shares.
     """
-    argv = [
-        "git",
-        "fetch",
-        "-q",
-        "origin",
-        f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
-    ]
+    return fetch_refspecs(
+        repo,
+        (f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",),
+        timeout=timeout,
+        label=f"origin/{base_branch}",
+    )
+
+
+def fetch_refspecs(
+    repo: Path,
+    refspecs: Sequence[str],
+    *,
+    timeout: float = FETCH_TIMEOUT_SECONDS,
+    label: str = "",
+) -> str:
+    """``git fetch origin <refspecs…>`` with the daemon's tolerances; ``""``
+    on success, else the reason (for the caller's log or error).
+
+    Never raises, never prompts (``GIT_TERMINAL_PROMPT=0`` — a credential
+    prompt on the daemon's tty would block for the whole timeout), and a
+    hung transport is killed with its process group (the ssh / https helper
+    outlives a bare kill of ``git``). Two fetches of a moved base in one
+    repo race on the tracking ref's compare-and-swap and the loser fails
+    with ``cannot lock ref … is at X but expected Y`` though both write X —
+    that is retried once, not a failure (#390 review; #392: the merge-gate
+    probe / converge fetch beside a story-develop worktree cut).
+    """
+    argv = ["git", "fetch", "-q", "origin", *refspecs]
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    what = label or " ".join(refspecs)
     for attempt in (1, 2):
         returncode, stderr = run_group(argv, cwd=repo, env=env, timeout=timeout)
         if returncode is None:
@@ -82,16 +98,28 @@ def fetch_branch(
         if returncode == 0:
             return ""
         stderr = stderr.strip()
-        reason = stderr.splitlines()[-1] if stderr else f"exit {returncode}"
+        reason = _fetch_reason(stderr) or f"exit {returncode}"
         if _REF_LOCK_RACE in stderr and attempt == 1:
             logger.info(
-                "git: fetch of origin/%s raced with another fetch (%s); retrying",
-                base_branch,
+                "git: fetch of %s raced with another fetch (%s); retrying",
+                what,
                 reason,
             )
             continue
         return reason
     return "unreachable"  # pragma: no cover
+
+
+def _fetch_reason(stderr: str) -> str:
+    """The line of a failed fetch's stderr worth reporting: git's own
+    ``error:`` / ``fatal:`` line — for a ref-lock failure that is the FIRST
+    line, and the last is "remove the file manually to continue." (#392
+    review) — else the last non-blank line."""
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    for line in lines:
+        if line.startswith(("error:", "fatal:")):
+            return line
+    return lines[-1] if lines else ""
 
 
 def run_group(

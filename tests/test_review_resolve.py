@@ -269,7 +269,12 @@ def test_allow_fork_default_still_fetches_a_fork(
     )
     change = review_resolve.resolve_change(tmp_path, "#142")
     assert change.is_fork is True
-    assert stub_gh.fetches == [("pull/142/head", "main")]
+    # opus round 1 (M3): the base is fetched by EXPLICIT refspec (#390's
+    # lesson — a narrowed remote.origin.fetch would otherwise leave
+    # origin/<base> stale at exit 0); the PR head is read via its sha
+    assert stub_gh.fetches == [
+        ("pull/142/head", "+refs/heads/main:refs/remotes/origin/main")
+    ]
 
 
 def test_resolved_pr_carries_its_open_or_closed_state(
@@ -367,3 +372,71 @@ def test_expect_repo_checks_every_url_shape_the_number_parser_accepts(
         review_resolve.resolve_change(tmp_path, url, expect_repo="o/right")
     assert exc.value.actual == "o/other"
     assert stub_gh.fetches == []
+
+
+# ── #392: the PR-head / base fetch tolerates a lost ref-lock race ────────────
+
+
+def _lock_race(moved: str = "a" * 40) -> str:
+    return (
+        f"error: cannot lock ref 'refs/remotes/origin/main': is at {moved} but "
+        f"expected {'0' * 40}\n"
+    )
+
+
+def _stub_pr_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the GitHub read and the merge-base are stubbed; the FETCH is real code
+    # over a scripted `git.run_group` (the public seam every fetch shares)
+    monkeypatch.setattr(review_resolve, "_gh_pr_view", lambda repo, n: _stub_pr(n))
+    monkeypatch.setattr(review_resolve, "_merge_base", lambda repo, a, b: "m" * 40)
+
+
+def test_resolving_a_pr_retries_the_fetch_once_on_a_lost_ref_lock_race(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#392: two fetches of a MOVED base in one repo race on the tracking
+    ref's compare-and-swap (the sweep's merge-gate probe beside a
+    story-develop worktree cut, #390); the loser exits 1 with `cannot lock
+    ref … is at X but expected Y` although both write X. `_run_git` treated
+    that as fatal — a `crashed` merge-gate key, a spent remediation round.
+    The fetch now goes through `git.fetch_refspecs`, which retries once."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    calls: list[list[str]] = []
+
+    def racing(argv, **kw):
+        calls.append(list(argv))
+        return (1, _lock_race()) if len(calls) == 1 else (0, "")
+
+    monkeypatch.setattr(git, "run_group", racing)
+
+    change = review_resolve.resolve_change(tmp_path, "#142")
+
+    assert change.head_sha == "h" * 40
+    assert len(calls) == 2
+    assert calls[0][:2] == ["git", "fetch"] and "origin" in calls[0]
+    assert calls[0][-2:] == [
+        "pull/142/head",
+        "+refs/heads/main:refs/remotes/origin/main",
+    ]
+
+
+def test_resolving_a_pr_still_raises_on_any_other_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # the callers' contract is unchanged: a real failure is fatal, unretried
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    calls: list[int] = []
+
+    def failing(argv, **kw):
+        calls.append(1)
+        return 128, "fatal: couldn't find remote ref pull/142/head"
+
+    monkeypatch.setattr(git, "run_group", failing)
+
+    with pytest.raises(RuntimeError, match="couldn't find remote ref"):
+        review_resolve.resolve_change(tmp_path, "#142")
+    assert len(calls) == 1

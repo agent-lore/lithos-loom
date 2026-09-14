@@ -9,9 +9,11 @@ which enumerates open tasks and holds a ``GitHubClient``), it reads the gate's
 PR merge state from GitHub and, on merge, completes the story **then** the gate;
 on closed-unmerged / deleted it supersedes the gate with a loom ``human`` gate on
 the story and completes it (:mod:`.pr_gate_stranding`, 04c2448b), with a
-``[DeliveredPRClosed]`` finding as the audit trail; while still open it also reports
-landability (:mod:`.pr_landability`, PRD S1) and ingests external reviews
-(:mod:`.external_reviews`, PRD S2).
+``[DeliveredPRClosed]`` finding as the audit trail; a still-open PR whose story
+is already terminal is the operator's now — the gate is completed before any
+dispatcher runs, its released dependents nudged (#372); while still open it
+otherwise reports landability (:mod:`.pr_landability`, PRD S1) and ingests
+external reviews (:mod:`.external_reviews`, PRD S2).
 
 De-dup lives in a single ``metadata.develop_pr_merge_state`` marker written on
 the GATE (mirrors ``github_state_snapshot``), scoped to the PR url it resolved
@@ -93,7 +95,9 @@ GATE_RESOLVED = "[GateResolved]"
 
 
 # Marker values that mean "this PR url is resolved". A still-open PR leaves the
-# marker UNSET so the resolver re-polls next cycle.
+# marker UNSET so the resolver re-polls next cycle — except `waiter_resolved`
+# (#372: the story is terminal, the gate is completed), deliberately NOT in
+# this set so a completion that did not land is retried on the next sweep.
 MERGE_STATE_TERMINAL: frozenset[str] = frozenset(
     {"merged", "closed_unmerged", "gone", "unparseable"}
 )
@@ -168,9 +172,9 @@ async def reconcile_pr_gate(
     """Resolve one open ``pr`` gate against its PR's merge state.
 
     Returns a short outcome label for the sweep's counters
-    (``merged`` / ``closed_unmerged`` / ``still_open`` / ``gone`` /
-    ``unparseable`` / ``error``), or ``None`` when already resolved for this
-    same PR url. Never raises.
+    (``merged`` / ``closed_unmerged`` / ``still_open`` / ``waiter_resolved``
+    / ``gone`` / ``unparseable`` / ``error``), or ``None`` when already
+    resolved for this same PR url. Never raises.
 
     On **merge** the gate + its story are completed (story-first, so a crash can
     never leave the story open-and-ready — the mark-then-complete hazard the
@@ -314,6 +318,16 @@ async def reconcile_pr_gate(
         return "error"
     if state == "closed_unmerged":
         return await _gate_closed(gate, story_id, spec, state, ctx, notifier)
+
+    if story_id is not None:
+        # #372 (the sibling of #268): the story is already terminal while its
+        # PR is still open — the PR is the operator's now. Decided BEFORE any
+        # dispatcher runs, or every sweep would post on a done story, spend a
+        # remediation round nobody reads, spawn the re-gate / resolver, and
+        # hold an S6 admission slot.
+        resolved = await _waiter_resolved(gate, story_id, spec, ctx)
+        if resolved is not None:
+            return resolved
 
     # state == "open" — still in flight; re-poll next sweep (no merge marker).
     # The base-move key for everything below is the base branch's LIVE tip
@@ -560,6 +574,86 @@ async def _complete_story(
             exc,
         )
         return None
+
+
+async def _waiter_resolved(
+    gate: Any, story_id: str, spec: PrGateSpec, ctx: SubscriptionContext
+) -> str | None:
+    """Complete a still-open ``pr`` gate whose waiter is already terminal
+    (#372) — the ``pr``-gate twin of the human-gate hygiene
+    (:func:`~.pr_gate_stranding.complete_if_waiter_resolved`): for a
+    ``completed`` story the released dependents are recovered and nudged
+    first (the story's own completion discarded that answer), then the
+    marker ``waiter_resolved`` (url-scoped, the audit trail; kept OUT of
+    ``MERGE_STATE_TERMINAL`` so a completion that did not land is retried),
+    then the completion; nothing is posted on the story. Returns the sweep
+    label, ``error`` when a read, the recovery, the marker or the completion
+    did not land (the whole branch retries next sweep — fail closed: no
+    dispatcher spends on a story Lithos could not describe), or ``None``
+    when the waiter is live, or gone ("gone" is not "done") — the ordinary
+    still-open branch then runs. Work a dispatcher already has in flight on
+    this PR finishes on its own; only NEW work stops.
+    """
+    try:
+        waiter = await ctx.lithos.task_get(task_id=story_id)
+    except (LithosClientError, OSError) as exc:
+        ctx.logger.warning(
+            "[Friction] pr-gate: reading gate %s's story %s failed (%s); "
+            "will retry next sweep",
+            gate.id,
+            story_id,
+            exc,
+        )
+        return "error"
+    if waiter is None or waiter.status == "open":
+        return None
+    if waiter.status == "completed":
+        # Whoever completed the story discarded its `unblocked` answer (the
+        # issue mirror, an Obsidian tick), and this gate is the only retry
+        # surface that survives its own completion (#372 review M1): rebuild
+        # the fan-out from the durable graph and nudge it BEFORE the gate
+        # goes terminal, exactly as the merged path does for an
+        # already-terminal story; an unclassifiable residue keeps the gate
+        # open until Lithos answers. A cancelled blocker releases nothing.
+        plan = await recover_dependents(story_id, gate, spec.pr_url, ctx)
+        if plan is None:
+            return "error"
+        await nudge_unblocked(plan.to_nudge, story_id, ctx)
+        if plan.record is not None:
+            await write_marker(
+                ctx,
+                task_id=gate.id,
+                marker={NUDGE_RECOVERED_KEY: plan.record.as_metadata()},
+                subsystem="pr-gate",
+            )
+        if plan.defer:
+            return "error"
+    if (
+        gate.metadata.get(MERGE_STATE_KEY) != "waiter_resolved"
+        or gate.metadata.get(MERGE_STATE_URL_KEY) != spec.pr_url
+    ) and not await write_marker(
+        ctx,
+        task_id=gate.id,
+        marker={MERGE_STATE_KEY: "waiter_resolved", MERGE_STATE_URL_KEY: spec.pr_url},
+        subsystem="pr-gate",
+    ):
+        return "error"  # the audit trail must land before the completion
+    if not await complete_swallowing(
+        ctx,
+        task_id=gate.id,
+        subject=f"pr gate {gate.id} (story {story_id} is {waiter.status})",
+        subsystem="pr-gate",
+    ):
+        return "error"
+    ctx.logger.info(
+        "pr-gate: completed gate %s — its story %s is already %s while PR %s "
+        "is still open; the PR is the operator's now (#372)",
+        gate.id,
+        story_id,
+        waiter.status,
+        spec.pr_url,
+    )
+    return "waiter_resolved"
 
 
 async def _gate_closed(
