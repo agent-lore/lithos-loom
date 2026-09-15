@@ -2561,3 +2561,180 @@ async def test_a_breadcrumb_that_fails_after_the_refund_landed_never_spends_the_
     assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
     assert await _human_gates(client) == []
     assert notifier.notices == []
+
+
+# ── #408: the budget records how its last round ended ────────────────────
+
+
+def test_budget_marker_round_trips_the_last_outcome() -> None:
+    budget = RemediationBudget(
+        pr_url=_PR_URL, rounds_used=2, last_status="converged", last_settled=True
+    )
+    marker = budget.as_marker()
+    assert marker["last_status"] == "converged" and marker["last_settled"] is True
+    gate = SimpleNamespace(metadata={REMEDIATION_KEY: marker})
+    assert read_budget(gate, _PR_URL) == budget
+    # an older record without the fields, or a malformed one, reads as no
+    # outcome — unsettled (fail-closed)
+    del marker["last_status"], marker["last_settled"]
+    assert read_budget(gate, _PR_URL) == RemediationBudget(
+        pr_url=_PR_URL, rounds_used=2
+    )
+    marker["last_status"] = 7
+    marker["last_settled"] = "true"
+    parsed = read_budget(gate, _PR_URL)
+    assert parsed.last_status == "" and parsed.last_settled is False
+
+
+async def _dispatched_marker(
+    client: FakeLithosClient, gate: Any, story: str, rem: ExternalRemediation
+) -> Any:
+    """Run one dispatch to completion and return the budget marker."""
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    return await _marker(client, gate.id)
+
+
+async def test_a_converged_run_records_a_settled_outcome_on_the_budget(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(
+        {"status": "converged", "pushed": True, "pushed_sha": "ab" * 20, "rounds": 1}
+    )
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    marker = await _dispatched_marker(client, gate, story, rem)
+    assert marker["last_status"] == "converged" and marker["last_settled"] is True
+    assert marker["last_loom_pushed_sha"] == "ab" * 20  # the push write is kept
+
+
+async def test_a_no_change_run_records_a_settled_outcome_on_the_budget(
+    tmp_path: Path,
+) -> None:
+    # Nothing pushed, so the verdict is the only thing that can vouch for
+    # the round when the budget later reads as spent (#408).
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(_already_clean_payload())
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    marker = await _dispatched_marker(client, gate, story, rem)
+    assert marker["last_status"] == "already_clean" and marker["last_settled"] is True
+    assert marker["rounds_used"] == 0 and marker["no_change_refunded"] is True
+
+
+async def test_an_unconverged_run_records_an_unsettled_outcome(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(_not_converged_payload())
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    marker = await _dispatched_marker(client, gate, story, rem)
+    assert marker["last_status"] == "not_converged" and marker["last_settled"] is False
+    assert marker["rounds_used"] == 1
+
+
+async def test_a_reverted_run_records_an_unsettled_outcome(tmp_path: Path) -> None:
+    # #387: `converged` by status, NOT succeeded — the verdict, not the
+    # status, is what the state reads (opus review of #408).
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(_reverted_payload())
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    marker = await _dispatched_marker(client, gate, story, rem)
+    assert marker["last_status"] == "reverted" and marker["last_settled"] is False
+    assert marker["last_loom_pushed_sha"] == "8d" * 20
+
+
+async def test_a_run_that_dies_without_a_result_records_an_unsettled_outcome(
+    tmp_path: Path,
+) -> None:
+    # Rounds remain, so no gate is raised — but the record must still say
+    # the round did not settle anything.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(None, rc=2)
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    marker = await _dispatched_marker(client, gate, story, rem)
+    assert marker["last_status"] == "failed" and marker["last_settled"] is False
+    assert marker["rounds_used"] == 1
+
+
+async def test_a_run_that_crashes_records_an_unsettled_outcome(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+
+    async def boom(cmd: list[str]) -> tuple[int, str]:
+        raise OSError("spawn failed: ENOENT")
+
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=boom)
+    marker = await _dispatched_marker(client, gate, story, rem)
+    assert marker["last_status"] == "failed" and marker["last_settled"] is False
+    assert marker["rounds_used"] == 1
+
+
+async def test_the_reservation_clears_the_previous_rounds_outcome(
+    tmp_path: Path,
+) -> None:
+    # Fail-closed (opus review of #408, the #407 shape): a round orphaned
+    # mid-run — a daemon restart, a host death — never records an outcome,
+    # so the reservation itself must leave the spent round unsettled or the
+    # board would read the round BEFORE ("converged") over unremediated
+    # material.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await release.wait()
+        return 2, "killed"
+
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=blocking)
+    prior = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=1,
+        last_loom_pushed_sha="c1" * 20,  # round 1's push; the material is newer
+        last_seen_head_sha=_HEAD,
+        last_status="converged",
+        last_settled=True,
+    )
+    assert await _consider(client, gate, story, rem, budget=prior) == "dispatched"
+    await started.wait()
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 2
+    assert marker["last_status"] == "" and marker["last_settled"] is False
+    assert marker["last_loom_pushed_sha"] == "c1" * 20  # the attribution is kept
+    release.set()
+    assert rem._task is not None
+    await rem._task
+
+
+async def test_a_crash_after_the_result_landed_keeps_the_push_attribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # opus review of #408 (Medium): the crash handler must compose its
+    # "failed" record on a re-read of the gate, not the dispatched copy —
+    # or a crash after `record_result` landed loom's push would revert the
+    # attribution and the next sweep would read that push as a human's
+    # (the budget reset the S5b bound exists to prevent).
+    from lithos_loom.subscriptions import external_remediation as er
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(
+        {"status": "converged", "pushed": True, "pushed_sha": "ab" * 20, "rounds": 1}
+    )
+    real = er.record_result
+
+    async def record_then_raise(*args: Any, **kwargs: Any) -> None:
+        await real(*args, **kwargs)
+        raise RuntimeError("logging blew up after the record landed")
+
+    monkeypatch.setattr(er, "record_result", record_then_raise)
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    marker = await _dispatched_marker(client, gate, story, rem)
+    assert marker["last_loom_pushed_sha"] == "ab" * 20
+    assert marker["last_seen_head_sha"] == "ab" * 20
+    assert marker["last_status"] == "failed" and marker["last_settled"] is False

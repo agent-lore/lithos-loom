@@ -90,13 +90,17 @@ Foundation  = ["Bus", "Config", "Errors", "LithosClient", "GitHub", "Tasks", "No
 cross_component_edges  = 68   # 65->68: b91177d2 notifications.py (Notifications) imported by Subscriptions + Children, and importing GitHub; direction: down
 component_cycles       = 1    # Render <-> Subscriptions; goal: 0
 module_cycles          = 1    # agent_session <-> panel <-> rounds SCC; goal: 0
-modules_over_800_lines = 8  # 8->6 via ARCH-9 slices 1-2; 6->7: rounds.py (821) gained the admitted
+modules_over_800_lines = 9  # 8->6 via ARCH-9 slices 1-2; 6->7: rounds.py (821) gained the admitted
                                # no-change round (PR #396 review) — the round pipeline is one
                                # responsibility and its phases read best in one place, so the
                                # budget moves rather than the phases; 7->8: route_runner.py
                                # (802) gained the ADR 0012 forget-on-not-ready hook — six lines
                                # in the one dispatch path whose guards (decline, readiness,
                                # admission, claim) must read in order; no seam worth a module;
+                               # 8->9: external_remediation.py (813, was exactly 800) records the
+                               # failed outcome on its two no-verdict paths and clears the previous
+                               # round's at the reservation (#408) — a dozen lines in the run's
+                               # dispatch / crash / no-result tail; the writes live in remediation_outcome.py;
                                # direction: down
 max_module_lines       = 2100 # stop-loss; 2210->2100 after PRD S6 extracted the wire
                                # types (Task / Note / … / WriteStatus) into lithos_types,

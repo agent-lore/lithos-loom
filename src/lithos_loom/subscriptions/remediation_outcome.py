@@ -16,13 +16,14 @@ from typing import Any
 
 from lithos_loom.gates import PrGateSpec
 from lithos_loom.subscriptions import SubscriptionContext
-from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
+from lithos_loom.subscriptions._findings import post_finding_then_mark
 from lithos_loom.subscriptions.external_reviews import EXTERNAL_REVIEW
 from lithos_loom.subscriptions.remediation_budget import (
     PENDING_KEY,
     REMEDIATION_KEY,
     RemediationBudget,
     RemediationNotifier,
+    read_budget,
 )
 from lithos_loom.subscriptions.remediation_escalation import (
     escalate_disputed,
@@ -38,6 +39,7 @@ __all__ = [
     "post_finding",
     "post_repo_mismatch_refusal",
     "record_result",
+    "record_unsettled",
     "refund_infra_failed",
     "refund_repo_mismatch",
     "refusal_key",
@@ -139,6 +141,48 @@ async def escalate_or_report(
         )
 
 
+async def record_unsettled(
+    ctx: SubscriptionContext,
+    *,
+    gate_id: str,
+    spec: PrGateSpec,
+    budget: RemediationBudget,
+) -> RemediationBudget:
+    """#408: a run that died without a verdict (a crash, or an exit with no
+    result) left the round spent AND the PR unsettled — say so on the budget
+    so a budget this spends reads as a stop, never as "nothing to do" from
+    the round before. Composed on a RE-READ of the gate (the merge-gate
+    precedent): the crash may have come after :func:`record_result` landed
+    the run's push, and writing the dispatched copy back would revert that
+    attribution — the next sweep would read loom's own push as a human's.
+    Strict and never raising, like every budget write on a failure path; a
+    write that does not land leaves the prior record."""
+    try:
+        latest = await ctx.lithos.task_get(task_id=gate_id)
+    except Exception as exc:  # noqa: BLE001 — a raw transport error must not reach the crash handler twice
+        ctx.logger.warning(
+            "external-remediation: could not re-read gate %s before recording "
+            "the failed outcome (%s); composing on the dispatched copy",
+            gate_id,
+            exc,
+        )
+        latest = None
+    if latest is not None:
+        budget = read_budget(latest, spec.pr_url)
+    budget = dataclasses.replace(budget, last_status="failed", last_settled=False)
+    failure = await write_marker_strict(
+        ctx, gate_id=gate_id, marker={REMEDIATION_KEY: budget.as_marker()}
+    )
+    if failure is not None:
+        ctx.logger.warning(
+            "[Friction] external-remediation: recording the failed outcome on "
+            "gate %s did not land (%s); the prior budget record stands",
+            gate_id,
+            failure,
+        )
+    return budget
+
+
 async def record_result(
     ctx: SubscriptionContext,
     *,
@@ -154,22 +198,58 @@ async def record_result(
     the exhaustion escalation when the CLI reports it did not succeed."""
     status = data.get("status", "unknown")
     pushed_sha = data.get("pushed_sha") or ""
+    # #387: a fix the loop made and then undid is a DECISION (the review vs
+    # the acceptance criteria) — raised below whatever the budget says.
+    reverted = next(
+        (
+            o
+            for o in data.get("external_outcomes") or []
+            if isinstance(o, dict) and o.get("disposition") == "reverted"
+        ),
+        None,
+    )
+    # The CLI's own verdict decides (PR #361 review F1): `triage_rejected`
+    # is a success — nothing left for the operator; the reverted shape is
+    # `converged` but NOT succeeded. An older record without the flag is
+    # judged by status alone.
+    succeeded = data.get("succeeded")
+    if not isinstance(succeeded, bool):
+        succeeded = status == "converged" and reverted is None
+    # #408: the outcome is recorded on the budget whatever it was — the
+    # reconciliation state reads `last_settled` to tell a spent budget whose
+    # last round settled the PR from one that left it unconverged. Every
+    # later write on this budget (the refund and the escalations below)
+    # starts from THIS copy, or it would clobber what was just recorded
+    # (opus round 1 on #361: a later write clobbered the push attribution
+    # and the next sweep read loom's own push as a human's).
+    budget = dataclasses.replace(
+        budget,
+        last_status="reverted" if reverted is not None else str(status),
+        last_settled=succeeded and reverted is None,
+    )
     if data.get("pushed") and pushed_sha:
         # Loom's own push: recorded so the next sweep's head observation
         # attributes it (no human-push reset) and own-sha material skips.
-        # Every later write on this budget (the escalations below) starts
-        # from THIS copy, or it would clobber the attribution and the next
-        # sweep would read loom's own push as a human's (opus round 1).
         budget = dataclasses.replace(
             budget,
             last_loom_pushed_sha=pushed_sha,
             last_seen_head_sha=pushed_sha,
         )
-        await write_marker(
-            ctx,
-            task_id=gate_id,
-            marker={REMEDIATION_KEY: budget.as_marker()},
-            subsystem="external-remediation",
+    # Strict, never raising: an escaping transport error would reach the
+    # crash handler, which re-reads the ORIGINAL reserved budget (the #380
+    # false-gate route); a write that still does not land leaves the prior
+    # record — the refund below and the escalations retry their own writes.
+    failure = await write_marker_strict(
+        ctx, gate_id=gate_id, marker={REMEDIATION_KEY: budget.as_marker()}
+    )
+    if failure is not None:
+        ctx.logger.warning(
+            "[Friction] external-remediation: recording the %s outcome for %s "
+            "on gate %s did not land (%s); the prior budget record stands",
+            status,
+            spec.pr_url,
+            gate_id,
+            failure,
         )
 
     lines = [
@@ -209,17 +289,8 @@ async def record_result(
         f", ${cost:.2f}" if isinstance(cost, int | float) else "",
     )
     await post_finding(ctx, story_id, "\n".join(lines))
-    # #387: a fix the loop made and then undid is a DECISION (the review vs
-    # the acceptance criteria), raised now whatever the budget says — before
-    # the exhaustion rule, which would otherwise wait for the last round.
-    reverted = next(
-        (
-            o
-            for o in data.get("external_outcomes") or []
-            if isinstance(o, dict) and o.get("disposition") == "reverted"
-        ),
-        None,
-    )
+    # the #387 decision is raised before the exhaustion rule, which would
+    # otherwise wait for the last round
     if reverted is not None:
         problem = await escalate_disputed(
             ctx,
@@ -241,12 +312,6 @@ async def record_result(
                 f"({problem}); the decision is outstanding",
             )
         return
-    # The CLI's own verdict decides (PR #361 review F1): `triage_rejected`
-    # is a success — nothing left for the operator. An older record without
-    # the flag is judged by status alone.
-    succeeded = data.get("succeeded")
-    if not isinstance(succeeded, bool):
-        succeeded = status == "converged"
     if not succeeded:
         await escalate_or_report(
             ctx,

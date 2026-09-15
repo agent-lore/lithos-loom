@@ -200,10 +200,16 @@ def derive_state(
     never raises on a malformed marker — a marker it cannot read is a marker
     that is absent. The detail is truncated here, so what is compared is
     what is stored."""
-    d = _derive(
-        meta, pr=pr, pr_url=pr_url, busy=busy, said=dispositions or Dispositions()
+    said = dispositions or Dispositions()
+    d = _derive(meta, pr=pr, pr_url=pr_url, busy=busy, said=said)
+    note = (
+        _spent_note(meta, pr_url=pr_url, busy=busy, said=said)
+        if d.state in ("awaiting_review", "ready_to_merge")
+        else ""
     )
-    return Derived(d.state, d.detail[:DETAIL_MAX_CHARS])
+    # the note survives truncation: it is the operator's constraint, and
+    # the base detail is the part that can be long (a push error)
+    return Derived(d.state, d.detail[: DETAIL_MAX_CHARS - len(note)] + note)
 
 
 def _derive(
@@ -254,8 +260,21 @@ def _derive(
     # board said needs_human with no gate behind it for the whole last
     # round). A remediation in flight outranks the count — its outcome (a
     # push, or the escalation that writes the gate id above) settles it.
-    if said.remediation_exhausted and not busy.remediation:
-        return Derived("needs_human", "external-remediation budget exhausted")
+    # A spent budget whose last round settled the PR is not a stop either
+    # (#408, lens #88: round 2/2 converged and pushed, and the board said
+    # needs_human over a PR that needed nothing but the re-review) — it
+    # falls through to the ordinary states, with the spend noted there.
+    if (
+        said.remediation_exhausted
+        and not busy.remediation
+        and not _spent_but_settled(budget)
+    ):
+        last = _str(budget.get("last_status"))
+        return Derived(
+            "needs_human",
+            "external-remediation budget exhausted; "
+            + (f"last run {last}" if last else "the last round recorded no outcome"),
+        )
     # #377: a dispatcher stopped on the HOST (no verdict reached) — like a
     # refusal, only the operator can move it (fix the host, restart loom).
     # Below every human-gate check so a gate that already waits is named first.
@@ -364,6 +383,40 @@ def _derive(
             "awaiting_review", "live base tip unreadable; re-gate cannot run"
         )
     return Derived("awaiting_review", f"re-gate not yet evaluated ({said.regate})")
+
+
+def _spent_but_settled(budget: Mapping[str, Any]) -> bool:
+    """Whether the budget's last round SETTLED the PR — loom pushed a fix
+    (`converged`), or every external finding was refuted / needed no change
+    with the loop approving the unchanged head (`already_clean` /
+    `triage_rejected`, #380): the CLI's own `succeeded` verdict, recorded
+    by the run that spent the round. A budget spent by such a round is a
+    fact about what loom will do next (nothing, until a human push re-arms
+    it), not a stop. FAIL-CLOSED: the reservation clears the verdict, so a
+    round whose outcome never landed — a crash, a restart mid-run (#407) —
+    and a record from before the field existed both read as unsettled."""
+    return budget.get("last_settled") is True
+
+
+def _spent_note(
+    meta: Mapping[str, Any], *, pr_url: str, busy: Busy, said: Dispositions
+) -> str:
+    """The suffix a settled spent budget adds to a "nothing to do" state's
+    detail, so the operator still sees the constraint without a false stop.
+    The guards mirror the precedence in :func:`_derive` (a run in flight or
+    a recorded gate never reaches those states) so the note cannot outlive
+    a reordering there."""
+    if not said.remediation_exhausted or busy.remediation:
+        return ""
+    budget = _record(meta, _REMEDIATION, pr_url)
+    if _str(budget.get("needs_human_gate_id")) or not _spent_but_settled(budget):
+        return ""
+    rounds = budget.get("rounds_used")
+    used = f" ({rounds} round(s) used)" if isinstance(rounds, int) else ""
+    return (
+        f"; remediation budget spent{used} — loom will not remediate again "
+        "until a human push"
+    )
 
 
 def _closed_detail(merge_state: str) -> str:

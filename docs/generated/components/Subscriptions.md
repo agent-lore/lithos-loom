@@ -54,7 +54,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.reconciliation_state` | M | 3 | 3 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 3 |
-| `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 10 |
+| `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 11 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
 
@@ -279,6 +279,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `post_finding` — Best-effort finding post (the story may have completed mid-run).
 - def `write_marker_strict` — A gate-marker write that keeps a budget round or a parked trigger: retried with backoff, and NEVER raising — a raw transport error propagates past the client's own recovery (``lithos_client._invoke``) and must land here, not in ``ExternalRemediation._run``'s crash handler, which re-reads the ORIGINAL reserved budget and can raise a false ``remediation_exhausted`` gate over a round that was refunded. Returns the last failure, or ``None`` when the write landed.
 - def `escalate_or_report` — PRD S5b: exhaustion → human gate; a gate that could not be raised is said so on the story instead of vanishing.
+- def `record_unsettled` — #408: a run that died without a verdict (a crash, or an exit with no result) left the round spent AND the PR unsettled — say so on the budget so a budget this spends reads as a stop, never as "nothing to do" from the round before. Composed on a RE-READ of the gate (the merge-gate precedent): the crash may have come after :func:`record_result` landed the run's push, and writing the dispatched copy back would revert that attribution — the next sweep would read loom's own push as a human's. Strict and never raising, like every budget write on a failure path; a write that does not land leaves the prior record.
 - def `record_result` — Record a run that produced a JSON result: marker, finding, log, and the exhaustion escalation when the CLI reports it did not succeed.
 - def `refusal_key` — What the sweep observes about the mapped checkout — the settle key a repo-mismatch refusal (the sweep's own, or the CLI's) is de-duped on.
 - def `settled_refusal` — The kind of refusal (``repo_mismatch`` / ``checkout_unresolved``) already recorded for exactly this key — no spawn, no re-post until the mapping or the read moves — or ``None``.

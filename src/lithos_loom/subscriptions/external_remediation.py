@@ -86,6 +86,7 @@ from lithos_loom.subscriptions.remediation_outcome import (
     post_finding,
     post_repo_mismatch_refusal,
     record_result,
+    record_unsettled,
     refund_infra_failed,
     refund_repo_mismatch,
     settled_refusal,
@@ -487,8 +488,16 @@ class ExternalRemediation:
         # and STRICTLY (PR #346 review F3): write_marker swallows failures,
         # so the bound only exists if this write demonstrably landed. The
         # same update consumes any pending trigger (per-key merge: None
-        # deletes), so trigger and reservation move together.
-        budget = dataclasses.replace(budget, rounds_used=budget.rounds_used + 1)
+        # deletes), so trigger and reservation move together. The last
+        # round's outcome goes with it (#408): the spent round has none yet,
+        # and a run that never records one — a crash, a restart mid-run
+        # (#407) — must read as unsettled, never as the round before.
+        budget = dataclasses.replace(
+            budget,
+            rounds_used=budget.rounds_used + 1,
+            last_status="",
+            last_settled=False,
+        )
         try:
             await ctx.lithos.task_update(
                 task_id=gate.id,
@@ -641,6 +650,9 @@ class ExternalRemediation:
         except Exception as exc:  # noqa: BLE001 — the slot must always free cleanly
             ctx.logger.exception("external-remediation: run for %s raised", spec.pr_url)
             detail = f"{type(exc).__name__}: {exc}"
+            budget = await record_unsettled(
+                ctx, gate_id=gate_id, spec=spec, budget=budget
+            )
             await post_finding(
                 ctx,
                 story_id,
@@ -748,6 +760,7 @@ class ExternalRemediation:
             )
             return
         tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
+        budget = await record_unsettled(ctx, gate_id=gate_id, spec=spec, budget=budget)
         ctx.logger.warning(
             "external-remediation: converge for %s finished: failed (exit %d) "
             "without a result, round %d/%d spent",

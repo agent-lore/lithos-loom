@@ -647,3 +647,152 @@ def test_a_dispatched_run_with_no_record_on_the_pair_is_still_reconciling() -> N
     next sweep re-dispatches; until then it is owed, not evaluated."""
     d = _derive_d(_regate("green", head="f" * 40), regate="dispatched")
     assert d.state == "reconciling"
+
+
+# ── #408: a spent budget is a fact about what loom will do NEXT ──────────
+
+
+def _lens88_meta(
+    last_status: str, *, settled: bool | None = None, pushed: str = _HEAD
+) -> dict[str, Any]:
+    """lens #88 gate 92ca8187 as the sweep re-read it on 2026-09-15 15:44Z:
+    remediation round 2/2 had just converged and pushed the current head,
+    the re-gate was green on the pair, and no human gate existed."""
+    if settled is None:
+        settled = last_status in ("converged", "already_clean", "triage_rejected")
+    budget = RemediationBudget(
+        pr_url=_URL,
+        rounds_used=2,
+        last_loom_pushed_sha=pushed,
+        last_seen_head_sha=_HEAD,
+        last_status=last_status,
+        last_settled=settled,
+    )
+    return {"external_remediation": budget.as_marker(), **_regate("green")}
+
+
+def test_a_spent_budget_after_a_converged_last_round_awaits_the_re_review() -> None:
+    # The live #408 shape: loom just pushed a fix on the operator's re-review;
+    # GitHub is still running checks on it. Nothing stopped — the PR awaits
+    # the operator's review of that push, and the spent budget is a note.
+    d = _derive_d(
+        _lens88_meta("converged"),
+        pr=_PR(mergeable_state="unstable"),
+        remediation_exhausted=True,
+        regate="unchanged",
+    )
+    assert d.state == "awaiting_review"
+    assert "unstable" in d.detail
+    assert "budget spent" in d.detail and "human push" in d.detail
+
+
+def test_a_spent_budget_on_a_clean_green_pr_is_ready_to_merge_with_the_note() -> None:
+    d = _derive_d(
+        _lens88_meta("converged"), remediation_exhausted=True, regate="unchanged"
+    )
+    assert d.state == "ready_to_merge"
+    assert d.detail.startswith("landable; trial merge green")
+    assert "budget spent (2 round" in d.detail
+
+
+def test_a_spent_budget_whose_last_round_needed_no_change_is_not_a_stop() -> None:
+    # #380's principle at the state level: a reported-not-remediated last
+    # round (the refund already used) leaves nothing for the operator to
+    # fix. Nothing was ever pushed — the recorded verdict is what vouches.
+    for status in ("already_clean", "triage_rejected"):
+        d = _derive_d(
+            _lens88_meta(status, pushed=""),
+            pr=_PR(mergeable_state="blocked"),
+            remediation_exhausted=True,
+            regate="unchanged",
+        )
+        assert d.state == "awaiting_review", status
+        assert "budget spent" in d.detail, status
+
+
+def test_a_spent_budget_after_an_unconverged_round_with_no_gate_is_a_stop() -> None:
+    # The gate could not be raised ([Friction] on the story) or the record
+    # predates #361: the PR is not converged and loom will not run again.
+    for status in ("not_converged", "failed"):
+        d = _derive_d(
+            _lens88_meta(status, pushed=""),
+            remediation_exhausted=True,
+            regate="unchanged",
+        )
+        assert d.state == "needs_human", status
+        assert "budget exhausted" in d.detail and status in d.detail
+
+
+def test_a_spent_round_with_no_recorded_outcome_is_a_stop_whatever_loom_pushed() -> (
+    None
+):
+    # Fail-closed (opus review of #408): the reservation clears the verdict,
+    # so a round orphaned by a crash or a daemon restart mid-run (#407)
+    # reads as unsettled — even when an EARLIER round's push is still the
+    # head, which is the normal shape after any unconverged last round
+    # (`not_converged` pushes nothing). A record from before the field
+    # existed reads the same way.
+    meta = _lens88_meta("", settled=False)
+    d = _derive_d(meta, remediation_exhausted=True, regate="unchanged")
+    assert d.state == "needs_human" and "recorded no outcome" in d.detail
+    legacy = _lens88_meta("converged", settled=False)
+    del legacy["external_remediation"]["last_settled"]
+    d = _derive_d(legacy, remediation_exhausted=True, regate="unchanged")
+    assert d.state == "needs_human"
+
+
+def test_a_reverted_last_round_is_a_stop_even_without_the_dispute_gate_id() -> None:
+    # #387's shape is `converged` by status but NOT succeeded (the fix was
+    # undone); the disputed gate's id write is best-effort, so the verdict
+    # must carry the stop on its own.
+    meta = _lens88_meta("reverted", settled=False)
+    d = _derive_d(meta, remediation_exhausted=True, regate="unchanged")
+    assert d.state == "needs_human" and "reverted" in d.detail
+
+
+def test_a_settled_spent_budget_never_masks_a_real_state() -> None:
+    # The note rides only on the two "nothing to do" states; a red trial
+    # merge or a conflict still names itself, without the note.
+    meta = {**_lens88_meta("converged"), **_regate("red")}
+    d = _derive_d(meta, remediation_exhausted=True, regate="unchanged")
+    assert d.state == "gate_failed" and "budget" not in d.detail
+    d = _derive_d(
+        _lens88_meta("converged"),
+        pr=_PR(mergeable=False, mergeable_state="dirty"),
+        remediation_exhausted=True,
+        regate="unchanged",
+    )
+    assert d.state == "behind" and "budget" not in d.detail
+
+
+def test_a_spent_budget_with_the_gate_recorded_is_still_needs_human() -> None:
+    # A settled verdict never outranks a recorded decision gate (#387: the
+    # disputed gate is raised over a `converged` push).
+    budget = RemediationBudget(
+        pr_url=_URL,
+        rounds_used=2,
+        last_loom_pushed_sha=_HEAD,
+        last_status="converged",
+        last_settled=True,
+        needs_human_gate_id="gate-h",
+        needs_human_reason="disputed",
+    )
+    d = _derive_d(
+        {"external_remediation": budget.as_marker()}, remediation_exhausted=True
+    )
+    assert d.state == "needs_human" and "gate-h" in d.detail
+    assert "budget spent" not in d.detail
+
+
+def test_the_budget_note_survives_the_detail_truncation() -> None:
+    # The note is the operator's constraint; the base detail is the part
+    # that can be long, so it is the part that gives way.
+    d = _derive_d(
+        _lens88_meta("converged"),
+        pr=_PR(mergeable_state="x" * 300),
+        remediation_exhausted=True,
+        regate="unchanged",
+    )
+    assert len(d.detail) <= 200
+    assert d.detail.endswith("until a human push")
+    assert d.detail.startswith("GitHub: xxx")

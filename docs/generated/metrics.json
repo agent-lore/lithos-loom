@@ -121,12 +121,12 @@
         "qualname": "lithos_loom.plugins.story_develop.develop.develop"
       },
       {
-        "complexity": 49,
-        "qualname": "lithos_loom.cli.project.import_project"
+        "complexity": 50,
+        "qualname": "lithos_loom.subscriptions.reconciliation_state._derive"
       },
       {
-        "complexity": 48,
-        "qualname": "lithos_loom.subscriptions.reconciliation_state._derive"
+        "complexity": 49,
+        "qualname": "lithos_loom.cli.project.import_project"
       },
       {
         "complexity": 44,
@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.plugins.story_develop.converge.converge_pr"
       }
     ],
-    "total_functions": 1579
+    "total_functions": 1582
   },
   "domain": {
     "associations": 2,
@@ -514,13 +514,13 @@
       },
       "Subscriptions": {
         "classes": 41,
-        "functions": 366,
-        "largest_module": "lithos_loom.subscriptions.route_runner",
-        "largest_module_lines": 807,
-        "lines": 15405,
+        "functions": 369,
+        "largest_module": "lithos_loom.subscriptions.external_remediation",
+        "largest_module_lines": 813,
+        "lines": 15556,
         "modules": 46,
-        "public_symbols": 141,
-        "sloc": 12505
+        "public_symbols": 142,
+        "sloc": 12619
       },
       "Supervisor": {
         "classes": 3,
@@ -553,15 +553,16 @@
       "lithos_loom.plugins.story_develop.__main__",
       "lithos_loom.plugins.story_develop.daemon_io",
       "lithos_loom.plugins.story_develop.rounds",
+      "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 61567,
+    "total_lines": 61718,
     "total_modules": 174,
-    "total_sloc": 49977
+    "total_sloc": 50091
   },
   "tests": {
     "ratio": 1.59,
-    "src_lines": 61567,
-    "test_lines": 98035
+    "src_lines": 61718,
+    "test_lines": 98361
   }
 }
