@@ -921,6 +921,58 @@ async def test_reconcile_exhausted_budget_states_it_in_the_finding(
     assert rem._task is None  # nothing dispatched
 
 
+async def test_a_trusted_review_after_a_settled_last_round_reads_needs_human(
+    tmp_path,
+) -> None:
+    """#408, Dave's review of PR #410 (High), end to end: round 2/2 converged
+    and pushed (a settled spent budget — the lens #88 shape), then a new
+    trusted review arrives. Ingestion parks the trigger, the dispatcher says
+    `exhausted` and leaves it parked, and the state must say automation has
+    stopped with material waiting — not `reconciling` behind a run that is
+    not there, and not the "nothing to do" note."""
+    from lithos_loom.subscriptions.external_remediation import (
+        PENDING_KEY,
+        REMEDIATION_KEY,
+    )
+    from lithos_loom.subscriptions.reconciliation_state import DETAIL_KEY, STATE_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    pr = _open_pr()
+    await client.task_update(
+        task_id=gate.id,
+        metadata={
+            REMEDIATION_KEY: {
+                "pr_url": _PR_URL,
+                "rounds_used": 2,
+                "last_loom_pushed_sha": pr.head_sha,
+                "last_seen_head_sha": pr.head_sha,
+                "needs_human_gate_id": "",
+                "needs_human_reason": "",
+                "no_change_refunded": False,
+                "last_status": "converged",
+                "last_settled": True,
+            }
+        },
+    )
+    gate = await _get(client, gate.id)
+    github = _review_github(pr)
+    github.get_collaborator_permission.return_value = "write"  # trusted
+    rem = _remediation(tmp_path, budget=2)
+
+    outcome = await reconcile_pr_gate(
+        gate, github, _ctx(client), ingest_reviews=True, remediation=rem
+    )
+
+    assert outcome == "still_open"
+    assert rem._task is None  # nothing dispatched: the budget is spent
+    stored = await _get(client, gate.id)
+    assert stored.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}  # parked
+    assert stored.metadata[STATE_KEY] == "needs_human"
+    assert "new review material" in stored.metadata[DETAIL_KEY]
+    assert "human push" in stored.metadata[DETAIL_KEY]
+
+
 async def test_reconcile_busy_slot_parks_the_trigger_with_the_marks(
     tmp_path,
 ) -> None:

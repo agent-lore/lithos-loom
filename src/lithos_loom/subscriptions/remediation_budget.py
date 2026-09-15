@@ -1,7 +1,8 @@
 """The S5b external-remediation budget marker on a ``pr`` gate.
 
 ``metadata.external_remediation`` — ``{pr_url, rounds_used,
-last_loom_pushed_sha, last_seen_head_sha, needs_human_gate_id}``, url-scoped
+last_loom_pushed_sha, last_seen_head_sha, needs_human_gate_id,
+needs_human_reason, no_change_refunded, last_status, last_settled}``, url-scoped
 — is the on-disk contract :mod:`.external_remediation` reads and writes and
 :mod:`.remediation_escalation` records its gate in. A separate key from
 ``external_review_seen`` and the merge marker — no marker may trip another's
@@ -67,6 +68,20 @@ class RemediationBudget:
     # an unbounded refund would remove the S5b spend bound; a fresh budget (a
     # human push, or a completed decision gate — PR #396 review) re-grants it.
     no_change_refunded: bool = False
+    # #408: how this budget's last run ended — the converge status
+    # (`converged` / `already_clean` / `triage_rejected` / `not_converged` /
+    # `failed`; `reverted` for the #387 dispute shape) and whether that run
+    # SETTLED the PR (the CLI's own `succeeded` verdict: a fix pushed, or
+    # nothing to change). A spent budget is a fact about what loom will do
+    # NEXT (nothing, until a human push re-arms it), not about the PR now:
+    # the reconciliation state reads `last_settled` to tell "loom just fixed
+    # it, awaiting the re-review" from "not converged and nothing left".
+    # FAIL-CLOSED: the reservation clears both when a round is spent, so a
+    # round whose outcome never landed (a crash, a daemon restart mid-run —
+    # #407) reads as unsettled, never as the round before; a record written
+    # before the fields existed reads the same way.
+    last_status: str = ""
+    last_settled: bool = False
 
     def as_marker(self) -> dict[str, Any]:
         return {
@@ -77,6 +92,8 @@ class RemediationBudget:
             "needs_human_gate_id": self.needs_human_gate_id,
             "needs_human_reason": self.needs_human_reason,
             "no_change_refunded": self.no_change_refunded,
+            "last_status": self.last_status,
+            "last_settled": self.last_settled,
         }
 
 
@@ -90,6 +107,7 @@ def read_budget(gate: Any, pr_url: str) -> RemediationBudget:
     seen_sha = raw.get("last_seen_head_sha")
     gate_id = raw.get("needs_human_gate_id")
     reason = raw.get("needs_human_reason")
+    last_status = raw.get("last_status")
     return RemediationBudget(
         pr_url=pr_url,
         rounds_used=rounds if isinstance(rounds, int) and rounds >= 0 else 0,
@@ -98,6 +116,8 @@ def read_budget(gate: Any, pr_url: str) -> RemediationBudget:
         needs_human_gate_id=gate_id if isinstance(gate_id, str) else "",
         needs_human_reason=reason if isinstance(reason, str) else "",
         no_change_refunded=raw.get("no_change_refunded") is True,
+        last_status=last_status if isinstance(last_status, str) else "",
+        last_settled=raw.get("last_settled") is True,
     )
 
 
