@@ -12,11 +12,17 @@ Two layers, deliberately split:
 Design per ADR 0002 + the PRD: long-lived idle container (``sleep infinity``)
 that we ``docker exec`` into per turn; hardened profile (``cap_drop: ALL``,
 ``no-new-privileges``); per-run ``CLAUDE_CONFIG_DIR`` with only the single auth
-file bind-mounted in (RW, for token refresh) — never the whole ``~/.claude``.
+file bind-mounted in (RW; a refresh the container attempts cannot be relied on —
+the mount pins the inode, #403 — so the reaction loops re-sync it from the host
+before an auth retry) — never the whole ``~/.claude``.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+import shlex
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -27,6 +33,11 @@ from .config import (
     HANDOFF_MOUNT_NAME,
     WORKSPACE_MOUNT,
 )
+
+logger = logging.getLogger(__name__)
+
+#: One docker exec must never hang a retry on a dead daemon.
+_RESYNC_TIMEOUT_S = 30
 
 
 def container_name(run_id: str, agent: str) -> str:
@@ -157,6 +168,92 @@ def exec_turn(
         text=True,
         timeout=timeout,
     )
+
+
+def resync_auth_files(
+    name: str,
+    *,
+    config_mount: str,
+    auth_source_dir: Path,
+    auth_files: Sequence[str],
+) -> list[str]:
+    """Write the host's CURRENT auth files into the container's bind-mounted
+    inodes, in place — only where the mount is demonstrably a STALE inode
+    (#403).
+
+    Each auth file is bind-mounted as a single file, which pins the inode at
+    container start; the agent CLIs refresh their token by rename-replace, so
+    a container alive across a host-side refresh keeps reading the OLD file —
+    its access token expires and its refresh token was rotated away ("OAuth
+    session expired and could not be refreshed" with a valid host file). A
+    host-side copy or rename never reaches the mount; streaming the bytes
+    through ``docker exec -i … cat > <mount>/<file>`` does (an in-place write).
+
+    The write is guarded on INODE IDENTITY (PR #405 review): when no host
+    refresh has happened the mount still IS the host's live file, and a write
+    through it would rewrite the operator's live credentials — a byte
+    comparison cannot prove non-aliasing (an in-place refresh between the two
+    reads makes the bytes differ while the inode is shared, and the write
+    would roll the live file back). So the container's inode of the target is
+    compared with the inode of the host file whose bytes are about to be
+    written (the same open fd — one snapshot); equal → aliased → never
+    written. Also skipped: a host file that is empty or not JSON (the CLI
+    mid-rewrite — never install garbage), a file the container never mounted
+    (a candidate absent at start; writing would create a plaintext copy in
+    the run dir), a dead / hung container (exec error or timeout — the retry
+    then fails for real and escalates as before). Returns the files that
+    landed.
+    """
+    synced: list[str] = []
+    for fname in auth_files:
+        target = f"{config_mount}/{fname}"
+        try:
+            with open(auth_source_dir / fname, "rb") as fh:
+                host_inode = os.fstat(fh.fileno()).st_ino
+                data = fh.read()
+            json.loads(data)
+        except (OSError, ValueError) as exc:
+            logger.warning("auth re-sync: host %s unusable, skipped: %s", fname, exc)
+            continue
+        try:
+            probe = subprocess.run(
+                ["docker", "exec", name, "stat", "-c", "%i", target],
+                capture_output=True,
+                timeout=_RESYNC_TIMEOUT_S,
+            )
+            if probe.returncode != 0:
+                logger.warning(
+                    "auth re-sync: %s has no %s to refresh (rc %d), skipped",
+                    name,
+                    target,
+                    probe.returncode,
+                )
+                continue
+            if probe.stdout.strip() == str(host_inode).encode():
+                # the mount still aliases the host's live file: nothing is
+                # stale, and a write would go through to the operator's login
+                continue
+            write = f"cat > {shlex.quote(target)}"
+            proc = subprocess.run(
+                ["docker", "exec", "-i", name, "sh", "-c", write],
+                input=data,
+                capture_output=True,
+                timeout=_RESYNC_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("auth re-sync of %s into %s failed: %s", fname, name, exc)
+            continue
+        if proc.returncode == 0:
+            synced.append(fname)
+        else:
+            logger.warning(
+                "auth re-sync of %s into %s failed (rc %d): %s",
+                fname,
+                name,
+                proc.returncode,
+                proc.stderr.decode(errors="replace").strip()[:200],
+            )
+    return synced
 
 
 def stop_container(name: str) -> None:

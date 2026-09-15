@@ -15,12 +15,14 @@ NOT infra — the system must never mis-pause or mis-retry an ordinary crash.
 Classes (:class:`FailureClass`) and their reactions:
 
 * ``usage_limited`` → pause / tool-switch (T5, unchanged);
-* ``auth_failed`` → ONE retry after a short backoff, then escalate. The
-  2026-09-12 lens#82 loss: the container's token refresh failed while the
-  host's credentials were valid minutes later (a rotation race on the shared,
-  RW-mounted credentials file is the working hypothesis), so a re-read is worth
-  one attempt — but a genuinely revoked login fails identically until a human
-  re-authenticates, so the second hit escalates;
+* ``auth_failed`` → ONE retry after a short backoff, the host's current auth
+  file written into the container's mounted inode first (#403: the single-file
+  bind mount pins the inode at container start and the CLI refreshes by
+  rename-replace, so a container alive across a host-side refresh reads the
+  pre-refresh token — the 2026-09-12 lens#82 loss and the 2026-09-15 lens78
+  reviewer death, the host's credentials valid throughout), then escalate —
+  a genuinely revoked login fails identically until a human re-authenticates,
+  and the host action says whether the retry ran on re-synced credentials;
 * ``transient_infra`` → up to two retries with backoff (stream disconnects,
   5xx / 429 / overloaded, socket errors), then escalate;
 * ``oom_or_spawn`` → one retry (a killed process or a dead container), then
@@ -287,8 +289,8 @@ _REACTIONS: dict[FailureClass, Reaction] = {
         backoff_seconds=(20.0,),
         escalate=True,
         host_action=(
-            "re-authenticate the agent CLI on the host (`claude` / `codex` login) "
-            f"and check the mounted credentials file, {_COMPLETE_GATE}"
+            "log the agent CLI in on the host (`claude` / `codex` login) and check "
+            f"the mounted credentials file, {_COMPLETE_GATE}"
         ),
     ),
     FailureClass.TRANSIENT_INFRA: Reaction(

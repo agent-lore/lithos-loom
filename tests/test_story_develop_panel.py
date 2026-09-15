@@ -14,6 +14,7 @@ the round routes the reviewer turn through the *injected* :class:`Services`.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -1239,6 +1240,74 @@ def _round(config, reviewers, services):
         coder_summary="",
         services=services,
     )
+
+
+def test_reviewer_auth_death_resyncs_the_mounted_credentials_before_the_retry(
+    tmp_path: Path,
+) -> None:
+    """#403: the reviewer's container re-reads the host's CURRENT auth file
+    (written into the mounted inode) before its one auth retry — the
+    2026-09-15 lens78 security-reviewer death, where the host file was valid
+    and the container's copy was the pre-refresh inode."""
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    events: list[str] = []
+    resyncs: list[tuple[str, str]] = []
+    turns = [_infra_failed_turn(), _infra_failed_turn()]
+
+    def run_turn(**kw):
+        return turns.pop(0)
+
+    services = _recording_services(run_turn, [])
+    services = dataclasses.replace(
+        services,
+        sleep=lambda s: events.append("sleep"),
+        resync_auth=lambda container, engine, cfg: (
+            resyncs.append((container, engine.name)),
+            events.append("resync"),
+            [".credentials.json"],
+        )[2],
+    )
+    result = _round(config, [_reviewer("correctness", tmp_path)], services)
+    assert result.infra_failure is not None and "auth_failed" in result.infra_failure
+    assert events == ["sleep", "resync"]  # after the backoff, before the retry turn
+    (container, engine_name) = resyncs[0]
+    assert container == "cid-correctness"  # THIS reviewer's container, not the coder's
+    assert engine_name == "claude"  # the spec's own engine (default tool)
+    assert "re-synced from the host" in result.infra_host_action
+    assert ".credentials.json" in result.infra_host_action
+
+
+def test_reviewer_mixed_class_exhaustion_keeps_the_auth_outcome_on_auth(
+    tmp_path: Path,
+) -> None:
+    """PR #405 review (Medium), the reviewer loop: OOM → auth → OOM ends on
+    the OOM class and its host action must not inherit the auth re-sync."""
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    killed = TurnResult(
+        exit_code=137,
+        succeeded=False,
+        completed=False,
+        session_id="",
+        result_text="",
+        cost_usd=0.0,
+        raw=None,
+        stderr="",
+    )
+    turns = [killed, _infra_failed_turn(), killed]
+
+    def run_turn(**kw):
+        return turns.pop(0)
+
+    services = dataclasses.replace(
+        _recording_services(run_turn, []),
+        resync_auth=lambda container, engine, cfg: [".credentials.json"],
+    )
+    result = _round(config, [_reviewer("correctness", tmp_path)], services)
+    assert result.infra_failure is not None and "oom_or_spawn" in result.infra_failure
+    assert "re-sync" not in result.infra_host_action
+    assert "docker" in result.infra_host_action
 
 
 def test_reviewer_auth_death_retries_once_then_escalates(tmp_path: Path) -> None:

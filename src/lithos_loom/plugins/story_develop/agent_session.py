@@ -121,6 +121,65 @@ def resume_after_from(turn: TurnResult | None) -> datetime:
     return hint or (datetime.now(UTC) + timedelta(minutes=_RESUME_FALLBACK_MINUTES))
 
 
+def resync_before_auth_retry(
+    services: Services,
+    config: DevelopConfig,
+    cls: limits.FailureClass,
+    *,
+    container: str,
+    engine: engines.Engine,
+    who: str,
+) -> list[str] | None:
+    """#403: before an ``auth_failed`` retry — after its backoff, so the bytes
+    are as fresh as they can be — write the host's current auth file into the
+    container's bind-mounted inode (``Services.resync_auth``). The mount pins
+    the inode at container start and the CLI refreshes by rename, so without
+    this the retry re-reads the same stale token. Returns the files that
+    landed (``[]`` when nothing did), ``None`` for any other class."""
+    if cls is not limits.FailureClass.AUTH_FAILED:
+        return None
+    synced = services.resync_auth(container, engine, config)
+    if synced:
+        logger.info(
+            "story-develop %s: %s re-synced %s from the host before the retry",
+            config.run_id,
+            who,
+            ", ".join(synced),
+        )
+    else:
+        logger.warning(
+            "story-develop %s: %s could not re-sync any auth file from the host "
+            "before the retry (nothing landed)",
+            config.run_id,
+            who,
+        )
+    return synced
+
+
+def auth_host_action(
+    reaction: limits.Reaction, cls: limits.FailureClass, resynced: list[str] | None
+) -> str:
+    """The escalation's host action, saying what the retry actually ran on
+    (#403): the table's advice plus — only when the class ESCALATING is
+    ``auth_failed`` — whether the credentials were re-synced. Retry budgets
+    are per class and interleave (PR #405 review: an OOM exhausting after an
+    auth retry must not inherit the auth outcome), and the needs-human brief
+    must never assert a re-sync that did not happen."""
+    if cls is not limits.FailureClass.AUTH_FAILED or resynced is None:
+        return reaction.host_action
+    if resynced:
+        return (
+            f"{reaction.host_action}; the mounted credentials "
+            f"({', '.join(resynced)}) were re-synced from the host before the "
+            "retry, so this is a real re-authentication"
+        )
+    return (
+        f"{reaction.host_action}; the credentials could NOT be re-synced from "
+        "the host before the retry (no auth file, or the container did not "
+        "answer) — check the mount and the container, then the host login"
+    )
+
+
 def turn_with_reactions(
     config: DevelopConfig,
     budget: PauseBudget,
@@ -157,6 +216,7 @@ def turn_with_reactions(
     attempt_prompt, attempt_resume = prompt, resume
     total_cost = 0.0
     attempts: dict[limits.FailureClass, int] = {}
+    resynced: list[str] | None = None  # #403: what the last auth retry ran on
     while True:
         turn = services.run_turn(
             container=container,
@@ -235,7 +295,9 @@ def turn_with_reactions(
                     False,
                     total_cost,
                     escalation,
-                    host_action=reaction.host_action if escalation else "",
+                    host_action=(
+                        auth_host_action(reaction, cls, resynced) if escalation else ""
+                    ),
                     session_id=session_id,
                 )
             wait = reaction.backoff_seconds[used]
@@ -251,6 +313,10 @@ def turn_with_reactions(
                 reaction.retries + 1,
             )
             services.sleep(wait)
+            if cls is limits.FailureClass.AUTH_FAILED:  # keyed to the class
+                resynced = resync_before_auth_retry(
+                    services, config, cls, container=container, engine=engine, who=agent
+                )
             continuation = INFRA_CONTINUATION_PROMPT
         else:
             return TurnAttempt(turn, False, total_cost, session_id=session_id)

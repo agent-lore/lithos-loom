@@ -148,7 +148,8 @@ class _BaseEngine:
     def auth_files(self, config: DevelopConfig) -> list[str]:
         """The subset of :attr:`auth_file_candidates` present in the operator dir.
 
-        Bind-mounted RW (token refresh) — never the whole config dir. Absorbs the
+        Bind-mounted RW — never the whole config dir; the mount pins the inode, so
+        a host-side refresh is re-synced in by the reaction loops (#403). Absorbs the
         former ``containers.resolve_auth_files``.
         """
         source = self.auth_source_dir(config)
@@ -197,7 +198,8 @@ class ClaudeEngine(_BaseEngine):
     config_env_var = "CLAUDE_CONFIG_DIR"
     # `.credentials.json` only — never the whole ~/.claude, and NOT `.claude.json`
     # (mutable user state; mounting it RW would let the container pollute the
-    # operator's live config). Bind-mounted RW so the OAuth token refresh propagates.
+    # operator's live config). Bind-mounted RW; a host-side OAuth refresh does NOT
+    # propagate through the single-file mount (#403) — the reaction loops re-sync it.
     auth_file_candidates: tuple[str, ...] = (".credentials.json",)
 
     def auth_source_dir(self, config: DevelopConfig) -> Path:

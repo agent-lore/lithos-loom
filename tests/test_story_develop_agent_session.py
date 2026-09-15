@@ -9,6 +9,7 @@ the loop off disk), so these pin the orchestration, not a re-mock of the policy.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import cast
 
@@ -411,3 +412,168 @@ def test_successful_attempt_reports_its_session(tmp_path: Path) -> None:
         session_id="pre-mint-uuid",
     )
     assert att.session_id == "thread-minted"
+
+
+# --- #403: an auth retry re-syncs the mounted credentials first ---------------
+
+
+def _services_with_resync(turns: list[TurnResult]):
+    services, calls, sleeps = _services(turns)
+    events: list[object] = []
+    resyncs: list[tuple[str, object]] = []
+
+    def fake_resync(container: str, engine: object, config: object) -> list[str]:
+        resyncs.append((container, engine))
+        events.append("resync")
+        return [".credentials.json"]
+
+    services = dataclasses.replace(
+        services,
+        sleep=lambda seconds: (sleeps.append(seconds), events.append("sleep")),
+        resync_auth=fake_resync,
+    )
+    return services, calls, sleeps, resyncs, events
+
+
+def test_auth_failure_resyncs_the_mounted_credentials_before_the_retry(
+    tmp_path: Path,
+) -> None:
+    """#403: the container's bind-mounted auth file is pinned to the inode
+    the host has since replaced (a token refresh by another claude process),
+    so the retry can only succeed if the host's current file is written
+    into the container first — AFTER the backoff (opus review: the host may
+    be mid-refresh at the failure; 20 s later the bytes are fresher), and
+    before the retry turn."""
+    services, calls, sleeps, resyncs, events = _services_with_resync(
+        [
+            _turn(succeeded=False, result_text=AUTH, cost=0.0),
+            _turn(succeeded=True, cost=0.3),
+        ]
+    )
+    engine = _FakeEngine(True)
+    att = _run(_config(tmp_path), services, engine, budget=PauseBudget(600))
+    assert att.turn.succeeded and att.escalation is None
+    assert resyncs == [("c", engine)]
+    assert events == ["sleep", "resync"]
+    assert len(calls) == 2
+
+
+def test_auth_escalation_host_action_says_what_the_retry_ran_on(
+    tmp_path: Path,
+) -> None:
+    """The needs-human brief must never assert a re-sync that did not happen
+    (opus review, High): the host action carries the outcome — the files that
+    landed, or that nothing could be re-synced."""
+    two_auth = [
+        _turn(succeeded=False, result_text=AUTH, cost=0.01),
+        _turn(succeeded=False, result_text=AUTH, cost=0.01),
+    ]
+    services, *_ = _services_with_resync(list(two_auth))
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.escalation is not None
+    assert "re-synced from the host" in att.host_action
+    assert ".credentials.json" in att.host_action
+    assert "complete the gate" in att.host_action
+    # nothing landed → the brief says so, never "re-synced"
+    services, *_ = _services_with_resync(list(two_auth))
+    services = dataclasses.replace(services, resync_auth=lambda c, e, cfg: [])
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert "could NOT be re-synced" in att.host_action
+    assert "complete the gate" in att.host_action
+
+
+def test_transient_failure_never_resyncs_credentials(tmp_path: Path) -> None:
+    services, calls, sleeps, resyncs, events = _services_with_resync(
+        [
+            _turn(succeeded=False, result_text="stream disconnected", cost=0.0),
+            _turn(succeeded=True, cost=0.3),
+        ]
+    )
+    _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert resyncs == [] and events == ["sleep"]
+
+
+def test_services_default_resync_is_a_no_op() -> None:
+    """Existing fakes construct Services without the seam; the default never
+    touches docker and reports nothing synced."""
+    services, _calls, _sleeps = _services([])
+    engine = cast(engines.Engine, _FakeEngine(True))
+    config = DevelopConfig(repo=Path("."), description="x", work_dir=Path("w"))
+    assert services.resync_auth("c", engine, config) == []
+
+
+def test_services_live_wires_the_resync_and_maps_the_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production seam is the real re-sync, and it reads the ACTIVE
+    engine's mount, operator dir and auth files — claude and codex alike
+    (opus review, Medium: nothing pinned the wiring)."""
+    from lithos_loom.plugins.story_develop import containers, rounds
+
+    assert rounds.Services.live().resync_auth is rounds.resync_auth_live
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        containers,
+        "resync_auth_files",
+        lambda name, **kw: (seen.append({"name": name, **kw}), ["x"])[1],
+    )
+    claude_dir, codex_dir = tmp_path / "claude", tmp_path / "codex"
+    claude_dir.mkdir()
+    codex_dir.mkdir()
+    (claude_dir / ".credentials.json").write_text("{}")
+    (codex_dir / "auth.json").write_text("{}")
+    config = DevelopConfig(
+        repo=tmp_path,
+        description="x",
+        work_dir=tmp_path / "w",
+        claude_config_dir=claude_dir,
+        codex_config_dir=codex_dir,
+    )
+    assert rounds.resync_auth_live("c1", engines.get_engine("claude"), config) == ["x"]
+    assert rounds.resync_auth_live("c2", engines.get_engine("codex"), config) == ["x"]
+    assert seen == [
+        {
+            "name": "c1",
+            "config_mount": "/claude_config",
+            "auth_source_dir": claude_dir,
+            "auth_files": [".credentials.json"],
+        },
+        {
+            "name": "c2",
+            "config_mount": "/codex_home",
+            "auth_source_dir": codex_dir,
+            "auth_files": ["auth.json"],
+        },
+    ]
+
+
+def _killed() -> TurnResult:
+    return TurnResult(
+        exit_code=137,
+        succeeded=False,
+        completed=False,
+        session_id="",
+        result_text="",
+        cost_usd=0.0,
+        raw=None,
+        stderr="",
+    )
+
+
+def test_mixed_class_exhaustion_keeps_the_auth_outcome_on_the_auth_class(
+    tmp_path: Path,
+) -> None:
+    """PR #405 review (Medium): retry budgets are per class and interleave.
+    OOM → auth → OOM exhausts the OOM class while the last auth retry's
+    re-sync is still remembered — the OOM host action must not claim a
+    re-authentication. The reverse ordering exhausts auth and DOES carry it."""
+    auth = _turn(succeeded=False, result_text=AUTH, cost=0.0)
+    services, *_ = _services_with_resync([_killed(), auth, _killed()])
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.escalation is not None and "oom_or_spawn" in att.escalation
+    assert "re-sync" not in att.host_action and "docker" in att.host_action
+
+    services, *_ = _services_with_resync([auth, _killed(), auth])
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.escalation is not None and "auth_failed" in att.escalation
+    assert "re-synced from the host" in att.host_action
