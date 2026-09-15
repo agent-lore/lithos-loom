@@ -25,7 +25,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review.harness` | M | 1 | 4 |
 | `lithos_loom.evals.review.judge` | S | 1 | 1 |
 | `lithos_loom.evals.review.match` | M | 3 | 9 |
-| `lithos_loom.evals.review.overrides` | S | 1 | 2 |
+| `lithos_loom.evals.review.overrides` | S | 1 | 3 |
 | `lithos_loom.evals.review.patch` | S | 0 | 2 |
 | `lithos_loom.evals.review.report` | S | 0 | 12 |
 | `lithos_loom.evals.review.rescore` | M | 5 | 6 |
@@ -111,6 +111,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - def `score_run` — Score one review run: the case is caught iff EVERY expected matches.
 
 ### `lithos_loom.evals.review.overrides`
+- def `selectable_reviewers` — The reviewers a run may field by name: the canonical personas plus the zero-config generalist (``code-quality`` — no persona brief, the ``daemon_io.BUILTIN_REVIEWERS`` default). The generalist is the cold-generalist arm of the escape-corpus reading (README §"Escape review"): whether a reviewer with no persona narrowness reproduces the operator's findings separates "the personas are too narrow" from "the panel lacks context" as the lever. Only ``--reviewer`` / ``--reviewer-override`` read this; a case file's ``personas`` stays canonical-only (``load_case``), so a case never opts into the generalist silently.
 - def `parse_reviewer_overrides` — Parse ``PERSONA.FIELD=VALUE`` override strings, fail-closed.
 - class `PanelSource` — What :func:`resolve_panel` reads off a case: the panel it declares and the profile its check-set comes from (``eval review`` and ``eval resolve`` cases both qualify).
 - def `resolve_panel` — The effective ``(profile, panel)`` for *case* under the run's overrides.
