@@ -160,6 +160,7 @@ keywords = [
     "data-gate-row",
 ]
 min_severity = "major"
+class = "sibling-surface"
 mechanism = """
 Gate rows are excluded from the side-panel interaction the story adds for
 "a row click". The diff makes tasks/row.html emit `data-task-row` plus a

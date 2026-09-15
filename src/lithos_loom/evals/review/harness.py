@@ -92,6 +92,17 @@ class CaseResult:
     false_positive_judge_status_per_sample: tuple[str, ...] = ()
     structured_caught_per_sample: tuple[bool, ...] = ()
     false_positive_structured_per_sample: tuple[bool, ...] = ()
+    # #404: the catch PER [[expected]] — outer index the expected, inner the
+    # sample — beside the per-sample conjunction above. A two-expected case is
+    # a conjunction the case-level number presents as one figure (lens79 read
+    # 1/5 while its tie-break was 5/5 and its partition reuse 1/5); these are
+    # the diagnosis. Same valid-sample denominator as every other rate. The
+    # classes are the case's declared `class` per expected (None = unclassed),
+    # the key of the class-balanced roll-up.
+    caught_per_expected: tuple[tuple[bool, ...], ...] = ()
+    catch_rate_per_expected: tuple[float, ...] = ()
+    catch_rate_ci_per_expected: tuple[tuple[float, float], ...] = ()
+    expected_classes: tuple[str | None, ...] = ()
 
     @property
     def judge_errored_per_sample(self) -> tuple[bool, ...]:
@@ -154,8 +165,14 @@ def aggregate_case(
     *,
     k: int,
     bar: float,
+    expected_classes: Sequence[str | None] | None = None,
 ) -> CaseResult:
     """Turn per-sample scores into a :class:`CaseResult`.
+
+    *expected_classes* is the case's declared class per ``[[expected]]``
+    (#404) and fixes the expected count; when omitted the count is read off
+    the samples' matches, and a sample carrying no matches (a stub, or a
+    report from before they were kept) contributes its own verdict.
 
     Split from :func:`run_case` so the arithmetic has exactly one home (#307):
     ``eval rescore`` scores stored reports rather than running reviewers, and if
@@ -180,6 +197,9 @@ def aggregate_case(
     caught, n_valid = count_valid(caught_samples, excluded)
     severity_ok, _ = count_valid(severity_samples, excluded)
     catch_rate = caught / n_valid if n_valid else 0.0
+    per_expected, per_expected_rates, per_expected_cis, classes = _per_expected(
+        buggy, excluded, expected_classes
+    )
 
     fp_samples = [s.caught for s in known_good]
     fp_errored_samples = [(not s.caught) and s.incomplete for s in known_good]
@@ -232,7 +252,46 @@ def aggregate_case(
         false_positive_structured_per_sample=tuple(
             s.structured_caught for s in known_good
         ),
+        caught_per_expected=per_expected,
+        catch_rate_per_expected=per_expected_rates,
+        catch_rate_ci_per_expected=per_expected_cis,
+        expected_classes=classes,
     )
+
+
+def _per_expected(
+    buggy: Sequence[RunScore],
+    excluded: Sequence[bool],
+    expected_classes: Sequence[str | None] | None,
+) -> tuple[
+    tuple[tuple[bool, ...], ...],
+    tuple[float, ...],
+    tuple[tuple[float, float], ...],
+    tuple[str | None, ...],
+]:
+    """The per-expected half of :func:`aggregate_case` (#404)."""
+    if expected_classes is not None:
+        n_expected = len(expected_classes)
+    else:
+        n_expected = max((len(s.matches) for s in buggy), default=0) or (
+            1 if buggy else 0
+        )
+    classes: tuple[str | None, ...] = (
+        tuple(expected_classes)
+        if expected_classes is not None
+        else (None,) * n_expected
+    )
+    caught_per_expected = tuple(
+        tuple(s.matches[j].caught if j < len(s.matches) else s.caught for s in buggy)
+        for j in range(n_expected)
+    )
+    rates: list[float] = []
+    cis: list[tuple[float, float]] = []
+    for flags in caught_per_expected:
+        c, v = count_valid(flags, excluded)
+        rates.append(c / v if v else 0.0)
+        cis.append(wilson_interval(c, v))
+    return caught_per_expected, tuple(rates), tuple(cis), classes
 
 
 def run_case(
@@ -280,7 +339,14 @@ def run_case(
             known_good = [
                 _score(case.known_good_head, "known-good", i) for i in range(j)
             ]
-        return aggregate_case(case.id, buggy, known_good, k=k, bar=bar)
+        return aggregate_case(
+            case.id,
+            buggy,
+            known_good,
+            k=k,
+            bar=bar,
+            expected_classes=[e.blind_spot_class for e in case.expected],
+        )
     finally:
         cleanup()
 

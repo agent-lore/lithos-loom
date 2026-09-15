@@ -18,6 +18,7 @@ from lithos_loom.evals.review.harness import (
     run_case,
 )
 from lithos_loom.evals.review.match import JudgeVerdict, RunScore, score_run
+from lithos_loom.evals.review.stats import wilson_interval
 from lithos_loom.plugins.story_develop.review_report import ReviewReport
 
 _EXPECTED = Expected(
@@ -930,3 +931,121 @@ def test_aggregate_case_reproduces_run_case_exactly() -> None:
     via_aggregate = aggregate_case(_case().id, scored, kg, k=3, bar=0.6)
 
     assert via_aggregate == via_run
+
+
+# ── #404: catch per [[expected]], not only per sample ────────────────────────
+
+_SECOND = Expected(
+    file="cli/attach.py",
+    keywords=("poll", "timeout"),
+    min_severity="major",
+    mechanism="attach polls without a timeout",
+    blind_spot_class="resource-bound",
+)
+
+
+def _two_expected_case() -> Case:
+    first = Expected(
+        file=_EXPECTED.file,
+        keywords=_EXPECTED.keywords,
+        min_severity=_EXPECTED.min_severity,
+        mechanism=_EXPECTED.mechanism,
+        blind_spot_class="rule-conformance",
+    )
+    return Case(
+        id="two-expected",
+        description="",
+        repo=".",
+        base="base",
+        head="buggy",
+        acceptance_criteria="attach must wait for delivery",
+        personas=("correctness",),
+        profile="standard",
+        expected=(first, _SECOND),
+        known_good_head=None,
+    )
+
+
+def _finding(finding_id: str, files: list[str], rationale: str) -> dict:
+    return {
+        "reviewer": "correctness",
+        "severity": "critical",
+        "files": files,
+        "rationale": rationale,
+        "finding_id": finding_id,
+    }
+
+
+def _report(findings: list[dict]) -> dict:
+    return {
+        "reviewers": [
+            {
+                "name": "correctness",
+                "status": "FINDINGS" if findings else "LGTM",
+                "passed": not findings,
+                "findings": findings,
+            }
+        ]
+    }
+
+
+def test_caught_per_expected_is_recorded_beside_the_conjunction() -> None:
+    # lens79's shape (#404): the tie-break caught every time, the partition
+    # reuse once — the case reads 1/5 and the summary could not say which.
+    both = _report(
+        [
+            _finding("f-1", ["cli/develop.py"], "exits on approved before delivery"),
+            _finding("f-2", ["cli/attach.py"], "polls with no timeout"),
+        ]
+    )
+    first_only = _report(
+        [_finding("f-1", ["cli/develop.py"], "exits on approved before delivery")]
+    )
+    reports = iter([both, first_only, first_only])
+
+    def review_fn(case: Case, head: str) -> dict:
+        return next(reports)
+
+    result = run_case(_two_expected_case(), k=3, review_fn=review_fn)
+
+    assert result.caught_per_sample == (True, False, False)  # the conjunction
+    assert result.caught_per_expected == ((True, True, True), (True, False, False))
+    assert result.catch_rate_per_expected == (1.0, pytest.approx(1 / 3))
+    assert result.catch_rate_ci_per_expected == (
+        wilson_interval(3, 3),
+        wilson_interval(1, 3),
+    )
+    assert result.expected_classes == ("rule-conformance", "resource-bound")
+
+
+def test_per_expected_rates_share_the_valid_sample_denominator() -> None:
+    # An errored sample is excluded from EVERY rate (#182 A3), the per-expected
+    # ones included — a crash never deflates one diagnosis line.
+    first_only = _report(
+        [_finding("f-1", ["cli/develop.py"], "exits on approved before delivery")]
+    )
+    reports = iter([first_only, _errored(), first_only])
+
+    def review_fn(case: Case, head: str) -> dict:
+        return next(reports)
+
+    result = run_case(_two_expected_case(), k=3, review_fn=review_fn)
+
+    assert result.errored_per_sample == (False, True, False)
+    assert result.caught_per_expected == ((True, False, True), (False, False, False))
+    assert result.catch_rate_per_expected == (1.0, 0.0)  # 2/2 and 0/2, not /3
+    assert result.catch_rate_ci_per_expected[0] == wilson_interval(2, 2)
+
+
+def test_aggregate_falls_back_to_the_sample_verdict_without_matches() -> None:
+    # A RunScore built without per-expected matches (a stub, or a report dir
+    # from before the field) still yields one per-expected row: the sample's
+    # own verdict.
+    buggy = [
+        RunScore(caught=True, severity_correct=True),
+        RunScore(caught=False, severity_correct=False),
+    ]
+    result = aggregate_case("stub", buggy, k=2, bar=0.5)
+    assert result.caught_per_expected == ((True, False),)
+    assert result.catch_rate_per_expected == (0.5,)
+    assert result.expected_classes == (None,)

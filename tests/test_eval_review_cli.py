@@ -1694,3 +1694,281 @@ def test_unsupported_judge_tool_message_is_pinned(
     assert "is not a supported agent tool (known: claude, codex)" in _unwrapped(
         result.output
     )
+
+
+# ── #404: per-expected rows and the class-balanced headline ──────────────────
+
+_TWO_EXPECTED_TOML = """
+[case]
+id = "{id}"
+description = "d"
+base = "aaaa"
+head = "bbbb"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+tier = "frontier"
+
+[[expected]]
+file = "cli/develop.py"
+keywords = ["delivery"]
+min_severity = "critical"
+mechanism = "exits before delivery"
+class = "{first}"
+
+[[expected]]
+file = "cli/attach.py"
+keywords = ["timeout"]
+min_severity = "major"
+mechanism = "polls without a timeout"
+class = "{second}"
+"""
+
+
+def _make_two_expected_case(
+    cases_dir: Path, case_id: str, *, first: str, second: str
+) -> None:
+    d = cases_dir / case_id
+    d.mkdir(parents=True)
+    (d / "case.toml").write_text(
+        _TWO_EXPECTED_TOML.format(id=case_id, first=first, second=second)
+    )
+    (d / "ac.md").write_text("attach must wait for delivery")
+
+
+def _make_classed_case(cases_dir: Path, case_id: str, cls: str | None) -> None:
+    _make_case(cases_dir, case_id, tier="frontier")
+    if cls is not None:
+        toml_path = cases_dir / case_id / "case.toml"
+        toml_path.write_text(
+            toml_path.read_text().replace(
+                'min_severity = "critical"',
+                f'min_severity = "critical"\nclass = "{cls}"',
+            )
+        )
+
+
+def _stub_per_expected(monkeypatch: pytest.MonkeyPatch, per_case: dict) -> None:
+    """run_case stub taking ``{case_id: [per-expected caught tuples]}``; the
+    sample verdict is the conjunction, every sample valid."""
+
+    def fake(case, **kwargs):
+        per_expected = per_case[case.id]
+        n = len(per_expected[0])
+        caught_per_sample = tuple(all(col) for col in zip(*per_expected, strict=True))
+        caught = sum(caught_per_sample)
+        return CaseResult(
+            case_id=case.id,
+            n=n,
+            catch_rate=caught / n,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=caught / n >= 0.8,
+            caught_per_sample=caught_per_sample,
+            severity_per_sample=caught_per_sample,
+            catch_rate_ci=wilson_interval(caught, n),
+            caught_per_expected=tuple(tuple(t) for t in per_expected),
+            catch_rate_per_expected=tuple(sum(t) / n for t in per_expected),
+            catch_rate_ci_per_expected=tuple(
+                wilson_interval(sum(t), n) for t in per_expected
+            ),
+            expected_classes=tuple(e.blind_spot_class for e in case.expected),
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+
+
+def test_table_shows_a_row_per_expected_under_a_multi_expected_case(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # lens79 (#404): the case row reads 1/5 — the conjunction — and the two
+    # rows under it say WHICH defect was missed: the tie-break 5/5, the
+    # partition reuse 1/5. A single-expected case gets no sub-row.
+    d = tmp_path / "cases"
+    _make_two_expected_case(
+        d, "two-exp", first="partition-reuse", second="rule-conformance"
+    )
+    _make_classed_case(d, "one-exp", "resource-bound")
+    _stub_per_expected(
+        monkeypatch,
+        {
+            "two-exp": [
+                (True, False, False, False, False),
+                (True, True, True, True, True),
+            ],
+            "one-exp": [(True, True, True, True, False)],
+        },
+    )
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(d)])
+    assert result.exit_code == 0, result.output
+    out = _unwrapped(result.output)
+    assert "[0] partition-reuse 1/5" in out
+    assert "[1] rule-conformance 5/5" in out
+    assert "[0] resource-bound" not in out  # one expected: the row IS the diagnosis
+
+
+def test_class_balanced_rollup_counts_a_recurring_class_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # PR #401 review (High): the pooled headline weights a class by how often
+    # it recurred across PRs. The balanced line pools WITHIN a class across
+    # cases, then takes the mean over classes: resource-bound (two cases) is
+    # 5/10 = 50%, rule-conformance 5/5 — mean 75%, each class with its own
+    # CI, while the pooled per-sample headline is 10/15. The unclassed
+    # expected is EXCLUDED and counted (opus round 1 H2: a singleton per
+    # expected would weight a case by how many defects it declares).
+    d = tmp_path / "cases"
+    _make_classed_case(d, "a-case", "resource-bound")
+    _make_two_expected_case(
+        d, "b-case", first="resource-bound", second="rule-conformance"
+    )
+    _make_classed_case(d, "c-case", None)
+    _stub_per_expected(
+        monkeypatch,
+        {
+            "a-case": [(True,) * 5],
+            "b-case": [(False,) * 5, (True,) * 5],
+            "c-case": [(True,) * 5],
+        },
+    )
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(d)])
+    assert result.exit_code == 0, result.output
+    out = _unwrapped(result.output)
+    assert "frontier: 10/15 pooled catch" in out
+    lo, hi = wilson_interval(5, 10)
+    assert (
+        "frontier (class-balanced): 75% mean over 2 classes — "
+        f"resource-bound 5/10 {lo * 100:.0f}-{hi * 100:.0f}%, "
+        "rule-conformance 5/5 57-100%; 1 unclassed expected excluded"
+    ) in out
+
+
+def test_a_class_declared_twice_on_one_case_measures_its_runs_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # opus round 1 M2 (lens78, lens43 shape): two expecteds of one class on
+    # one case are two readings of the SAME K runs — the class is caught in
+    # a sample when both are, over K, never 2K observations.
+    d = tmp_path / "cases"
+    _make_two_expected_case(d, "twice", first="resource-bound", second="resource-bound")
+    _stub_per_expected(
+        monkeypatch,
+        {"twice": [(True, True, True, True, True), (True, True, False, False, False)]},
+    )
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(d)])
+    assert result.exit_code == 0, result.output
+    out = _unwrapped(result.output)
+    assert "resource-bound 2/5 " in out
+    assert "2/10" not in out
+
+
+def test_a_class_with_no_valid_sample_is_named_and_left_out_of_the_mean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # opus round 1 M1: the mean and the listed keys must describe the same
+    # corpus — a class whose only samples errored is listed as excluded, not
+    # silently dropped and not counted as 0%.
+    d = tmp_path / "cases"
+    _make_classed_case(d, "alive", "rule-conformance")
+    _make_classed_case(d, "dead", "resource-bound")
+
+    def fake(case, **kwargs):
+        if case.id == "alive":
+            per = (True, True, True, False, False)
+            errored = (False,) * 5
+        else:
+            per = (False,) * 5
+            errored = (True,) * 5
+        caught = sum(per)
+        n_valid = 5 - sum(errored)
+        return CaseResult(
+            case_id=case.id,
+            n=5,
+            catch_rate=caught / n_valid if n_valid else 0.0,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=bool(n_valid),
+            caught_per_sample=per,
+            severity_per_sample=per,
+            catch_rate_ci=wilson_interval(caught, n_valid),
+            errored_per_sample=errored,
+            caught_per_expected=(per,),
+            catch_rate_per_expected=(caught / n_valid if n_valid else 0.0,),
+            catch_rate_ci_per_expected=(wilson_interval(caught, n_valid),),
+            expected_classes=tuple(e.blind_spot_class for e in case.expected),
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(d)])
+    assert result.exit_code != 0  # the all-errored case fails the run, as ever
+    out = _unwrapped(result.output)
+    assert (
+        "frontier (class-balanced): 60% mean over 1 class — "
+        "resource-bound 0/0 (no valid sample, excluded), rule-conformance 3/5 "
+    ) in out
+
+
+def test_a_sub_row_uses_the_valid_sample_denominator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    d = tmp_path / "cases"
+    _make_two_expected_case(
+        d, "two-exp", first="partition-reuse", second="rule-conformance"
+    )
+
+    def fake(case, **kwargs):
+        errored = (False, False, True)
+        first = (True, False, False)
+        second = (True, True, False)
+        return CaseResult(
+            case_id=case.id,
+            n=3,
+            catch_rate=0.5,
+            severity_correctness=1.0,
+            false_positive_rate=0.0,
+            passed=False,
+            caught_per_sample=(True, False, False),
+            severity_per_sample=(True, False, False),
+            catch_rate_ci=wilson_interval(1, 2),
+            errored_per_sample=errored,
+            caught_per_expected=(first, second),
+            catch_rate_per_expected=(0.5, 1.0),
+            catch_rate_ci_per_expected=(wilson_interval(1, 2), wilson_interval(2, 2)),
+            expected_classes=tuple(e.blind_spot_class for e in case.expected),
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(d)])
+    out = _unwrapped(result.output)
+    assert "[0] partition-reuse 1/2" in out
+    assert "[1] rule-conformance 2/2" in out
+
+
+def test_summary_json_carries_the_per_expected_diagnosis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    d = tmp_path / "cases"
+    _make_two_expected_case(
+        d, "two-exp", first="partition-reuse", second="rule-conformance"
+    )
+    _stub_per_expected(
+        monkeypatch,
+        {"two-exp": [(True, False, False), (True, True, True)]},
+    )
+    report_dir = tmp_path / "report"
+    result = runner.invoke(
+        eval_app,
+        ["review", "--cases-dir", str(d), "--report-dir", str(report_dir)],
+    )
+    assert result.exit_code == 0, result.output
+    summary = json.loads((report_dir / "two-exp" / "summary.json").read_text())
+    assert summary["caught_per_expected"] == [
+        [True, False, False],
+        [True, True, True],
+    ]
+    assert summary["catch_rate_per_expected"] == [pytest.approx(1 / 3), 1.0]
+    assert summary["catch_rate_ci_per_expected"] == [
+        list(wilson_interval(1, 3)),
+        list(wilson_interval(3, 3)),
+    ]
+    assert summary["expected_classes"] == ["partition-reuse", "rule-conformance"]

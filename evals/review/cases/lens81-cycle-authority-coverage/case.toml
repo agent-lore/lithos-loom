@@ -146,6 +146,7 @@ keywords = [
     "flagged",
 ]
 min_severity = "major"
+class = "authority-coverage"
 mechanism = """
 An out-of-scope ghost's blocked row is promoted into this graph's cycle
 authority: a project-scoped `task_blocked` read legitimately returns tasks

@@ -493,7 +493,12 @@ def rescore_case(
             return out
 
         return aggregate_case(
-            case.id, scores(reports.buggy), scores(reports.known_good), k=k, bar=bar
+            case.id,
+            scores(reports.buggy),
+            scores(reports.known_good),
+            k=k,
+            bar=bar,
+            expected_classes=[e.blind_spot_class for e in case.expected],
         )
 
     recorded: dict[tuple[str, int], list[list[JudgeVerdict]]] = {}

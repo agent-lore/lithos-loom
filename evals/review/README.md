@@ -23,9 +23,10 @@ uv run lithos-loom eval review --case 180-attach-delivery -k 8 --bar 0.9 \
 uv run lithos-loom eval review --no-judge
 ```
 
-The command prints a per-case table plus two tier roll-up lines (see
+The command prints a per-case table plus the tier roll-up lines (see
 [Case tier](#case-tier--floor-vs-frontier)): the headline pools catches over
-**frontier** cases; **floor** cases report `ok`/`REGRESSED`. It exits non-zero
+**frontier** cases, a second frontier line rolls the same catches up **per
+blind-spot class** (#404, below); **floor** cases report `ok`/`REGRESSED`. It exits non-zero
 iff a floor case falls below the bar or a case has no valid samples
 (all-errored infra failure) — a frontier FAIL is the measurement, not a failure
 of the run. Catch and FP are shown as a count over K plus a **Wilson 95% CI**
@@ -35,14 +36,54 @@ estimate:
 ```
 case                         tier       n       catch (95% CI)   sev          fp (95% CI)        noise  result
 --------------------------------------------------------------------------------------------------------------
-180-attach-delivery          floor     20        20/20 84-100%  100%     0/4 0-49% +16err   1/4 blk1  ok
-lens33-confidence-crash      frontier  20          2/20  3-30%  100%                   0%            —  FAIL
-frontier: 2/20 pooled catch (95% CI 3-30%) over 1 case
+180-attach-delivery          floor      5          5/5 57-100%  100%            0/5 0-43%     2/5 blk0  ok
+lens79-active-projection-chain frontier   5            1/5 4-62%  100%            0/5 0-43%     2/5 blk0  FAIL
+  └ [0] partition-reuse        1/5 4-62%
+  └ [1] rule-conformance       5/5 57-100%
+lens81-cycle-authority-coverage frontier   5            0/5 0-43%  100%            0/5 0-43%     2/5 blk0  FAIL
+lens30-list-envelope         frontier   5           3/5 23-88%  100%            0/5 0-43%     2/5 blk0  FAIL
+frontier: 4/15 pooled catch (95% CI 11-52%) over 3 cases
+frontier (class-balanced): 40% mean over 3 classes — authority-coverage 0/5 0-43%, partition-reuse 1/5 4-62%, rule-conformance 5/5 57-100%; 1 unclassed expected excluded
 floor: OK (1 case at bar)
 ```
 
 The CI is why a low-K run can't prove a clean panel: `5/5` still spans `57-100%`
 (a miss-rate up to ~43%), and `0/4` known-good only bounds FP below ~49%.
+
+**Per expected, and per class (#404).** A case's catch is the *conjunction* of
+its `[[expected]]` entries — the "this PR would have been blocked" reading —
+so a two-expected case presents two different diagnoses as one number
+(`lens79` read 1/5 while its tie-break was 5/5 and its partition reuse 1/5).
+A multi-expected case therefore gets one `└` row per expected, over the
+same valid-sample denominator, and `summary.json` carries
+`caught_per_expected` / `catch_rate_per_expected` / `catch_rate_ci_per_expected`
+/ `expected_classes` — derived from what the judge already returns per
+expected, no new paid work. (The `└` rows are the one deliberate exception
+to the table's fixed shape; a column-diff against an older table filters on
+the prefix. The four arrays are not drift keys for `eval rescore`: a re-score
+whose per-expected verdicts swap while the conjunction holds reports no
+drift — read the arrays.)
+
+The **class-balanced** line rolls the same catches up per blind-spot class:
+within one case a class is caught in a sample when every expected of that
+class is caught in it (so a class declared twice on one case measures its K
+runs once), the per-sample counts pool across the cases that declare the
+class — the same statistic as the pooled line, restricted to one class, so
+each class carries its own Wilson CI — and the mean over classes is the
+headline, so a class that recurred across PRs counts once (the PR #401
+review's High: the pooled line weights a class by how often it recurred).
+Read it with three limits. **The mean has no interval**: a mean of ratios over
+unequal, non-independent denominators has no pooled-binomial sampling model,
+so it is a summary, never the figure an A/B tests — an A/B compares the
+per-class `c/v` figures with their CIs, under the same power arithmetic as
+any pooled rate ([How many samples](#how-many-samples--what-an-ab-can-actually-detect-rh-5)).
+**Unclassed expecteds are excluded and counted** (`; N unclassed expecteds
+excluded`): a singleton per expected would weight a case by how many defects
+its author seeded, so the line covers only the classed corpus and says so —
+class the cases an A/B is about. **The class set is the frontier's**: a class
+whose only case is promoted to `floor` leaves the mean, and two arms are
+comparable only over the same class list (the line prints it). A class with
+no valid sample is named `0/0 (no valid sample, excluded)`.
 
 A reviewer turn that **crashes** (a failed/short-circuited turn — `status`
 `invalid` / `not-run`, e.g. a provider usage limit) produces no verdict. Such a
@@ -742,16 +783,48 @@ Classify each validated external finding into one of four buckets:
   same head is documented in the `description` as present-but-undeclared with
   its classification rationale, never silently omitted.
 - **One case per blind-spot CLASS, not per finding** — near-duplicates grow
-  sweep cost without signal. Name the class in the `description` (e.g.
-  contract-grounding against an in-repo requirements doc; suppression/trust-
-  proof completeness; cross-component lifecycle reasoning). Two findings of
-  one class in one diff become two `[[expected]]` on one case, not two cases.
+  sweep cost without signal. Name the class in the `description` and declare
+  it as `class = "<slug>"` on each `[[expected]]` from the [taxonomy](#blind-spot-taxonomy)
+  below (#404) — that is what lets the class-balanced headline count a
+  recurring class once: a second case for a class that already has one
+  pools into that class's rate (it moves the class's figure, and with
+  unequal K the larger case dominates it) but adds no second class to the
+  mean. Two findings of one class in one diff become two `[[expected]]` on
+  one case, not two cases; a recurrence on a later PR is recorded as
+  provenance inside the existing case's `description` (lens78 carries
+  lens81's and lens89's), never scored twice.
 - **Tier**: enter at `frontier` (RH-6) — a case never opts into the floor
   silently; promote to `floor` only once measured saturated.
 - **Measurement discipline**: these cases serve as (a) a regression floor —
   near-total moves are what K=3/K=5 can resolve — and (b) a blind-spot
   taxonomy source. They do NOT cheaply resolve mid-band improvements (K=5 has
   ~11% power there); any paid A/B over them states its MDE first.
+
+### Blind-spot taxonomy
+
+The `class` an `[[expected]]` may declare — validated at load against
+`BLIND_SPOT_CLASSES` in `case.py` (extend both together; a value outside
+the list fails the load, so a typo cannot mint a silent new class). A class
+names the *reasoning* the panel lacked, not the code it was in:
+
+| class | the panel failed to… | minted from |
+|---|---|---|
+| `resource-bound` | ask what bounds work driven by writable or external inputs — a ceiling, a deadline, an admission gate — where a display cap or a semaphore is not one | lens78 (recurred on lens81 and lens89 — provenance in the case) |
+| `partition-reuse` | notice a derived computation over one projection built on a partition (an SCC condensation, a grouping) computed over a *different* edge set | lens79 (recurred lens87) |
+| `authority-coverage` | check that a rule's authority — who decides, over which scope — covers every surface the rule is applied to | lens81 |
+| `sibling-surface` | carry a contract implemented on one surface to the sibling surface that shares its consumer | lens83 |
+| `contract-grounding` | test an affirmative claim against the in-tree contract or the reads that would support it | lens43 |
+| `rule-conformance` | build the fixture on which a rule the story spells out and its implementation diverge (direction, order, tie-break) | lens79 |
+
+The class is deliberately **not** part of the scoring fingerprint: it keys
+the roll-up, never the per-case score, so declaring it on a case whose report
+dir predates it does not make a re-score read as a different case. Cases
+outside the escape-review corpus stay unclassed until a class is defensible;
+the balanced line excludes them and says how many. One caveat the per-class
+figures inherit from the matcher: each `[[expected]]` is matched against the
+full finding set independently, so one finding the judge accepts for two
+mechanisms credits both — a class declared twice on one case can read as
+caught off a single finding.
 
 ### Seed corpus (2026-08-31)
 

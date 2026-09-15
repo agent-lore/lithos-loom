@@ -749,3 +749,46 @@ def test_load_rejects_non_canonical_finding_status(tmp_path: Path) -> None:
     bogus["status"] = "bogus"
     with pytest.raises(RescoreError, match="status"):
         load_report_dir(_dir(tmp_path / "c", [_report([bogus])]))
+
+
+# ── #404: a re-score carries the per-expected diagnosis and the classes ──────
+
+
+def test_rescore_carries_the_per_expected_diagnosis_and_classes(tmp_path: Path) -> None:
+    # opus round 1 M3: the rescore half goes through the same aggregate; if
+    # the classes were ever not threaded, every class would silently read
+    # as unclassed and the balanced headline would degenerate.
+    second = Expected(
+        file="cli/attach.py",
+        keywords=("timeout",),
+        min_severity="major",
+        mechanism="polls without a timeout",
+        blind_spot_class="resource-bound",
+    )
+    first = Expected(
+        file=_EXPECTED.file,
+        keywords=_EXPECTED.keywords,
+        min_severity=_EXPECTED.min_severity,
+        mechanism=_EXPECTED.mechanism,
+        blind_spot_class="rule-conformance",
+    )
+    both = _report(
+        [
+            _finding("f-001"),
+            {
+                "reviewer": "correctness",
+                "severity": "major",
+                "files": ["cli/attach.py"],
+                "rationale": "polls with no timeout",
+                "finding_id": "f-002",
+            },
+        ]
+    )
+    root = _dir(tmp_path, [both, _report([_finding("f-001")])])
+    (reports,) = load_report_dir(root)
+    scored = rescore_case(
+        _case((first, second)), reports, bar=0.5, judge=None, repeats=1
+    )
+    assert scored.judged.caught_per_sample == (True, False)
+    assert scored.judged.caught_per_expected == ((True, True), (True, False))
+    assert scored.judged.expected_classes == ("rule-conformance", "resource-bound")
