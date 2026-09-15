@@ -1,0 +1,1671 @@
+diff --git a/docs/SPECIFICATION.md b/docs/SPECIFICATION.md
+index e725ca7..caeb063 100644
+--- a/docs/SPECIFICATION.md
++++ b/docs/SPECIFICATION.md
+@@ -484,6 +484,51 @@ layer: a dependency cycle, a cross-project `blocks` edge, a cancelled
+ predecessor, resolved predecessors inside and outside the window, an epic with
+ a child in another project, isolated tasks, and a chain of depth 5.
+ 
++### 5.11 Task Graph Topology
++
++`graph_layout` computes the shape of a fetched task graph — the input the T2
++graph page renders. It is pure: a node set, the fetched edges, and Lithos's own
++`task_blocked` verdict in; cycles, layers, roots, the longest blocking chain and
++the hierarchy tree out. **No route renders it yet** (the page is a later T2
++slice); what ships here is the computation and its rules.
++
++- **Dependency edges** (`blocks`, `waits_on_gate`) are classified from BOTH
++  endpoints: `active` (open dependent, open-or-cancelled predecessor — a
++  cancelled predecessor blocks forever, a completed one blocks nothing),
++  `inactive` with a reason (`satisfied` when the predecessor completed, else
++  `dependent_resolved`; satisfied wins when both hold, because the dependency
++  was met whatever the dependent then did), or `unknown` when either endpoint's
++  status could not be read.
++- **Cycles** — membership is Lithos's verdict and is never overridden: a task
++  carrying a `kind="cycle"` blocker is a cycle member here even when Lens's own
++  Tarjan pass finds no component, because a cycle closing through out-of-scope
++  tasks is invisible to a graph that never fetches a ghost's edges. The shape —
++  members ordered by `(created_at, id)` plus one representative path — is Lens's,
++  and is empty for a flagged member with no component, where Lithos's message is
++  all there is. The representative path is one linear DFS pass, not a search
++  over the component's paths: these edges are agent-written, and a walk whose
++  cost grew with the shape of the cycle would hand their author the render.
++- **Layers** are Kahn's algorithm over the graph with each cycle condensed to a
++  single node, so every cycle member gets a layer and its dependents are layered
++  below it and marked *blocked via cycle* — a cycle never takes downstream work
++  off the page. Layering uses every fetched dependency edge whatever its state,
++  because layers describe the planned sequence rather than what blocks now.
++  `roots` are the in-degree-zero condensations plus one representative per cycle.
++- **The longest blocking chain** is the longest path by node count over the
++  condensed **active** projection, so a completed three-chain never outranks the
++  open two-chain beside it; a cycle counts once, ghosts count, and ties break on
++  the smallest `(created_at, id)` at each step so the traced chain is stable
++  across renders. The chain through a given node is available for focus mode.
++- **The chain carries its own confidence.** It is a lower bound — rendered
++  "≥ N", never as an exact claim — whenever a node's edges could not be read OR
++  any `unknown` dependency edge exists **anywhere** in the fetched graph: an
++  unknown edge sits in neither projection, so a disconnected one could itself be
++  the longest active component, and "it is off the current chain" proves nothing.
++- **The hierarchy tree** is the `parent_child` forest, indented. These edges
++  carry no readiness meaning, so completion never drops one; a node whose parent
++  is out of scope is a root, and a malformed parent loop yields a shorter tree
++  rather than dropping tasks.
++
+ ## 6. Current Lithos Dependencies
+ 
+ Lens currently assumes the availability of an existing Lithos deployment that
+@@ -683,8 +728,8 @@ The following requirement areas are not yet implemented in the current state:
+ - authentication
+ 
+ - the task dependency graph **pages** (`/tasks/graph`, the shared side panel,
+-  the detail mini-graph) — T2; the assembly layer beneath them is in place
+-  (§5.10) but no route reads it yet
++  the detail mini-graph) — T2; the two layers beneath them are in place — graph
++  assembly (§5.10) and topology (§5.11) — but no route reads either yet
+ 
+ One gap is narrower than a milestone and tracked as a task:
+ 
+diff --git a/docs/architecture.toml b/docs/architecture.toml
+index 848da6d..0fbcf9f 100644
+--- a/docs/architecture.toml
++++ b/docs/architecture.toml
+@@ -46,7 +46,7 @@ Events       = ["lithos_lens.events"]
+ LithosClient = ["lithos_lens.lithos_client", "lithos_lens.mcp_transport", "lithos_lens.fake_lithos", "lithos_lens.fake_dataset", "lithos_lens.fake_graph_dataset"]
+ Config       = ["lithos_lens.config", "lithos_lens.config_fields", "lithos_lens.config_schema"]
+ Tasks        = ["lithos_lens.tasks", "lithos_lens.task_filtering", "lithos_lens.normalizers"]
+-TaskGraph    = ["lithos_lens.task_graph", "lithos_lens.frontier", "lithos_lens.frontier_fallback", "lithos_lens.frontier_join", "lithos_lens.epic_strip", "lithos_lens.attention", "lithos_lens.gates", "lithos_lens.dashboard", "lithos_lens.task_detail", "lithos_lens.task_links", "lithos_lens.blocker_chain", "lithos_lens.graph_cache", "lithos_lens.graph_fanout", "lithos_lens.graph_scope"]
++TaskGraph    = ["lithos_lens.task_graph", "lithos_lens.frontier", "lithos_lens.frontier_fallback", "lithos_lens.frontier_join", "lithos_lens.epic_strip", "lithos_lens.attention", "lithos_lens.gates", "lithos_lens.dashboard", "lithos_lens.task_detail", "lithos_lens.task_links", "lithos_lens.blocker_chain", "lithos_lens.graph_cache", "lithos_lens.graph_fanout", "lithos_lens.graph_scope", "lithos_lens.graph_layout"]
+ Knowledge    = ["lithos_lens.knowledge", "lithos_lens.knowledge_resolver", "lithos_lens.knowledge_metadata", "lithos_lens.knowledge_produced_by"]
+ Logging      = ["lithos_lens.logging"]
+ Telemetry    = ["lithos_lens.telemetry", "lithos_lens.metrics"]
+@@ -151,6 +151,7 @@ include_modules = [
+     "lithos_lens.graph_cache",
+     "lithos_lens.graph_fanout",
+     "lithos_lens.graph_scope",
++    "lithos_lens.graph_layout",
+     "lithos_lens.knowledge",
+     "lithos_lens.knowledge_resolver",
+     "lithos_lens.knowledge_metadata",
+diff --git a/docs/generated/components/TaskGraph.md b/docs/generated/components/TaskGraph.md
+index 12381e5..303c827 100644
+--- a/docs/generated/components/TaskGraph.md
++++ b/docs/generated/components/TaskGraph.md
+@@ -21,6 +21,7 @@ Task-graph transport records and normalizers (blocked-task rows + edges), plus t
+ | `lithos_lens.gates` | M | 5 | 5 |
+ | `lithos_lens.graph_cache` | M | 2 | 2 |
+ | `lithos_lens.graph_fanout` | S | 1 | 3 |
++| `lithos_lens.graph_layout` | L | 6 | 4 |
+ | `lithos_lens.graph_scope` | L | 5 | 6 |
+ | `lithos_lens.task_detail` | M | 3 | 2 |
+ | `lithos_lens.task_graph` | S | 3 | 3 |
+@@ -86,6 +87,18 @@ Task-graph transport records and normalizers (blocked-task rows + edges), plus t
+ - def `partition_far_endpoints` — Split ghost candidates into "already known" and "needs a read".
+ - def `resolve_far_endpoints` — Read every pending candidate, filling ``resolved`` and returning failures.
+ 
++### `lithos_lens.graph_layout`
++- class `DependencyEdge` — One fetched ``blocks``/``waits_on_gate`` edge, classified per D6.
++- class `Cycle` — A cycle in the scope: Lithos's verdict, or Lens's own SCC, or both.
++- class `Condensation` — One node of the condensed graph: a cycle's members, or a lone task.
++- class `BlockingChain` — The longest blocking chain, by node count, over the active projection.
++- class `HierarchyRow` — One line of the indented ``parent_child`` tree.
++- class `Topology` — The condensed shape of one fetched scope.
++- def `classify_dependency_edges` — Classify the fetched dependency edges from BOTH endpoints (D6).
++- def `build_topology` — Condense the fetched scope into cycles, layers and roots.
++- def `longest_blocking_chain` — The longest chain of blocking work in this graph, by node count (D7).
++- def `hierarchy_rows` — The scope's ``parent_child`` forest, flattened into indented rows.
++
+ ### `lithos_lens.graph_scope`
+ - class `GraphScopeLimits` — The two ``[graph]`` knobs that bound one scope's reads.
+ - class `GraphNode` — One node of the assembled graph: a task, or a one-hop ghost of one.
+diff --git a/docs/generated/domain_model.md b/docs/generated/domain_model.md
+index 580bbec..1dd1417 100644
+--- a/docs/generated/domain_model.md
++++ b/docs/generated/domain_model.md
+@@ -152,9 +152,28 @@ classDiagram
+     +status str
+     +message str
+   }
++  class BlockingChain {
++    +nodes tuple[str, ...]
++    +bound ChainBound
++  }
+   class Breadcrumb {
+     +incomplete bool
+   }
++  class Condensation {
++    +id str
++    +members tuple[str, ...]
++    +layer int
++    +blocked_via_cycle bool
++    +created_at str
++  }
++  class Cycle {
++    +id str
++    +members tuple[str, ...]
++    +path tuple[str, ...]
++    +scc bool
++    +flagged bool
++    +message str
++  }
+   class DashboardData {
+     +frontier_limit int
+     +open_total int
+@@ -170,6 +189,13 @@ classDiagram
+     +errors tuple[str, ...]
+     +epic_scope str
+   }
++  class DependencyEdge {
++    +from_task_id str
++    +to_task_id str
++    +type str
++    +state EdgeState
++    +reason str
++  }
+   class EdgeCacheEntry {
+     +task_id str
+     +fetched_at datetime
+@@ -216,6 +242,11 @@ classDiagram
+     +max_tasks int
+     +fetch_concurrency int
+   }
++  class HierarchyRow {
++    +task_id str
++    +depth int
++    +has_children bool
++  }
+   class LinkPage {
+     +total int
+   }
+@@ -271,6 +302,12 @@ classDiagram
+     +agents int
+     +approximate frozenset[str]
+   }
++  class Topology {
++    +nodes tuple[str, ...]
++    +layers tuple[tuple[str, ...], ...]
++    +roots tuple[str, ...]
++    +incomplete frozenset[str]
++  }
+   class AgentRecord
+   <<Tasks>> AgentRecord
+   class EpicRollup
+@@ -289,6 +326,7 @@ classDiagram
+   BlockedTaskRecord "1" --> "1" TaskRecord : task
+   BlockerLevel "1" --> "1" LinkPage : page
+   Breadcrumb "1" --> "0..*" TaskRecord : ancestors
++  Condensation "1" --> "0..1" Cycle : cycle
+   DashboardData "1" --> "0..*" AgentRecord : agents
+   DashboardData "1" --> "0..*" EpicRollup : epics
+   DashboardData "1" --> "0..*" GateGroup : gate_groups
+@@ -316,6 +354,9 @@ classDiagram
+   TaskGraphScope "1" --> "0..*" GraphEdge : edges
+   TaskGraphScope "1" --> "0..*" GraphNode : nodes
+   TaskGraphScope "1" --> "0..1" ScopeRefusal : refusal
++  Topology "1" --> "0..*" Condensation : condensations
++  Topology "1" --> "0..*" Cycle : cycles
++  Topology "1" --> "0..*" DependencyEdge : edges
+ ```
+ 
+ ## Tasks
+diff --git a/docs/generated/metrics.json b/docs/generated/metrics.json
+index c3ab46c..2f0fb2b 100644
+--- a/docs/generated/metrics.json
++++ b/docs/generated/metrics.json
+@@ -42,7 +42,7 @@
+         "max_function": "lithos_lens.state.AppState.__init__"
+       },
+       "TaskGraph": {
+-        "functions_over_10": 6,
++        "functions_over_10": 9,
+         "max_complexity": 46,
+         "max_function": "lithos_lens.frontier.load_dashboard"
+       },
+@@ -62,7 +62,7 @@
+         "max_function": "lithos_lens.request_filters._parse_preserved_filters"
+       }
+     },
+-    "functions_over_10": 20,
++    "functions_over_10": 23,
+     "top_functions": [
+       {
+         "complexity": 46,
+@@ -80,6 +80,10 @@
+         "complexity": 20,
+         "qualname": "lithos_lens.fake_lithos.FakeLithosClient.list_tasks"
+       },
++      {
++        "complexity": 18,
++        "qualname": "lithos_lens.graph_layout.build_topology"
++      },
+       {
+         "complexity": 15,
+         "qualname": "lithos_lens.task_filtering.matches_filters"
+@@ -99,17 +103,13 @@
+       {
+         "complexity": 13,
+         "qualname": "lithos_lens.frontier.load_dashboard._partition_state"
+-      },
+-      {
+-        "complexity": 13,
+-        "qualname": "lithos_lens.knowledge_resolver._gather_candidates"
+       }
+     ],
+-    "total_functions": 498
++    "total_functions": 520
+   },
+   "domain": {
+-    "associations": 50,
+-    "models": 49,
++    "associations": 54,
++    "models": 55,
+     "models_without_docstrings": 14
+   },
+   "graph": {
+@@ -177,7 +177,7 @@
+       }
+     },
+     "cross_component_edges": 35,
+-    "cross_component_module_edges": 82,
++    "cross_component_module_edges": 83,
+     "longest_component_chain": 8,
+     "module_cycle_count": 0,
+     "module_cycles": [],
+@@ -289,14 +289,14 @@
+         "sloc": 59
+       },
+       "TaskGraph": {
+-        "classes": 35,
+-        "functions": 177,
++        "classes": 41,
++        "functions": 199,
+         "largest_module": "lithos_lens.frontier",
+         "largest_module_lines": 768,
+-        "lines": 5286,
+-        "modules": 14,
+-        "public_symbols": 73,
+-        "sloc": 3939
++        "lines": 6052,
++        "modules": 15,
++        "public_symbols": 83,
++        "sloc": 4581
+       },
+       "Tasks": {
+         "classes": 13,
+@@ -332,13 +332,13 @@
+     "max_module": "lithos_lens.config",
+     "max_module_lines": 790,
+     "modules_over_800": [],
+-    "total_lines": 14606,
+-    "total_modules": 41,
+-    "total_sloc": 11101
++    "total_lines": 15372,
++    "total_modules": 42,
++    "total_sloc": 11743
+   },
+   "tests": {
+-    "ratio": 1.76,
+-    "src_lines": 14606,
+-    "test_lines": 25692
++    "ratio": 1.7,
++    "src_lines": 15372,
++    "test_lines": 26201
+   }
+ }
+diff --git a/docs/generated/metrics.md b/docs/generated/metrics.md
+index 02df9c7..1b507ed 100644
+--- a/docs/generated/metrics.md
++++ b/docs/generated/metrics.md
+@@ -21,7 +21,7 @@ lower a budget after improving the code to lock in the gain.
+ 
+ ## Import graph
+ 
+-- Cross-component edges: **35** (82 module-level)
++- Cross-component edges: **35** (83 module-level)
+ - Component cycles: none
+ - Module cycles: none
+ - Tier-skipping edges (Entrypoints → Foundation): 10 (Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> Logging, Entrypoint -> Telemetry, Web -> Config, Web -> Errors, Web -> Knowledge, Web -> TaskGraph, Web -> Tasks, Web -> Telemetry)
+@@ -42,20 +42,20 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
+ | LithosClient | 5 | 2591 | 2078 | 2 | 6 | 0.75 | 20 (`lithos_lens.fake_lithos.FakeLithosClient.list_tasks`) | 4 |
+ | Logging | 1 | 169 | 122 | 2 | 1 | 0.33 | 7 (`lithos_lens.logging._json_safe`) | 0 |
+ | State | 1 | 80 | 59 | 1 | 4 | 0.80 | 3 (`lithos_lens.state.AppState.__init__`) | 0 |
+-| TaskGraph | 14 | 5286 | 3939 | 4 | 1 | 0.20 | 46 (`lithos_lens.frontier.load_dashboard`) | 6 |
++| TaskGraph | 15 | 6052 | 4581 | 4 | 1 | 0.20 | 46 (`lithos_lens.frontier.load_dashboard`) | 9 |
+ | Tasks | 3 | 1069 | 786 | 5 | 0 | 0.00 | 23 (`lithos_lens.normalizers.normalize_task`) | 3 |
+ | Telemetry | 2 | 1024 | 741 | 4 | 2 | 0.33 | 10 (`lithos_lens.telemetry.setup_telemetry`) | 0 |
+ | Web | 3 | 1208 | 936 | 1 | 9 | 0.90 | 14 (`lithos_lens.request_filters._parse_preserved_filters`) | 2 |
+ 
+ ## Size
+ 
+-- Modules: **41**, lines: **14606**, SLOC: **11101**
++- Modules: **42**, lines: **15372**, SLOC: **11743**
+ - Largest module: `lithos_lens.config` (790 lines)
+ - Modules over 800 lines: **0**
+ 
+ ## Complexity
+ 
+-- Functions: **498**, cyclomatic > 10: **20**
++- Functions: **520**, cyclomatic > 10: **23**
+ 
+ Top 10 most complex functions:
+ 
+@@ -65,12 +65,12 @@ Top 10 most complex functions:
+ | 32 | `lithos_lens.config._apply_env_overrides` |
+ | 23 | `lithos_lens.normalizers.normalize_task` |
+ | 20 | `lithos_lens.fake_lithos.FakeLithosClient.list_tasks` |
++| 18 | `lithos_lens.graph_layout.build_topology` |
+ | 15 | `lithos_lens.task_filtering.matches_filters` |
+ | 14 | `lithos_lens.events._iter_sse_lines` |
+ | 14 | `lithos_lens.request_filters._parse_preserved_filters` |
+ | 13 | `lithos_lens.fake_lithos.FakeLithosClient.list_notes` |
+ | 13 | `lithos_lens.frontier.load_dashboard._partition_state` |
+-| 13 | `lithos_lens.knowledge_resolver._gather_candidates` |
+ 
+ ## Seams
+ 
+@@ -82,5 +82,5 @@ Private-name reaches across module seams. Both counts can be pinned as
+ 
+ ## Domain & tests
+ 
+-- Domain models: **49** (50 associations, 14 without docstrings)
+-- Test-to-source line ratio: **1.76** (25692 test lines / 14606 source lines)
++- Domain models: **55** (54 associations, 14 without docstrings)
++- Test-to-source line ratio: **1.70** (26201 test lines / 15372 source lines)
+diff --git a/pyproject.toml b/pyproject.toml
+index 8e3ef8b..0de0472 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -77,6 +77,7 @@ source_modules = [
+     "lithos_lens.graph_cache",
+     "lithos_lens.graph_fanout",
+     "lithos_lens.graph_scope",
++    "lithos_lens.graph_layout",
+     "lithos_lens.frontier",
+     "lithos_lens.gates",
+     "lithos_lens.dashboard",
+diff --git a/src/lithos_lens/graph_layout.py b/src/lithos_lens/graph_layout.py
+new file mode 100644
+index 0000000..39fef3c
+--- /dev/null
++++ b/src/lithos_lens/graph_layout.py
+@@ -0,0 +1,766 @@
++"""Graph topology over a fetched scope: cycles, layers, chain, hierarchy (T2-A2).
++
++Pure functions over the transport records this package already has —
++``EdgeRecord`` for the fetched edges, ``TaskRecord`` for the node set,
++``BlockedTaskRecord``/``BlockerRecord`` for Lithos's own cycle verdict. Nothing
++here reads Lithos: the scope assembly (``graph_scope``) fetches, this module
++says what the fetched shape IS, which is what makes every rule below testable
++one fixture at a time.
++
++The division of labour with Lithos is T2's D4 and it is not symmetric.
++**Membership of a cycle is Lithos's verdict** — a ``kind="cycle"`` blocker on a
++``lithos_task_blocked`` row — and this module never overrides it: a task Lithos
++flags is a cycle member here even when Tarjan finds no strongly connected
++component, because a cycle running through two out-of-scope tasks
++(``A(in) -> B(ghost) -> C(ghost) -> A``) is invisible to a scope that never
++fetches a ghost's edges (D5). **The SHAPE is Lens's** — the members, their
++order, the representative path — because that is topology over an edge set, not
++readiness, and Lens still never re-implements the readiness predicate.
++
++Three answers, three deliberately different edge sets, each because of what it
++claims. Cycles and layers use EVERY fetched dependency edge, active or not,
++because layers are the planned sequence and a satisfied edge is still a fact
++about the plan. The longest chain uses the ACTIVE projection only (D6/D7),
++because "blocking" is a claim about now. The hierarchy tree uses
++``parent_child``, which carries no readiness meaning and is never satisfied.
++
++Everything this module emits is ordered by ``(created_at, id)`` and every
++adjacency it walks is sorted the same way, so the render is a function of the
++graph and not of the order the edges happened to arrive in.
++"""
++
++from __future__ import annotations
++
++from collections import deque
++from collections.abc import Collection, Mapping, Sequence
++from dataclasses import dataclass
++from typing import Literal
++
++from lithos_lens.task_graph import BlockedTaskRecord, EdgeRecord
++from lithos_lens.task_links import BLOCKER_EDGE_TYPES, PARENT_EDGE_TYPE
++from lithos_lens.tasks import TaskRecord, parse_timestamp
++
++# D6's dependency edges: the only two types that carry readiness meaning, so
++# the only two that make a cycle, a layer or a chain. Same tuple the detail
++# page's blocker walk uses — "what stops a task running" has one definition in
++# this codebase, not one per surface.
++DEPENDENCY_EDGE_TYPES: tuple[str, ...] = BLOCKER_EDGE_TYPES
++
++# The ``lithos_task_blocked`` blocker kind that IS Lithos's cycle verdict (see
++# task_graph.KNOWN_BLOCKER_KINDS).
++CYCLE_BLOCKER_KIND = "cycle"
++
++# A node whose own status could not be read — a ghost whose ``task_get``
++# failed (D2). Not a Lithos status: ``TaskRecord.status`` cannot hold it, which
++# is why the callers pass those ids separately.
++STATUS_UNKNOWN = "unknown"
++
++EdgeState = Literal["active", "inactive", "unknown"]
++InactiveReason = Literal["satisfied", "dependent_resolved"]
++ChainBound = Literal["exact", "lower_bound"]
++
++# Statuses of a predecessor that still constrain a dependent. A cancelled
++# predecessor blocks forever (T1's unsatisfiable case); a completed one blocks
++# nothing.
++_BLOCKING_PREDECESSOR_STATUSES = frozenset({"open", "cancelled"})
++
++
++@dataclass(frozen=True)
++class DependencyEdge:
++    """One fetched ``blocks``/``waits_on_gate`` edge, classified per D6.
++
++    ``from_task_id`` is the predecessor and ``to_task_id`` the dependent: both
++    types point blocker -> blocked. ``reason`` is set only when ``state`` is
++    ``inactive``, and ``satisfied`` takes precedence over
++    ``dependent_resolved`` — a completed predecessor MET the dependency,
++    whatever the dependent then did, and reporting the dependent's own
++    resolution instead would hide that.
++    """
++
++    from_task_id: str
++    to_task_id: str
++    type: str
++    state: EdgeState
++    reason: str = ""
++
++
++@dataclass(frozen=True)
++class Cycle:
++    """A cycle in the scope: Lithos's verdict, or Lens's own SCC, or both.
++
++    ``members`` are ordered by ``(created_at, id)``. ``path`` is ONE
++    representative walk of the cycle — a DFS from the smallest member over
++    adjacency sorted the same way, closing back on that member — not an
++    enumeration of every cycle through the component. It is empty when
++    ``scc`` is false: a Lithos-flagged member with no component in the fetched
++    topology closes its loop through tasks this scope never fetched, so Lens
++    has no path to draw and ``message`` (Lithos's own text) is all there is.
++    """
++
++    id: str
++    members: tuple[str, ...]
++    path: tuple[str, ...] = ()
++    # Tarjan found this component in the fetched topology, so Lens can draw it.
++    scc: bool = False
++    # Lithos reported a ``kind="cycle"`` blocker on at least one member.
++    flagged: bool = False
++    message: str = ""
++
++
++@dataclass(frozen=True)
++class Condensation:
++    """One node of the condensed graph: a cycle's members, or a lone task.
++
++    ``id`` is the representative task id — the smallest member by
++    ``(created_at, id)`` — so a condensation is addressable by an id the
++    payload and the canvas already carry, and ``roots`` can name a cyclic
++    condensation without inventing a synthetic node id.
++
++    ``blocked_via_cycle`` marks a condensation that is not itself a cycle but
++    sits downstream of one. That marker is the whole reason cycle members are
++    condensed rather than dropped: a cycle with no layer takes its dependents
++    off the page with it, and work that vanishes is worse than work that is
++    labelled unreachable.
++    """
++
++    id: str
++    members: tuple[str, ...]
++    layer: int = 0
++    cycle: Cycle | None = None
++    blocked_via_cycle: bool = False
++    # The representative's own ``created_at``, carried so the chain's
++    # tie-breaks order condensations by the same ``(created_at, id)`` as
++    # everything else without re-reading the task records.
++    created_at: str = ""
++
++
++@dataclass(frozen=True)
++class BlockingChain:
++    """The longest blocking chain, by node count, over the active projection.
++
++    ``nodes`` are condensation ids in order, so a cyclic condensation counts
++    once however many members it holds. ``bound`` is ``lower_bound`` whenever
++    the answer could only be longer than it says — see
++    :func:`longest_blocking_chain` for the two ways that happens — and the
++    caller renders ">= N" rather than "N" for it.
++    """
++
++    nodes: tuple[str, ...] = ()
++    bound: ChainBound = "exact"
++
++    @property
++    def length(self) -> int:
++        return len(self.nodes)
++
++
++@dataclass(frozen=True)
++class HierarchyRow:
++    """One line of the indented ``parent_child`` tree."""
++
++    task_id: str
++    depth: int = 0
++    has_children: bool = False
++
++
++@dataclass(frozen=True)
++class Topology:
++    """The condensed shape of one fetched scope.
++
++    ``layers`` holds condensation ids, layer by layer; ``condensations`` is the
++    same set flattened in render order (layer, then ``(created_at, id)``).
++    """
++
++    nodes: tuple[str, ...] = ()
++    condensations: tuple[Condensation, ...] = ()
++    layers: tuple[tuple[str, ...], ...] = ()
++    cycles: tuple[Cycle, ...] = ()
++    roots: tuple[str, ...] = ()
++    edges: tuple[DependencyEdge, ...] = ()
++    incomplete: frozenset[str] = frozenset()
++
++    def condensation_of(self, task_id: str) -> Condensation | None:
++        """The condensation ``task_id`` belongs to, by id OR by membership."""
++        for condensation in self.condensations:
++            if task_id == condensation.id or task_id in condensation.members:
++                return condensation
++        return None
++
++
++def _sort_key(task_id: str, created_at: str) -> tuple[str, str]:
++    """The one ordering in this module: ``(created_at, id)``.
++
++    Timestamps are normalized to UTC before comparison so two differently
++    offset ISO strings order chronologically rather than lexically; an absent
++    or unreadable one sorts first and falls back to the id, which keeps a ghost
++    with no known creation time in a stable place instead of a random one.
++    """
++    parsed = parse_timestamp(created_at)
++    return (parsed.isoformat() if parsed is not None else "", task_id)
++
++
++def _dedupe_edges(
++    edges: Sequence[EdgeRecord], types: Collection[str]
++) -> list[EdgeRecord]:
++    """Edges of the given types, one per ``(from, to, type)``.
++
++    The cache fetches ``direction="both"`` per task, so an edge between two
++    in-scope tasks arrives twice — harmless to the shape, but it would draw
++    twice in the payload.
++    """
++    seen: set[tuple[str, str, str]] = set()
++    kept: list[EdgeRecord] = []
++    for edge in edges:
++        if edge.type not in types or not edge.from_task_id or not edge.to_task_id:
++            continue
++        key = (edge.from_task_id, edge.to_task_id, edge.type)
++        if key in seen:
++            continue
++        seen.add(key)
++        kept.append(edge)
++    return kept
++
++
++def _status_map(
++    tasks: Sequence[TaskRecord],
++    edges: Sequence[EdgeRecord],
++    unknown_status: Collection[str],
++) -> dict[str, str]:
++    """id -> status for every node, including endpoints not in ``tasks``.
++
++    An endpoint the scope supplied no record for gets ``unknown`` rather than
++    an assumed status: an assumed ``open`` would make its edges active and
++    inflate the chain, an assumed ``completed`` would hide a live blocker.
++    """
++    statuses = {task.id: task.status for task in tasks}
++    for edge in edges:
++        for endpoint in (edge.from_task_id, edge.to_task_id):
++            if endpoint and endpoint not in statuses:
++                statuses[endpoint] = STATUS_UNKNOWN
++    for task_id in unknown_status:
++        statuses[task_id] = STATUS_UNKNOWN
++    return statuses
++
++
++def classify_dependency_edges(
++    edges: Sequence[EdgeRecord],
++    tasks: Sequence[TaskRecord],
++    *,
++    unknown_status: Collection[str] = (),
++) -> tuple[DependencyEdge, ...]:
++    """Classify the fetched dependency edges from BOTH endpoints (D6).
++
++    ``active`` — the dependent is open and the predecessor is open or
++    cancelled. ``inactive`` — the predecessor is completed (``satisfied``), or
++    the dependent is completed/cancelled (``dependent_resolved``); satisfied
++    wins when both hold. ``unknown`` — either endpoint's status could not be
++    read, in which case Lens cannot classify the edge in EITHER direction and
++    says so, rather than guessing an answer every downstream claim would
++    inherit.
++    """
++    statuses = _status_map(tasks, edges, unknown_status)
++    classified: list[DependencyEdge] = []
++    for edge in _dedupe_edges(edges, DEPENDENCY_EDGE_TYPES):
++        predecessor = statuses.get(edge.from_task_id, STATUS_UNKNOWN)
++        dependent = statuses.get(edge.to_task_id, STATUS_UNKNOWN)
++        state: EdgeState
++        reason = ""
++        if STATUS_UNKNOWN in (predecessor, dependent):
++            state = "unknown"
++        elif predecessor == "completed":
++            state, reason = "inactive", "satisfied"
++        elif dependent != "open":
++            state, reason = "inactive", "dependent_resolved"
++        elif predecessor in _BLOCKING_PREDECESSOR_STATUSES:
++            state = "active"
++        else:  # pragma: no cover - every status is covered by the branches above
++            state = "unknown"
++        classified.append(
++            DependencyEdge(
++                from_task_id=edge.from_task_id,
++                to_task_id=edge.to_task_id,
++                type=edge.type,
++                state=state,
++                reason=reason,
++            )
++        )
++    return tuple(classified)
++
++
++def _adjacency(
++    nodes: Sequence[str],
++    edges: Sequence[DependencyEdge],
++    key: Mapping[str, tuple[str, str]],
++) -> dict[str, tuple[str, ...]]:
++    """predecessor -> dependents, each list sorted by ``(created_at, id)``.
++
++    Sorting here is what makes Tarjan's component order and the representative
++    path independent of the order the edges arrived in.
++    """
++    out: dict[str, list[str]] = {node: [] for node in nodes}
++    for edge in edges:
++        out[edge.from_task_id].append(edge.to_task_id)
++    return {
++        node: tuple(sorted(set(targets), key=lambda t: key[t]))
++        for node, targets in out.items()
++    }
++
++
++def _strongly_connected(
++    nodes: Sequence[str], adjacency: Mapping[str, tuple[str, ...]]
++) -> list[list[str]]:
++    """Tarjan's SCC, iterative so a deep chain cannot exhaust the stack."""
++    index_of: dict[str, int] = {}
++    low: dict[str, int] = {}
++    on_stack: set[str] = set()
++    stack: list[str] = []
++    components: list[list[str]] = []
++    counter = 0
++    for root in nodes:
++        if root in index_of:
++            continue
++        work: list[tuple[str, int]] = [(root, 0)]
++        while work:
++            node, cursor = work[-1]
++            if cursor == 0:
++                index_of[node] = low[node] = counter
++                counter += 1
++                stack.append(node)
++                on_stack.add(node)
++            descended = False
++            neighbours = adjacency.get(node, ())
++            while cursor < len(neighbours):
++                child = neighbours[cursor]
++                cursor += 1
++                if child not in index_of:
++                    work[-1] = (node, cursor)
++                    work.append((child, 0))
++                    descended = True
++                    break
++                if child in on_stack:
++                    low[node] = min(low[node], index_of[child])
++            if descended:
++                continue
++            work.pop()
++            if low[node] == index_of[node]:
++                component: list[str] = []
++                while True:
++                    member = stack.pop()
++                    on_stack.discard(member)
++                    component.append(member)
++                    if member == node:
++                        break
++                components.append(component)
++            if work:
++                parent = work[-1][0]
++                low[parent] = min(low[parent], low[node])
++    return components
++
++
++def _representative_path(
++    start: str, members: Collection[str], adjacency: Mapping[str, tuple[str, ...]]
++) -> tuple[str, ...]:
++    """One walk from ``start`` back to ``start`` inside the component.
++
++    DFS over the same sorted adjacency, so the path is the graph's, not the
++    input order's. A self-loop yields ``(A, A)``; a component always has such a
++    walk, so the bare ``(start,)`` fallback is unreachable for a real SCC and
++    is there to keep the function total.
++
++    ``visited`` is NEVER un-marked on backtrack, which bounds the walk at
++    O(V+E) — one expansion per member — instead of enumerating simple paths.
++    A security property, not a micro-optimisation: these edges AND their
++    ``created_at`` are agent-written (``blocker_chain``'s opening premise), so
++    their author picks the component's shape and, through the sort key, which
++    branch is tried first. Unwinding ``visited`` would let them plant 2**n dead
++    ends ahead of the closing edge and burn the event loop on every render of
++    the page — the whole process, since the route is an ordinary coroutine and
++    no concurrency meter can preempt a running one.
++
++    Keeping the mark still finds a walk: DFS reaches every member, each
++    member's neighbours are scanned in full while it is on top of the stack,
++    and ``start`` has an in-neighbour inside the component, so that scan
++    returns the closing edge if nothing shorter did first.
++    """
++    member_set = set(members)
++    inside = {
++        node: tuple(n for n in adjacency.get(node, ()) if n in member_set)
++        for node in members
++    }
++    path = [start]
++    visited = {start}
++    cursors = [0]
++    while path:
++        neighbours = inside.get(path[-1], ())
++        cursor = cursors[-1]
++        if cursor >= len(neighbours):
++            path.pop()
++            cursors.pop()
++            continue
++        cursors[-1] = cursor + 1
++        nxt = neighbours[cursor]
++        if nxt == start:
++            return (*path, start)
++        if nxt in visited:
++            continue
++        visited.add(nxt)
++        path.append(nxt)
++        cursors.append(0)
++    return (start,)
++
++
++def _flagged_cycle_members(blocked: Sequence[BlockedTaskRecord]) -> dict[str, str]:
++    """Lithos's cycle verdict: task id -> the blocker's own message."""
++    flagged: dict[str, str] = {}
++    for record in blocked:
++        for blocker in record.blockers:
++            if blocker.kind == CYCLE_BLOCKER_KIND and record.task.id not in flagged:
++                flagged[record.task.id] = blocker.message
++    return flagged
++
++
++def _condense(
++    nodes: Sequence[str],
++    adjacency: Mapping[str, tuple[str, ...]],
++    key: Mapping[str, tuple[str, str]],
++    flagged: Mapping[str, str],
++) -> tuple[list[tuple[str, tuple[str, ...], Cycle | None]], dict[str, str]]:
++    """Group nodes into condensations and say which of them are cycles.
++
++    Every SCC of size > 1 — and every self-loop — is one condensation. Every
++    other node is its own, and a Lithos-flagged one among them is condensed
++    alone AS A CYCLE, so it still receives a layer and its dependents are still
++    layered below it and marked (D4).
++    """
++    groups: list[tuple[str, tuple[str, ...], Cycle | None]] = []
++    member_of: dict[str, str] = {}
++    for component in _strongly_connected(nodes, adjacency):
++        members = tuple(sorted(component, key=lambda node: key[node]))
++        representative = members[0]
++        self_loop = len(members) == 1 and representative in adjacency.get(
++            representative, ()
++        )
++        cycle: Cycle | None = None
++        if len(members) > 1 or self_loop:
++            flagged_members = [m for m in members if m in flagged]
++            cycle = Cycle(
++                id=representative,
++                members=members,
++                path=_representative_path(representative, members, adjacency),
++                scc=True,
++                flagged=bool(flagged_members),
++                message=flagged.get(flagged_members[0], "") if flagged_members else "",
++            )
++        elif representative in flagged:
++            cycle = Cycle(
++                id=representative,
++                members=members,
++                scc=False,
++                flagged=True,
++                message=flagged[representative],
++            )
++        groups.append((representative, members, cycle))
++        for member in members:
++            member_of[member] = representative
++    groups.sort(key=lambda group: key[group[0]])
++    return groups, member_of
++
++
++def _condensed_edges(
++    edges: Sequence[DependencyEdge], member_of: Mapping[str, str]
++) -> list[tuple[str, str]]:
++    """Deduped condensation-level edges, dropping the ones inside a group."""
++    return sorted(
++        {
++            (member_of[edge.from_task_id], member_of[edge.to_task_id])
++            for edge in edges
++            if member_of[edge.from_task_id] != member_of[edge.to_task_id]
++        }
++    )
++
++
++def _layer(
++    group_ids: Sequence[str],
++    condensed: Sequence[tuple[str, str]],
++    key: Mapping[str, tuple[str, str]],
++) -> dict[str, int]:
++    """Kahn over the condensed graph: layer = longest path from any root.
++
++    The condensation is by SCC of this very edge set, so the condensed graph is
++    a DAG and every node dequeues exactly once.
++    """
++    successors: dict[str, list[str]] = {group: [] for group in group_ids}
++    indegree = dict.fromkeys(group_ids, 0)
++    for predecessor, dependent in condensed:
++        successors[predecessor].append(dependent)
++        indegree[dependent] += 1
++    layers = dict.fromkeys(group_ids, 0)
++    roots = sorted((g for g in group_ids if not indegree[g]), key=lambda g: key[g])
++    queue = deque(roots)
++    while queue:
++        group = queue.popleft()
++        for dependent in successors[group]:
++            layers[dependent] = max(layers[dependent], layers[group] + 1)
++            indegree[dependent] -= 1
++            if not indegree[dependent]:
++                queue.append(dependent)
++    return layers
++
++
++def _blocked_via_cycle(
++    cyclic: Collection[str], condensed: Sequence[tuple[str, str]]
++) -> set[str]:
++    """Every condensation strictly downstream of a cycle."""
++    successors: dict[str, list[str]] = {}
++    for predecessor, dependent in condensed:
++        successors.setdefault(predecessor, []).append(dependent)
++    reached: set[str] = set()
++    queue = deque(cyclic)
++    while queue:
++        for dependent in successors.get(queue.popleft(), ()):
++            if dependent not in reached and dependent not in cyclic:
++                reached.add(dependent)
++                queue.append(dependent)
++    return reached
++
++
++def build_topology(
++    tasks: Sequence[TaskRecord],
++    edges: Sequence[EdgeRecord],
++    *,
++    blocked: Sequence[BlockedTaskRecord] = (),
++    incomplete: Collection[str] = (),
++    unknown_status: Collection[str] = (),
++) -> Topology:
++    """Condense the fetched scope into cycles, layers and roots.
++
++    ``tasks`` is the node set (in-scope tasks and their ghosts); ``edges`` is
++    every fetched edge — the dependency ones are selected here, so callers pass
++    the scope's edge list whole. ``blocked`` carries Lithos's cycle verdict,
++    ``incomplete`` the nodes whose edge read failed and ``unknown_status`` the
++    ghosts whose ``task_get`` failed.
++
++    Layering uses every dependency edge whatever its state, because layers are
++    the planned sequence rather than a claim about what blocks now — that claim
++    is :func:`longest_blocking_chain`, and it uses the active projection.
++    """
++    dependency = classify_dependency_edges(edges, tasks, unknown_status=unknown_status)
++    node_ids = set(task.id for task in tasks)
++    for edge in dependency:
++        node_ids.update((edge.from_task_id, edge.to_task_id))
++    created_at = {task.id: task.created_at for task in tasks}
++    key = {node: _sort_key(node, created_at.get(node, "")) for node in node_ids}
++    nodes = sorted(node_ids, key=lambda node: key[node])
++
++    adjacency = _adjacency(nodes, dependency, key)
++    groups, member_of = _condense(
++        nodes, adjacency, key, _flagged_cycle_members(blocked)
++    )
++    condensed = _condensed_edges(dependency, member_of)
++    group_ids = [group[0] for group in groups]
++    layers = _layer(group_ids, condensed, key)
++    cyclic = {group_id for group_id, _, cycle in groups if cycle is not None}
++    downstream = _blocked_via_cycle(cyclic, condensed)
++
++    condensations = tuple(
++        sorted(
++            (
++                Condensation(
++                    id=group_id,
++                    members=members,
++                    layer=layers[group_id],
++                    cycle=cycle,
++                    blocked_via_cycle=group_id in downstream,
++                    created_at=created_at.get(group_id, ""),
++                )
++                for group_id, members, cycle in groups
++            ),
++            key=lambda condensation: (condensation.layer, key[condensation.id]),
++        )
++    )
++    depth = max(layers.values(), default=-1) + 1
++    with_indegree = {dependent for _, dependent in condensed}
++    return Topology(
++        nodes=tuple(nodes),
++        condensations=condensations,
++        layers=tuple(
++            tuple(c.id for c in condensations if c.layer == index)
++            for index in range(depth)
++        ),
++        cycles=tuple(c.cycle for c in condensations if c.cycle is not None),
++        # D4: in-degree-zero condensations, plus one representative per cyclic
++        # condensation — a cycle has no root of its own, and a layout given no
++        # root inside it draws its members from wherever it happens to start.
++        roots=tuple(
++            c.id for c in condensations if c.id not in with_indegree or c.id in cyclic
++        ),
++        edges=dependency,
++        incomplete=frozenset(incomplete),
++    )
++
++
++def _chain_bound(topology: Topology) -> ChainBound:
++    """Exact only when nothing could make the true chain longer (D7).
++
++    Two independent degradations, and the second is the subtle one: ANY
++    unknown dependency edge anywhere in the fetched graph lowers the bound,
++    not just one on or near the chain. An unknown edge sits in neither
++    projection, so a disconnected ``X -> Y`` pair could itself be the longest
++    active component — "it is off the current chain" proves nothing about
++    whether it would have been the chain.
++    """
++    if topology.incomplete or any(edge.state == "unknown" for edge in topology.edges):
++        return "lower_bound"
++    return "exact"
++
++
++def _active_condensed(
++    topology: Topology,
++) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
++    """Successor/predecessor maps of the ACTIVE projection, condensed."""
++    member_of = {
++        member: condensation.id
++        for condensation in topology.condensations
++        for member in condensation.members
++    }
++    successors: dict[str, list[str]] = {c.id: [] for c in topology.condensations}
++    predecessors: dict[str, list[str]] = {c.id: [] for c in topology.condensations}
++    for predecessor, dependent in sorted(
++        {
++            (member_of[edge.from_task_id], member_of[edge.to_task_id])
++            for edge in topology.edges
++            if edge.state == "active"
++            and member_of[edge.from_task_id] != member_of[edge.to_task_id]
++        }
++    ):
++        successors[predecessor].append(dependent)
++        predecessors[dependent].append(predecessor)
++    return successors, predecessors
++
++
++def _longest_from(
++    order: Sequence[str],
++    neighbours: Mapping[str, Sequence[str]],
++    key: Mapping[str, tuple[str, str]],
++) -> tuple[dict[str, int], dict[str, str]]:
++    """Longest path length per node over ``neighbours``, plus the step taken.
++
++    ``order`` must be reverse-topological for the direction being walked. Ties
++    break on the smallest ``(created_at, id)`` at each step, which is what
++    makes the traced chain the same one on every render.
++    """
++    length = dict.fromkeys(neighbours, 1)
++    step: dict[str, str] = {}
++    for node in order:
++        best = 0
++        chosen = ""
++        for neighbour in neighbours[node]:
++            candidate = length[neighbour]
++            # ``not chosen`` first: the tie-break below reads ``key[chosen]``,
++            # which only exists once a first neighbour has been taken.
++            if (
++                not chosen
++                or candidate > best
++                or (candidate == best and key[neighbour] < key[chosen])
++            ):
++                best, chosen = candidate, neighbour
++        if chosen:
++            length[node] = best + 1
++            step[node] = chosen
++    return length, step
++
++
++def _walk(start: str, step: Mapping[str, str]) -> list[str]:
++    walked = [start]
++    while walked[-1] in step:
++        walked.append(step[walked[-1]])
++    return walked
++
++
++def longest_blocking_chain(topology: Topology, *, through: str = "") -> BlockingChain:
++    """The longest chain of blocking work in this graph, by node count (D7).
++
++    Over the condensed DAG of the ACTIVE projection: a completed predecessor's
++    edge is not in it, so a finished three-chain never outranks the open
++    two-chain that is the real critical sequence. A cyclic condensation counts
++    once and ghosts count. ``through`` (a task id or a condensation id) asks
++    for the longest chain THROUGH that node instead — the longest walk into it
++    joined to the longest walk out of it — which is what focus mode traces.
++
++    This is the longest chain WITHIN THIS GRAPH, never a corpus-wide critical
++    path: the scope is a page's worth of tasks and their one-hop ghosts.
++    """
++    bound = _chain_bound(topology)
++    if not topology.condensations:
++        return BlockingChain(bound=bound)
++    # The layer order is topological for every dependency edge, so it is
++    # topological for the active subset too.
++    order = [c.id for c in topology.condensations]
++    key = {c.id: _sort_key(c.id, c.created_at) for c in topology.condensations}
++    successors, predecessors = _active_condensed(topology)
++    down, next_step = _longest_from(list(reversed(order)), successors, key)
++    if not through:
++        start = min(order, key=lambda node: (-down[node], key[node]))
++        return BlockingChain(nodes=tuple(_walk(start, next_step)), bound=bound)
++    focus = topology.condensation_of(through)
++    if focus is None:
++        return BlockingChain(bound=bound)
++    _, previous_step = _longest_from(order, predecessors, key)
++    upward = _walk(focus.id, previous_step)
++    return BlockingChain(
++        nodes=tuple(reversed(upward)) + tuple(_walk(focus.id, next_step))[1:],
++        bound=bound,
++    )
++
++
++def hierarchy_rows(
++    tasks: Sequence[TaskRecord], edges: Sequence[EdgeRecord]
++) -> tuple[HierarchyRow, ...]:
++    """The scope's ``parent_child`` forest, flattened into indented rows.
++
++    ``parent_child`` points parent -> child and carries no readiness meaning,
++    so completion never drops one of these edges and the tree shows the same
++    shape whatever the statuses are. A node whose parent is outside the scope
++    is a root here; siblings are ordered by ``(created_at, id)``. Lithos
++    guarantees a single-parent forest, but the walk still refuses to revisit a
++    node, because these edges are agent-written and a malformed loop must
++    degrade to a shorter tree rather than hang the render.
++    """
++    created_at = {task.id: task.created_at for task in tasks}
++    nodes = {task.id for task in tasks}
++    key = {node: _sort_key(node, created_at.get(node, "")) for node in nodes}
++    children: dict[str, list[str]] = {node: [] for node in nodes}
++    parented: set[str] = set()
++    for edge in _dedupe_edges(edges, (PARENT_EDGE_TYPE,)):
++        if edge.from_task_id in nodes and edge.to_task_id in nodes:
++            children[edge.from_task_id].append(edge.to_task_id)
++            parented.add(edge.to_task_id)
++    ordered = {
++        node: sorted(set(kids), key=lambda kid: key[kid])
++        for node, kids in children.items()
++    }
++    by_key = sorted(nodes, key=lambda node: key[node])
++    # Unparented nodes are the real roots; every node is then offered as a seed
++    # so a malformed loop (every member parented, none reachable from a root)
++    # renders a shorter tree instead of dropping its tasks off the page.
++    return _walk_forest([n for n in by_key if n not in parented] + by_key, ordered)
++
++
++def _walk_forest(
++    seeds: Sequence[str], children: Mapping[str, Sequence[str]]
++) -> tuple[HierarchyRow, ...]:
++    """Pre-order DFS from each unvisited seed, emitting one row per node."""
++    rows: list[HierarchyRow] = []
++    visited: set[str] = set()
++    for seed in seeds:
++        stack = [(seed, 0)]
++        while stack:
++            node, depth = stack.pop()
++            if node in visited:
++                continue
++            visited.add(node)
++            kids = children[node]
++            rows.append(
++                HierarchyRow(task_id=node, depth=depth, has_children=bool(kids))
++            )
++            stack.extend((kid, depth + 1) for kid in reversed(kids))
++    return tuple(rows)
+diff --git a/tests/test_graph_layout.py b/tests/test_graph_layout.py
+new file mode 100644
+index 0000000..8f4850a
+--- /dev/null
++++ b/tests/test_graph_layout.py
+@@ -0,0 +1,509 @@
++"""T2 slice A2 — the pure graph topology: SCC, layers, chain, hierarchy.
++
++Table-driven where the rule has cases (edge classification, layering, the
++chain's bound) and fixture-driven where the rule has a shape (the depth-5 DAG,
++the cross-scope cycle). Every case names the D-number it pins, because the
++interesting assertions here are the ones that look wrong until you read the
++decision: a cyclic condensation counting ONCE, a completed three-chain losing
++to an open two-chain, and a disconnected unknown edge lowering the bound of a
++chain it is nowhere near.
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime, timedelta
++
++import pytest
++
++from lithos_lens.graph_layout import (
++    DependencyEdge,
++    build_topology,
++    classify_dependency_edges,
++    hierarchy_rows,
++    longest_blocking_chain,
++)
++from lithos_lens.task_graph import BlockedTaskRecord, BlockerRecord, EdgeRecord
++from lithos_lens.tasks import TaskRecord, TaskStatusName
++
++# Creation order is the tie-break everything in this module falls back on, so
++# fixtures space their tasks a day apart in the order their ids read.
++_CREATED = {
++    letter: f"2026-08-{index + 1:02d}T09:00:00+00:00"
++    for index, letter in enumerate("ABCDEFGHIJ")
++}
++
++
++def _task(
++    task_id: str,
++    *,
++    status: TaskStatusName = "open",
++    created_at: str = "",
++    task_type: str = "task",
++) -> TaskRecord:
++    return TaskRecord(
++        id=task_id,
++        title=f"Title {task_id}",
++        status=status,
++        task_type=task_type,
++        created_at=created_at or _CREATED.get(task_id, f"2026-08-01T09:00:0{0}+00:00"),
++    )
++
++
++def _tasks(*specs: str) -> list[TaskRecord]:
++    """``"A"`` / ``"B:completed"`` shorthand for a node set."""
++    built = []
++    for spec in specs:
++        task_id, _, status = spec.partition(":")
++        built.append(_task(task_id, status=status or "open"))  # type: ignore[arg-type]
++    return built
++
++
++def _edge(spec: str, edge_type: str = "blocks") -> EdgeRecord:
++    """``"A>B"`` is "A blocks B" — both dependency types point blocker -> blocked."""
++    predecessor, _, dependent = spec.partition(">")
++    return EdgeRecord(
++        from_task_id=predecessor,
++        to_task_id=dependent,
++        type=edge_type,
++        created_at="2026-08-01T09:00:00+00:00",
++    )
++
++
++def _edges(*specs: str) -> list[EdgeRecord]:
++    return [_edge(spec) for spec in specs]
++
++
++def _cycle_flag(
++    task: TaskRecord, message: str = "cycle: A -> B -> A"
++) -> BlockedTaskRecord:
++    return BlockedTaskRecord(
++        task=task,
++        blockers=(BlockerRecord(kind="cycle", task_id=task.id, message=message),),
++    )
++
++
++def _layer_ids(topology) -> list[list[str]]:
++    return [list(layer) for layer in topology.layers]
++
++
++# --------------------------------------------------------------------------
++# D6 — dependency edge state, classified from BOTH endpoints
++# --------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    ("predecessor", "dependent", "state", "reason"),
++    [
++        ("open", "open", "active", ""),
++        # A cancelled predecessor blocks forever: T1's unsatisfiable case.
++        ("cancelled", "open", "active", ""),
++        ("completed", "open", "inactive", "satisfied"),
++        ("open", "completed", "inactive", "dependent_resolved"),
++        ("open", "cancelled", "inactive", "dependent_resolved"),
++        # Satisfied takes precedence: the dependency was MET, whatever the
++        # dependent then did.
++        ("completed", "completed", "inactive", "satisfied"),
++        ("completed", "cancelled", "inactive", "satisfied"),
++    ],
++)
++def test_edge_state_from_both_endpoints(
++    predecessor: str, dependent: str, state: str, reason: str
++) -> None:
++    edges = classify_dependency_edges(
++        _edges("A>B"), _tasks(f"A:{predecessor}", f"B:{dependent}")
++    )
++    assert edges == (
++        DependencyEdge("A", "B", "blocks", state, reason),  # type: ignore[arg-type]
++    )
++
++
++@pytest.mark.parametrize("unknown", ["A", "B"])
++def test_unknown_status_endpoint_makes_the_edge_unknown(unknown: str) -> None:
++    """D2: a ghost whose ``task_get`` failed unclassifies its edges either way."""
++    edges = classify_dependency_edges(
++        _edges("A>B"), _tasks("A", "B"), unknown_status=[unknown]
++    )
++    assert [(edge.state, edge.reason) for edge in edges] == [("unknown", "")]
++
++
++def test_only_dependency_edge_types_are_classified() -> None:
++    edges = classify_dependency_edges(
++        [
++            _edge("A>B", "blocks"),
++            _edge("A>B", "waits_on_gate"),
++            _edge("A>B", "parent_child"),
++            _edge("A>B", "discovered_from"),
++            # The cache fetches direction="both", so an in-scope edge arrives twice.
++            _edge("A>B", "blocks"),
++        ],
++        _tasks("A", "B"),
++    )
++    assert [edge.type for edge in edges] == ["blocks", "waits_on_gate"]
++
++
++# --------------------------------------------------------------------------
++# D4 — cycles and condensed layering
++# --------------------------------------------------------------------------
++
++
++def test_cycle_and_its_dependent_each_get_a_layer() -> None:
++    """A -> B -> A with C blocked by B: [{A,B} cycle], [C blocked-via-cycle]."""
++    topology = build_topology(_tasks("A", "B", "C"), _edges("A>B", "B>A", "B>C"))
++
++    assert _layer_ids(topology) == [["A"], ["C"]]
++    (cycle,) = topology.cycles
++    assert cycle.members == ("A", "B")
++    assert cycle.path == ("A", "B", "A")
++    assert cycle.scc is True
++    assert topology.condensation_of("B") is topology.condensations[0]
++    assert topology.condensations[0].blocked_via_cycle is False
++    assert topology.condensations[1].blocked_via_cycle is True
++    # A cycle has no in-degree-zero member, so it contributes its own root.
++    assert topology.roots == ("A",)
++
++
++def test_dag_of_depth_four_yields_four_layers() -> None:
++    topology = build_topology(_tasks("A", "B", "C", "D"), _edges("A>B", "B>C", "C>D"))
++
++    assert _layer_ids(topology) == [["A"], ["B"], ["C"], ["D"]]
++    assert topology.cycles == ()
++    assert topology.roots == ("A",)
++
++
++def test_ghost_with_only_outgoing_edges_is_in_layer_zero() -> None:
++    """D5: a one-hop ghost predecessor (a node record like any other) is a root."""
++    topology = build_topology(_tasks("A", "B", "C"), _edges("A>B", "B>C"))
++
++    assert _layer_ids(topology) == [["A"], ["B"], ["C"]]
++    assert topology.roots == ("A",)
++
++
++def test_edge_endpoint_with_no_record_is_a_node_of_unknown_status() -> None:
++    """Assuming a status would either inflate the chain or hide a live blocker."""
++    topology = build_topology(_tasks("B"), _edges("A>B"))
++
++    assert topology.nodes == ("A", "B")
++    assert [edge.state for edge in topology.edges] == ["unknown"]
++
++
++@pytest.mark.parametrize(
++    ("label", "specs"),
++    [
++        ("self-loop", ("A>A",)),
++        ("two-cycle", ("A>B", "B>A")),
++        ("three-cycle", ("A>B", "B>C", "C>A")),
++    ],
++)
++def test_every_cycle_shape_is_one_condensation(
++    label: str, specs: tuple[str, ...]
++) -> None:
++    members = sorted({end for spec in specs for end in spec.split(">")})
++    topology = build_topology(_tasks(*members), _edges(*specs))
++
++    (cycle,) = topology.cycles
++    assert cycle.members == tuple(members)
++    assert cycle.scc is True
++    # One condensation, so one layer, however many members it holds.
++    assert _layer_ids(topology) == [["A"]]
++
++
++def test_scc_renders_identically_under_reversed_edge_order() -> None:
++    tasks = _tasks("A", "B", "C")
++    specs = ("A>B", "B>C", "C>A")
++    forward = build_topology(tasks, _edges(*specs))
++    reversed_input = build_topology(
++        list(reversed(tasks)), list(reversed(_edges(*specs)))
++    )
++
++    assert forward.cycles == reversed_input.cycles
++    assert forward.cycles[0].members == ("A", "B", "C")
++    assert forward.cycles[0].path == ("A", "B", "C", "A")
++    assert forward.layers == reversed_input.layers
++
++
++def test_lithos_flagged_member_with_no_scc_is_condensed_alone_and_marked() -> None:
++    """D4: the cross-scope cycle Lens cannot see is still layered and marked."""
++    tasks = _tasks("A", "C")
++    topology = build_topology(
++        tasks,
++        # A's cycle closes through ghosts whose edges Lens never fetches.
++        _edges("A>C"),
++        blocked=[_cycle_flag(tasks[0], "cycle: A -> ghost -> A")],
++    )
++
++    (cycle,) = topology.cycles
++    assert cycle.members == ("A",)
++    assert cycle.scc is False
++    assert cycle.flagged is True
++    assert cycle.path == ()
++    assert cycle.message == "cycle: A -> ghost -> A"
++    assert _layer_ids(topology) == [["A"], ["C"]]
++    downstream = topology.condensation_of("C")
++    assert downstream is not None and downstream.blocked_via_cycle is True
++    assert topology.roots == ("A",)
++
++
++def test_lithos_flag_on_an_scc_member_keeps_the_drawable_shape() -> None:
++    tasks = _tasks("A", "B")
++    topology = build_topology(
++        tasks, _edges("A>B", "B>A"), blocked=[_cycle_flag(tasks[1])]
++    )
++
++    (cycle,) = topology.cycles
++    assert (cycle.scc, cycle.flagged) == (True, True)
++    assert cycle.members == ("A", "B")
++    assert cycle.path == ("A", "B", "A")
++
++
++def test_layers_use_every_dependency_edge_whatever_its_state() -> None:
++    """D6: layers describe the planned sequence, so a satisfied edge still orders."""
++    topology = build_topology(
++        _tasks("A:completed", "B", "C"), _edges("A>B", "B>C"), unknown_status=["C"]
++    )
++
++    assert _layer_ids(topology) == [["A"], ["B"], ["C"]]
++    assert [edge.state for edge in topology.edges] == ["inactive", "unknown"]
++
++
++def test_roots_list_every_in_degree_zero_condensation() -> None:
++    topology = build_topology(_tasks("A", "B", "C", "D"), _edges("A>C", "B>C", "C>D"))
++
++    assert topology.roots == ("A", "B")
++
++
++# --------------------------------------------------------------------------
++# D7 — the longest blocking chain
++# --------------------------------------------------------------------------
++
++
++def _depth_five() -> tuple[list[TaskRecord], list[EdgeRecord]]:
++    """A -> B -> C -> D -> E, with a shorter F -> C branch beside it."""
++    return (
++        _tasks("A", "B", "C", "D", "E", "F"),
++        _edges("A>B", "B>C", "C>D", "D>E", "F>C"),
++    )
++
++
++def test_longest_chain_of_the_depth_five_fixture() -> None:
++    topology = build_topology(*_depth_five())
++    chain = longest_blocking_chain(topology)
++
++    assert chain.nodes == ("A", "B", "C", "D", "E")
++    assert chain.length == 5
++    assert chain.bound == "exact"
++
++
++def test_chain_through_a_given_node_is_the_known_sub_chain() -> None:
++    tasks, edges = _depth_five()
++    topology = build_topology(tasks, edges)
++
++    # C sits in layer 2; the chain through it is the whole five, and the chain
++    # through the short branch F reaches C's descendants but not A and B.
++    assert longest_blocking_chain(topology, through="C").nodes == (
++        "A",
++        "B",
++        "C",
++        "D",
++        "E",
++    )
++    assert longest_blocking_chain(topology, through="F").nodes == ("F", "C", "D", "E")
++    assert longest_blocking_chain(topology, through="E").nodes == (
++        "A",
++        "B",
++        "C",
++        "D",
++        "E",
++    )
++
++
++def test_chain_through_an_unknown_id_is_empty_not_an_error() -> None:
++    topology = build_topology(*_depth_five())
++
++    assert longest_blocking_chain(topology, through="nope").nodes == ()
++
++
++def test_chain_ties_break_on_created_at_then_id() -> None:
++    """Two equal-length branches: the smaller ``(created_at, id)`` wins each step."""
++    topology = build_topology(
++        _tasks("A", "B", "C", "D", "E"), _edges("A>B", "A>C", "B>D", "C>E")
++    )
++
++    assert longest_blocking_chain(topology).nodes == ("A", "B", "D")
++
++
++def test_a_cyclic_condensation_counts_once_in_the_chain() -> None:
++    topology = build_topology(
++        _tasks("A", "B", "C", "D"), _edges("A>B", "B>C", "C>B", "C>D")
++    )
++
++    chain = longest_blocking_chain(topology)
++    # B and C are one condensation, represented by B: A -> {B,C} -> D is 3.
++    assert chain.nodes == ("A", "B", "D")
++    assert chain.length == 3
++
++
++def test_ghosts_count_toward_the_chain() -> None:
++    """D7: a chain may start at a ghost, so the scope's ghost records count."""
++    topology = build_topology(_tasks("A", "B", "C"), _edges("A>B", "B>C"))
++
++    assert longest_blocking_chain(topology).nodes == ("A", "B", "C")
++
++
++def test_completed_three_chain_loses_to_the_open_two_chain() -> None:
++    """D7: inactive edges are not in the projection, so they never dominate."""
++    topology = build_topology(
++        _tasks("A:completed", "B:completed", "C:completed", "D", "E"),
++        _edges("A>B", "B>C", "D>E"),
++    )
++
++    chain = longest_blocking_chain(topology)
++    assert chain.nodes == ("D", "E")
++    assert chain.bound == "exact"
++
++
++def test_incomplete_node_flags_the_chain_as_a_lower_bound() -> None:
++    tasks, edges = _depth_five()
++    topology = build_topology(tasks, edges, incomplete=["D"])
++
++    chain = longest_blocking_chain(topology)
++    assert chain.nodes == ("A", "B", "C", "D", "E")
++    assert chain.bound == "lower_bound"
++
++
++def test_unknown_ghost_blocker_lowers_the_bound_and_stays_off_the_chain() -> None:
++    """D6: an unknown edge is counted in neither direction, so it is not walked."""
++    topology = build_topology(
++        _tasks("A", "B"), _edges("G>A", "A>B"), unknown_status=["G"]
++    )
++
++    chain = longest_blocking_chain(topology)
++    assert chain.nodes == ("A", "B")
++    assert chain.bound == "lower_bound"
++    assert "G" not in chain.nodes
++
++
++def test_disconnected_unknown_edge_lowers_the_global_bound() -> None:
++    """A known chain of 1 beside an unknown X -> Y reports ">= 1", not "1"."""
++    topology = build_topology(_tasks("A", "X"), _edges("X>Y"), unknown_status=["Y"])
++
++    chain = longest_blocking_chain(topology)
++    assert chain.length == 1
++    assert chain.bound == "lower_bound"
++
++
++def test_empty_scope_has_no_chain() -> None:
++    chain = longest_blocking_chain(build_topology([], []))
++
++    assert (chain.nodes, chain.length, chain.bound) == ((), 0, "exact")
++
++
++def test_epic_fixture_completed_predecessor_leaves_the_chain_and_the_ancestry() -> None:
++    """An epic graph keeps closed children; open A -> completed B is not blocking."""
++    tasks = _tasks("A", "B:completed", "C", "D")
++    edges = _edges("A>B", "C>D")
++    topology = build_topology(tasks, edges)
++
++    assert longest_blocking_chain(topology).nodes == ("C", "D")
++    assert longest_blocking_chain(topology, through="A").nodes == ("A",)
++
++    # Reopening B (the fake's own move) makes the edge active again.
++    reopened = build_topology(_tasks("A", "B", "C", "D"), edges)
++    assert longest_blocking_chain(reopened, through="A").nodes == ("A", "B")
++
++
++# --------------------------------------------------------------------------
++# The hierarchy tree
++# --------------------------------------------------------------------------
++
++
++def test_hierarchy_tree_is_indented_and_ordered_by_created_at() -> None:
++    rows = hierarchy_rows(
++        _tasks("A", "B", "C", "D", "E"),
++        [
++            _edge("A>C", "parent_child"),
++            _edge("A>B", "parent_child"),
++            _edge("B>D", "parent_child"),
++            # Not hierarchy: must not shape the tree.
++            _edge("D>E", "blocks"),
++        ],
++    )
++
++    assert [(row.task_id, row.depth) for row in rows] == [
++        ("A", 0),
++        ("B", 1),
++        ("D", 2),
++        ("C", 1),
++        ("E", 0),
++    ]
++    assert [row.task_id for row in rows if row.has_children] == ["A", "B"]
++
++
++def test_hierarchy_ignores_a_parent_outside_the_scope() -> None:
++    rows = hierarchy_rows(_tasks("B"), [_edge("A>B", "parent_child")])
++
++    assert [(row.task_id, row.depth) for row in rows] == [("B", 0)]
++
++
++def test_hierarchy_walk_refuses_to_revisit_a_malformed_loop() -> None:
++    rows = hierarchy_rows(
++        _tasks("A", "B"),
++        [_edge("A>B", "parent_child"), _edge("B>A", "parent_child")],
++    )
++
++    # Every parented node, no root: the walk still terminates and shows both.
++    assert sorted(row.task_id for row in rows) == ["A", "B"]
++
++
++# ── security: bounded representative-path walk (security/f-001) ────────
++
++
++def _exponential_scc(depth: int) -> tuple[list[TaskRecord], list[EdgeRecord]]:
++    """One SCC whose closing edge sits behind ``2**depth`` dead-end descents.
++
++    ``s -> m``, then ``m`` branches into a trap lattice (``t_i`` forking through
++    ``u_i``/``v_i`` into ``t_{i+1}``, the last one pointing back at ``m``) and
++    into ``w -> s``, the only edge that closes the cycle. ``created_at`` is
++    assigned so ``s`` is the smallest member — hence the walk's start — and
++    ``w`` the largest, so the sorted adjacency offers ``m`` the trap first.
++    """
++    order = ["s", "m"]
++    edges = [_edge("s>m"), _edge("m>t0"), _edge(f"t{depth}>m")]
++    for index in range(depth):
++        order += [f"t{index}", f"u{index}", f"v{index}"]
++        edges += _edges(
++            f"t{index}>u{index}",
++            f"t{index}>v{index}",
++            f"u{index}>t{index + 1}",
++            f"v{index}>t{index + 1}",
++        )
++    order += [f"t{depth}", "w"]
++    edges += [_edge("m>w"), _edge("w>s")]
++    base = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
++    tasks = [
++        _task(task_id, created_at=(base + timedelta(minutes=index)).isoformat())
++        for index, task_id in enumerate(order)
++    ]
++    return tasks, edges
++
++
++def test_representative_path_walk_is_bounded_by_the_component_size() -> None:
++    """Regression for the exhaustive-backtracking DoS: un-marking a node when
++    the walk backtracked made the path search enumerate simple paths, so an
++    agent-written cycle of ~80 tasks (well inside ``[graph].max_tasks``) burned
++    minutes of event loop per render. Keeping the visited mark bounds it at one
++    expansion per member. Black-box through ``build_topology``, the entry point
++    a page scope actually reaches, and asserting the answer is unchanged as
++    well as fast — the trap costs nothing to skip, it only costs to explore."""
++    import time
++
++    tasks, edges = _exponential_scc(24)
++
++    start = time.perf_counter()
++    topology = build_topology(tasks, edges)
++    elapsed = time.perf_counter() - start
++
++    (cycle,) = topology.cycles
++    assert cycle.path == ("s", "m", "w", "s")
++    assert cycle.members[0] == "s"
++    assert len(cycle.members) == len(tasks)
++    assert elapsed < 2.0  # pre-fix: 14.8 s here, and 2x per 3 nodes added
