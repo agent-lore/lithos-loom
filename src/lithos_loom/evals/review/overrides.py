@@ -20,7 +20,12 @@ from dataclasses import replace
 from typing import Protocol
 
 from ...plugins.story_develop import engines
-from ...plugins.story_develop.config import ReviewerSpec, parse_effort, parse_model
+from ...plugins.story_develop.config import (
+    DEFAULT_REVIEWER_NAME,
+    ReviewerSpec,
+    parse_effort,
+    parse_model,
+)
 from ...plugins.story_develop.personas import canonical_personas
 from ...plugins.story_develop.profiles import get_profile
 
@@ -34,6 +39,24 @@ _OVERRIDE_FIELDS = ("model", "effort", "tool")
 ReviewerOverrides = dict[str, dict[str, str]]
 
 
+def selectable_reviewers() -> dict[str, ReviewerSpec]:
+    """The reviewers a run may field by name: the canonical personas plus the
+    zero-config generalist (``code-quality`` — no persona brief, the
+    ``daemon_io.BUILTIN_REVIEWERS`` default). The generalist is the
+    cold-generalist arm of the escape-corpus reading (README §"Escape
+    review"): whether a reviewer with no persona narrowness reproduces the
+    operator's findings separates "the personas are too narrow" from "the
+    panel lacks context" as the lever. Only ``--reviewer`` /
+    ``--reviewer-override`` read this; a case file's ``personas`` stays
+    canonical-only (``load_case``), so a case never opts into the
+    generalist silently.
+    """
+    return {
+        **canonical_personas(),
+        DEFAULT_REVIEWER_NAME: ReviewerSpec(name=DEFAULT_REVIEWER_NAME),
+    }
+
+
 def parse_reviewer_overrides(items: Sequence[str]) -> ReviewerOverrides:
     """Parse ``PERSONA.FIELD=VALUE`` override strings, fail-closed.
 
@@ -43,7 +66,7 @@ def parse_reviewer_overrides(items: Sequence[str]) -> ReviewerOverrides:
     so every surface rejects identical garbage. A later duplicate for the same
     ``persona.field`` wins. Raises :class:`ValueError`.
     """
-    registry = canonical_personas()
+    registry = selectable_reviewers()
     overrides: ReviewerOverrides = {}
     for item in items:
         where = f"--reviewer-override {item!r}"
@@ -104,7 +127,8 @@ def resolve_panel(
     """The effective ``(profile, panel)`` for *case* under the run's overrides.
 
     Precedence: an explicit ``reviewers`` enumeration wins the panel (dedup
-    preserving order, unknown names fail closed); else a ``profile`` override
+    preserving order, unknown names fail closed; the generalist
+    ``code-quality`` is selectable here and only here); else a ``profile`` override
     replaces the panel with the profile's personas — what a live
     ``develop_review_profile`` run would field — and a gate-only profile is
     rejected because there would be nothing to measure; else the case's own
@@ -123,7 +147,7 @@ def resolve_panel(
     the returned panel (and hence ``summary.json``) is the *effective* runtime
     configuration, never a recorded-but-ignored setting.
     """
-    registry = canonical_personas()
+    registry = selectable_reviewers()
     effective_profile = profile or case.profile
     if reviewers:
         specs: list[ReviewerSpec] = []

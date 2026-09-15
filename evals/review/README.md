@@ -213,7 +213,13 @@ Semantics:
   the panel (then `--profile` is check-set-only).
 - **`--reviewer NAME` (repeatable) wins the panel**: explicit enumeration of
   canonical personas (dedup, order preserved) — this is how you add or remove
-  reviewers relative to a case/profile panel.
+  reviewers relative to a case/profile panel. `code-quality` — the zero-config
+  generalist with no persona brief — is selectable here and only here (a case
+  file's `personas` stays canonical-only): the **cold-generalist arm** of an
+  escape-review reading, `--reviewer code-quality` over the escape cases, asks
+  whether a reviewer with no persona narrowness reproduces the operator's
+  findings — separating "the personas are too narrow" from "the panel lacks
+  context" as the lever before either is bought.
 - **`--reviewer-override PERSONA.FIELD=VALUE`** (repeatable; `FIELD` ∈ `model` |
   `effort` | `tool`) then adjusts personas **where present** in the effective
   panel: a case whose panel lacks the persona runs unmodified (full-benchmark
