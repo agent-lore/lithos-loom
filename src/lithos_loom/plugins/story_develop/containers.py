@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shlex
 import subprocess
 from collections.abc import Sequence
@@ -177,7 +178,8 @@ def resync_auth_files(
     auth_files: Sequence[str],
 ) -> list[str]:
     """Write the host's CURRENT auth files into the container's bind-mounted
-    inodes, in place — only where they differ (#403).
+    inodes, in place — only where the mount is demonstrably a STALE inode
+    (#403).
 
     Each auth file is bind-mounted as a single file, which pins the inode at
     container start; the agent CLIs refresh their token by rename-replace, so
@@ -187,52 +189,53 @@ def resync_auth_files(
     host-side copy or rename never reaches the mount; streaming the bytes
     through ``docker exec -i … cat > <mount>/<file>`` does (an in-place write).
 
-    The write is guarded because when NO host refresh has happened the mount
-    still IS the host's live file (same inode): the container's current bytes
-    are read first and an identical file is left alone — so the operator's
-    live credentials are never truncated-and-rewritten for a 401 that was a
-    real revocation, and a codex ``auth.json`` that refreshes in place is never
-    touched. Also skipped: a host file that is empty or not JSON (the CLI
+    The write is guarded on INODE IDENTITY (PR #405 review): when no host
+    refresh has happened the mount still IS the host's live file, and a write
+    through it would rewrite the operator's live credentials — a byte
+    comparison cannot prove non-aliasing (an in-place refresh between the two
+    reads makes the bytes differ while the inode is shared, and the write
+    would roll the live file back). So the container's inode of the target is
+    compared with the inode of the host file whose bytes are about to be
+    written (the same open fd — one snapshot); equal → aliased → never
+    written. Also skipped: a host file that is empty or not JSON (the CLI
     mid-rewrite — never install garbage), a file the container never mounted
-    (a candidate absent at start; writing would create a plaintext copy in the
-    run dir), a dead / hung container (exec error or timeout — the retry then
-    fails for real and escalates as before). Returns the files that landed.
+    (a candidate absent at start; writing would create a plaintext copy in
+    the run dir), a dead / hung container (exec error or timeout — the retry
+    then fails for real and escalates as before). Returns the files that
+    landed.
     """
     synced: list[str] = []
     for fname in auth_files:
         target = f"{config_mount}/{fname}"
         try:
-            data = (auth_source_dir / fname).read_bytes()
+            with open(auth_source_dir / fname, "rb") as fh:
+                host_inode = os.fstat(fh.fileno()).st_ino
+                data = fh.read()
             json.loads(data)
         except (OSError, ValueError) as exc:
             logger.warning("auth re-sync: host %s unusable, skipped: %s", fname, exc)
             continue
         try:
-            current = subprocess.run(
-                ["docker", "exec", name, "cat", target],
+            probe = subprocess.run(
+                ["docker", "exec", name, "stat", "-c", "%i", target],
                 capture_output=True,
                 timeout=_RESYNC_TIMEOUT_S,
             )
-            if current.returncode != 0:
+            if probe.returncode != 0:
                 logger.warning(
                     "auth re-sync: %s has no %s to refresh (rc %d), skipped",
                     name,
                     target,
-                    current.returncode,
+                    probe.returncode,
                 )
                 continue
-            if current.stdout == data:
-                continue  # same inode, or already fresh — never rewrite it
+            if probe.stdout.strip() == str(host_inode).encode():
+                # the mount still aliases the host's live file: nothing is
+                # stale, and a write would go through to the operator's login
+                continue
+            write = f"cat > {shlex.quote(target)}"
             proc = subprocess.run(
-                [
-                    "docker",
-                    "exec",
-                    "-i",
-                    name,
-                    "sh",
-                    "-c",
-                    f"cat > {shlex.quote(target)}",
-                ],
+                ["docker", "exec", "-i", name, "sh", "-c", write],
                 input=data,
                 capture_output=True,
                 timeout=_RESYNC_TIMEOUT_S,

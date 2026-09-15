@@ -1278,6 +1278,38 @@ def test_reviewer_auth_death_resyncs_the_mounted_credentials_before_the_retry(
     assert ".credentials.json" in result.infra_host_action
 
 
+def test_reviewer_mixed_class_exhaustion_keeps_the_auth_outcome_on_auth(
+    tmp_path: Path,
+) -> None:
+    """PR #405 review (Medium), the reviewer loop: OOM → auth → OOM ends on
+    the OOM class and its host action must not inherit the auth re-sync."""
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    killed = TurnResult(
+        exit_code=137,
+        succeeded=False,
+        completed=False,
+        session_id="",
+        result_text="",
+        cost_usd=0.0,
+        raw=None,
+        stderr="",
+    )
+    turns = [killed, _infra_failed_turn(), killed]
+
+    def run_turn(**kw):
+        return turns.pop(0)
+
+    services = dataclasses.replace(
+        _recording_services(run_turn, []),
+        resync_auth=lambda container, engine, cfg: [".credentials.json"],
+    )
+    result = _round(config, [_reviewer("correctness", tmp_path)], services)
+    assert result.infra_failure is not None and "oom_or_spawn" in result.infra_failure
+    assert "re-sync" not in result.infra_host_action
+    assert "docker" in result.infra_host_action
+
+
 def test_reviewer_auth_death_retries_once_then_escalates(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.handoff_dir.mkdir(parents=True, exist_ok=True)

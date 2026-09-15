@@ -545,3 +545,35 @@ def test_services_live_wires_the_resync_and_maps_the_engine(
             "auth_files": ["auth.json"],
         },
     ]
+
+
+def _killed() -> TurnResult:
+    return TurnResult(
+        exit_code=137,
+        succeeded=False,
+        completed=False,
+        session_id="",
+        result_text="",
+        cost_usd=0.0,
+        raw=None,
+        stderr="",
+    )
+
+
+def test_mixed_class_exhaustion_keeps_the_auth_outcome_on_the_auth_class(
+    tmp_path: Path,
+) -> None:
+    """PR #405 review (Medium): retry budgets are per class and interleave.
+    OOM → auth → OOM exhausts the OOM class while the last auth retry's
+    re-sync is still remembered — the OOM host action must not claim a
+    re-authentication. The reverse ordering exhausts auth and DOES carry it."""
+    auth = _turn(succeeded=False, result_text=AUTH, cost=0.0)
+    services, *_ = _services_with_resync([_killed(), auth, _killed()])
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.escalation is not None and "oom_or_spawn" in att.escalation
+    assert "re-sync" not in att.host_action and "docker" in att.host_action
+
+    services, *_ = _services_with_resync([auth, _killed(), auth])
+    att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
+    assert att.escalation is not None and "auth_failed" in att.escalation
+    assert "re-synced from the host" in att.host_action

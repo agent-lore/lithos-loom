@@ -156,11 +156,16 @@ def resync_before_auth_retry(
     return synced
 
 
-def auth_host_action(reaction: limits.Reaction, resynced: list[str] | None) -> str:
+def auth_host_action(
+    reaction: limits.Reaction, cls: limits.FailureClass, resynced: list[str] | None
+) -> str:
     """The escalation's host action, saying what the retry actually ran on
-    (#403): the table's advice plus whether the credentials were re-synced —
-    the needs-human brief must never assert a re-sync that did not happen."""
-    if resynced is None:
+    (#403): the table's advice plus — only when the class ESCALATING is
+    ``auth_failed`` — whether the credentials were re-synced. Retry budgets
+    are per class and interleave (PR #405 review: an OOM exhausting after an
+    auth retry must not inherit the auth outcome), and the needs-human brief
+    must never assert a re-sync that did not happen."""
+    if cls is not limits.FailureClass.AUTH_FAILED or resynced is None:
         return reaction.host_action
     if resynced:
         return (
@@ -290,9 +295,9 @@ def turn_with_reactions(
                     False,
                     total_cost,
                     escalation,
-                    host_action=auth_host_action(reaction, resynced)
-                    if escalation
-                    else "",
+                    host_action=(
+                        auth_host_action(reaction, cls, resynced) if escalation else ""
+                    ),
                     session_id=session_id,
                 )
             wait = reaction.backoff_seconds[used]
@@ -308,9 +313,10 @@ def turn_with_reactions(
                 reaction.retries + 1,
             )
             services.sleep(wait)
-            resynced = resync_before_auth_retry(
-                services, config, cls, container=container, engine=engine, who=agent
-            )
+            if cls is limits.FailureClass.AUTH_FAILED:  # keyed to the class
+                resynced = resync_before_auth_retry(
+                    services, config, cls, container=container, engine=engine, who=agent
+                )
             continuation = INFRA_CONTINUATION_PROMPT
         else:
             return TurnAttempt(turn, False, total_cost, session_id=session_id)

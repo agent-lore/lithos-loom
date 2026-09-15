@@ -451,7 +451,7 @@ def _run_reviewer_with_reaction(
                     cost,
                     False,
                     None,
-                    (escalation, auth_host_action(reaction, resynced)),
+                    (escalation, auth_host_action(reaction, cls, resynced)),
                 )
             wait = reaction.backoff_seconds[used]
             attempts[cls] = used + 1
@@ -467,14 +467,15 @@ def _run_reviewer_with_reaction(
                 reaction.retries + 1,
             )
             services.sleep(wait)
-            resynced = resync_before_auth_retry(
-                services,
-                config,
-                cls,
-                container=rstate.container,
-                engine=rstate.engine_now,
-                who=f"reviewer [{name}]",
-            )
+            if cls is limits.FailureClass.AUTH_FAILED:  # keyed to the class
+                resynced = resync_before_auth_retry(
+                    services,
+                    config,
+                    cls,
+                    container=rstate.container,
+                    engine=rstate.engine_now,
+                    who=f"reviewer [{name}]",
+                )
             if reaction.resume and rstate.engine_now.session_transcript_exists(
                 config.reviewer_config_dir(name), rstate.session
             ):

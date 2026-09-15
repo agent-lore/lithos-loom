@@ -56,7 +56,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
-| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 14 |
+| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
@@ -79,7 +79,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `PauseBudget` — The run's shared usage-limit pause budget, in seconds.
 - def `resume_after_from` — When an interrupted run should be retried (PRD decision #5, T10).
 - def `resync_before_auth_retry` — #403: before an ``auth_failed`` retry — after its backoff, so the bytes are as fresh as they can be — write the host's current auth file into the container's bind-mounted inode (``Services.resync_auth``). The mount pins the inode at container start and the CLI refreshes by rename, so without this the retry re-reads the same stale token. Returns the files that landed (``[]`` when nothing did), ``None`` for any other class.
-- def `auth_host_action` — The escalation's host action, saying what the retry actually ran on (#403): the table's advice plus whether the credentials were re-synced — the needs-human brief must never assert a re-sync that did not happen.
+- def `auth_host_action` — The escalation's host action, saying what the retry actually ran on (#403): the table's advice plus — only when the class ESCALATING is ``auth_failed`` — whether the credentials were re-synced. Retry budgets are per class and interleave (PR #405 review: an OOM exhausting after an auth retry must not inherit the auth outcome), and the needs-human brief must never assert a re-sync that did not happen.
 - def `turn_with_reactions` — Run a turn, applying the failure-class reaction table until it settles.
 
 ### `lithos_loom.plugins.story_develop.autoformat`
@@ -162,7 +162,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `build_run_command` — Build the ``docker run`` argv for a long-lived idle agent container.
 - def `start_container` — Run ``docker run -d`` and return the container id (stdout).
 - def `exec_turn` — Run ``docker exec`` for one turn with stdin closed (no 3s stdin wait).
-- def `resync_auth_files` — Write the host's CURRENT auth files into the container's bind-mounted inodes, in place — only where they differ (#403).
+- def `resync_auth_files` — Write the host's CURRENT auth files into the container's bind-mounted inodes, in place — only where the mount is demonstrably a STALE inode (#403).
 - def `stop_container` — Force-remove the container; never raises (teardown must be best-effort).
 
 ### `lithos_loom.plugins.story_develop.converge`
@@ -393,6 +393,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `resolve_change` — Resolve *spec* into a :class:`ResolvedChange`.
 
 ### `lithos_loom.plugins.story_develop.rounds`
+- def `no_resync` — The ``Services.resync_auth`` default: nothing landed (fakes, and any constructor that does not name the seam).
 - class `Services` — The side-effecting seams the round pipeline depends on, injected so the loop is testable with fakes (ARCH-1.S4): ``run_turn`` / ``sleep`` feed :func:`agent_session.turn_with_reactions`, the rest the phase pipeline.
 - def `resync_auth_live` — The production ``Services.resync_auth``: the engine's auth files from its operator dir into its config mount (#403).
 - class `CycleExit` — A terminal outcome of the develop loop.
