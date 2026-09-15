@@ -2738,3 +2738,47 @@ async def test_a_crash_after_the_result_landed_keeps_the_push_attribution(
     assert marker["last_loom_pushed_sha"] == "ab" * 20
     assert marker["last_seen_head_sha"] == "ab" * 20
     assert marker["last_status"] == "failed" and marker["last_settled"] is False
+
+
+async def test_the_infra_friction_names_the_run_worktree_that_holds_the_coders_work(
+    tmp_path: Path,
+) -> None:
+    # #412 (lens #89): the host died under the reviewer AFTER the coder had
+    # committed a fix. Converge commits on the RUN's own worktree branch
+    # (opus round 1 High) — never on the PR's branch, which an infra_failed
+    # run never pushes — so that is what the breadcrumb must name.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    payload = {
+        **_infra_failed_payload(),
+        "head_branch": "t2-a5-detail-mini-graph-b0552ed3",
+        "branch": "t2-a5-detail-mini-graph-884dc481",
+        "worktree": "/tmp/lithos-loom/work/converge/86b39768/worktree/t2-a5-884dc481",
+        "host_action": "check docker (`docker ps -a`, memory limits, a daemon restart)",
+    }
+    spawn, _calls = _spawner(payload, rc=1)
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    await _consider(client, gate, story, rem, rounds_used=1)
+    assert rem._task is not None
+    await rem._task
+    friction = next(f for f in _findings(client) if f.startswith("[Friction]"))
+    assert "/tmp/lithos-loom/work/converge/86b39768/worktree/t2-a5-884dc481" in friction
+    assert "t2-a5-detail-mini-graph-884dc481" in friction
+    assert "b0552ed3 holds" not in friction  # the PR branch holds nothing new
+    assert "check docker" in friction
+
+
+async def test_the_infra_friction_says_nothing_about_work_when_no_coder_ran(
+    tmp_path: Path,
+) -> None:
+    # the intake-infra shape: no develop result, no worktree — no false pointer
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    payload = {**_infra_failed_payload(), "head_branch": "feature"}
+    spawn, _calls = _spawner(payload, rc=1)
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    await _consider(client, gate, story, rem, rounds_used=1)
+    assert rem._task is not None
+    await rem._task
+    friction = next(f for f in _findings(client) if f.startswith("[Friction]"))
+    assert "holds any fix" not in friction

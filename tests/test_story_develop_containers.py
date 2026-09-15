@@ -438,3 +438,75 @@ def test_resync_auth_files_reports_only_what_landed_and_never_raises(
 
     monkeypatch.setattr(containers.subprocess, "run", no_docker)
     assert _resync(tmp_path) == []
+
+
+# --- #412: the liveness probe ---------------------------------------------------
+
+
+def _inspect_result(rc: int, stdout: str = "", stderr: str = ""):
+    return subprocess.CompletedProcess(
+        args=["docker"], returncode=rc, stdout=stdout, stderr=stderr
+    )
+
+
+def test_container_running_reads_the_inspect_state(monkeypatch) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return _inspect_result(0, "true\n")
+
+    monkeypatch.setattr(containers.subprocess, "run", fake_run)
+    assert containers.container_running("loom-develop-x-coder") is True
+    assert seen[0][:3] == ["docker", "inspect", "-f"]
+    assert "loom-develop-x-coder" in seen[0]
+    monkeypatch.setattr(
+        containers.subprocess, "run", lambda cmd, **k: _inspect_result(0, "false\n")
+    )
+    assert containers.container_running("loom-develop-x-coder") is False
+
+
+def test_container_running_is_false_when_the_container_is_gone(monkeypatch) -> None:
+    # after a docker daemon restart the container does not exist at all
+    monkeypatch.setattr(
+        containers.subprocess,
+        "run",
+        lambda cmd, **k: _inspect_result(
+            1, "", "Error: No such object: loom-develop-x-coder"
+        ),
+    )
+    assert containers.container_running("loom-develop-x-coder") is False
+
+
+def test_container_running_is_unknown_when_docker_cannot_answer(monkeypatch) -> None:
+    # a hung or absent docker must never decide a class — and never raise
+    # into the turn site (the probe runs on the failure path)
+    def hung(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=cmd, timeout=float(kwargs.get("timeout") or 0)
+        )
+
+    monkeypatch.setattr(containers.subprocess, "run", hung)
+    assert containers.container_running("c") is None
+
+    def no_docker(cmd, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(containers.subprocess, "run", no_docker)
+    assert containers.container_running("c") is None
+
+
+def test_container_running_reads_an_unreachable_daemon_as_not_running(
+    monkeypatch,
+) -> None:
+    # deliberate (#412): mid-restart the daemon answers nothing useful, and
+    # the container will not survive it — "not running" is the honest
+    # reading, and the one that keeps the retry on the infra path
+    monkeypatch.setattr(
+        containers.subprocess,
+        "run",
+        lambda cmd, **k: _inspect_result(
+            1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+        ),
+    )
+    assert containers.container_running("c") is False

@@ -247,3 +247,75 @@ def test_a_timed_out_turn_did_not_complete(monkeypatch) -> None:
     assert result.timed_out is True
     assert result.succeeded is False
     assert result.completed is False
+
+
+# --- #412: the turn site probes the container after a failed exec -------------
+
+
+def _completed(rc: int, stdout: str = "", stderr: str = ""):
+    import subprocess
+
+    return subprocess.CompletedProcess(
+        args=["docker"], returncode=rc, stdout=stdout, stderr=stderr
+    )
+
+
+def test_a_failed_exec_records_whether_the_container_is_still_running(
+    monkeypatch,
+) -> None:
+    from lithos_loom.plugins.story_develop import containers, turns
+
+    probed: list[str] = []
+    monkeypatch.setattr(
+        containers, "exec_turn", lambda *a, **k: _completed(255, "", "")
+    )
+    monkeypatch.setattr(
+        containers, "container_running", lambda name: probed.append(name) or False
+    )
+    result = turns.run_turn(
+        container="c", prompt="p", engine=ClaudeEngine(), session_id="s"
+    )
+    assert result.succeeded is False
+    assert result.container_running is False
+    assert probed == ["c"]
+
+
+def test_a_successful_exec_never_probes(monkeypatch) -> None:
+    from lithos_loom.plugins.story_develop import containers, turns
+
+    def boom(name: str):
+        raise AssertionError("probed a successful turn")
+
+    monkeypatch.setattr(
+        containers,
+        "exec_turn",
+        lambda *a, **k: _completed(
+            0,
+            '{"type":"result","is_error":false,"result":"ok","session_id":"s","total_cost_usd":0.1}',
+        ),
+    )
+    monkeypatch.setattr(containers, "container_running", boom)
+    result = turns.run_turn(
+        container="c", prompt="p", engine=ClaudeEngine(), session_id="s"
+    )
+    assert result.succeeded is True
+    assert result.container_running is None
+
+
+def test_a_timed_out_turn_never_probes(monkeypatch) -> None:
+    import subprocess
+
+    from lithos_loom.plugins.story_develop import containers, turns
+
+    def timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=["docker"], timeout=1)
+
+    def boom(name: str):
+        raise AssertionError("probed a timed-out turn")
+
+    monkeypatch.setattr(containers, "exec_turn", timeout)
+    monkeypatch.setattr(containers, "container_running", boom)
+    result = turns.run_turn(
+        container="c", prompt="p", engine=ClaudeEngine(), session_id="s", timeout=1
+    )
+    assert result.timed_out is True and result.container_running is None

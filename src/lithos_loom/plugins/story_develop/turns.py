@@ -14,6 +14,7 @@ ARCH-2.E5 (their last caller, the eval judge, migrated to
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from dataclasses import dataclass
 
@@ -89,10 +90,19 @@ def run_turn(
             raw=None,
             stderr=f"agent turn timed out after {timeout}s",
         )
-    return engine.parse_turn(
+    turn = engine.parse_turn(
         proc.stdout,
         exit_code=proc.returncode,
         stderr=proc.stderr,
         session_id=session_id,
         resume=resume,
     )
+    if proc.returncode != 0:
+        # #412: a non-zero exec may be the CONTAINER dying (a docker daemon
+        # restart under the turn returns 255 with no text) — probed here,
+        # where the container is known, and decided by the classifier
+        # before any text is read. A successful exec is never probed.
+        turn = dataclasses.replace(
+            turn, container_running=containers.container_running(container)
+        )
+    return turn

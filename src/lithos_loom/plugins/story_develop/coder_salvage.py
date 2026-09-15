@@ -70,6 +70,12 @@ def written_by_dying_attempt(
     """
     if turn.succeeded or not done_path.is_file():
         return False
+    if turn.container_running is False:
+        # #412: the coder's container is gone. Its handoff may be perfectly
+        # good, but the next coder turn cannot re-enter a container that no
+        # longer exists, so salvaging here only buys a panel + gate before
+        # the same escalation; let the escalation stand.
+        return False
     if limits.reaction_for(limits.classify_failure(turn)).kind != "retry":
         return False
     return handoff.file_fingerprint(done_path) != pre_turn

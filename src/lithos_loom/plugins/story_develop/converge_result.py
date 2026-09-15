@@ -200,6 +200,11 @@ class ConvergeResult:
             "head_sha": self.change.head_sha,
             "rounds": dev.rounds if dev is not None else 0,
             "develop_status": dev.status if dev is not None else None,
+            # #412: the RUN's own branch + worktree — where a coder's commits
+            # live on an `infra_failed` exit (nothing is pushed, so
+            # `head_branch` above holds none of them); None when no coder ran
+            "branch": dev.branch if dev is not None else None,
+            "worktree": str(dev.worktree) if dev is not None else None,
             # #377: what to fix on the host when the run ended `infra_failed`
             "host_action": self.host_action,
             "fixer_commits": len(self.fixer_commits),

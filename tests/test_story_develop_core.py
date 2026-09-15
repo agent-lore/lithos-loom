@@ -614,6 +614,32 @@ def test_failed_retry_turn_with_valid_rewrite_is_salvaged(
     assert result.review is not None and result.review.status == "LGTM"
 
 
+def test_a_dead_container_is_never_salvaged_into_the_next_phase(tmp_path: Path) -> None:
+    # #412 (opus round 1 Medium): moving a dead container into the `retry`
+    # class made it salvage-eligible — but a container that is gone cannot
+    # be re-entered by the next coder turn, so salvaging the handoff and
+    # continuing buys a full panel + gate before the same escalation.
+    # Exit 137 with the container alive (the agent OOM-killed) still is.
+    from lithos_loom.plugins.story_develop import coder_salvage
+
+    done = tmp_path / "round_01_coder_done.md"
+    done.write_text("## Status: DONE\n\nwrote the fix")
+    dead = engines.TurnResult(
+        exit_code=255,
+        succeeded=False,
+        completed=False,
+        session_id="",
+        result_text="",
+        cost_usd=0.0,
+        raw=None,
+        stderr="",
+        container_running=False,
+    )
+    assert coder_salvage.written_by_dying_attempt(dead, done, None) is False
+    killed = dataclasses.replace(dead, exit_code=137, container_running=True)
+    assert coder_salvage.written_by_dying_attempt(killed, done, None) is True
+
+
 # --- coder failure modes (no review, no commit) -----------------------------
 
 

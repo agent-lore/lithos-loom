@@ -57,6 +57,13 @@ class TurnResult:
     cost_usd: float
     raw: dict | None
     stderr: str
+    # #412: what the turn site found when it probed the container AFTER a
+    # failed exec — ``False`` = not running / gone (the docker daemon
+    # restarted under the turn, an OOM-kill of the container itself), ``True``
+    # = alive, ``None`` = never probed (a successful or timed-out turn, or a
+    # probe docker could not answer). The classifier reads it before any text:
+    # a dead container's output is stale by definition.
+    container_running: bool | None = None
 
     @property
     def timed_out(self) -> bool:

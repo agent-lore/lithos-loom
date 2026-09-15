@@ -514,6 +514,12 @@ def test_converge_result_json_round_trips_the_documented_shape(
     result = converge_pr(_config(tmp_path), _change())
     # actually serialise (the old test never called json.dumps) and pin the shape
     data = json.loads(json.dumps(result.to_json()))
+    # #412: the RUN's own branch + worktree (where a coder's commits live on
+    # an infra_failed exit) ride beside the PR's head_branch (where they do
+    # not, until a push)
+    assert result.develop_result is not None
+    assert data.pop("branch") == result.develop_result.branch
+    assert data.pop("worktree") == str(result.develop_result.worktree)
     assert data == {
         "deferred_findings": [],  # 819370e5: out-of-scope deferrals (none here)
         "status": "converged",
