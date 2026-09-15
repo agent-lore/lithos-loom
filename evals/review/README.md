@@ -843,7 +843,51 @@ findings, run through the four buckets above.
   queue has a count), so under the RH-1 rule a lens is admissible if the
   first readings come in at 0/5 — and a cold generalist arm on the same
   cases (`--reviewer code-quality`) is what separates "the personas'
-  narrowness" from "the panel's context" as the lever. Readings pending.
+  narrowness" from "the panel's context" as the lever.
+  **First readings (2026-09-15; persona arm = each case's own panel, report `escape-t2-persona-2026-09-14` for lens78 / lens79 / lens81 / lens87 — lens83's persona row is its own first reading, report `lens83-first-2026-09-13`; generalist arm = `--reviewer code-quality`
+  on claude-opus-5, report `escape-t2-generalist-2026-09-14`; judge
+  claude-opus-5; K=5; per-expected counts audited from the judge files —
+  the summary reports only the conjunction, #404):**
+
+  | blind-spot class (case) | persona arm | generalist arm |
+  |---|---|---|
+  | rule conformance — the tie-break (lens79) | correctness/codex **5/5** | 0/5 |
+  | partition reuse, server (lens79) | correctness/codex 1/5 | 0/5 |
+  | partition reuse, client (lens87, provenance) | correctness/codex 1/5 | 1/5 |
+  | authority coverage (lens81) | correctness/codex 0/5 | **3/5** |
+  | unbounded work — cycle reads (lens81, undeclared) | correctness/codex 0/5 | 2/5 |
+  | unbounded work — far endpoints (lens78) | security/claude **4/4** | **5/5** |
+  | limiter coverage (lens78) | security/claude **3/4** | 1/5 |
+  | sibling-surface completeness (lens83) | correctness/codex 3/5 | **5/5** |
+
+  fp 0/25 valid samples on both arms (judge-scoped). Known-good blocked: persona 18/20 across the four correctness cases (lens79 5/5, lens81 5/5, lens87 4/5, lens83 4/5) + 5/5 on lens78 with security = 23/25; generalist 2/5, 5/5, 2/5, 1/5, 3/5 — its blocks are a different genre (a D6 classifier duplicated, the
+  panel's full detail fan-out) and mostly major-rated nits; lens79's 5/5 is
+  on a duplication the external reviewer explicitly called non-blocking.
+  Readings — held to the method's own power rule (§"How many samples": a single K=5 delta on a mid-band case is not evidence, nor is the difference between two): (1) **no arm dominates — a hypothesis, not a finding.** The per-class leaders differ, but every between-arm delta except the tie-break sits inside the "not evidence" band (two-sided Fisher: limiter coverage 3/4 vs 1/5 p≈0.21; authority coverage 0/5 vs 3/5 p≈0.17; sibling-surface 3/5 vs 5/5 p≈0.44) AND is confounded by engine (correctness = codex, generalist = claude). What these rows do establish: a cold generalist pass is not a *demonstrated* substitute for the persona panel, and which arms are worth powering. A same-persona engine control (`correctness.tool=claude` on lens81, ~$10) comes before any persona attribution. (2) **Rule conformance was anchoring**: the
+  tie-break caught 5/5 cold by the persona that missed it live over two
+  rounds with the coder summary in front of it — the #208 per-criterion
+  checklist, no lens. (3) **Resource-bound completeness splits in two**:
+  "unbounded work per request" is caught by security AND by a brief-less
+  claude reviewer; "every read path under the shared limiter" only by security in this reading (3/4 vs 1/5, p≈0.21 — not distinguishable at K=5) — a persona lens removed from its panel on 2026-09-08 for pacing /
+  OWASP findings inapplicable to a local single-user tool (the same persona
+  blocked lens #78's converge for $68 on an "unpaced `_build_nodes` pass",
+  and blocked this corpus's known-good 5/5). The design that would keep the two catches and drop the noise is an `availability` canonical persona (bounds under writable inputs + limiter coverage; no web-attack or pacing classes) — the HYPOTHESIS these rows motivate, to be tested as availability vs security vs the generalist on lens78 + lens81 at K≈20 per arm after the engine control; nothing is adopted on these rows. (4) **Partition reuse** read low for every reviewer tried (1/5 server, 1/5 client, 0/5 generalist — three low-band readings, none distinguishable from the others);
+  closed, so an enumerate-the-inputs lens on the correctness brief is
+  admissible under the RH-1 rule — control in-session first. (5) **Authority coverage** (0/5 persona, 3/5 generalist; p≈0.17) reads as a persona blind spot the generalist may not share — a hypothesis for the same powered arm. (6) The harness's known-good "noise" is a
+  stream of lens defects: the edge-read phase's missing deadline after the
+  A1 fix, the blocked tint inferred from a fetched edge rather than
+  `task_blocked`, `Topology.edges` order under reversed input, singleton
+  ghosts winning the chain by creation order, the config knobs accepting
+  booleans, the graph route skipping `filter_query_oversized` — lens
+  escape-review material, filed on the operator's call. Two harness
+  lessons: a text-only patch that drops a binary the head added draws a
+  shared finding on every sample (use `git diff --binary`); review-only
+  mode captures no e2e artifacts, so an AC that demands them always draws a
+  "no artifacts" finding at both heads (shared noise, not a case defect).
+  Cost: persona arm ~$10–20/case (lens78 ~2× with two personas), generalist
+  ~$15/case at ~17 min/sample on opus; one persona-arm sample errored to
+  loom #403 (the sandbox's auth bind mount stranded by a host-side token
+  refresh), fixed in #405.
 
 ## Scoring (how a finding matches)
 

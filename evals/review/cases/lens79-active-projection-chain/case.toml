@@ -82,6 +82,31 @@ live run at 0 findings over 2 rounds. Decision rule as lens83's; (1) is a
 CLOSED class (the projections a derived claim can be computed over are
 enumerable: all / active / unknown-free) so an enumerate-the-projection
 lens is admissible under the RH-1 rule if the reading is 0/5.
+
+FIRST READING (2026-09-15, report ~/lithos-loom-eval-reports/
+escape-t2-persona-2026-09-14; panel = correctness on codex gpt-5.6-sol high;
+judge claude-opus-5): catch 1/5 (95% CI 4–62%) as a conjunction; PER
+FINDING (judge, audited): the tie-break (2) 5/5 — every cold sample
+reproduced the diamond — and the partition reuse (1) 1/5 (sample 4 alone;
+three structured hits were keyword collisions on an unrelated singleton-
+candidate claim the judge rightly rejected). Two readings in one case:
+(2) at 5/5 cold means the live miss over 2 rounds was anchoring — the lever
+is #208, no lens; (1) at 1/5, matched by the client-side recurrence's 1/5
+(above), is the low band: a real class for this persona, not decisive at
+K=5 alone but two 1/5 readings of one class across server and client are
+the corpus's clearest class signal. fp 0/5; known-good blocked 5/5 on
+shared claims at both heads — `_active_condensed` seeding every node so an
+unknown ghost / a completed task can win as a one-node chain by creation
+order (4/5; the AC says a lower-bound chain "does not pass through the
+ghost" — LENS ESCAPE-REVIEW CANDIDATE), `Topology.edges` order varying
+under reversed input against the AC's determinism clause (5/5; candidate),
+`lower_bound` not monotone under excluded unknown edges (2/5). GENERALIST
+ARM (`--reviewer code-quality`, claude-opus-5): 0/5 on BOTH — every sample
+fixated on D6's edge-state classifier existing twice (graph_scope vs
+graph_layout), rated major at both heads (known-good blocked 5/5), the
+duplication the external reviewer explicitly called "an integration note,
+not the cause"; the tie-break, verifiable from the story text, was never
+looked at. On the tie-break, 0/5 against the persona's 5/5 is the near-total movement the method calls readable; on the partition, 0/5 vs 1/5 is not.
 """
 ac_provenance = "replay"   # the real T2-A2 story body the panel reviewed against
 tier = "frontier"
