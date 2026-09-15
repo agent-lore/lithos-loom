@@ -1,0 +1,145 @@
+[case]
+id = "lens78-fanout-work-bounds"
+description = """
+lens PR #78 escape (T2-A1, story-develop run f81a4c5a): the standard panel
+(correctness + security, 8 rounds, $169.57, ZERO findings at any severity)
+approved and delivered head 2694092 — and the external reviewer's first
+pass found two P1s in the Conversation tab
+(https://github.com/agent-lore/lithos-lens/pull/78#issuecomment-5551158842),
+both availability / isolation gaps in graph_scope.py:
+(1) the rendered-node guard (`max_tasks`, "refused with the count") is
+applied only AFTER every far endpoint has been resolved, and
+`_resolve_far_endpoints` creates one `task_get` coroutine per non-open
+endpoint with no count or work bound — the semaphores cap concurrency, not
+queued tasks, total duration or memory, and the per-read timeout starts
+only after both gates are acquired — so whoever writes a scope's edges
+chooses how much upstream work a page request costs before the refusal it
+was guaranteed; (2) epic membership reads (`epic_scope_tasks`'s `task_get`
++ `task_children`) start before the per-scope limiter exists and outside
+`graph_fanout_gate()`, so concurrent epic graph requests consume the whole
+MCP session and starve ordinary pages despite the slice reserving half of
+it (`GRAPH_FANOUT_SESSION_SHARE`; the reviewer's probe: 12 epic scopes, all
+12 `task_get`s started at once against a reservation of 8).
+
+Escape-review provenance (README §"Escape review"): bucket 1 — the panel
+reviewed this exact diff, both defects are in it, and catching them needs
+only the tree plus reasoning: the diff itself introduces the reservation
+constant, the gate and the guard, and PRD D5 ("fan-out is bounded by the
+scope") is in the reviewed checkout. BLIND-SPOT CLASS: resource-bound
+completeness — (a) a guard whose EVALUATION costs unbounded work is no
+guard (the answer may be exact; the cost may not be unbounded), and (b) a
+shared limiter must cover every read path of the feature it limits (the
+epic reads bypassed it). The same class (a) escaped AGAIN one slice later
+in lens81-cycle-authority-coverage's first finding — two modules, two
+panels, one week apart — which is the corpus's strongest single reading:
+"the semaphore bounds it" is accepted by the panel as a bound on work.
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout.
+FULL-FEATURE diff as the panel approved it (base = lens main e2a3ae8, the
+T2 PRD merge = the story's own merge-base; defect patch = delivered r8 head
+2694092, the head the reviewer validated: make check 1085 passed / 16
+skipped, e2e 60, CI green).
+
+PAIRING: defect + its AUTHENTIC FIX. known-good.patch is `git diff
+e2a3ae8..52e52c2` — the operator's single hand commit ("fix: bound ghost
+classification work, and gate epic membership reads"), a direct descendant
+of the defect head: a candidate budget refused with no `task_get` issued
+(`REFUSAL_CLASSIFICATION`) + a whole-phase deadline, the epic reads under
+`graph_fanout_gate()` with the same per-read deadline, three regression
+tests that fail when reverted, and — the not-minimal part — the fan-out
+half extracted to `graph_fanout.py` for the 800-line budget, so the
+known-good head moves code the defect head keeps in place. A finding
+anchored in graph_fanout.py at the known-good head is about the same code.
+Both heads pass lens's own `make check` (the reviewer's validation on
+2694092; 52e52c2 = 1089 passed / 16 skipped per the fix comment, CI green
+on the merged head).
+
+PANEL: the live panel that escaped it was correctness + security; the case
+runs BOTH — the class is availability under adversarial input (a task's
+edges are operator-writable), which is the security persona's ground as
+much as correctness's, and a reading that only the correctness persona
+misses it would be a different lever from both missing it.
+
+RH-5 DECLARATION: two declared defects, the two externally-caught escapes
+— a floor, not a census. The reviewer's other remarks ("the amount of code
+is substantial") are not defects. MDE, STATED BEFORE ANY PAID ARM: prior =
+one live run at 0 findings over 8 rounds (rounds are not samples). Decision
+rule as lens83's: ≥4/5 on both → single-pass variance, the lever is #208;
+0/5 → a genuine class, and it is CLOSED (every read path of a feature is
+enumerable; every guard has a cost) so an enumerate-the-cost lens is
+admissible under the RH-1 rule; 1–3/5 → a regression floor only.
+"""
+ac_provenance = "replay"   # the real T2-A1 story body the panel reviewed against
+tier = "frontier"
+repo = "../lithos-lens"
+base = "e2a3ae8ea4d0a454f9d5bec026290c9cb92c8f0d"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness", "security"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+
+[[expected]]
+file = "src/lithos_lens/graph_scope.py"
+keywords = [
+    "unbounded",
+    "bound",
+    "budget",
+    "deadline",
+    "_resolve_far_endpoints",
+    "far endpoint",
+    "far-endpoint",
+    "queue",
+    "max_tasks",
+    "memory",
+    "semaphore",
+]
+min_severity = "major"
+mechanism = """
+The exact node-limit guard (`max_tasks`, the refusal "with the count") is
+evaluated only after `assemble_scope` has resolved EVERY far endpoint, and
+`_resolve_far_endpoints` creates one `task_get` coroutine per non-open
+dependency endpoint with no bound on their count, total duration or memory:
+the semaphores limit how many run at once, not how many are queued, and the
+per-read timeout starts only once a queued read has acquired both gates. So
+a scope whose tasks' edges name many resolved/ghost endpoints — chosen by
+whoever writes edges, not by whoever configured the page — forces unbounded
+upstream reads and wall-clock before the refusal the guard promises; the
+cost of deciding to refuse is unbounded even though the answer is exact. A
+match names the unbounded / uncapped fan-out (queued reads, total work or
+duration) before the limit / refusal, or the missing candidate budget or
+phase deadline. NOT a match: the cache TTL or eviction semantics; the
+edge-state classifier; ghost directionality; concurrency-limit tuning
+without the queued-work / duration point.
+"""
+
+[[expected]]
+file = "src/lithos_lens/graph_scope.py"
+keywords = [
+    "epic_scope_tasks",
+    "graph_fanout_gate",
+    "reservation",
+    "session",
+    "starve",
+    "starvation",
+    "task_children",
+    "GRAPH_FANOUT_SESSION_SHARE",
+    "limiter",
+]
+min_severity = "major"
+mechanism = """
+Epic membership reads bypass the graph session reservation: `epic_scope_tasks`
+issues `task_get` (the epic) and `task_children(recursive, include_closed)`
+directly, before the per-scope limiter exists and outside
+`graph_fanout_gate()`, while the slice reserves only a share of the MCP
+session for graph reads (`GRAPH_FANOUT_SESSION_SHARE`) so that ordinary
+pages keep the rest. Concurrent epic graph requests therefore start as many
+upstream calls as there are requests (12 epic scopes → 12 simultaneous
+`task_get`s against a reservation of 8) and can consume the whole session,
+starving the dashboard. A match names the epic anchor / membership reads
+running outside the fan-out gate or reservation (or unbounded by the
+graph limiter). NOT a match: the edge fan-out for misses (already gated);
+epic scope's include_resolved semantics; the context-ghost rules.
+"""

@@ -1,0 +1,156 @@
+[case]
+id = "lens79-active-projection-chain"
+description = """
+lens PR #79 escape (T2-A2, story-develop run 25cf71e5): the standard panel
+(correctness + security, 2 rounds, $19.09, ZERO findings at any severity)
+approved and delivered the topology slice — and the external reviewer's
+first pass on the delivered PR found two defects in the longest-chain code
+(https://github.com/agent-lore/lithos-lens/pull/79#issuecomment-5630266043):
+(1) P1 — `build_topology` condenses ALL dependency edges into SCCs
+(correct for display layering) and `_active_condensed` then REUSES those
+groups for the active-only chain, dropping every active edge whose
+endpoints share an all-edge SCC. Reproduction: an epic with `A(open) →
+B(open) → C(completed) → A`; states A→B active, B→C inactive
+(dependent_resolved), C→A inactive (satisfied); the active graph has the
+chain A→B (length 2), but the code collapses {A,B,C} on the two historical
+edges, discards A→B as intra-condensation and returns
+`BlockingChain(nodes=('A',), bound='exact')` — not "the condensed DAG of
+the active projection" D7 requires. (2) P2 — the `through=` focus chain's
+tie-break runs backward: `_longest_from` over predecessor lists picks the
+smallest IMMEDIATE predecessor on equal-length prefixes and reverses, which
+is not the documented forward `(created_at, id)` tie-break; equal paths
+A→Z→F and B→C→F with creation order A<B<C<Z<F: the global chain picks
+A→Z→F, focusing F switches to B→C→F because C<Z.
+
+Escape-review provenance (README §"Escape review"): bucket 1 ×2 — the
+panel reviewed this exact diff (the story body states D7's active-only
+requirement and the tie-break rule verbatim), both defects are in it, and
+catching them needs only the tree plus reasoning (the reviewer proved
+each with a 3–5 node fixture). BLIND-SPOT CLASSES: (1) partition reuse
+across projections — a derived computation ("longest chain over the ACTIVE
+projection") built on a partition (the SCC condensation) computed over a
+DIFFERENT edge set (all edges); the same class escaped AGAIN one slice
+later on the client side, with the server's own docstring naming the case
+(RECURRENCE, recorded here as provenance rather than scored twice — see
+below); (2) documented-rule conformance — a
+tie-break the story spells out, implemented in the wrong direction; the
+reviewer's method was a fixture where the rule's two readings diverge.
+Two findings, two classes, one diff: one case (README minting rule).
+
+CROSS-REPO case: repo points at the sibling lithos-lens checkout.
+FULL-FEATURE diff as the reviewer saw it (base = lens main 14d7413, the
+main tip the branch's own merge commit 0891cb6 brought in; defect patch =
+14d7413..0891cb6, the head the reviewer validated: make check 1145 passed,
+e2e 60, CI green — the panel-approved r2 head plus that main merge, no
+source change in between).
+
+PAIRING: defect + its AUTHENTIC FIX (the lens22 shape). known-good.patch is
+`git diff 14d7413..908d4c3` — round 1 of loom's own remediation
+(`converge --from-github`): `_active_condensed` Tarjan-condenses the active
+projection itself and the focus chain compares complete forward prefixes,
+with the mixed-status-cycle and diamond-to-focus regressions; SPECIFICATION
+and metrics regenerated. NOT the merged head 5ce7782: rounds 2–4 addressed
+the converge panel's own findings on the fixed tree and would be a
+difference between the heads for no gain.
+
+RECURRENCE (provenance, not a second case — PR #401 review: the corpus
+holds one case per blind-spot class, and pooling a recurring class twice
+would weight the headline by how often a class recurred): lens PR #87
+(T2-A4, 2026-09-14) shipped the CLIENT half of class (1) — graph.js's
+`condensationOf()` traced `payload.longest_chain.nodes` through
+`node.cycle`, the all-edge display SCC, while the server had computed the
+chain over the active projection since this case's fix, and
+`_active_condensed`'s docstring named the divergence. Twelve panel rounds
+(story-develop aabb134f + converge 82dfe33b, correctness + test-quality)
+passed it; the external reviewer's first pass caught it
+(https://github.com/agent-lore/lithos-lens/pull/87#issuecomment-5665261576);
+loom's remediation 505ad2f8 round 1 (eb578fe) fixed it with
+`longest_chain.members` + `chainCondensationOf()`. A K=5 correctness
+reading of that pair (base 9afee57, defect 19202ab, known-good eb578fe;
+report escape-t2-persona-2026-09-14) read 1/5 — the same number as this
+case's finding (1) below — so the class is stable across the server/client
+boundary. Re-mint it as its own case only if the class taxonomy gains a
+"consumer ignores its producer's stated caveat" class distinct from (1).
+
+RH-5 DECLARATION: two declared defects. The reviewer also noted that
+`graph_layout` now duplicates the D6 classifier / edge-state model already
+in `graph_scope` (an integration note after the A1 merge, not a defect) — a
+finding about that duplication is neither expected nor fp. Both heads pass
+lens's own `make check` (the reviewer's validation on 0891cb6; the
+remediation gate on 908d4c3). MDE, STATED BEFORE ANY PAID ARM: prior = one
+live run at 0 findings over 2 rounds. Decision rule as lens83's; (1) is a
+CLOSED class (the projections a derived claim can be computed over are
+enumerable: all / active / unknown-free) so an enumerate-the-projection
+lens is admissible under the RH-1 rule if the reading is 0/5.
+"""
+ac_provenance = "replay"   # the real T2-A2 story body the panel reviewed against
+tier = "frontier"
+repo = "../lithos-lens"
+base = "14d741310edd0de85967010d0ad2e6c1c42e459e"
+head_patch = "feature-with-defect.patch"
+personas = ["correctness"]
+profile = "standard"
+acceptance_criteria_file = "ac.md"
+
+[known_good]
+head_patch = "known-good.patch"
+
+[[expected]]
+file = "src/lithos_lens/graph_layout.py"
+keywords = [
+    "_active_condensed",
+    "active",
+    "condens",
+    "SCC",
+    "inactive",
+    "projection",
+    "intra",
+    "mixed",
+    "completed",
+]
+min_severity = "major"
+mechanism = """
+The longest blocking chain is required (D7, the story body) to be computed
+over the condensed DAG of the ACTIVE projection only, but `_active_condensed`
+reuses the SCC condensation `build_topology` built over ALL dependency edges
+(active, inactive, unknown) and drops every active edge whose endpoints fall
+in the same all-edge SCC. Any cycle that is only closed by inactive edges
+(A open → B open active; B → C completed and C → A inactive) collapses A and
+B into one condensation and loses the active chain A→B: the chain is
+reported as a single node with bound `exact`. A match says the active chain
+is condensed / grouped using SCCs (or cycle membership) computed from
+inactive, historical or all edges, or that active edges inside an all-edge
+SCC are discarded, or reproduces the mixed-status cycle. NOT a match: the
+tie-break direction (the other expected finding); layering / roots (they
+correctly use all edges); lower-bound propagation; the hierarchy tree.
+"""
+
+[[expected]]
+file = "src/lithos_lens/graph_layout.py"
+keywords = [
+    "tie",
+    "tie-break",
+    "through",
+    "_longest_from",
+    "predecessor",
+    "backward",
+    "reverse",
+    "focus",
+    "created_at",
+    "prefix",
+]
+min_severity = "minor"
+mechanism = """
+The `through=` (focus) chain's tie-breaking runs backward and can disagree
+with the global chain: `longest_blocking_chain` calls `_longest_from` over
+PREDECESSOR lists, which on equal-length prefixes chooses the smallest
+immediate predecessor and then reverses the result, instead of the
+documented forward `(created_at, id)` tie-break over the rendered chain. With
+equal paths A→Z→F and B→C→F and creation order A < B < C < Z < F the global
+chain is A→Z→F but focusing F yields B→C→F (C < Z) — a node on the selected
+global chain focuses to a different equal chain. A match names the focus /
+through chain's tie-break as backward, greedy from the focus, or
+inconsistent with the global chain's tie-break, or reproduces the diamond.
+NOT a match: the active-projection condensation (the other expected
+finding); determinism under reversed input order (correct); ghost handling.
+"""
