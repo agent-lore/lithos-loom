@@ -37,8 +37,10 @@ from .agent_session import (
     _CONTINUATION_PROMPT,
     INFRA_CONTINUATION_PROMPT,
     PauseBudget,
+    auth_host_action,
     build_run_cmd,
     resume_after_from,
+    resync_before_auth_retry,
 )
 from .check_set import CheckSetResult
 from .config import DevelopConfig
@@ -420,6 +422,7 @@ def _run_reviewer_with_reaction(
     )
     cost = review.cost_usd
     attempts: dict[limits.FailureClass, int] = {}
+    resynced: list[str] | None = None  # #403: what the last auth retry ran on
 
     while rev_failed is not None:
         cls = limits.classify_failure(rev_failed)
@@ -443,7 +446,13 @@ def _run_reviewer_with_reaction(
                     f"reviewer [{name}] {cls.value} persisted after {n} attempt"
                     f"{'s' if n != 1 else ''}: {summary}"
                 )
-                return review, cost, False, None, (escalation, reaction.host_action)
+                return (
+                    review,
+                    cost,
+                    False,
+                    None,
+                    (escalation, auth_host_action(reaction, resynced)),
+                )
             wait = reaction.backoff_seconds[used]
             attempts[cls] = used + 1
             logger.warning(
@@ -458,6 +467,14 @@ def _run_reviewer_with_reaction(
                 reaction.retries + 1,
             )
             services.sleep(wait)
+            resynced = resync_before_auth_retry(
+                services,
+                config,
+                cls,
+                container=rstate.container,
+                engine=rstate.engine_now,
+                who=f"reviewer [{name}]",
+            )
             if reaction.resume and rstate.engine_now.session_transcript_exists(
                 config.reviewer_config_dir(name), rstate.session
             ):

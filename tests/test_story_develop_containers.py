@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -252,3 +253,149 @@ def test_container_name() -> None:
 
 # resolve_auth_files was deleted in ARCH-2.E3 — its candidate-filtering contract
 # now lives on Engine.auth_files, covered by tests/test_story_develop_engines.py.
+
+
+# --- #403: re-sync the host's auth file into the bind-mounted inode ----------
+
+_FRESH = b'{"claudeAiOauth": {"accessToken": "fresh"}}'
+_STALE = b'{"claudeAiOauth": {"accessToken": "stale"}}'
+
+
+def _exec_fake(calls: list[dict], *, container_bytes: bytes | None, write_rc: int = 0):
+    """A docker stand-in: `exec … cat <path>` answers with the container's
+    current bytes (rc 1 when None: no such file / dead container); the
+    `exec -i … sh -c 'cat > …'` write answers *write_rc*."""
+
+    def fake_run(argv, **kw):
+        calls.append({"argv": list(argv), **kw})
+        if argv[:3] == ["docker", "exec", "-i"]:
+            return subprocess.CompletedProcess(argv, write_rc, b"", b"boom")
+        if container_bytes is None:
+            return subprocess.CompletedProcess(argv, 1, b"", b"No such file")
+        return subprocess.CompletedProcess(argv, 0, container_bytes, b"")
+
+    return fake_run
+
+
+def _resync(tmp_path: Path, files=(".credentials.json",)) -> list[str]:
+    return containers.resync_auth_files(
+        "loom-develop-abc-coder",
+        config_mount="/claude_config",
+        auth_source_dir=tmp_path,
+        auth_files=list(files),
+    )
+
+
+def test_resync_auth_files_writes_the_host_file_into_the_mounted_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single-file bind mount is pinned to the inode at container start; the
+    CLI refreshes the host file by rename, so a running container keeps the
+    stale token. The re-sync reads the container's current bytes, sees they
+    differ, and streams the host's CURRENT bytes through
+    `docker exec -i … cat > <mount>/<file>` — an in-place write reaches the
+    mounted inode where a host-side copy never would."""
+    (tmp_path / ".credentials.json").write_bytes(_FRESH)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        containers.subprocess, "run", _exec_fake(calls, container_bytes=_STALE)
+    )
+    assert _resync(tmp_path, (".credentials.json", "missing.json")) == [
+        ".credentials.json"
+    ]
+    read, write = calls  # the absent candidate is skipped before any exec
+    assert read["argv"] == [
+        "docker",
+        "exec",
+        "loom-develop-abc-coder",
+        "cat",
+        "/claude_config/.credentials.json",
+    ]
+    assert write["argv"] == [
+        "docker",
+        "exec",
+        "-i",
+        "loom-develop-abc-coder",
+        "sh",
+        "-c",
+        "cat > /claude_config/.credentials.json",
+    ]
+    assert write["input"] == _FRESH
+    assert read["timeout"] and write["timeout"]  # never hangs on a dead daemon
+
+
+def test_resync_auth_files_never_rewrites_an_identical_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opus review (Critical): when NO host refresh has happened the mount
+    still IS the host's live credentials file — a truncate-and-rewrite of an
+    identical file risks logging the operator out host-wide on any
+    interruption. Identical bytes → no write at all."""
+    (tmp_path / ".credentials.json").write_bytes(_FRESH)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        containers.subprocess, "run", _exec_fake(calls, container_bytes=_FRESH)
+    )
+    assert _resync(tmp_path) == []
+    assert [c["argv"][:3] for c in calls] == [
+        ["docker", "exec", "loom-develop-abc-coder"]
+    ]
+
+
+def test_resync_auth_files_skips_a_file_the_container_never_mounted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A candidate absent at container start was never bind-mounted: writing
+    it would create a plaintext copy inside the per-run config dir on the
+    host. `cat` failing in-container (also: a dead container) → skipped."""
+    (tmp_path / ".credentials.json").write_bytes(_FRESH)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        containers.subprocess, "run", _exec_fake(calls, container_bytes=None)
+    )
+    assert _resync(tmp_path) == []
+    assert len(calls) == 1 and calls[0]["argv"][:3] != ["docker", "exec", "-i"]
+
+
+def test_resync_auth_files_never_installs_an_empty_or_non_json_host_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI mid-rewrite can leave the host file empty; `cat >` with empty
+    stdin would truncate the mounted credentials to nothing."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        containers.subprocess, "run", _exec_fake(calls, container_bytes=_STALE)
+    )
+    for bad in (b"", b"not json"):
+        (tmp_path / ".credentials.json").write_bytes(bad)
+        assert _resync(tmp_path) == []
+    assert calls == []  # no exec at all
+
+
+def test_resync_auth_files_reports_only_what_landed_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed write is not 'landed'; a hung docker (TimeoutExpired) or a
+    missing binary (OSError) must not escape into the reaction loop — an
+    unhandled exception there would turn `infra_failed` into `internal` and
+    lose the auth diagnosis (opus review, High)."""
+    (tmp_path / ".credentials.json").write_bytes(_FRESH)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        containers.subprocess,
+        "run",
+        _exec_fake(calls, container_bytes=_STALE, write_rc=1),
+    )
+    assert _resync(tmp_path) == []
+
+    def hung(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 30)
+
+    monkeypatch.setattr(containers.subprocess, "run", hung)
+    assert _resync(tmp_path) == []
+
+    def no_docker(argv, **kw):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(containers.subprocess, "run", no_docker)
+    assert _resync(tmp_path) == []

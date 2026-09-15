@@ -73,6 +73,12 @@ class Services:
     start_container: Callable[[Sequence[str]], str]
     stop_container: Callable[[str], None]
     run_check_set: Callable[..., CheckSetResult | None]
+    # #403: write the host's current auth file into the container's mounted
+    # inode before an `auth_failed` retry — (container, engine, config) →
+    # the files that landed. Defaults to a no-op so fakes need not name it.
+    resync_auth: Callable[[str, engines.Engine, DevelopConfig], list[str]] = (
+        lambda container, engine, config: []
+    )
 
     @classmethod
     def live(cls) -> Services:
@@ -84,7 +90,21 @@ class Services:
             start_container=containers.start_container,
             stop_container=containers.stop_container,
             run_check_set=check_runner.run_check_set,
+            resync_auth=resync_auth_live,
         )
+
+
+def resync_auth_live(
+    container: str, engine: engines.Engine, config: DevelopConfig
+) -> list[str]:
+    """The production ``Services.resync_auth``: the engine's auth files from
+    its operator dir into its config mount (#403)."""
+    return containers.resync_auth_files(
+        container,
+        config_mount=engine.config_mount,
+        auth_source_dir=engine.auth_source_dir(config),
+        auth_files=engine.auth_files(config),
+    )
 
 
 # --- the round pipeline (ARCH-1.S6) -----------------------------------------

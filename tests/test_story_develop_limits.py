@@ -283,6 +283,15 @@ def test_reaction_table_is_total() -> None:
         assert isinstance(reaction_for(cls), Reaction)
 
 
+def test_auth_host_action_never_asserts_a_resync_statically() -> None:
+    """#403 (opus review, High): whether the credentials were re-synced before
+    the retry is known only at run time and rides the escalation's host
+    action from the loop — the table's static text must not claim it."""
+    r = reaction_for(FailureClass.AUTH_FAILED)
+    assert "re-synced" not in r.host_action
+    assert "complete the gate" in r.host_action
+
+
 def test_auth_failure_retries_once_then_escalates() -> None:
     # 2026-09-12: the host token was valid minutes after the container's
     # refresh failed and the next run proceeded — a plausible rotation race
