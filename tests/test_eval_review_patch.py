@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -1039,5 +1040,233 @@ def test_lens83_fixture_pins_the_gate_row_gap(monkeypatch: pytest.MonkeyPatch) -
         needle = "clicking_a_gate_row"
         assert _tests_mentioning(repo, resolved.head, needle) == []
         assert _tests_mentioning(repo, good_head, needle) != []
+    finally:
+        cleanup()
+
+
+# ---------------------------------------------------------------------------
+# The lens T2 escape corpus (escape review, lens PRs #78 / #79 / #81; PR #401
+# review, Medium): each pair pinned semantically — the mechanism is present at
+# the defect head, closed at the known-good head, the heads differ in the fix
+# commit's files alone, and both rebuilt trees are the real commits'. The
+# generic materialise test proves only that a patch applies; the first cut of
+# lens81 applied cleanly while omitting the screenshot its manual referenced.
+
+
+def _function_body(blob: str, name: str) -> str:
+    """The source of one top-level ``def`` / ``async def`` up to the next."""
+    start = re.search(rf"^(?:async )?def {re.escape(name)}\(", blob, re.MULTILINE)
+    assert start is not None, name
+    nxt = re.search(r"^(?:async )?def ", blob[start.end() :], re.MULTILINE)
+    return blob[start.start() : start.end() + (nxt.start() if nxt else len(blob))]
+
+
+def _pin_pair(
+    monkeypatch: pytest.MonkeyPatch, case_id: str, delivered: str, fix: str
+) -> tuple[Path, Case, Callable[[], None]]:
+    case = load_case(_SHIPPED_CASES_DIR / case_id)
+    repo = Path(case.repo).resolve()
+    if not (repo / ".git").exists():
+        pytest.skip(f"repo {case.repo!r} is not a git checkout here")
+    if not _commit_exists(repo, case.base):
+        pytest.skip(f"base {case.base[:12]} not present (shallow clone?)")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "loom-eval-preflight@localhost")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "loom-eval-preflight")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "loom-eval-preflight@localhost")
+    resolved, cleanup = patch.materialise_patch_heads(case)
+    # Tree pins against the real commits, where the checkout has them.
+    for real, rebuilt in ((delivered, resolved.head), (fix, resolved.known_good_head)):
+        if rebuilt and _commit_exists(repo, real):
+            assert _git_out(repo, "diff", "--name-only", real, rebuilt) == ""
+    return repo, resolved, cleanup
+
+
+_LENS78_SCOPE = "src/lithos_lens/graph_scope.py"
+_LENS78_FANOUT = "src/lithos_lens/graph_fanout.py"
+_LENS78_FIX_FILES = [
+    "docs/REQUIREMENTS.md",
+    "docs/SPECIFICATION.md",
+    "docs/architecture.toml",
+    "docs/generated/components/TaskGraph.md",
+    "docs/generated/metrics.json",
+    "docs/generated/metrics.md",
+    "docs/prd/t2-task-relationship-graphs.md",
+    "pyproject.toml",
+    _LENS78_FANOUT,
+    _LENS78_SCOPE,
+    "tests/test_graph_scope.py",
+]
+_LENS78_DELIVERED = "2694092478b677552a3ec310846746e63af73465"
+_LENS78_FIX = "52e52c2ed3f0b6ebaa18124128f535ce3f8d091e"
+
+
+def test_lens78_fixture_pins_the_fanout_work_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bucket 1 ×2 (resource-bound completeness): (1) the exact node guard is
+    # evaluated only after every far endpoint was resolved and nothing bounds
+    # that work; (2) the epic membership reads run outside the graph session
+    # reservation. The fix (the operator's hand commit) adds a candidate
+    # budget + phase deadline refusing with REFUSAL_CLASSIFICATION, puts the
+    # epic reads under graph_fanout_gate(), and extracts the fan-out half to
+    # graph_fanout.py for the line budget.
+    repo, resolved, cleanup = _pin_pair(
+        monkeypatch, "lens78-fanout-work-bounds", _LENS78_DELIVERED, _LENS78_FIX
+    )
+    try:
+        good = resolved.known_good_head or ""
+        # The base predates the slice: no scope module at all.
+        assert (
+            _git_out(repo, "ls-tree", "--name-only", resolved.base, "--", _LENS78_SCOPE)
+            == ""
+        )
+        buggy = _blob_at(repo, resolved.head, _LENS78_SCOPE)
+        fixed = _blob_at(repo, good, _LENS78_SCOPE)
+        # (1) defect: the far-endpoint resolution has no candidate budget or
+        # phase deadline, and no classification refusal exists.
+        assert "_resolve_far_endpoints" in buggy
+        assert "REFUSAL_CLASSIFICATION" not in buggy
+        assert "MAX_GHOST_RESOLUTION_READS" not in buggy
+        assert "GHOST_RESOLUTION_BUDGET_S" not in buggy
+        # (2) defect: epic membership reads outside the reservation.
+        epic = _function_body(buggy, "epic_scope_tasks")
+        assert "task_children" in epic and "graph_fanout_gate" not in epic
+        # The fix: both bounds + the refusal, and the epic reads gated.
+        assert "REFUSAL_CLASSIFICATION" in fixed
+        assert "graph_fanout_gate" in _function_body(fixed, "epic_scope_tasks")
+        fanout = _blob_at(repo, good, _LENS78_FANOUT)
+        assert "MAX_GHOST_RESOLUTION_READS = " in fanout
+        assert "GHOST_RESOLUTION_BUDGET_S = " in fanout
+        assert (
+            _git_out(
+                repo, "ls-tree", "--name-only", resolved.head, "--", _LENS78_FANOUT
+            )
+            == ""
+        )
+        # The fix commit's files and nothing else.
+        changed = _git_out(repo, "diff", "--name-only", resolved.head, good)
+        assert sorted(changed.split()) == sorted(_LENS78_FIX_FILES)
+    finally:
+        cleanup()
+
+
+_LENS79_LAYOUT = "src/lithos_lens/graph_layout.py"
+_LENS79_FIX_FILES = [
+    "docs/SPECIFICATION.md",
+    "docs/generated/metrics.json",
+    "docs/generated/metrics.md",
+    _LENS79_LAYOUT,
+    "tests/test_graph_layout.py",
+]
+_LENS79_DELIVERED = "0891cb6f05244fdd3a97a4bb3c757b986ada4fe4"
+_LENS79_FIX = "908d4c3129e7c3669f62a1966077d56655b66823"
+
+
+def test_lens79_fixture_pins_the_active_projection_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bucket 1 ×2: (1) `_active_condensed` reuses the all-edge SCC
+    # condensation (`member_of` from topology.condensations) and drops active
+    # edges inside one; (2) the `through=` chain's tie-break walks the
+    # PREDECESSOR map backward and reverses. The fix (remediation round 1)
+    # gives the active projection its own Tarjan and compares complete
+    # forward prefixes.
+    repo, resolved, cleanup = _pin_pair(
+        monkeypatch, "lens79-active-projection-chain", _LENS79_DELIVERED, _LENS79_FIX
+    )
+    try:
+        good = resolved.known_good_head or ""
+        assert (
+            _git_out(
+                repo, "ls-tree", "--name-only", resolved.base, "--", _LENS79_LAYOUT
+            )
+            == ""
+        )
+        buggy = _blob_at(repo, resolved.head, _LENS79_LAYOUT)
+        fixed = _blob_at(repo, good, _LENS79_LAYOUT)
+        b_active = _function_body(buggy, "_active_condensed")
+        assert "for condensation in topology.condensations" in b_active  # reused
+        assert "member_of[edge.from_task_id] != member_of[edge.to_task_id]" in b_active
+        assert "Tarjan" not in b_active and "_tarjan" not in b_active
+        b_chain = _function_body(buggy, "longest_blocking_chain")
+        assert "_longest_from(order, predecessors, key)" in b_chain  # backward
+        assert "tuple(reversed(upward))" in b_chain
+        f_active = _function_body(fixed, "_active_condensed")
+        assert 'edge.state == "active"' in f_active
+        assert "for condensation in topology.condensations" not in f_active
+        assert (
+            "Tarjan" in f_active or "_tarjan" in f_active or "_adjacency(" in f_active
+        )
+        f_chain = _function_body(fixed, "longest_blocking_chain")
+        assert "_longest_from(order, predecessors, key)" not in f_chain
+        changed = _git_out(repo, "diff", "--name-only", resolved.head, good)
+        assert sorted(changed.split()) == sorted(_LENS79_FIX_FILES)
+    finally:
+        cleanup()
+
+
+_LENS81_CYCLES = "src/lithos_lens/graph_cycles.py"
+_LENS81_PAGE = "src/lithos_lens/graph_page.py"
+_LENS81_SCREENSHOT = "docs/user-manual/screenshots/graph.png"
+_LENS81_FIX_FILES = [
+    "docs/SPECIFICATION.md",
+    "docs/generated/domain_model.md",
+    "docs/generated/metrics.json",
+    "docs/generated/metrics.md",
+    "docs/user-manual/manual.md",
+    _LENS81_CYCLES,
+    _LENS81_PAGE,
+    "tests/test_graph_page.py",
+]
+_LENS81_DELIVERED = "b0368ed2bf9f1e62046c672fce7b5b852911ed1d"
+_LENS81_FIX = "8b7f6c844ef1c1d0bbd9c52e87cb2e3ba7a0e0d3"
+
+
+def test_lens81_fixture_pins_the_cycle_authority_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Declared (authority coverage): `_signal` folds every scoped-read row
+    # into the page's cycle authority — no in-scope filter, no `verdicts`.
+    # Present-but-undeclared (lens78's class): the read plan is handed to
+    # gather with no cap or phase deadline. The fix (remediation round 1)
+    # adds `verdicts` filtered to in-scope non-ghost ids and the
+    # MAX_CYCLE_READ_PROJECTS / CYCLE_READ_BUDGET_S bounds (the cap the
+    # merged head later replaced with the deadline alone — recorded in the
+    # case as pairing noise). Both patches carry the manual's screenshot
+    # (binary): the first cut omitted it and drew a shared broken-image
+    # minor on every sample.
+    repo, resolved, cleanup = _pin_pair(
+        monkeypatch, "lens81-cycle-authority-coverage", _LENS81_DELIVERED, _LENS81_FIX
+    )
+    try:
+        good = resolved.known_good_head or ""
+        assert (
+            _git_out(
+                repo, "ls-tree", "--name-only", resolved.base, "--", _LENS81_CYCLES
+            )
+            == ""
+        )
+        buggy = _blob_at(repo, resolved.head, _LENS81_CYCLES)
+        fixed = _blob_at(repo, good, _LENS81_CYCLES)
+        assert "verdicts" not in buggy
+        assert "in_scope" not in _function_body(buggy, "_signal")
+        assert "asyncio.gather(*(read(*call) for call in plan))" in buggy
+        assert (
+            "MAX_CYCLE_READ_PROJECTS" not in buggy
+            and "CYCLE_READ_BUDGET_S" not in buggy
+        )
+        assert "verdicts: tuple[BlockedTaskRecord, ...]" in fixed
+        assert "in_scope" in _function_body(fixed, "_signal")
+        assert "MAX_CYCLE_READ_PROJECTS = 64" in fixed
+        assert "CYCLE_READ_BUDGET_S = " in fixed
+        assert "def _read_plan(" in fixed
+        for sha in (resolved.head, good):
+            listed = _git_out(
+                repo, "ls-tree", "--name-only", sha, "--", _LENS81_SCREENSHOT
+            )
+            assert listed.strip() == _LENS81_SCREENSHOT
+        changed = _git_out(repo, "diff", "--name-only", resolved.head, good)
+        assert sorted(changed.split()) == sorted(_LENS81_FIX_FILES)
     finally:
         cleanup()

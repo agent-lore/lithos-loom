@@ -31,7 +31,8 @@ across projections — a derived computation ("longest chain over the ACTIVE
 projection") built on a partition (the SCC condensation) computed over a
 DIFFERENT edge set (all edges); the same class escaped AGAIN one slice
 later on the client side, with the server's own docstring naming the case
-(lens87-chain-trace-projection); (2) documented-rule conformance — a
+(RECURRENCE, recorded here as provenance rather than scored twice — see
+below); (2) documented-rule conformance — a
 tie-break the story spells out, implemented in the wrong direction; the
 reviewer's method was a fixture where the rule's two readings diverge.
 Two findings, two classes, one diff: one case (README minting rule).
@@ -51,6 +52,25 @@ with the mixed-status-cycle and diamond-to-focus regressions; SPECIFICATION
 and metrics regenerated. NOT the merged head 5ce7782: rounds 2–4 addressed
 the converge panel's own findings on the fixed tree and would be a
 difference between the heads for no gain.
+
+RECURRENCE (provenance, not a second case — PR #401 review: the corpus
+holds one case per blind-spot class, and pooling a recurring class twice
+would weight the headline by how often a class recurred): lens PR #87
+(T2-A4, 2026-09-14) shipped the CLIENT half of class (1) — graph.js's
+`condensationOf()` traced `payload.longest_chain.nodes` through
+`node.cycle`, the all-edge display SCC, while the server had computed the
+chain over the active projection since this case's fix, and
+`_active_condensed`'s docstring named the divergence. Twelve panel rounds
+(story-develop aabb134f + converge 82dfe33b, correctness + test-quality)
+passed it; the external reviewer's first pass caught it
+(https://github.com/agent-lore/lithos-lens/pull/87#issuecomment-5665261576);
+loom's remediation 505ad2f8 round 1 (eb578fe) fixed it with
+`longest_chain.members` + `chainCondensationOf()`. A K=5 correctness
+reading of that pair (base 9afee57, defect 19202ab, known-good eb578fe;
+report escape-t2-persona-2026-09-14) read 1/5 — the same number as this
+case's finding (1) below — so the class is stable across the server/client
+boundary. Re-mint it as its own case only if the class taxonomy gains a
+"consumer ignores its producer's stated caveat" class distinct from (1).
 
 RH-5 DECLARATION: two declared defects. The reviewer also noted that
 `graph_layout` now duplicates the D6 classifier / edge-state model already

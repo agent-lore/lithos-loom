@@ -37,7 +37,19 @@ lens78-fanout-work-bounds one slice earlier (a different module, a
 different panel member); (2) authority coverage — a derived verdict (in a
 cycle / blocked via cycle) may only be asserted for nodes whose inputs
 (edges) were fetched; rows a scoped read returns about out-of-scope tasks
-are data, not authority. Two findings, two classes, one diff: one case.
+are data, not authority.
+
+DECLARED: finding (2) only. Finding (1) is lens78-fanout-work-bounds's
+class, and the corpus holds one case per class (PR #401 review) — so it is
+PRESENT-BUT-UNDECLARED here: in the defect head, closed by the same
+round-1 fix, and recorded as the class's second instance (a different
+module, a different panel, one slice later). A reviewer that files it at
+the defect head is right and does not score; it cannot be an fp at the
+known-good head, where it is fixed. Its first K=5 correctness reading as a
+declared finding (report escape-t2-persona-2026-09-14, before the
+demotion) was 0/5 beside lens78's 4/4 with correctness + security — the
+persona-attribution evidence lives in the escape-review log, not in this
+case's number.
 
 CROSS-REPO case: repo points at the sibling lithos-lens checkout.
 FULL-FEATURE diff as the panel approved it (base = lens main e2347d6, the
@@ -70,7 +82,8 @@ too). Both patches carry the user-manual screenshot the head added
 (`git diff --binary`; a text-only patch left the manual embedding a
 missing image and drew a shared minor on every sample of the first run).
 
-RH-5 DECLARATION: two declared defects, the two externally-caught escapes.
+RH-5 DECLARATION: one declared defect (the ghost-authority escape) plus
+the fan-out escape present-but-undeclared as above.
 The reviewer's first pass also recorded two non-defects (graph_layout.py at
 799/800 lines; the cycle logic has no production exercise — all 20 real
 scopes report 0 cycles) — findings about those are neither expected nor
@@ -79,9 +92,8 @@ b0368ed; the remediation gate on 8b7f6c8). MDE, STATED BEFORE ANY PAID
 ARM: prior = one live run at 0 open findings over 7 rounds (the panel was
 BUSY on this diff — it found two criticals — which makes a 0/5 here more
 informative than lens83's: not a quiet panel, a panel looking elsewhere).
-Decision rule as lens83's; both classes are CLOSED (every queued read has
-a count; every asserted verdict has an input set) so a lens is admissible
-at 0/5 under the RH-1 rule.
+Decision rule as lens83's; the class is CLOSED (every asserted verdict has
+an input set) so a lens is admissible at 0/5 under the RH-1 rule.
 """
 ac_provenance = "replay"   # the real T2-A3 story body the panel reviewed against
 tier = "frontier"
@@ -94,40 +106,6 @@ acceptance_criteria_file = "ac.md"
 
 [known_good]
 head_patch = "known-good.patch"
-
-[[expected]]
-file = "src/lithos_lens/graph_cycles.py"
-keywords = [
-    "coverage_projects",
-    "bound",
-    "unbounded",
-    "cap",
-    "deadline",
-    "gather",
-    "tags",
-    "project:",
-    "fan-out",
-    "fanout",
-    "task_blocked",
-]
-min_severity = "major"
-mechanism = """
-The cycle-signal fan-out is unbounded before the read queue exists:
-`coverage_projects()` accepts every project-looking tag on every covered task
-(the vendored task contract puts no maximum on a task's tags), the code
-constructs two scoped `task_blocked` reads per project and passes the entire
-plan to `asyncio.gather`; the semaphores limit only simultaneous calls, not
-the number of queued coroutines or total work, and the per-call timeout
-starts only after both gates are acquired, so the phase as a whole has no
-deadline. One task carrying many valid `project:*` tags makes every graph
-page request issue thousands of `task_blocked` calls and consume unbounded
-memory / upstream work / time. A match names the unbounded or uncapped
-number of blocked reads driven by tags / coverage projects, the missing
-hard bound before the queue is built, or the missing whole-phase deadline
-(and, ideally, that a truncated coverage must degrade to `unknown`, never
-cycle-free). NOT a match: the ghost-authority finding (the other expected);
-the truncation-at-limit banner (correct); the projectless-child rule.
-"""
 
 [[expected]]
 file = "src/lithos_lens/graph_cycles.py"
