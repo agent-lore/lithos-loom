@@ -55,7 +55,20 @@ filtered to non-ghost in-scope ids and ghost flagged / cycle rendering is
 gated; route-level regressions for the many-project task, the slow client
 and the upstream-ghost case; SPECIFICATION, manual and metrics regenerated.
 NOT the merged head 50723ea: rounds 2–4 addressed the converge panel's own
-findings on the fixed tree.
+findings on the fixed tree — one of which is ABOUT THIS PAIRING: round 1
+bounded the fan-out with a hard cap (`MAX_CYCLE_READ_PROJECTS = 64`, the
+projects past it left unread and their tasks `unknown`, the page naming the
+capped coverage), the converge panel held in round 2 that a cap violates
+D4's one-read-pair-per-coverage-project contract, and the merged head
+replaced it with the phase deadline alone (`unmade` reads). A finding that
+the known-good head silently truncates the coverage set / never reads
+projects past 64 is therefore a real claim about the ROUND-1 tree that
+lens main no longer carries: it lands in `noise`, never `fp`, and is not a
+reason to re-pair (the first persona reading raised it 5/5 on the
+known-good head, so the class the live panel caught, this panel catches
+too). Both patches carry the user-manual screenshot the head added
+(`git diff --binary`; a text-only patch left the manual embedding a
+missing image and drew a shared minor on every sample of the first run).
 
 RH-5 DECLARATION: two declared defects, the two externally-caught escapes.
 The reviewer's first pass also recorded two non-defects (graph_layout.py at
