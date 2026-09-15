@@ -89,8 +89,7 @@ accepting TOML booleans as integers (5/5), cache entry size unbounded (3/5),
 dir suffix -generalist-; `--reviewer code-quality` = claude-opus-5, no
 brief): case 1/5 as a conjunction, but PER FINDING the work bound 5/5 and
 the reservation 1/5 — "unbounded work per request" is caught by a
-brief-less claude reviewer as reliably as by security; "every read path
-under the shared limiter" is security's alone. Known-good blocked 2/5.
+brief-less claude reviewer as reliably as by security; "every read path under the shared limiter" was reached only by security in this reading (3/4 vs 1/5 — two-sided Fisher p≈0.21, not distinguishable at K=5; a hypothesis for a powered arm, engine-confounded). Known-good blocked 2/5.
 Persona and engine are confounded across the arms (see README §"Escape
 review", 2026-09-15).
 """

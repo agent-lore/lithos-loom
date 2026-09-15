@@ -106,8 +106,7 @@ fixated on D6's edge-state classifier existing twice (graph_scope vs
 graph_layout), rated major at both heads (known-good blocked 5/5), the
 duplication the external reviewer explicitly called "an integration note,
 not the cause"; the tie-break, verifiable from the story text, was never
-looked at. On this diff the brief-less generalist is strictly worse than
-the persona.
+looked at. On the tie-break, 0/5 against the persona's 5/5 is the near-total movement the method calls readable; on the partition, 0/5 vs 1/5 is not.
 """
 ac_provenance = "replay"   # the real T2-A2 story body the panel reviewed against
 tier = "frontier"

@@ -115,8 +115,7 @@ text-only patches (fixed: `git diff --binary`). GENERALIST ARM
 (`--reviewer code-quality`, claude-opus-5): ghost authority 3/5 (two exact,
 one via a condensation-counting angle; severity-correct 1/3) and the
 undeclared fan-out finding raised as major 2/5 with D4's "no sampling of
-the coverage set" — the brief-less generalist beats the correctness
-persona on both classes here, engine confounded (claude vs codex).
+the coverage set" — 3/5 vs 0/5 (two-sided Fisher p≈0.17) and 2/5 vs 0/5: inside the method's "not evidence" band at K=5 and engine-confounded (claude vs codex), so a hypothesis for a powered arm with the engine control first, not a finding.
 Known-good blocked 2/5 (the graph route re-emitting query values without
 `filter_query_oversized` — real on lens main).
 """

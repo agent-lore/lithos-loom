@@ -129,9 +129,7 @@ no brief; judge claude-opus-5): catch 5/5 (95% CI 57–100%), severity-
 correct 3/5 (two samples rated the gap minor), fp 0/5, known-good blocked
 3/5 — on "every panel open runs the full detail-page fan-out via
 `load_task_detail`" (3/5, a real cost note on lens main, shared by both
-heads). Against the persona's 3/5 first reading this is the one case where
-the brief-less reviewer beat the persona outright on the declared class;
-read with the corpus's other rows (README §"Escape review", 2026-09-15) —
+heads). Against the persona's 3/5 first reading, 5/5 vs 3/5 (two-sided Fisher p≈0.44) is not a distinguishable delta at K=5 — recorded, not read; see it with the corpus's other rows (README §"Escape review", 2026-09-15) —
 persona and engine are confounded across the arms.
 """
 ac_provenance = "replay"   # the real T2-A6 story body the panel reviewed against
