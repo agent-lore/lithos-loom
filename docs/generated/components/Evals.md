@@ -27,7 +27,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 | `lithos_loom.evals.review.match` | M | 3 | 9 |
 | `lithos_loom.evals.review.overrides` | S | 1 | 3 |
 | `lithos_loom.evals.review.patch` | S | 0 | 2 |
-| `lithos_loom.evals.review.report` | S | 0 | 12 |
+| `lithos_loom.evals.review.report` | M | 0 | 16 |
 | `lithos_loom.evals.review.rescore` | M | 5 | 6 |
 | `lithos_loom.evals.review.stats` | XS | 0 | 1 |
 | `lithos_loom.evals.triage` | XS | 0 | 0 |
@@ -129,9 +129,13 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 - def `struct_note` — ``struct N/M`` — but only when the judge-free matcher disagrees (#307).
 - def `noise_cell` — The known-good noise cell: how many runs said anything, how many blocked.
 - def `catch_cell` — The catch cell plus ``(caught, n_valid)`` for the roll-up tallies.
+- def `per_expected_rows` — One indented row per ``[[expected]]`` under a MULTI-expected case (#404).
 - def `fp_cell`
 - def `print_results_table` — Print the results table + the two tier roll-ups.
 - def `print_rollups` — The two tier roll-up lines (RH-6): frontier headline, floor gate.
+- def `class_tallies` — ``{class: (caught, valid)}`` over SAMPLES, pooled across the cases that declare the class (#404).
+- def `unclassed_expected_count` — How many frontier expecteds carry no class — the part of the corpus the balanced line does NOT cover.
+- def `class_balanced_line` — The class-balanced frontier line (#404, PR #401 review): each declared class's pooled per-sample catch rate with its Wilson CI, and their mean, so a class that recurred across PRs counts once. The mean is a point summary with NO interval — a mean of ratios over unequal, non-independent denominators has no pooled-binomial sampling model, so it is never the figure an A/B tests; the per-class ``c/v`` figures are. A class with no valid sample is named and left out of the mean; unclassed expecteds are excluded and counted, so the line always says what corpus it covers.
 - def `case_result_payload` — The rate / per-sample half of a case's ``summary.json``.
 
 ### `lithos_loom.evals.review.rescore`

@@ -798,3 +798,75 @@ def test_at_least_one_shipped_artifact_case_exists() -> None:
     assert any(load_case(d).artifacts_dir is not None for d in _shipped_case_dirs()), (
         "no shipped artifact case — the artifact-review surface is unmeasured"
     )
+
+
+# ── #404: the blind-spot class on each [[expected]] ──────────────────────────
+
+
+def _with_class(cls: str) -> str:
+    return _SEED_TOML.replace(
+        'min_severity = "critical"', f'min_severity = "critical"\nclass = "{cls}"'
+    )
+
+
+def test_expected_class_loads_when_declared(tmp_path: Path) -> None:
+    _write_case(tmp_path / "c", toml=_with_class("resource-bound"))
+    case = load_case(tmp_path / "c")
+    assert case.expected[0].blind_spot_class == "resource-bound"
+
+
+def test_expected_class_defaults_to_none(tmp_path: Path) -> None:
+    _write_case(tmp_path / "c", toml=_SEED_TOML)
+    assert load_case(tmp_path / "c").expected[0].blind_spot_class is None
+
+
+def test_expected_class_rejects_a_value_outside_the_taxonomy(tmp_path: Path) -> None:
+    # Fail closed: a typo'd class would silently make a new singleton class
+    # and change the class-balanced headline's weights.
+    from lithos_loom.evals.review.case import BLIND_SPOT_CLASSES
+
+    _write_case(tmp_path / "c", toml=_with_class("resource-bounds"))
+    with pytest.raises(ValueError, match="resource-bounds") as exc:
+        load_case(tmp_path / "c")
+    for known in BLIND_SPOT_CLASSES:
+        assert known in str(exc.value)
+
+
+def test_expected_class_does_not_change_the_scoring_fingerprint(
+    tmp_path: Path,
+) -> None:
+    # The class keys the ROLL-UP, not the per-case score: a re-score of a
+    # report dir recorded before the class was declared must still compare.
+    from lithos_loom.evals.review.case import expected_fingerprint
+
+    _write_case(tmp_path / "a", toml=_SEED_TOML)
+    _write_case(tmp_path / "b", toml=_with_class("resource-bound"))
+    assert expected_fingerprint(load_case(tmp_path / "a")) == expected_fingerprint(
+        load_case(tmp_path / "b")
+    )
+
+
+def test_every_shipped_class_is_in_the_taxonomy() -> None:
+    # The taxonomy is the README's; a class used by a shipped case that the
+    # vocabulary does not name would be a silent extension.
+    from lithos_loom.evals.review.case import BLIND_SPOT_CLASSES
+
+    root = Path(__file__).resolve().parents[1] / "evals" / "review" / "cases"
+    classed = 0
+    for case_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for e in load_case(case_dir).expected:
+            if e.blind_spot_class is not None:
+                classed += 1
+                assert e.blind_spot_class in BLIND_SPOT_CLASSES, case_dir.name
+    # the lens T2 escape corpus (#401) is classed — the reason #404 exists —
+    # and every class in the taxonomy is represented by at least one shipped
+    # expected (a class nothing declares is a definition without evidence)
+    assert classed >= 6
+    represented = {
+        e.blind_spot_class
+        for case_dir in root.iterdir()
+        if case_dir.is_dir()
+        for e in load_case(case_dir).expected
+        if e.blind_spot_class is not None
+    }
+    assert represented == set(BLIND_SPOT_CLASSES)

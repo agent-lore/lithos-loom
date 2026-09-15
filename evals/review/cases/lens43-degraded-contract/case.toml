@@ -51,6 +51,7 @@ head_patch = "known-good.patch"
 file = "src/lithos_lens/frontier.py"
 keywords = ["flat", "REQUIREMENTS", "resilience", "silent classification", "unclassified"]
 min_severity = "major"
+class = "contract-grounding"
 mechanism = """
 Transient frontier read failure renders as graph classification instead of the
 contracted flat fallback: when lithos_task_ready / lithos_task_blocked raises,
@@ -67,6 +68,7 @@ per-load, distinct from the cached missing-tools verdict.
 file = "src/lithos_lens/tasks.py"
 keywords = ["All systems healthy", "healthy", "epic", "gate", "task_type"]
 min_severity = "major"
+class = "contract-grounding"
 mechanism = """
 The "All systems healthy" stripe makes a whole-system claim over rows it
 cannot see: classify_open_tasks deliberately skips every open row whose

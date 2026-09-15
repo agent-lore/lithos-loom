@@ -134,6 +134,7 @@ keywords = [
     "completed",
 ]
 min_severity = "major"
+class = "partition-reuse"
 mechanism = """
 The longest blocking chain is required (D7, the story body) to be computed
 over the condensed DAG of the ACTIVE projection only, but `_active_condensed`
@@ -165,6 +166,7 @@ keywords = [
     "prefix",
 ]
 min_severity = "minor"
+class = "rule-conformance"
 mechanism = """
 The `through=` (focus) chain's tie-breaking runs backward and can disagree
 with the global chain: `longest_blocking_chain` calls `_longest_from` over

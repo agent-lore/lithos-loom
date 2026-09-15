@@ -92,6 +92,21 @@ the reservation 1/5 — "unbounded work per request" is caught by a
 brief-less claude reviewer as reliably as by security; "every read path under the shared limiter" was reached only by security in this reading (3/4 vs 1/5 — two-sided Fisher p≈0.21, not distinguishable at K=5; a hypothesis for a powered arm, engine-confounded). Known-good blocked 2/5.
 Persona and engine are confounded across the arms (see README §"Escape
 review", 2026-09-15).
+
+RECURRENCE (provenance, not a second case — README minting rule; the
+class-balanced roll-up of #404 is what makes a recurrence weightless in
+the headline): (1) lens PR #81 (T2-A6, 2026-09-13) — the operator's fan-out
+finding on the cycle module's edge reads, declared present-but-undeclared
+in lens81-cycle-authority-coverage as this case's class; (2) lens PR #89
+(T2-A5, run 210e12e3, 2026-09-15, correctness + test-quality, 7 rounds,
+$96.76, ZERO findings) — the operator's merge blocker: the mini-graph's
+`mini_graph_max_nodes` cap bounds what is RENDERED but not the work queued
+to build the tiers (`_resolve` over every first-hop endpoint + `read_edges`
+over every first-hop blocker; 1,102 task_get + 1,102 edge-list calls at cap
+1 with 1,101 blockers), while the full assembler's own
+`MAX_GHOST_RESOLUTION_READS` guard — this case's known-good — was bypassed
+(https://github.com/agent-lore/lithos-lens/pull/89). Third live escape of
+the class on consecutive T2 slices; the panel missed it each time.
 """
 ac_provenance = "replay"   # the real T2-A1 story body the panel reviewed against
 tier = "frontier"
@@ -121,6 +136,7 @@ keywords = [
     "semaphore",
 ]
 min_severity = "major"
+class = "resource-bound"
 mechanism = """
 The exact node-limit guard (`max_tasks`, the refusal "with the count") is
 evaluated only after `assemble_scope` has resolved EVERY far endpoint, and
@@ -153,6 +169,7 @@ keywords = [
     "limiter",
 ]
 min_severity = "major"
+class = "resource-bound"
 mechanism = """
 Epic membership reads bypass the graph session reservation: `epic_scope_tasks`
 issues `task_get` (the epic) and `task_children(recursive, include_closed)`

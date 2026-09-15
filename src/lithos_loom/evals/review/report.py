@@ -8,7 +8,10 @@ code paths having drifted.
 
 Rendering deliberately keeps the core columns fixed-width and identical across
 commands: report dirs get column-diffed against each other, and a table whose
-shape depends on which command printed it breaks that.
+shape depends on which command printed it breaks that. The one deliberate
+exception (#404) is the ``└``-prefixed row per ``[[expected]]`` under a
+multi-expected case — the same rows from every command, and a prefix a diff
+can filter on.
 """
 
 from __future__ import annotations
@@ -123,6 +126,25 @@ def catch_cell(r: CaseResult) -> tuple[str, int, int]:
     return cell, caught, n_valid
 
 
+def per_expected_rows(r: CaseResult) -> list[str]:
+    """One indented row per ``[[expected]]`` under a MULTI-expected case (#404).
+
+    The case row is the conjunction ("the PR would have been blocked"); these
+    say which defect was missed. A single-expected case gets none — its row
+    already is the diagnosis. Same valid-sample denominator as the case row.
+    """
+    if len(r.caught_per_expected) < 2:
+        return []
+    rows = []
+    for j, flags in enumerate(r.caught_per_expected):
+        caught, n_valid = count_valid(flags, r.excluded_per_sample)
+        ci = wilson_interval(caught, n_valid)
+        cls = r.expected_classes[j] if j < len(r.expected_classes) else None
+        label = f"[{j}] {cls or 'unclassed'}"
+        rows.append(f"  └ {label:<26} {caught}/{n_valid} {ci_band(*ci)}")
+    return rows
+
+
 def fp_cell(r: CaseResult) -> str:
     if not r.false_positive_per_sample:
         return f"{r.false_positive_rate * 100:.0f}%"
@@ -175,6 +197,8 @@ def print_results_table(
             f"{r.severity_correctness * 100:>4.0f}% {fp_cell(r):>20} "
             f"{noise_cell(r):>12}{extra_cells}  {mark}{struct_note(r, caught)}"
         )
+        for row in per_expected_rows(r):
+            typer.echo(row)
     print_rollups(tallies)
 
 
@@ -193,6 +217,7 @@ def print_rollups(tallies: dict[str, list[tuple[CaseResult, int, int]]]) -> None
             f"frontier: {caught}/{valid} pooled catch (95% CI {ci_band(*ci)}) "
             f"over {len(frontier)} {_plural('case', len(frontier))}"
         )
+        typer.echo(class_balanced_line([r for r, _, _ in frontier]))
     floor = tallies["floor"]
     if floor:
         regressed = [(r, c, v) for r, c, v in floor if not r.passed]
@@ -201,6 +226,89 @@ def print_rollups(tallies: dict[str, list[tuple[CaseResult, int, int]]]) -> None
             typer.echo(f"floor: REGRESSED — {detail}")
         else:
             typer.echo(f"floor: OK ({len(floor)} {_plural('case', len(floor))} at bar)")
+
+
+def class_tallies(results: Sequence[CaseResult]) -> dict[str, tuple[int, int]]:
+    """``{class: (caught, valid)}`` over SAMPLES, pooled across the cases that
+    declare the class (#404).
+
+    Within one case a class is caught in a sample when every expected of that
+    class is caught in it — the conjunction, as the case row — so a class
+    declared twice on one case measures its K runs once, never as 2K
+    observations of the same runs (opus round 1 M2); across cases the per-
+    sample counts pool as the frontier line's do. Unclassed expecteds are not
+    here: the balanced roll-up excludes them and says how many (opus round 1
+    H2 — a singleton per expected weights a case by how many defects its
+    author seeded).
+    """
+    tallies: dict[str, list[int]] = {}
+    for r in results:
+        per_expected = r.caught_per_expected or (r.caught_per_sample,) * len(
+            r.expected_classes
+        )
+        by_class: dict[str, list[tuple[bool, ...]]] = {}
+        for j, cls in enumerate(r.expected_classes):
+            if cls is None or j >= len(per_expected):
+                continue
+            by_class.setdefault(cls, []).append(per_expected[j])
+        for cls, rows in by_class.items():
+            conjunction = tuple(all(col) for col in zip(*rows, strict=True))
+            c, v = count_valid(conjunction, r.excluded_per_sample)
+            t = tallies.setdefault(cls, [0, 0])
+            t[0] += c
+            t[1] += v
+    return {k: (c, v) for k, (c, v) in tallies.items()}
+
+
+def unclassed_expected_count(results: Sequence[CaseResult]) -> int:
+    """How many frontier expecteds carry no class — the part of the corpus
+    the balanced line does NOT cover."""
+    return sum(
+        sum(1 for cls in r.expected_classes if cls is None)
+        or (0 if r.expected_classes else len(r.caught_per_expected) or 1)
+        for r in results
+    )
+
+
+def class_balanced_line(results: Sequence[CaseResult]) -> str:
+    """The class-balanced frontier line (#404, PR #401 review): each declared
+    class's pooled per-sample catch rate with its Wilson CI, and their mean,
+    so a class that recurred across PRs counts once. The mean is a point
+    summary with NO interval — a mean of ratios over unequal, non-independent
+    denominators has no pooled-binomial sampling model, so it is never the
+    figure an A/B tests; the per-class ``c/v`` figures are. A class with no
+    valid sample is named and left out of the mean; unclassed expecteds are
+    excluded and counted, so the line always says what corpus it covers."""
+    tallies = class_tallies(results)
+    unclassed = unclassed_expected_count(results)
+    rated = {k: c / v for k, (c, v) in tallies.items() if v}
+    suffix = (
+        f"; {unclassed} unclassed {'expected' if unclassed == 1 else 'expecteds'} "
+        "excluded"
+        if unclassed
+        else ""
+    )
+    parts = []
+    for k, (c, v) in sorted(tallies.items()):
+        if v:
+            parts.append(f"{k} {c}/{v} {ci_band(*wilson_interval(c, v))}")
+        else:
+            parts.append(f"{k} 0/0 (no valid sample, excluded)")
+    if not rated:
+        # "declared but every sample errored" is not "none declared": the
+        # class list is what makes two arms comparable, so it is printed
+        # even when nothing can be rated (review of PR #413).
+        listed = (" — " + ", ".join(parts)) if parts else ""
+        return (
+            "frontier (class-balanced): no classed expected with a valid sample"
+            + listed
+            + suffix
+        )
+    mean = sum(rated.values()) / len(rated)
+    return (
+        f"frontier (class-balanced): {mean * 100:.0f}% mean over {len(rated)} "
+        f"{'class' if len(rated) == 1 else 'classes'} — " + ", ".join(parts) + suffix
+    )
 
 
 def case_result_payload(r: CaseResult) -> dict:
@@ -256,6 +364,12 @@ def case_result_payload(r: CaseResult) -> dict:
         ),
         "structured_caught_per_sample": list(r.structured_caught_per_sample),
         "structured_caught": structured_tally(r)[0],
+        # #404: the per-expected diagnosis beside the per-sample conjunction,
+        # and the classes the balanced roll-up keys on.
+        "caught_per_expected": [list(t) for t in r.caught_per_expected],
+        "catch_rate_per_expected": list(r.catch_rate_per_expected),
+        "catch_rate_ci_per_expected": [list(ci) for ci in r.catch_rate_ci_per_expected],
+        "expected_classes": list(r.expected_classes),
         "false_positive_structured_per_sample": list(
             r.false_positive_structured_per_sample
         ),

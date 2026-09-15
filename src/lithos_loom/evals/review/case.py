@@ -74,7 +74,33 @@ _CASE_KEYS = frozenset(
 )
 _TOP_LEVEL_KEYS = frozenset({"case", "expected", "known_good"})
 _KNOWN_GOOD_KEYS = frozenset({"base", "head", "head_patch", "artifacts_dir"})
-_EXPECTED_KEYS = frozenset({"file", "keywords", "min_severity", "mechanism"})
+_EXPECTED_KEYS = frozenset({"file", "keywords", "min_severity", "mechanism", "class"})
+
+# The blind-spot taxonomy (#404) — the `class` an [[expected]] may declare, so
+# the frontier headline can be rolled up PER CLASS (a class that recurred
+# across PRs counts once) instead of per case. Small on purpose and mirrored
+# by evals/review/README.md §"Blind-spot taxonomy", which defines each; extend
+# both together. A class names the REASONING the panel lacked, not the code:
+#   resource-bound      — work driven by writable / external inputs with no
+#                         ceiling, deadline or admission (lens78, lens89)
+#   partition-reuse     — a derived computation over one projection built on a
+#                         partition computed over a different one (lens79, lens87)
+#   authority-coverage  — a rule's authority (who decides, over which scope)
+#                         narrower than the surface it is applied to (lens81)
+#   sibling-surface     — a contract implemented on one surface and missing on
+#                         its sibling that shares the consumer (lens83)
+#   contract-grounding  — an affirmative claim the in-tree contract / reads do
+#                         not support (lens43)
+#   rule-conformance    — a rule the story spells out, implemented in another
+#                         direction or order (lens79's tie-break)
+BLIND_SPOT_CLASSES = (
+    "resource-bound",
+    "partition-reuse",
+    "authority-coverage",
+    "sibling-surface",
+    "contract-grounding",
+    "rule-conformance",
+)
 
 
 @dataclass(frozen=True)
@@ -91,6 +117,14 @@ class Expected:
     keywords: tuple[str, ...]
     min_severity: str
     mechanism: str = ""
+    # #404: the blind-spot class this defect belongs to (one of
+    # :data:`BLIND_SPOT_CLASSES`), the key of the class-balanced roll-up; None
+    # = unclassed, which the roll-up EXCLUDES and counts (a singleton per
+    # expected would weight a case by how many defects it declares).
+    # Not part of :func:`expected_fingerprint`: it keys the roll-up, never
+    # the per-case score, so declaring it on a case whose report dir predates
+    # it must not make a re-score read as a different case.
+    blind_spot_class: str | None = None
 
 
 @dataclass(frozen=True)
@@ -578,9 +612,19 @@ def _parse_expected(case_id: str | None, e: dict) -> Expected:
         )
     if not e.get("file"):
         raise ValueError(f"case {case_id}: an [[expected]] needs a file")
+    blind_spot_class = e.get("class")
+    if blind_spot_class is not None and blind_spot_class not in BLIND_SPOT_CLASSES:
+        # Fail closed: a typo'd class would silently become a new singleton
+        # class and change the class-balanced headline's weights.
+        raise ValueError(
+            f"case {case_id}: [[expected]] class must be one of "
+            f"{BLIND_SPOT_CLASSES} (got {blind_spot_class!r}); extend the "
+            "taxonomy in case.py + the README together"
+        )
     return Expected(
         file=str(e["file"]),
         keywords=keywords,
         min_severity=min_severity,
         mechanism=str(e.get("mechanism", "")),
+        blind_spot_class=str(blind_spot_class) if blind_spot_class else None,
     )
