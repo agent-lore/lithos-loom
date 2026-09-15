@@ -119,7 +119,8 @@ class Expected:
     mechanism: str = ""
     # #404: the blind-spot class this defect belongs to (one of
     # :data:`BLIND_SPOT_CLASSES`), the key of the class-balanced roll-up; None
-    # = unclassed, which the roll-up treats as a singleton class of its own.
+    # = unclassed, which the roll-up EXCLUDES and counts (a singleton per
+    # expected would weight a case by how many defects it declares).
     # Not part of :func:`expected_fingerprint`: it keys the roll-up, never
     # the per-case score, so declaring it on a case whose report dir predates
     # it must not make a re-score read as a different case.

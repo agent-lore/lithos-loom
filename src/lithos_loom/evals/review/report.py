@@ -288,17 +288,22 @@ def class_balanced_line(results: Sequence[CaseResult]) -> str:
         if unclassed
         else ""
     )
-    if not rated:
-        return (
-            "frontier (class-balanced): no classed expected with a valid sample"
-            + suffix
-        )
     parts = []
     for k, (c, v) in sorted(tallies.items()):
         if v:
             parts.append(f"{k} {c}/{v} {ci_band(*wilson_interval(c, v))}")
         else:
             parts.append(f"{k} 0/0 (no valid sample, excluded)")
+    if not rated:
+        # "declared but every sample errored" is not "none declared": the
+        # class list is what makes two arms comparable, so it is printed
+        # even when nothing can be rated (review of PR #413).
+        listed = (" — " + ", ".join(parts)) if parts else ""
+        return (
+            "frontier (class-balanced): no classed expected with a valid sample"
+            + listed
+            + suffix
+        )
     mean = sum(rated.values()) / len(rated)
     return (
         f"frontier (class-balanced): {mean * 100:.0f}% mean over {len(rated)} "

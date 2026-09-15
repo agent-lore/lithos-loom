@@ -1908,6 +1908,46 @@ def test_a_class_with_no_valid_sample_is_named_and_left_out_of_the_mean(
     ) in out
 
 
+def test_an_arm_whose_every_classed_sample_errored_still_names_its_classes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Dave's review of #413 (Medium): two arms are comparable only over the
+    # same class list, so the list must survive an arm where every classed
+    # sample errored — "declared but no valid sample" is not "none declared".
+    d = tmp_path / "cases"
+    _make_classed_case(d, "dead-a", "resource-bound")
+    _make_classed_case(d, "dead-b", "authority-coverage")
+    _make_classed_case(d, "loose", None)
+
+    def fake(case, **kwargs):
+        errored = (True,) * 5
+        return CaseResult(
+            case_id=case.id,
+            n=5,
+            catch_rate=0.0,
+            severity_correctness=0.0,
+            false_positive_rate=0.0,
+            passed=False,
+            caught_per_sample=(False,) * 5,
+            severity_per_sample=(False,) * 5,
+            errored_per_sample=errored,
+            caught_per_expected=((False,) * 5,),
+            catch_rate_per_expected=(0.0,),
+            catch_rate_ci_per_expected=((0.0, 0.0),),
+            expected_classes=tuple(e.blind_spot_class for e in case.expected),
+        )
+
+    monkeypatch.setattr(eval_cli, "run_case", fake)
+    result = runner.invoke(eval_app, ["review", "--cases-dir", str(d)])
+    assert result.exit_code != 0
+    out = _unwrapped(result.output)
+    assert (
+        "frontier (class-balanced): no classed expected with a valid sample — "
+        "authority-coverage 0/0 (no valid sample, excluded), "
+        "resource-bound 0/0 (no valid sample, excluded); 1 unclassed expected excluded"
+    ) in out
+
+
 def test_a_sub_row_uses_the_valid_sample_denominator(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
