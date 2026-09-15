@@ -796,3 +796,33 @@ def test_the_budget_note_survives_the_detail_truncation() -> None:
     assert len(d.detail) <= 200
     assert d.detail.endswith("until a human push")
     assert d.detail.startswith("GitHub: xxx")
+
+
+def test_a_settled_spent_budget_with_new_material_parked_is_a_stop() -> None:
+    # Dave's review of #410 (High): a new trusted review after the settled
+    # last round is parked by ingestion, and the exhausted dispatcher cannot
+    # consume it until a human push — so the "parked behind a busy run"
+    # reading would say automation is working, forever, when it has stopped
+    # with fresh material waiting. That is a stop, named as such.
+    meta = {
+        **_lens88_meta("converged"),
+        "external_remediation_pending": {"pr_url": _URL},
+    }
+    d = _derive_d(
+        meta,
+        pr=_PR(mergeable_state="unstable"),
+        remediation_exhausted=True,
+        regate="unchanged",
+    )
+    assert d.state == "needs_human"
+    assert "new review material" in d.detail and "human push" in d.detail
+    # a trigger parked for ANOTHER PR does not count
+    other = {
+        **_lens88_meta("converged"),
+        "external_remediation_pending": {"pr_url": "x"},
+    }
+    d = _derive_d(other, remediation_exhausted=True, regate="unchanged")
+    assert d.state == "ready_to_merge"
+    # and with rounds left the parked trigger still reads as reconciling
+    d = _derive_d(meta, regate="unchanged")
+    assert d.state == "reconciling"

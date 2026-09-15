@@ -264,17 +264,29 @@ def _derive(
     # (#408, lens #88: round 2/2 converged and pushed, and the board said
     # needs_human over a PR that needed nothing but the re-review) — it
     # falls through to the ordinary states, with the spend noted there.
-    if (
-        said.remediation_exhausted
-        and not busy.remediation
-        and not _spent_but_settled(budget)
-    ):
-        last = _str(budget.get("last_status"))
-        return Derived(
-            "needs_human",
-            "external-remediation budget exhausted; "
-            + (f"last run {last}" if last else "the last round recorded no outcome"),
-        )
+    if said.remediation_exhausted and not busy.remediation:
+        if not _spent_but_settled(budget):
+            last = _str(budget.get("last_status"))
+            return Derived(
+                "needs_human",
+                "external-remediation budget exhausted; "
+                + (
+                    f"last run {last}" if last else "the last round recorded no outcome"
+                ),
+            )
+        # Settled, but NEW material has since been parked (ingestion parks
+        # a trusted batch; an exhausted dispatcher leaves it parked until a
+        # human push re-arms the budget — review of PR #410): automation
+        # has stopped with work waiting. Named as the stop it is, before the
+        # parked-trigger branch below reads it as "behind a busy run".
+        if _record(meta, _REMEDIATION_PENDING, pr_url):
+            rounds = budget.get("rounds_used")
+            used = f" ({rounds} round(s) used)" if isinstance(rounds, int) else ""
+            return Derived(
+                "needs_human",
+                f"remediation budget spent{used} and new review material is "
+                "parked with no round left — a human push re-arms it",
+            )
     # #377: a dispatcher stopped on the HOST (no verdict reached) — like a
     # refusal, only the operator can move it (fix the host, restart loom).
     # Below every human-gate check so a gate that already waits is named first.
