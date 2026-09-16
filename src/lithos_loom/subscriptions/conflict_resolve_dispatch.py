@@ -531,12 +531,19 @@ class ConflictResolveDispatch:
             # pair stays armed for the next boot (the record's status + boot
             # id are the re-arm key), the breadcrumb names the host action.
             action = str(data.get("host_action") or "fix the host")
+            worktree = str(data.get("worktree") or "")
+            kept = (
+                f"; the run's worktree {worktree} holds any resolution the coder "
+                "committed before the failure"
+                if worktree
+                else ""
+            )
             await post_friction(
                 gate_id,
                 story_id,
                 record,
                 f"stopped on an infrastructure failure, not a verdict on the "
-                f"merge ({record.message}); {action}, then restart loom",
+                f"merge ({record.message}); {action}, then restart loom{kept}",
                 ctx,
             )
         elif status in _ESCALATE:

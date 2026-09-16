@@ -1,0 +1,9 @@
+{
+  "engine": "codex",
+  "exit_code": 255,
+  "result_text": "I\u2019ll trace the full mini-graph path and the latest read-budget fix, then map each acceptance criterion to implementation and tests before writing the correctness handoff. I\u2019ll keep the workspace unchanged except for the required review file.",
+  "stderr": "Reading additional input from stdin...\n",
+  "raw": null,
+  "container_running": false,
+  "_provenance": "lens PR #89 remediation round 1 (converge run 86b39768), 2026-09-15 21:44:18 BST: the docker daemon restarted under a package upgrade (docker-ce 29.7.2 -> 29.8.0) and killed the reviewer's sandbox mid-turn; the exec returned 255 with no text. classification at capture: agent_error (#412)."
+}

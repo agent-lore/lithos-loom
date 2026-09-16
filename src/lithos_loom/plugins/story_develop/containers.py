@@ -256,6 +256,35 @@ def resync_auth_files(
     return synced
 
 
+#: One liveness probe must never hang the failure path on a dead daemon.
+_PROBE_TIMEOUT_S = 30
+
+
+def container_running(name: str) -> bool | None:
+    """Whether the container is running NOW (#412) — ``False`` when stopped or
+    gone (a docker daemon restart removes ``--rm`` containers outright), and
+    DELIBERATELY also when the daemon is unreachable (``docker inspect``
+    fails with "Cannot connect to the Docker daemon"): mid-restart the
+    container will not survive, and "not running" is what keeps the retry
+    on the infra path. ``None`` only when the probe itself could not run
+    (docker hung past the cap, or absent from PATH). Never raises: it runs
+    on a turn's failure path, where a second failure must not mask the
+    first."""
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", name],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("liveness probe of %s could not run: %s", name, exc)
+        return None
+    if proc.returncode != 0:
+        return False
+    return proc.stdout.strip().lower() == "true"
+
+
 def stop_container(name: str) -> None:
     """Force-remove the container; never raises (teardown must be best-effort)."""
     subprocess.run(

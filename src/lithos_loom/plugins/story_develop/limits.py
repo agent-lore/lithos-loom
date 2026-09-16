@@ -143,6 +143,13 @@ _OOM_OR_SPAWN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"no such container", re.IGNORECASE),
     re.compile(r"OCI runtime exec failed", re.IGNORECASE),
     re.compile(r"\bout of memory\b|cannot allocate memory", re.IGNORECASE),
+    # #412: what `docker exec` says for the ~15 s a daemon restart takes —
+    # the container will not survive it, and the liveness probe cannot
+    # answer either, so the wording must carry the class on its own
+    re.compile(
+        r"cannot connect to the docker daemon|is the docker daemon running",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -196,7 +203,8 @@ def classify_failure(turn: TurnResult) -> FailureClass:
     """Classify a FAILED turn (see :class:`FailureClass`).
 
     Precedence: a timeout or an OOM-kill exit is decided by the exit code
-    alone (whatever the process printed is stale); then usage limit (a limit
+    alone, and a container the turn site found dead by that probe (#412)
+    (whatever the process printed is stale); then usage limit (a limit
     message can mention rate limiting — it must pause, never retry into the
     same wall); then a structured API status (401 → auth, 5xx / 429 →
     transient); then auth wording (a 401 inside a disconnect wording is the
@@ -210,6 +218,12 @@ def classify_failure(turn: TurnResult) -> FailureClass:
     if turn.timed_out:
         return FailureClass.TIMEOUT
     if turn.exit_code == _OOM_EXIT:
+        return FailureClass.OOM_OR_SPAWN
+    if turn.container_running is False:
+        # #412: the turn site's probe found the container stopped or gone (a
+        # docker daemon restart under the turn — lens #89 r1, exit 255 with
+        # an agent's opening sentence as the only text). Decided like the
+        # exit-137 rule, before any text: whatever it printed is stale.
         return FailureClass.OOM_OR_SPAWN
     if any(p.search(_failure_text(turn)) for p in _USAGE_LIMIT_PATTERNS):
         return FailureClass.USAGE_LIMITED
@@ -424,6 +438,10 @@ def record_failure_fixture(
                 "result_text": turn.result_text,
                 "stderr": turn.stderr,
                 "raw": turn.raw,
+                # #412: the probe result is evidence the class depends on;
+                # without it a promoted capture could not reproduce its own
+                # recorded classification
+                "container_running": turn.container_running,
             },
             indent=2,
             default=str,

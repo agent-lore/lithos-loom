@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -146,8 +147,11 @@ def _fixture_turn(name: str) -> TurnResult:
     data = json.loads((FIXTURES / name).read_text())
     engine = ClaudeEngine() if data["engine"] == "claude" else CodexEngine()
     if "stdout" in data:
-        return engine.parse_turn(
+        parsed = engine.parse_turn(
             data["stdout"], exit_code=data["exit_code"], stderr=data["stderr"]
+        )
+        return dataclasses.replace(
+            parsed, container_running=data.get("container_running")
         )
     return TurnResult(
         exit_code=data["exit_code"],
@@ -158,6 +162,9 @@ def _fixture_turn(name: str) -> TurnResult:
         cost_usd=0.0,
         raw=data["raw"],
         stderr=data["stderr"],
+        # #412: what the turn site's post-failure probe found (absent = never
+        # probed, the pre-#412 shape)
+        container_running=data.get("container_running"),
     )
 
 
@@ -174,6 +181,7 @@ EXPECTED_CLASS = {
     "codex_usage_limit.json": FailureClass.USAGE_LIMITED,
     "docker_exec_killed_137.json": FailureClass.OOM_OR_SPAWN,
     "docker_container_not_running.json": FailureClass.OOM_OR_SPAWN,
+    "docker_exec_255_daemon_restart.json": FailureClass.OOM_OR_SPAWN,
 }
 
 
@@ -530,6 +538,16 @@ def test_record_failure_fixture_round_trips(tmp_path: Path) -> None:
     assert data["result_text"] == "usage limit reached|1750000000"
     assert data["stderr"] == "boom"
     assert data["exit_code"] == 1
+    # #412: the probe result is part of the evidence — without it a promoted
+    # capture could not reproduce its own recorded classification
+    assert data["container_running"] is None
+    dead = dataclasses.replace(_failed(exit_code=255), container_running=False)
+    path = record_failure_fixture(
+        tmp_path / "failures", agent="coder", round_no=3, turn=dead
+    )
+    recorded = json.loads(path.read_text())
+    assert recorded["classification"] == "oom_or_spawn"
+    assert recorded["container_running"] is False
 
 
 def test_record_failure_fixture_never_overwrites(tmp_path: Path) -> None:
@@ -551,3 +569,53 @@ def test_record_failure_fixture_never_overwrites(tmp_path: Path) -> None:
     ]
     assert "usage limit reached" in p1.read_text()
     assert "quota exceeded" in p2.read_text()
+
+
+# --- #412: a dead container is decided by the probe, not by its text -----------
+
+
+def test_a_dead_container_is_infra_whatever_the_exec_printed() -> None:
+    # lens #89 r1: the docker daemon restarted under the turn; the exec came
+    # back 255 with an agent's opening sentence as its only text. Nothing in
+    # that text says "docker", so the wordings cannot decide it — the turn
+    # site's probe can.
+    turn = _fixture_turn("docker_exec_255_daemon_restart.json")
+    assert turn.container_running is False
+    assert classify_failure(turn) == FailureClass.OOM_OR_SPAWN
+    # the same capture WITHOUT the probe is the pre-#412 reading: the text
+    # alone is an agent error — pins that the probe is what changed the class
+    unprobed = dataclasses.replace(turn, container_running=None)
+    assert classify_failure(unprobed) == FailureClass.AGENT_ERROR
+    alive = dataclasses.replace(turn, container_running=True)
+    assert classify_failure(alive) == FailureClass.AGENT_ERROR
+
+
+def test_a_dead_container_outranks_the_text_channels() -> None:
+    # stale output from a container that is gone must not pause or re-auth:
+    # the exit-137 rule's precedent — decided before any text is read
+    for text in ("usage limit reached", "OAuth session expired", "stream disconnected"):
+        turn = _failed(exit_code=255, result_text=text)
+        assert classify_failure(dataclasses.replace(turn, container_running=False)) == (
+            FailureClass.OOM_OR_SPAWN
+        )
+
+
+def test_a_timeout_is_still_a_timeout_when_the_container_died() -> None:
+    turn = dataclasses.replace(
+        _failed(exit_code=124),  # the timeout exit
+        container_running=False,
+    )
+    assert classify_failure(turn) == FailureClass.TIMEOUT
+
+
+def test_an_unreachable_docker_daemon_is_a_dead_container_by_wording_too() -> None:
+    # #412 (opus round 1 Medium): during the ~15 s a docker restart takes,
+    # the retry's exec fails with this sentence — and the probe cannot answer
+    # either. The wording must decide it on its own, or the retry reads
+    # agent_error and the round is lost after all.
+    turn = _failed(
+        exit_code=1,
+        stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+        "Is the docker daemon running?",
+    )
+    assert classify_failure(turn) == FailureClass.OOM_OR_SPAWN

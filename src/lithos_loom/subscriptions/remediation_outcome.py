@@ -488,6 +488,23 @@ async def post_repo_mismatch_refusal(
     )
 
 
+def _kept_work(data: dict[str, Any]) -> str:
+    """#412: the host may have died AFTER the coder committed a fix (lens #89
+    r1). Converge commits on the RUN's own worktree branch — never on the PR's
+    branch, which an `infra_failed` run never pushes — so the breadcrumb names
+    that worktree, and nothing when no coder ran (the intake-infra shape)."""
+    worktree = str(data.get("worktree") or "")
+    branch = str(data.get("branch") or "")
+    if not worktree and not branch:
+        return ""
+    where = worktree or branch
+    tag = f" (branch {branch})" if worktree and branch else ""
+    return (
+        f" The run's worktree {where}{tag} holds any fix the coder committed "
+        "before the failure — recover it from there rather than paying for it again."
+    )
+
+
 async def refund_infra_failed(
     ctx: SubscriptionContext,
     *,
@@ -510,6 +527,7 @@ async def refund_infra_failed(
     """
     action = str(data.get("host_action") or "fix the host")
     detail = str(data.get("message") or "infrastructure failure")[:300]
+    kept = _kept_work(data)
     refund = dataclasses.replace(budget, rounds_used=max(0, budget.rounds_used - 1))
     marker = {
         REMEDIATION_KEY: refund.as_marker(),
@@ -532,7 +550,7 @@ async def refund_infra_failed(
             f"on the change ({detail}). The round is refunded "
             f"({refund.rounds_used}/{budget_limit}) and the review trigger "
             f"re-parked; loom will not retry this PR until the daemon restarts. "
-            f"{action} — then restart loom.",
+            f"{action} — then restart loom.{kept}",
         )
         return
     ctx.logger.warning(
@@ -552,7 +570,7 @@ async def refund_infra_failed(
         f"recording the refund did not land ({failure}): round "
         f"{budget.rounds_used}/{budget_limit} remains spent and the review "
         f"trigger is not re-parked. {action} — then restart loom and re-run "
-        f"`develop converge --from-github` for the material.",
+        f"`develop converge --from-github` for the material.{kept}",
     )
     # the round IS spent on this path: a last round decides like any other
     await escalate_or_report(
