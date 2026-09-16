@@ -27,6 +27,7 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
+from ...runner.orphans import PID_LABEL
 from .config import (
     CONTAINER_NOFILE_ULIMIT,
     CONTAINER_SHM_SIZE,
@@ -105,6 +106,12 @@ def build_run_command(
         "--init",
         "--name",
         name,
+        # #407: the container's owner. A loom restart kills every run's
+        # process but not its --rm container (docker keeps it until stopped);
+        # `reap_orphaned_containers` removes those whose owner is gone at the
+        # next boot and leaves the operator's own hand-run CLIs alone.
+        "--label",
+        f"{PID_LABEL}={os.getpid()}",
         "--cap-drop",
         "ALL",
         "--security-opt",
@@ -286,9 +293,15 @@ def container_running(name: str) -> bool | None:
 
 
 def stop_container(name: str) -> None:
-    """Force-remove the container; never raises (teardown must be best-effort)."""
-    subprocess.run(
-        ["docker", "rm", "-f", name],
-        capture_output=True,
-        text=True,
-    )
+    """Force-remove the container; never raises (teardown must be best-effort).
+    Capped (#407): teardown now runs on the SIGTERM path inside the
+    supervisor's grace, and a wedged docker must not eat the whole window."""
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", name],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("stop_container(%s) did not complete: %s", name, exc)

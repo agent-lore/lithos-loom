@@ -656,3 +656,39 @@ def test_eval_group_is_mounted_with_its_commands() -> None:
     assert "review" in result.output
     assert "rescore" in result.output
     assert "triage" in result.output
+
+
+def test_run_reaps_orphaned_containers_before_spawning_children(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #407 slice 2a: the previous daemon's runs died with it, but their --rm
+    # containers did not — they are reaped at boot, before any child could
+    # start a run beside them
+    order: list[str] = []
+    monkeypatch.setattr(
+        main_module, "_require_task_graph_or_exit", lambda cfg: order.append("gate")
+    )
+    monkeypatch.setattr(
+        main_module.orphans,
+        "reap_orphaned_containers",
+        lambda: order.append("reap") or ["loom-develop-dead-coder"],
+    )
+
+    grace: list[float] = []
+
+    class _Sup:
+        def __init__(self, cfg, categories, *, shutdown_grace_seconds):
+            order.append("supervisor")
+            grace.append(shutdown_grace_seconds)
+
+        async def run(self):
+            return 0
+
+    monkeypatch.setattr(main_module, "Supervisor", _Sup)
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code == 0, result.output
+    # the reap needs nothing from Lithos, and "Lithos is down, restart loom"
+    # is exactly the boot where the old containers are still around — so it
+    # runs before the boot gate can refuse (opus round 1)
+    assert order == ["reap", "gate", "supervisor"]
+    assert grace == [30.0]

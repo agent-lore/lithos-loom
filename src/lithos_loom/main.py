@@ -43,6 +43,7 @@ from lithos_loom.doctor import (
 )
 from lithos_loom.errors import LithosClientError, LithosLoomError
 from lithos_loom.lithos_client import BlockedTask, Blocker, LithosClient, Task
+from lithos_loom.runner import orphans
 from lithos_loom.subscriptions import (
     SUBSCRIPTION_ACTIONS,
     SubscriptionContext,
@@ -122,8 +123,23 @@ def run(
     # an incompatible server must surface at boot, not mid-PRD. This is a real
     # startup round-trip; if Lithos is unreachable / mid-restart the daemon also
     # won't start (re-run once Lithos is back).
+    # #407: the previous daemon's runs died with it; their --rm containers did
+    # not. Reap the ones whose owner is gone before any child starts a run —
+    # and before the boot gate, which needs Lithos: "Lithos is down, restart
+    # loom" is exactly the boot where the old containers are still around.
+    reaped = orphans.reap_orphaned_containers()
+    if reaped:
+        logging.getLogger(__name__).warning(
+            "reaped %d orphaned run container(s) from a previous daemon: %s",
+            len(reaped),
+            ", ".join(reaped),
+        )
     _require_task_graph_or_exit(cfg)
-    sup = Supervisor(cfg, default_categories())
+    sup = Supervisor(
+        cfg,
+        default_categories(),
+        shutdown_grace_seconds=cfg.orchestrator.shutdown_grace_seconds,
+    )
     exit_code = asyncio.run(sup.run())
     raise typer.Exit(exit_code)
 

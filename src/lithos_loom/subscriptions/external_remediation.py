@@ -88,6 +88,7 @@ from lithos_loom.subscriptions.remediation_outcome import (
     record_result,
     record_unsettled,
     refund_infra_failed,
+    refund_lost_run,
     refund_repo_mismatch,
     settled_refusal,
 )
@@ -159,6 +160,9 @@ class ExternalRemediation:
         self._hold = hold
         self._task: asyncio.Task[None] | None = None
         self._in_flight_pr_url = ""
+        # #407: what the in-flight run is about — so shutdown can refund the
+        # round it kills (gate id, story id, spec, ctx); None while idle
+        self._in_flight: tuple[str, str, PrGateSpec, SubscriptionContext] | None = None
         # #377: PR urls whose last run this boot ended `infra_failed` — held
         # from re-dispatch until the daemon restarts (the operator's fix attempt)
         self._infra_held: set[str] = set()
@@ -519,6 +523,7 @@ class ExternalRemediation:
             budget.rounds_used,
             self._settings.budget,
         )
+        self._in_flight = (gate.id, story_id, spec, ctx)
         self._task = asyncio.create_task(
             self._run(gate.id, story_id, spec, repo, budget, ctx),
             name=f"external-remediation-{spec.pr_number}",
@@ -535,9 +540,26 @@ class ExternalRemediation:
         task = self._task
         if task is None or task.done():
             return
+        facts = self._in_flight
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        # #407 slice 2a: the daemon just killed that run. A cancelled run task
+        # recorded nothing (its `except Exception` never sees the cancel), so
+        # the reserved round and the consumed trigger would strand — as lens
+        # #88 r2 did for a whole afternoon. Refund here, where the daemon
+        # knows; guarded on the gate's outcome field for the cancel that
+        # landed after the run recorded.
+        if facts is not None and task.cancelled():
+            gate_id, story_id, spec, ctx = facts
+            await refund_lost_run(
+                ctx,
+                gate_id=gate_id,
+                story_id=story_id,
+                spec=spec,
+                budget_limit=self._settings.budget,
+                work_dir=self._settings.work_dir,
+            )
 
     # ── decision helpers ───────────────────────────────────────────────
 
@@ -671,6 +693,7 @@ class ExternalRemediation:
             )
         finally:
             self._in_flight_pr_url = ""
+            self._in_flight = None
 
     async def _run_inner(
         self,
@@ -750,7 +773,10 @@ class ExternalRemediation:
                 spec.pr_url,
             )
             refund = dataclasses.replace(
-                budget, rounds_used=max(0, budget.rounds_used - 1)
+                budget,
+                rounds_used=max(0, budget.rounds_used - 1),
+                last_status="no_result",  # the round's outcome (#407 review)
+                last_settled=False,
             )
             await write_marker(
                 ctx,

@@ -32,6 +32,7 @@ The TOML schema is documented in ``docs/SPECIFICATION.md`` §3.1; the shape is:
 
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from collections.abc import Mapping
@@ -129,6 +130,13 @@ class OrchestratorConfig:
     may hold before a PR-producing route stops claiming its ready stories.
     ``0`` = unlimited. Per-project override: the same key in the context
     doc's metadata."""
+    shutdown_grace_seconds: float = 30.0
+    """How long the supervisor lets a child finish its shutdown before SIGKILL
+    (#407 slice 2a). A stopping watcher terminates the run it dispatched,
+    waits for that run to tear its containers down, then refunds the budget
+    round it killed — none of which fits the old 5 s fuse on a loaded docker
+    host, and a SIGKILL mid-refund strands the round the fix exists to
+    return."""
     max_open_delivered_prs_total: int = 3
     """The looser backstop: open ``pr`` gates INCLUDING escalated ones.
     Reaching it stops dispatch and posts ``[AdmissionHeld]``. ``0`` =
@@ -570,6 +578,20 @@ def _parse_orchestrator(data: Any, config_path: Path) -> OrchestratorConfig:
             f"{config_path}: orchestrator.max_open_delivered_prs_total must be 0 "
             "or >= max_open_delivered_prs"
         )
+    raw_grace = data.get("shutdown_grace_seconds", 30.0)
+    # TOML spells nan and inf (PR #415 review): nan makes wait_for time out at
+    # once — straight to SIGKILL, stranding the refund the grace exists for —
+    # and inf disables the SIGKILL fallback for a child that never exits.
+    if (
+        isinstance(raw_grace, bool)
+        or not isinstance(raw_grace, int | float)
+        or not math.isfinite(raw_grace)
+        or raw_grace < 0
+    ):
+        raise ConfigError(
+            f"{config_path}: orchestrator.shutdown_grace_seconds must be a "
+            f"finite non-negative number (got {raw_grace!r})"
+        )
     return OrchestratorConfig(
         agent_id=agent_id,
         lithos_url=lithos_url,
@@ -579,6 +601,7 @@ def _parse_orchestrator(data: Any, config_path: Path) -> OrchestratorConfig:
         retain_failed_workdirs=retain_failed,
         max_open_delivered_prs=max_open,
         max_open_delivered_prs_total=max_open_total,
+        shutdown_grace_seconds=float(raw_grace),
     )
 
 

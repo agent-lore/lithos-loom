@@ -332,3 +332,18 @@ def test_run_format_pass_does_not_follow_symlinks_to_host_files(
     for p in wt.rglob("*"):
         if p.is_file() and not p.is_symlink() and ".git" not in p.parts:
             assert "TOPSECRET-TOKEN" not in p.read_text(errors="ignore")
+
+
+def test_format_command_labels_the_container_with_its_owner_pid(tmp_path: Path) -> None:
+    # #407 slice 2a: every run container carries its owner's pid so the next
+    # daemon boot can reap the ones a restart orphaned
+    import os
+
+    cmd = autoformat.build_format_command(
+        name="loom-format",
+        image="img:1",
+        tree=tmp_path / "export",
+        cache_dir=tmp_path / "cache",
+        command="ruff format",
+    )
+    assert cmd[cmd.index("--label") + 1] == f"loom.pid={os.getpid()}"

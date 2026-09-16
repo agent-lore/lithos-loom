@@ -2782,3 +2782,155 @@ async def test_the_infra_friction_says_nothing_about_work_when_no_coder_ran(
     await rem._task
     friction = next(f for f in _findings(client) if f.startswith("[Friction]"))
     assert "holds any fix" not in friction
+
+
+# ── #407 slice 2a: the daemon refunds what it kills ──────────────────────────
+
+
+async def test_shutdown_refunds_the_round_it_kills_and_re_parks_the_trigger(
+    tmp_path: Path,
+) -> None:
+    """#407 (lens #88 r2, 2026-09-15): the operator restarted the daemon
+    18 s after a dispatch; the reservation stayed spent and the trigger
+    consumed, and nothing ever re-dispatched. The daemon KNOWS the moment
+    it kills a run — shutdown is where the refund belongs."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+
+    async def hanging_spawn(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await asyncio.sleep(3600)
+        return 0, ""
+
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=hanging_spawn)
+    assert await _consider(client, gate, story, rem, rounds_used=1) == "dispatched"
+    await started.wait()
+    assert (await _marker(client, gate.id))["rounds_used"] == 2  # reserved
+
+    await rem.shutdown()
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1  # refunded
+    assert marker["last_status"] == "" and marker["last_settled"] is False
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}  # re-parked
+    friction = next(f for f in _findings(client) if f.startswith("[Friction]"))
+    assert "lost to a loom shutdown" in friction
+    assert "round 2/2" in friction and "refunded" in friction
+    assert "re-dispatches" in friction
+    assert not rem.busy
+
+
+async def test_shutdown_never_refunds_a_run_that_recorded_its_outcome(
+    tmp_path: Path,
+) -> None:
+    # The cancel can land after the run's outcome write (#410's last_status)
+    # — then the round is spent by a recorded outcome, and a refund on top
+    # would be a second refund.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+
+    async def hanging_spawn(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await asyncio.sleep(3600)
+        return 0, ""
+
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=hanging_spawn)
+    assert await _consider(client, gate, story, rem, rounds_used=1) == "dispatched"
+    await started.wait()
+    recorded = RemediationBudget(
+        pr_url=_PR_URL, rounds_used=2, last_status="converged", last_settled=True
+    )
+    await client.task_update(
+        task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: recorded.as_marker()}
+    )
+
+    await rem.shutdown()
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 2 and marker["last_status"] == "converged"
+    assert [f for f in _findings(client) if "lost to a loom shutdown" in f] == []
+
+
+async def test_shutdown_with_nothing_in_flight_writes_nothing(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=_spawner(None)[0])
+    await rem.shutdown()
+    assert await _marker(client, gate.id) is None
+    assert _findings(client) == []
+
+
+async def test_shutdown_never_double_refunds_a_run_whose_own_refund_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opus round 1 (High, reproduced): the infra / repo-mismatch / no-result
+    paths REFUND the round and used to leave `last_status` empty, so a cancel
+    that landed during their finding post read as "never recorded" and the
+    shutdown refunded a paid round a second time. Every refund path now
+    stamps its outcome, and the shutdown guard sees it."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(_infra_failed_payload(), rc=1)
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+    real_post = client.finding_post
+
+    async def slow_post(**kw):
+        blocked.set()
+        await release.wait()
+        return await real_post(**kw)
+
+    monkeypatch.setattr(client, "finding_post", slow_post)
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    assert await _consider(client, gate, story, rem, rounds_used=1) == "dispatched"
+    await blocked.wait()  # the infra refund landed; its friction post is in flight
+
+    await rem.shutdown()
+
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1  # the ONE refund, not two
+    assert marker["last_status"] == "infra_failed" and marker["last_settled"] is False
+    assert [f for f in _findings(client) if "lost to a loom shutdown" in f] == []
+
+
+async def test_a_no_result_refund_stamps_its_outcome(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(None, rc=0)  # exit 0, nothing to ingest
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
+    await _consider(client, gate, story, rem, rounds_used=1)
+    assert rem._task is not None
+    await rem._task
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1 and marker["last_status"] == "no_result"
+
+
+async def test_the_shutdown_friction_says_where_the_killed_run_left_its_work(
+    tmp_path: Path,
+) -> None:
+    # opus round 1 (Medium): the killed run may have committed, even pushed;
+    # the operator is told where to look and that a push it made reads as a
+    # human push on the next sweep (re-arming the budget) rather than paying
+    # for the fix again
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+
+    async def hanging_spawn(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await asyncio.sleep(3600)
+        return 0, ""
+
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=hanging_spawn)
+    assert await _consider(client, gate, story, rem, rounds_used=0) == "dispatched"
+    await started.wait()
+    await rem.shutdown()
+    friction = next(f for f in _findings(client) if "lost to a loom shutdown" in f)
+    assert str(tmp_path) in friction and "converge" in friction
+    assert "re-arms the budget" in friction

@@ -100,6 +100,10 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 
 If round 1's coder disputes *every* finding and commits nothing, the deterministic gate still runs on the unchanged head. Such a round converges only if the head was already gate-green. This is rare (the coder is told to fix, not dispute-all) and acceptable for v1.
 
+## Stopping a run
+
+SIGTERM — what the daemon sends a dispatched run on shutdown — is turned into `SystemExit(143)` for every `develop` subcommand (#407 slice 2a), so the `finally` blocks that stop the run's sandbox containers and tear down its worktree run on the way out instead of being skipped by the signal's default disposition. The run's outcome is still lost (nothing is pushed, no JSON is written); the daemon refunds the budget round it killed and reaps any container that outlived its owner at the next boot.
+
 ## Requirements
 
 Host-only, like a develop run: `docker` + the agent CLIs (`claude` / `codex`) + `gh` (for PR resolution and the push). Not part of the hermetic `make check`.

@@ -1295,3 +1295,54 @@ def test_admission_dials_reject_bad_values(
     monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
     with pytest.raises(ConfigError, match=fragment):
         load_config()
+
+
+def test_shutdown_grace_defaults_to_thirty_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #407 slice 2a: a stopped watcher tears the killed run's containers down
+    # and refunds its round before exiting — the old 5 s SIGKILL fuse cut
+    # that off on any loaded docker host
+    _write_config(tmp_path, monkeypatch, "")
+    assert load_config().orchestrator.shutdown_grace_seconds == 30.0
+
+
+def test_shutdown_grace_parses_an_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        _MINIMAL_ORCHESTRATOR_TOML.replace(
+            'lithos_url = "http://localhost:8765"',
+            'lithos_url = "http://localhost:8765"\nshutdown_grace_seconds = 12\n',
+        )
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    assert load_config().orchestrator.shutdown_grace_seconds == 12.0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "shutdown_grace_seconds = -1\n",
+        'shutdown_grace_seconds = "x"\n',
+        # Dave's review of PR #415: TOML spells both; nan makes wait_for time
+        # out at once (straight to SIGKILL, stranding the refund), inf disables
+        # the SIGKILL fallback for a child that never exits
+        "shutdown_grace_seconds = nan\n",
+        "shutdown_grace_seconds = inf\n",
+    ],
+)
+def test_shutdown_grace_rejects_bad_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        _MINIMAL_ORCHESTRATOR_TOML.replace(
+            'lithos_url = "http://localhost:8765"',
+            'lithos_url = "http://localhost:8765"\n' + body,
+        )
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    with pytest.raises(ConfigError, match="shutdown_grace_seconds"):
+        load_config()
