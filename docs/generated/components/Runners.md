@@ -15,6 +15,8 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
 | `lithos_loom.runner.git` | M | 1 | 29 |
+| `lithos_loom.runner.orphans` | S | 0 | 1 |
+| `lithos_loom.runner.signals` | XS | 0 | 1 |
 | `lithos_loom.runner.worktree` | S | 0 | 6 |
 
 ## Public API
@@ -61,6 +63,12 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `conflict_markers` — Of *paths*, those whose working-tree content still carries conflict markers — the pre-commit guard for a resolution round (``git commit`` does not refuse markers; the guard must). A path deleted as its resolution carries none.
 - def `delete_branch` — Delete local *branch* (``-D``: a throwaway trial-merge branch is never merged anywhere, so the safe ``-d`` would always refuse). Raises when the branch does not exist or is checked out.
 
+### `lithos_loom.runner.orphans`
+- def `reap_orphaned_containers` — #407: remove every loom-labelled container whose owner process is gone.
+
+### `lithos_loom.runner.signals`
+- def `install_sigterm_exit` — Make SIGTERM raise ``SystemExit`` in the main thread (no-op where the interpreter cannot install handlers, e.g. a non-main thread).
+
 ### `lithos_loom.runner.worktree`
 - def `create` — Create a per-task worktree off *base_branch* and return its path.
 - def `current_base_ref` — The commit-ish a fresh branch off *base_branch* starts at (see :func:`create`): when the repo has an ``origin`` remote, the SHA of ``refs/remotes/origin/<base_branch>`` after :func:`git.fetch_branch` — the explicit refspec CREATES the tracking ref, so a checkout that never materialised it (narrowed then widened, pruned — PR #393 review) is fetched too, never cut at the stale local branch; when the fetch fails, the ref as last fetched if there is one, else the local branch (logged). A repo with no ``origin`` (the test fixtures) keeps the local branch. A sha, not the ``origin/<base>`` name: a branch created at a remote-tracking name gets upstream config written to ``.git/config`` under a non-retrying lock, which concurrent cuts in one checkout trip over; a sha writes nothing.
@@ -72,6 +80,6 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 ## Dependencies
 
 - Depends on: [Errors](Errors.md)
-- Used by: [Evals](Evals.md), [Plugins](Plugins.md), [Subscriptions](Subscriptions.md)
+- Used by: [Cli](Cli.md), [Entrypoint](Entrypoint.md), [Evals](Evals.md), [Plugins](Plugins.md), [Subscriptions](Subscriptions.md)
 
 [← all generated docs](../README.md)

@@ -41,6 +41,7 @@ __all__ = [
     "record_result",
     "record_unsettled",
     "refund_infra_failed",
+    "refund_lost_run",
     "refund_repo_mismatch",
     "refusal_key",
     "settled_refusal",
@@ -505,6 +506,92 @@ def _kept_work(data: dict[str, Any]) -> str:
     )
 
 
+async def refund_lost_run(
+    ctx: SubscriptionContext,
+    *,
+    gate_id: str,
+    story_id: str,
+    spec: PrGateSpec,
+    budget_limit: int,
+    work_dir: Path | None = None,
+) -> bool:
+    """#407 slice 2a: the daemon is stopping and just killed this PR's run.
+    The daemon knows the moment it strands a round, so the refund belongs
+    here, not in boot-time archaeology: the reservation is given back, the
+    review trigger re-parked (the reservation consumed it), and the story
+    told once — it re-dispatches after the next boot.
+
+    Guarded by #410's outcome field on a RE-READ of the gate: a cancel that
+    landed after the run's outcome write leaves ``last_status`` set, and a
+    refund on top of a recorded outcome would be a second refund. Strict
+    write, never raising; ``True`` when a refund landed.
+    """
+    try:
+        latest = await ctx.lithos.task_get(task_id=gate_id)
+    except Exception as exc:  # noqa: BLE001 — shutdown must finish either way
+        ctx.logger.warning(
+            "[Friction] external-remediation: could not re-read gate %s to refund "
+            "the run killed by shutdown (%s); the round stays spent — the next "
+            "boot's sweep reconciles it",
+            gate_id,
+            exc,
+        )
+        return False
+    if latest is None:
+        return False
+    budget = read_budget(latest, spec.pr_url)
+    if budget.rounds_used <= 0 or budget.last_status:
+        return False  # never reserved here, or the run recorded its outcome
+    refund = dataclasses.replace(
+        budget,
+        rounds_used=budget.rounds_used - 1,
+        last_status="",
+        last_settled=False,
+    )
+    failure = await write_marker_strict(
+        ctx,
+        gate_id=gate_id,
+        marker={
+            REMEDIATION_KEY: refund.as_marker(),
+            PENDING_KEY: {"pr_url": spec.pr_url},
+        },
+    )
+    if failure is not None:
+        ctx.logger.warning(
+            "[Friction] external-remediation: refund of the run killed by shutdown "
+            "did not land on gate %s (%s); round %d/%d stays spent",
+            gate_id,
+            failure,
+            budget.rounds_used,
+            budget_limit,
+        )
+        return False
+    ctx.logger.warning(
+        "external-remediation: round %d/%d for %s was lost to a loom shutdown; "
+        "refunded, trigger re-parked",
+        budget.rounds_used,
+        budget_limit,
+        spec.pr_url,
+    )
+    where = (
+        f" Any commits the killed run made sit in its worktree under "
+        f"{work_dir / 'converge'}; a fix it had already pushed reads as a human "
+        "push on the next sweep and re-arms the budget."
+        if work_dir is not None
+        else ""
+    )
+    await post_finding(
+        ctx,
+        story_id,
+        f"[Friction] external-remediation: remediation round {budget.rounds_used}/"
+        f"{budget_limit} for {spec.pr_url} was lost to a loom shutdown before it "
+        f"recorded an outcome; the round is refunded ({refund.rounds_used}/"
+        f"{budget_limit}) and the review trigger re-parked — it re-dispatches "
+        f"after the next boot.{where}",
+    )
+    return True
+
+
 async def refund_infra_failed(
     ctx: SubscriptionContext,
     *,
@@ -528,7 +615,15 @@ async def refund_infra_failed(
     action = str(data.get("host_action") or "fix the host")
     detail = str(data.get("message") or "infrastructure failure")[:300]
     kept = _kept_work(data)
-    refund = dataclasses.replace(budget, rounds_used=max(0, budget.rounds_used - 1))
+    # The refund IS this round's outcome (#407 slice 2a review): stamped, so a
+    # shutdown cancel that lands during the friction post below cannot read
+    # the refunded round as "never recorded" and refund it again.
+    refund = dataclasses.replace(
+        budget,
+        rounds_used=max(0, budget.rounds_used - 1),
+        last_status="infra_failed",
+        last_settled=False,
+    )
     marker = {
         REMEDIATION_KEY: refund.as_marker(),
         PENDING_KEY: {"pr_url": spec.pr_url},
@@ -613,7 +708,12 @@ async def refund_repo_mismatch(
     claim over state that did not land.
     """
     actual = data.get("actual_repo") or "(unknown)"
-    refund = dataclasses.replace(budget, rounds_used=max(0, budget.rounds_used - 1))
+    refund = dataclasses.replace(
+        budget,
+        rounds_used=max(0, budget.rounds_used - 1),
+        last_status="repo_mismatch",  # the round's outcome (#407 slice 2a review)
+        last_settled=False,
+    )
     marker = {
         REMEDIATION_KEY: refund.as_marker(),
         PENDING_KEY: {"pr_url": spec.pr_url},

@@ -28,6 +28,20 @@ def tmp_git_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def restore_sigterm_disposition():
+    """The ``develop`` CLI group installs a SIGTERM→SystemExit handler (#407)
+    the moment any of its subcommands is invoked — in the pytest process too.
+    Put the disposition back after every test so a CI timeout's SIGTERM ends
+    the run instead of surfacing as a SystemExit inside an unrelated test."""
+    import signal
+
+    setter = signal.signal  # bound now: a test may monkeypatch the name
+    before = signal.getsignal(signal.SIGTERM)
+    yield
+    setter(signal.SIGTERM, before)
+
+
+@pytest.fixture(autouse=True)
 def clean_loom_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Clear ``LITHOS_*`` env vars so a developer's shell cannot leak into tests.
 

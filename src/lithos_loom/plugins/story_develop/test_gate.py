@@ -18,12 +18,14 @@ Docker) + thin side-effecting wrappers (monkeypatched in orchestration tests).
 from __future__ import annotations
 
 import contextlib
+import os
 import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...runner.orphans import PID_LABEL
 from .config import CONTAINER_NOFILE_ULIMIT, CONTAINER_SHM_SIZE, WORKSPACE_MOUNT
 
 # Mounted into the gate container so uv/npm package downloads are shared
@@ -148,6 +150,11 @@ def build_gate_command(
         "--init",
         "--name",
         name,
+        # #407: the owner's pid, so a daemon boot can reap this container
+        # if a restart orphaned it (the gate is the longest-lived container
+        # of any run)
+        "--label",
+        f"{PID_LABEL}={os.getpid()}",
         "--cap-drop",
         "ALL",
         "--security-opt",
@@ -217,6 +224,11 @@ def probe_tools(image: str, tools: list[str]) -> list[str]:
     return [t for t in tools if t in found]
 
 
+def _force_remove(name: str) -> None:
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+
+
 def run_gate_container(
     gate_cmd: list[str], *, name: str, command: str, timeout: int
 ) -> GateResult:
@@ -232,14 +244,20 @@ def run_gate_container(
     except subprocess.TimeoutExpired:
         # The --rm container keeps running after the host-side timeout; kill it.
         # Best-effort: a cleanup failure must not turn the TIMEOUT into a crash.
-        with contextlib.suppress(OSError):
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        _force_remove(name)
         return GateResult(
             command=command,
             exit_code=_TIMEOUT_EXIT,
             passed=False,
             output_tail=f"test gate timed out after {timeout}s",
         )
+    except BaseException:
+        # #407 slice 2a: SIGTERM now unwinds through here as SystemExit; the
+        # docker client dies with us but the container would run on (and the
+        # caller's finally would rmtree a tree it still has mounted). Remove
+        # it on the way out, then keep unwinding.
+        _force_remove(name)
+        raise
     full = (proc.stdout + ("\n" + proc.stderr if proc.stderr else "")).strip()
     return GateResult(
         command=command,

@@ -272,3 +272,60 @@ def test_run_gate_container_keeps_full_output_and_caps_tail(
     assert res.full_output == body  # full, untruncated — what the adapter parses
     assert len(res.output_tail) == cap  # display tail stays capped
     assert res.passed is True
+
+
+# --- #407 slice 2a: the gate container is labelled and torn down on exit ------
+
+
+def test_gate_command_labels_the_container_with_its_owner_pid(tmp_path: Path) -> None:
+    import os
+
+    cmd = test_gate_mod.build_gate_command(
+        name="loom-develop-x-gate-r1",
+        image="img:latest",
+        tree=tmp_path / "tree",
+        cache_dir=tmp_path / "cache",
+        command="uv run pytest",
+    )
+    assert cmd[cmd.index("--label") + 1] == f"loom.pid={os.getpid()}"
+
+
+def test_gate_container_is_force_removed_when_the_run_is_terminated(
+    monkeypatch,
+) -> None:
+    # opus round 1 (High): SIGTERM now unwinds as SystemExit through the gate
+    # runner; the longest-lived container of any run must not be the one
+    # left running. `docker rm -f` on the way out, and the exit still ends
+    # the process.
+    calls: list[list[str]] = []
+
+    def run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["docker", "run"]:
+            raise SystemExit(143)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(test_gate_mod.subprocess, "run", run)
+    with pytest.raises(SystemExit):
+        test_gate_mod.run_gate_container(
+            ["docker", "run", "--name", "g"], name="g", command="make check", timeout=5
+        )
+    assert ["docker", "rm", "-f", "g"] in calls
+
+
+def test_gate_container_removal_never_runs_on_a_normal_exit(monkeypatch) -> None:
+    # a --rm container that finished is already gone; a spurious rm would
+    # just add a docker call per check
+    calls: list[list[str]] = []
+
+    def run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="ok", stderr=""
+        )
+
+    monkeypatch.setattr(test_gate_mod.subprocess, "run", run)
+    result = test_gate_mod.run_gate_container(
+        ["docker", "run", "--name", "g"], name="g", command="make check", timeout=5
+    )
+    assert result.passed and all(c[:2] != ["docker", "rm"] for c in calls)

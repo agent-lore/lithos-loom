@@ -12,6 +12,7 @@ from lithos_loom.plugins.story_develop.config import (
     CONTAINER_NOFILE_ULIMIT,
     CONTAINER_SHM_SIZE,
 )
+from lithos_loom.runner import orphans
 
 
 def _exec_cmd(
@@ -510,3 +511,75 @@ def test_container_running_reads_an_unreachable_daemon_as_not_running(
         ),
     )
     assert containers.container_running("c") is False
+
+
+# --- #407 slice 2a: containers carry their owner's pid; orphans are reaped ---
+
+
+def test_run_command_labels_the_container_with_its_owner_pid() -> None:
+    import os
+
+    cmd = _run_cmd()
+    assert cmd[cmd.index("--label") + 1] == f"loom.pid={os.getpid()}"
+
+
+def test_reap_orphaned_containers_removes_only_dead_owners(monkeypatch) -> None:
+    # a loom restart kills every run's process but not its --rm containers
+    # (docker keeps them until stopped); the operator's own hand-run converge
+    # is alive and must be left alone
+    import os
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=(
+                    f"loom-develop-dead1-coder 999999999\n"
+                    f"loom-develop-alive-coder {os.getpid()}\n"
+                    "loom-develop-junk notapid\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(orphans.subprocess, "run", fake_run)
+    reaped = orphans.reap_orphaned_containers()
+    assert reaped == ["loom-develop-dead1-coder"]
+    removed = [c for c in calls if c[:3] == ["docker", "rm", "-f"]]
+    assert removed == [["docker", "rm", "-f", "loom-develop-dead1-coder"]]
+    assert "label=loom.pid" in " ".join(calls[0])
+    assert "-a" in calls[0]  # a container stuck in `created` holds its name too
+
+
+def test_reap_orphaned_containers_never_raises(monkeypatch) -> None:
+    def no_docker(cmd, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(orphans.subprocess, "run", no_docker)
+    assert orphans.reap_orphaned_containers() == []
+
+    def hung(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1.0)
+
+    monkeypatch.setattr(orphans.subprocess, "run", hung)
+    assert orphans.reap_orphaned_containers() == []
+
+
+def test_stop_container_never_hangs_on_a_wedged_docker(monkeypatch) -> None:
+    # teardown runs on the SIGTERM path now (#407) inside the supervisor's
+    # grace — a `docker rm -f` with no timeout would eat the whole window
+    seen: list[float | None] = []
+
+    def hung(cmd, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(
+            cmd=cmd, timeout=float(kwargs.get("timeout") or 0)
+        )
+
+    monkeypatch.setattr(containers.subprocess, "run", hung)
+    containers.stop_container("c")  # no raise
+    assert seen and seen[0] is not None

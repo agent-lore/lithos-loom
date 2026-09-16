@@ -33,10 +33,12 @@ the reviewers remain the backstop. Layered like :mod:`test_gate`: pure command b
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
 from ...runner import detection, git
+from ...runner.orphans import PID_LABEL
 from . import check_catalog, containers, test_gate
 from .config import (
     CONTAINER_NOFILE_ULIMIT,
@@ -79,6 +81,8 @@ def build_format_command(
         "--init",
         "--name",
         name,
+        "--label",
+        f"{PID_LABEL}={os.getpid()}",  # #407: reapable if a restart orphans it
         "--network",
         "none",
         "--cap-drop",

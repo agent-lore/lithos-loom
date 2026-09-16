@@ -28,6 +28,9 @@ max_open_delivered_prs = 1
 # gates still excluded). Reaching it stops dispatch for the project and posts
 # [AdmissionHeld]. 0 = unlimited, otherwise must be >= max_open_delivered_prs.
 max_open_delivered_prs_total = 3
+# How long the supervisor lets a child finish its shutdown before SIGKILL (#407):
+# a stopping watcher tears the run it killed down and refunds its budget round.
+shutdown_grace_seconds = 30
 # Held stories take a freed slot by metadata.priority (highest first; none
 # set = between low and medium), then in the order they first asked — ADR 0012.
 

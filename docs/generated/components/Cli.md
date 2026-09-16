@@ -118,7 +118,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, â€
 
 ## Dependencies
 
-- Depends on: [Config](Config.md), [Errors](Errors.md), [LithosClient](LithosClient.md), [Plugins](Plugins.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Subscriptions](Subscriptions.md), [Tasks](Tasks.md)
+- Depends on: [Config](Config.md), [Errors](Errors.md), [LithosClient](LithosClient.md), [Plugins](Plugins.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [Subscriptions](Subscriptions.md), [Tasks](Tasks.md)
 - Used by: [Entrypoint](Entrypoint.md), [Sources](Sources.md)
 
 ## ADRs

@@ -1295,3 +1295,26 @@ def test_infra_failed_posts_no_external_replies(
 
     assert result.exit_code == 1
     assert github_stubs["replies"] == []
+
+
+def test_converge_installs_the_sigterm_teardown_handler(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #407 slice 2a (the orphaned triage container of lens #88 r2): the
+    # daemon terminates a dispatched converge with SIGTERM, whose default
+    # disposition kills the process WITHOUT running the `finally` blocks that
+    # stop its containers. The CLI turns SIGTERM into SystemExit so they run.
+    import signal
+
+    installed: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        signal, "signal", lambda sig, handler: installed.append((sig, handler))
+    )
+    result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    sigs = [sig for sig, _ in installed]
+    assert signal.SIGTERM in sigs
+    handler = next(h for sig, h in installed if sig == signal.SIGTERM)
+    with pytest.raises(SystemExit) as exc:
+        handler(signal.SIGTERM, None)  # type: ignore[operator]
+    assert exc.value.code == 143

@@ -611,11 +611,18 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
                 # PR #346 review F5: own the in-flight remediation run too —
                 # its cancellation-safe spawn terminates the converge child,
                 # so a stopped loom never leaves an orphan pushing to PRs.
-                await remediation.shutdown()
-                # ...and the in-flight merge-gate runs (same reasoning: a
-                # merge commit pushed after loom stopped is an orphan push).
-                await merge_gate.shutdown()
-                await conflict_resolve.shutdown()
+                # ...and the in-flight merge-gate / resolver runs (same
+                # reasoning: a merge commit pushed after loom stopped is an
+                # orphan push). Concurrently (#407 slice 2a): each waits up to
+                # 10 s for its child to unwind, and the remediation refund
+                # runs after its wait — sequenced, three of them would not fit
+                # the supervisor's grace.
+                await asyncio.gather(
+                    remediation.shutdown(),
+                    merge_gate.shutdown(),
+                    conflict_resolve.shutdown(),
+                    return_exceptions=True,
+                )
     finally:
         _boot.remove_stop_signals(loop, installed)
         logger.info("github-watcher child stopping")
