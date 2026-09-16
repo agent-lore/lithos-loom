@@ -15,7 +15,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
 | `lithos_loom.runner.git` | M | 1 | 29 |
-| `lithos_loom.runner.orphans` | S | 0 | 1 |
+| `lithos_loom.runner.orphans` | S | 0 | 2 |
 | `lithos_loom.runner.signals` | XS | 0 | 1 |
 | `lithos_loom.runner.worktree` | S | 0 | 6 |
 
@@ -64,6 +64,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `delete_branch` — Delete local *branch* (``-D``: a throwaway trial-merge branch is never merged anywhere, so the safe ``-d`` would always refuse). Raises when the branch does not exist or is checked out.
 
 ### `lithos_loom.runner.orphans`
+- def `pid_alive` — ``None`` when the label is not a pid the kernel can be asked about (an all-digit label too large for a C long raises ``OverflowError`` — PR #415 review: the reaper runs before the boot gate, so one stale label must never keep loom from starting).
 - def `reap_orphaned_containers` — #407: remove every loom-labelled container whose owner process is gone.
 
 ### `lithos_loom.runner.signals`

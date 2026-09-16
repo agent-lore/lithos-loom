@@ -177,6 +177,11 @@ async def _escalate(
             budget,
             needs_human_gate_id=human_gate_id,
             needs_human_reason=escalation.reason,
+            # the round is decided by the time a gate is raised on it; a
+            # dispatch-time snapshot must not resurrect the in-flight stamp
+            # (#407 slice 2b review)
+            in_flight_boot_id="",
+            in_flight_pid=0,
         )
         ok = await write_marker(
             ctx,

@@ -2934,3 +2934,346 @@ async def test_the_shutdown_friction_says_where_the_killed_run_left_its_work(
     friction = next(f for f in _findings(client) if "lost to a loom shutdown" in f)
     assert str(tmp_path) in friction and "converge" in friction
     assert "re-arms the budget" in friction
+
+
+# ── #407 slice 2b: the reservation names its boot; a later boot reconciles ────
+
+
+def test_budget_marker_round_trips_the_in_flight_boot_id() -> None:
+    budget = RemediationBudget(pr_url=_PR_URL, rounds_used=1, in_flight_boot_id="b1")
+    marker = budget.as_marker()
+    assert marker["in_flight_boot_id"] == "b1"
+    gate = SimpleNamespace(metadata={REMEDIATION_KEY: marker})
+    assert read_budget(gate, _PR_URL) == budget
+    del marker["in_flight_boot_id"]  # a record from before the field: no stamp
+    assert read_budget(gate, _PR_URL).in_flight_boot_id == ""
+
+
+async def test_the_reservation_carries_the_dispatching_boots_id(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await release.wait()
+        path = Path(cmd[cmd.index("--json") + 1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_not_converged_payload()), encoding="utf-8")
+        return 1, ""
+
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=blocking, boot_id="boot-a"
+    )
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    await started.wait()
+    assert (await _marker(client, gate.id))["in_flight_boot_id"] == "boot-a"
+    release.set()
+    assert rem._task is not None
+    await rem._task
+    # every outcome write clears the stamp — the round is decided
+    assert (await _marker(client, gate.id))["in_flight_boot_id"] == ""
+
+
+@pytest.mark.parametrize(
+    "payload, rc",
+    [
+        (
+            {
+                "status": "converged",
+                "pushed": True,
+                "pushed_sha": "ab" * 20,
+                "rounds": 1,
+            },
+            0,
+        ),
+        (None, 0),  # no result, exit 0: the no-ingest refund
+        (None, 2),  # no result, failed
+        ("infra", 1),
+    ],
+)
+async def test_every_outcome_clears_the_boot_stamp(tmp_path: Path, payload, rc) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(
+        _infra_failed_payload() if payload == "infra" else payload, rc=rc
+    )
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=3), spawn=spawn, boot_id="boot-a"
+    )
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    assert (await _marker(client, gate.id))["in_flight_boot_id"] == ""
+
+
+async def test_a_crash_clears_the_boot_stamp(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+
+    async def boom(cmd: list[str]) -> tuple[int, str]:
+        raise OSError("spawn failed")
+
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=3), spawn=boom, boot_id="boot-a"
+    )
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    assert (await _marker(client, gate.id))["in_flight_boot_id"] == ""
+
+
+async def _stale_stamped_gate(
+    client: FakeLithosClient, *, boot: str, last_status: str = ""
+):
+    story, gate = await _gate_with_story(client)
+    stale = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=2,
+        last_seen_head_sha=_HEAD,
+        last_status=last_status,
+        in_flight_boot_id=boot,
+    )
+    await client.task_update(
+        task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: stale.as_marker()}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    return story, gate
+
+
+async def test_a_new_boot_refunds_a_reservation_stamped_by_a_dead_boot(
+    tmp_path: Path,
+) -> None:
+    """#407 slice 2b (the ungraceful death — SIGKILL, a host crash — where the
+    shutdown refund of slice 2a never runs): the reservation still names the
+    boot that made it; the first sweep of a later boot sees a stamp that is
+    not its own, no run in flight, and no recorded outcome — a lost run —
+    and refunds it, re-parks the trigger, and says so on the story."""
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
+
+    client = FakeLithosClient()
+    story, gate = await _stale_stamped_gate(client, boot="dead-boot")
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+
+    assert budget.rounds_used == 1 and budget.in_flight_boot_id == ""
+    marker = await _marker(client, gate.id)
+    assert marker["rounds_used"] == 1 and marker["in_flight_boot_id"] == ""
+    refreshed = await client.task_get(task_id=gate.id)
+    assert refreshed is not None
+    assert refreshed.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
+    friction = next(f for f in _findings(client) if f.startswith("[Friction]"))
+    assert "lost to a daemon restart" in friction and "round 2/2" in friction
+    assert "re-dispatches later in this sweep" in friction  # not "after the next boot"
+    assert "after the next boot" not in friction
+
+
+async def test_a_stamp_from_this_boot_is_a_run_not_a_loss(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _stale_stamped_gate(client, boot="this-boot")
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="this-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert budget.rounds_used == 2 and budget.in_flight_boot_id == "this-boot"
+    assert _findings(client) == []
+
+
+async def test_a_stale_stamp_beside_a_recorded_outcome_is_not_refunded(
+    tmp_path: Path,
+) -> None:
+    # belt and braces: an outcome write always clears the stamp, but if one
+    # ever did not, the recorded outcome wins — the round IS decided
+    client = FakeLithosClient()
+    story, gate = await _stale_stamped_gate(
+        client, boot="dead-boot", last_status="converged"
+    )
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert budget.rounds_used == 2
+    assert _findings(client) == []
+
+
+async def test_a_refund_whose_re_read_fails_still_drives_the_sweep_from_the_refund(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.errors import LithosClientError
+
+    # opus round (Medium, reproduced): the refund landed but the re-read
+    # blipped, and the sweep went on from the STALE copy — a false
+    # exhaustion note, no re-dispatch, needs_human for a sweep
+    client = FakeLithosClient()
+    story, gate = await _stale_stamped_gate(client, boot="dead-boot")
+    real_get = client.task_get
+    gets = {"n": 0}
+
+    async def flaky_get(**kw):
+        gets["n"] += 1
+        if (
+            gets["n"] == 2
+        ):  # the first is refund_lost_run's own read; the second is the re-read
+            raise LithosClientError("server_error", "blip")
+        return await real_get(**kw)
+
+    monkeypatch.setattr(client, "task_get", flaky_get)
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert budget.rounds_used == 1 and budget.in_flight_boot_id == ""
+    assert rem.exhaustion_note(budget) is None
+
+
+async def test_a_foreign_stamp_never_breaks_the_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # observe_head promises never to raise; the reconcile's own reads must
+    # keep that promise under a raw transport error too
+    client = FakeLithosClient()
+    story, gate = await _stale_stamped_gate(client, boot="dead-boot")
+
+    async def dead_get(**kw):
+        raise RuntimeError("mcp session closed")
+
+    monkeypatch.setattr(client, "task_get", dead_get)
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))  # no raise
+    assert budget.in_flight_boot_id == ""  # dropped in memory for this sweep
+
+
+async def test_an_orphan_gate_is_refunded_without_a_finding(tmp_path: Path) -> None:
+    # opus round (Medium): the refund needs no story; only the finding does
+    client = FakeLithosClient()
+    gate_id = await client.task_create(
+        title="Awaiting merge: x",
+        agent="a",
+        task_type="gate",
+        metadata={
+            "gate_type": "pr",
+            "repo": "agent-lore/lithos-loom",
+            "pr_number": 62,
+            "pr_url": _PR_URL,
+            REMEDIATION_KEY: RemediationBudget(
+                pr_url=_PR_URL, rounds_used=1, in_flight_boot_id="dead-boot"
+            ).as_marker(),
+        },
+    )
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert budget.rounds_used == 0 and budget.in_flight_boot_id == ""
+    assert (await _marker(client, gate_id))["rounds_used"] == 0
+    assert _findings(client) == []
+
+
+async def test_the_sweeps_story_id_is_preferred_over_the_gates_provenance(
+    tmp_path: Path,
+) -> None:
+    # the waits_on_gate edge is the authoritative link; metadata.story_id is
+    # provenance — the friction lands where the sweep's other findings land
+    client = FakeLithosClient()
+    story, gate = await _stale_stamped_gate(client, boot="dead-boot")
+    other = await client.task_create(title="other story", agent="a")
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    await rem.observe_head(gate, spec, _pr(), _ctx(client), story_id=other)
+    posted = [f for f in client._findings if "lost to a daemon restart" in f["summary"]]
+    assert [f["task_id"] for f in posted] == [other]
+
+
+async def test_a_child_that_outlived_the_daemon_is_not_re_dispatched_beside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # opus round (Medium): SIGKILL of the daemon does not kill its converge
+    # child; the stamp names the dispatcher's pid, and a live one means the
+    # run is still going — refunding and re-dispatching would put two agents
+    # on one branch
+    import os
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    stale = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=1,
+        last_seen_head_sha=_HEAD,
+        in_flight_boot_id="dead-boot",
+        in_flight_pid=os.getpid(),  # alive: this very process
+    )
+    await client.task_update(
+        task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: stale.as_marker()}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert budget.rounds_used == 1  # untouched while the child lives
+    assert (await _marker(client, gate.id))["in_flight_boot_id"] == "dead-boot"
+    assert _findings(client) == []
+
+
+async def test_the_reservation_carries_the_dispatchers_pid(tmp_path: Path) -> None:
+    import os
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+
+    async def hanging(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await asyncio.sleep(3600)
+        return 0, ""
+
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=hanging, boot_id="b")
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    await started.wait()
+    assert (await _marker(client, gate.id))["in_flight_pid"] == os.getpid()
+    await rem.shutdown()
+    marker = await _marker(client, gate.id)
+    assert marker["in_flight_pid"] == 0 and marker["in_flight_boot_id"] == ""
+
+
+async def test_a_repo_mismatch_refund_clears_the_boot_stamp(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, _calls = _spawner(
+        {"status": "repo_mismatch", "actual_repo": "o/other"}, rc=3
+    )
+    rem = ExternalRemediation(_settings(tmp_path, budget=3), spawn=spawn, boot_id="b")
+    await _consider(client, gate, story, rem)
+    assert rem._task is not None
+    await rem._task
+    marker = await _marker(client, gate.id)
+    assert (
+        marker["in_flight_boot_id"] == "" and marker["last_status"] == "repo_mismatch"
+    )

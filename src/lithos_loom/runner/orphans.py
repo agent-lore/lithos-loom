@@ -15,7 +15,7 @@ import logging
 import os
 import subprocess
 
-__all__ = ["PID_LABEL", "reap_orphaned_containers"]
+__all__ = ["PID_LABEL", "pid_alive", "reap_orphaned_containers"]
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ PID_LABEL = "loom.pid"
 _DOCKER_TIMEOUT_S = 30
 
 
-def _pid_alive(pid: int) -> bool | None:
+def pid_alive(pid: int) -> bool | None:
     """``None`` when the label is not a pid the kernel can be asked about (an
     all-digit label too large for a C long raises ``OverflowError`` — PR #415
     review: the reaper runs before the boot gate, so one stale label must
@@ -88,7 +88,7 @@ def reap_orphaned_containers() -> list[str]:
             pid = int(parts[1])
         except ValueError:
             pid = None
-        alive = _pid_alive(pid) if pid is not None else None
+        alive = pid_alive(pid) if pid is not None else None
         if alive is None:
             logger.warning(
                 "orphan-container reap: %s carries an unusable owner label %s; skipped",

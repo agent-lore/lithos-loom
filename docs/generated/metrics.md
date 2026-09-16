@@ -21,7 +21,7 @@ lower a budget after improving the code to lock in the gain.
 
 ## Import graph
 
-- Cross-component edges: **70** (349 module-level)
+- Cross-component edges: **70** (350 module-level)
 - Component cycles: Render ↔ Subscriptions
 - Module cycles: lithos_loom.plugins.story_develop.agent_session ↔ lithos_loom.plugins.story_develop.coder_salvage ↔ lithos_loom.plugins.story_develop.loop_entry ↔ lithos_loom.plugins.story_develop.panel ↔ lithos_loom.plugins.story_develop.rounds
 - Tier-skipping edges (Entrypoints → Foundation): 12 (Children -> Bus, Children -> Config, Children -> GitHub, Children -> LithosClient, Children -> Notifications, Children -> State, Entrypoint -> Bus, Entrypoint -> Config, Entrypoint -> Errors, Entrypoint -> LithosClient, Entrypoint -> Runners, Entrypoint -> Supervisor)
@@ -51,13 +51,13 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Runners | 7 | 1291 | 1043 | 5 | 1 | 0.17 | 12 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 1 |
 | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
-| Subscriptions | 46 | 15719 | 12761 | 4 | 11 | 0.73 | 58 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 30 |
+| Subscriptions | 46 | 15908 | 12922 | 4 | 11 | 0.73 | 58 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 34 |
 | Supervisor | 1 | 259 | 208 | 1 | 1 | 0.50 | 11 (`lithos_loom.supervisor.Supervisor._terminate_remaining`) | 1 |
 | Tasks | 4 | 1244 | 969 | 4 | 3 | 0.43 | 16 (`lithos_loom.task_graph.build_plan`) | 3 |
 
 ## Size
 
-- Modules: **176**, lines: **62443**, SLOC: **50652**
+- Modules: **176**, lines: **62632**, SLOC: **50813**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
 - Modules over 800 lines: **9**
   - `lithos_loom.cli.develop`
@@ -72,7 +72,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1596**, cyclomatic > 10: **150**
+- Functions: **1598**, cyclomatic > 10: **154**
 
 Top 10 most complex functions:
 
@@ -139,4 +139,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.60** (99775 test lines / 62443 source lines)
+- Test-to-source line ratio: **1.60** (100193 test lines / 62632 source lines)

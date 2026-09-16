@@ -170,7 +170,13 @@ async def record_unsettled(
         latest = None
     if latest is not None:
         budget = read_budget(latest, spec.pr_url)
-    budget = dataclasses.replace(budget, last_status="failed", last_settled=False)
+    budget = dataclasses.replace(
+        budget,
+        last_status="failed",
+        last_settled=False,
+        in_flight_boot_id="",
+        in_flight_pid=0,
+    )
     failure = await write_marker_strict(
         ctx, gate_id=gate_id, marker={REMEDIATION_KEY: budget.as_marker()}
     )
@@ -227,6 +233,8 @@ async def record_result(
         budget,
         last_status="reverted" if reverted is not None else str(status),
         last_settled=succeeded and reverted is None,
+        in_flight_boot_id="",  # decided (#407 slice 2b)
+        in_flight_pid=0,
     )
     if data.get("pushed") and pushed_sha:
         # Loom's own push: recorded so the next sweep's head observation
@@ -510,11 +518,13 @@ async def refund_lost_run(
     ctx: SubscriptionContext,
     *,
     gate_id: str,
-    story_id: str,
+    story_id: str | None,
     spec: PrGateSpec,
     budget_limit: int,
     work_dir: Path | None = None,
-) -> bool:
+    cause: str = "a loom shutdown",
+    next_step: str = "it re-dispatches after the next boot",
+) -> RemediationBudget | None:
     """#407 slice 2a: the daemon is stopping and just killed this PR's run.
     The daemon knows the moment it strands a round, so the refund belongs
     here, not in boot-time archaeology: the reservation is given back, the
@@ -524,7 +534,9 @@ async def refund_lost_run(
     Guarded by #410's outcome field on a RE-READ of the gate: a cancel that
     landed after the run's outcome write leaves ``last_status`` set, and a
     refund on top of a recorded outcome would be a second refund. Strict
-    write, never raising; ``True`` when a refund landed.
+    write, never raising; the refunded budget when a refund landed, else
+    ``None``. *story_id* ``None`` (an orphan gate) refunds without the
+    finding — the refund needs no story, only the breadcrumb does.
     """
     try:
         latest = await ctx.lithos.task_get(task_id=gate_id)
@@ -536,17 +548,19 @@ async def refund_lost_run(
             gate_id,
             exc,
         )
-        return False
+        return None
     if latest is None:
-        return False
+        return None
     budget = read_budget(latest, spec.pr_url)
     if budget.rounds_used <= 0 or budget.last_status:
-        return False  # never reserved here, or the run recorded its outcome
+        return None  # never reserved here, or the run recorded its outcome
     refund = dataclasses.replace(
         budget,
         rounds_used=budget.rounds_used - 1,
         last_status="",
         last_settled=False,
+        in_flight_boot_id="",
+        in_flight_pid=0,
     )
     failure = await write_marker_strict(
         ctx,
@@ -565,31 +579,33 @@ async def refund_lost_run(
             budget.rounds_used,
             budget_limit,
         )
-        return False
+        return None
     ctx.logger.warning(
-        "external-remediation: round %d/%d for %s was lost to a loom shutdown; "
+        "external-remediation: round %d/%d for %s was lost to %s; "
         "refunded, trigger re-parked",
         budget.rounds_used,
         budget_limit,
         spec.pr_url,
+        cause,
     )
     where = (
         f" Any commits the killed run made sit in its worktree under "
         f"{work_dir / 'converge'}; a fix it had already pushed reads as a human "
-        "push on the next sweep and re-arms the budget."
+        "push once the head is observed and re-arms the budget."
         if work_dir is not None
         else ""
     )
-    await post_finding(
-        ctx,
-        story_id,
+    summary = (
         f"[Friction] external-remediation: remediation round {budget.rounds_used}/"
-        f"{budget_limit} for {spec.pr_url} was lost to a loom shutdown before it "
+        f"{budget_limit} for {spec.pr_url} was lost to {cause} before it "
         f"recorded an outcome; the round is refunded ({refund.rounds_used}/"
-        f"{budget_limit}) and the review trigger re-parked — it re-dispatches "
-        f"after the next boot.{where}",
+        f"{budget_limit}) and the review trigger re-parked — {next_step}.{where}"
     )
-    return True
+    if story_id is None:
+        ctx.logger.warning("%s (orphan gate %s: no story to tell)", summary, gate_id)
+    else:
+        await post_finding(ctx, story_id, summary)
+    return refund
 
 
 async def refund_infra_failed(
@@ -623,6 +639,8 @@ async def refund_infra_failed(
         rounds_used=max(0, budget.rounds_used - 1),
         last_status="infra_failed",
         last_settled=False,
+        in_flight_boot_id="",
+        in_flight_pid=0,
     )
     marker = {
         REMEDIATION_KEY: refund.as_marker(),
@@ -713,6 +731,8 @@ async def refund_repo_mismatch(
         rounds_used=max(0, budget.rounds_used - 1),
         last_status="repo_mismatch",  # the round's outcome (#407 slice 2a review)
         last_settled=False,
+        in_flight_boot_id="",
+        in_flight_pid=0,
     )
     marker = {
         REMEDIATION_KEY: refund.as_marker(),
