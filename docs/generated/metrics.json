@@ -72,8 +72,8 @@
         "max_function": "lithos_loom.render.render_line"
       },
       "Runners": {
-        "functions_over_10": 0,
-        "max_complexity": 10,
+        "functions_over_10": 1,
+        "max_complexity": 12,
         "max_function": "lithos_loom.runner.orphans.reap_orphaned_containers"
       },
       "Sources": {
@@ -102,7 +102,7 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 149,
+    "functions_over_10": 150,
     "top_functions": [
       {
         "complexity": 98,
@@ -488,10 +488,10 @@
         "functions": 56,
         "largest_module": "lithos_loom.runner.git",
         "largest_module_lines": 565,
-        "lines": 1284,
+        "lines": 1291,
         "modules": 7,
         "public_symbols": 44,
-        "sloc": 1039
+        "sloc": 1043
       },
       "Sources": {
         "classes": 11,
@@ -557,13 +557,13 @@
       "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 62436,
+    "total_lines": 62443,
     "total_modules": 176,
-    "total_sloc": 50648
+    "total_sloc": 50652
   },
   "tests": {
     "ratio": 1.6,
-    "src_lines": 62436,
-    "test_lines": 99769
+    "src_lines": 62443,
+    "test_lines": 99775
   }
 }

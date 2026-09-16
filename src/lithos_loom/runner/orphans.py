@@ -80,8 +80,15 @@ def reap_orphaned_containers() -> list[str]:
         parts = line.split()
         if len(parts) != 2 or not parts[1].isdigit():
             continue
-        name, pid = parts[0], int(parts[1])
-        alive = _pid_alive(pid)
+        name = parts[0]
+        # A docker label value is an arbitrary string: an all-digit one past
+        # Python's int-conversion limit (4300 digits by default) raises here,
+        # before any kernel probe (PR #415 re-review) — contained the same way.
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            pid = None
+        alive = _pid_alive(pid) if pid is not None else None
         if alive is None:
             logger.warning(
                 "orphan-container reap: %s carries an unusable owner label %s; skipped",

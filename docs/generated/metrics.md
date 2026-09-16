@@ -48,7 +48,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Plugins | 51 | 18556 | 14952 | 2 | 5 | 0.71 | 98 (`lithos_loom.plugins.story_develop.__main__.main`) | 47 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
-| Runners | 7 | 1284 | 1039 | 5 | 1 | 0.17 | 10 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 0 |
+| Runners | 7 | 1291 | 1043 | 5 | 1 | 0.17 | 12 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 1 |
 | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
 | Subscriptions | 46 | 15719 | 12761 | 4 | 11 | 0.73 | 58 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 30 |
@@ -57,7 +57,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **176**, lines: **62436**, SLOC: **50648**
+- Modules: **176**, lines: **62443**, SLOC: **50652**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
 - Modules over 800 lines: **9**
   - `lithos_loom.cli.develop`
@@ -72,7 +72,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1596**, cyclomatic > 10: **149**
+- Functions: **1596**, cyclomatic > 10: **150**
 
 Top 10 most complex functions:
 
@@ -139,4 +139,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.60** (99769 test lines / 62436 source lines)
+- Test-to-source line ratio: **1.60** (99775 test lines / 62443 source lines)

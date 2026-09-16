@@ -569,6 +569,12 @@ def test_reap_skips_a_pid_label_too_large_for_the_kernel(monkeypatch) -> None:
                 returncode=0,
                 stdout=(
                     "loom-develop-huge-coder 999999999999999999999999999999\n"
+                    # re-review: past Python's int-conversion limit (4300
+                    # digits by default) `int()` itself raises, before any
+                    # kernel probe — a docker label value is an arbitrary string
+                    + "loom-develop-vast-coder "
+                    + "9" * 5000
+                    + "\n"
                     "loom-develop-dead1-coder 999999999\n"
                 ),
                 stderr="",
