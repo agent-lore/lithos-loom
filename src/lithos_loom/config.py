@@ -32,6 +32,7 @@ The TOML schema is documented in ``docs/SPECIFICATION.md`` §3.1; the shape is:
 
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from collections.abc import Mapping
@@ -578,14 +579,18 @@ def _parse_orchestrator(data: Any, config_path: Path) -> OrchestratorConfig:
             "or >= max_open_delivered_prs"
         )
     raw_grace = data.get("shutdown_grace_seconds", 30.0)
+    # TOML spells nan and inf (PR #415 review): nan makes wait_for time out at
+    # once — straight to SIGKILL, stranding the refund the grace exists for —
+    # and inf disables the SIGKILL fallback for a child that never exits.
     if (
         isinstance(raw_grace, bool)
         or not isinstance(raw_grace, int | float)
+        or not math.isfinite(raw_grace)
         or raw_grace < 0
     ):
         raise ConfigError(
             f"{config_path}: orchestrator.shutdown_grace_seconds must be a "
-            f"non-negative number (got {raw_grace!r})"
+            f"finite non-negative number (got {raw_grace!r})"
         )
     return OrchestratorConfig(
         agent_id=agent_id,

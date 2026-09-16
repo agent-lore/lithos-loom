@@ -555,6 +555,30 @@ def test_reap_orphaned_containers_removes_only_dead_owners(monkeypatch) -> None:
     assert "-a" in calls[0]  # a container stuck in `created` holds its name too
 
 
+def test_reap_skips_a_pid_label_too_large_for_the_kernel(monkeypatch) -> None:
+    # Dave's review of PR #415: an all-digit label is not necessarily a pid —
+    # a 30-digit one makes os.kill raise OverflowError, and the reaper runs
+    # before the boot gate, so one stale label would keep loom from starting.
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["docker", "ps"]:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=(
+                    "loom-develop-huge-coder 999999999999999999999999999999\n"
+                    "loom-develop-dead1-coder 999999999\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(orphans.subprocess, "run", fake_run)
+    assert orphans.reap_orphaned_containers() == ["loom-develop-dead1-coder"]
+
+
 def test_reap_orphaned_containers_never_raises(monkeypatch) -> None:
     def no_docker(cmd, **kwargs):
         raise FileNotFoundError("docker")

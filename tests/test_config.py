@@ -1322,7 +1322,16 @@ def test_shutdown_grace_parses_an_override(
 
 
 @pytest.mark.parametrize(
-    "body", ["shutdown_grace_seconds = -1\n", 'shutdown_grace_seconds = "x"\n']
+    "body",
+    [
+        "shutdown_grace_seconds = -1\n",
+        'shutdown_grace_seconds = "x"\n',
+        # Dave's review of PR #415: TOML spells both; nan makes wait_for time
+        # out at once (straight to SIGKILL, stranding the refund), inf disables
+        # the SIGKILL fallback for a child that never exits
+        "shutdown_grace_seconds = nan\n",
+        "shutdown_grace_seconds = inf\n",
+    ],
 )
 def test_shutdown_grace_rejects_bad_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str

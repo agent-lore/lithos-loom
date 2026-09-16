@@ -26,13 +26,19 @@ PID_LABEL = "loom.pid"
 _DOCKER_TIMEOUT_S = 30
 
 
-def _pid_alive(pid: int) -> bool:
+def _pid_alive(pid: int) -> bool | None:
+    """``None`` when the label is not a pid the kernel can be asked about (an
+    all-digit label too large for a C long raises ``OverflowError`` — PR #415
+    review: the reaper runs before the boot gate, so one stale label must
+    never keep loom from starting)."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True  # exists, owned by someone else
+    except (OverflowError, ValueError, OSError):
+        return None
     return True
 
 
@@ -75,7 +81,15 @@ def reap_orphaned_containers() -> list[str]:
         if len(parts) != 2 or not parts[1].isdigit():
             continue
         name, pid = parts[0], int(parts[1])
-        if _pid_alive(pid):
+        alive = _pid_alive(pid)
+        if alive is None:
+            logger.warning(
+                "orphan-container reap: %s carries an unusable owner label %s; skipped",
+                name,
+                parts[1],
+            )
+            continue
+        if alive:
             continue
         try:
             rm = subprocess.run(
