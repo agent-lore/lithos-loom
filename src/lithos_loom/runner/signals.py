@@ -11,8 +11,17 @@ conventional 128 + 15.
 
 from __future__ import annotations
 
+import ctypes
+import os
 import signal
 from types import FrameType
+
+#: Set on a child loom spawns, and ONLY then: a hand-run CLI in a terminal (or
+#: a `setsid nohup … &`) must never die with its shell. The child reads it and
+#: binds its lifetime to its parent.
+BOUND_ENV = "LITHOS_LOOM_BOUND_TO_PARENT"
+#: Linux prctl option: deliver a signal to this process when its parent dies.
+PR_SET_PDEATHSIG = 1
 
 #: 128 + SIGTERM — what a shell reports for a process the signal ended.
 SIGTERM_EXIT = 143
@@ -32,3 +41,32 @@ def install_sigterm_exit() -> None:
         signal.signal(signal.SIGTERM, _exit_on_sigterm)
     except (ValueError, OSError):  # not the main thread / unsupported
         return
+
+
+def set_pdeathsig(option: int, arg: int) -> None:
+    """``prctl(option, arg)`` via libc; raises ``OSError`` when it fails."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(option, arg, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl failed")
+
+
+def bind_lifetime_to_parent() -> None:
+    """Die with the loom that spawned us (#407 slice 2b re-review).
+
+    The supervisor kills a child by pid, not by process group, and a SIGKILL
+    of the watcher leaves its converge child running — the next boot would
+    then refund the round and launch a second agent on the same branch.
+    When :data:`BOUND_ENV` says loom spawned this process, ask the kernel for
+    SIGTERM on the parent's death (the SIGTERM handler runs the teardown),
+    and exit at once if the parent already died in the spawn-to-bind window
+    (PDEATHSIG would never fire for a death that already happened). No-op
+    without the marker, or where prctl is unavailable.
+    """
+    if os.environ.get(BOUND_ENV) != "1":
+        return
+    try:
+        set_pdeathsig(PR_SET_PDEATHSIG, signal.SIGTERM)
+    except (OSError, AttributeError):
+        return
+    if os.getppid() == 1:
+        raise SystemExit(SIGTERM_EXIT)

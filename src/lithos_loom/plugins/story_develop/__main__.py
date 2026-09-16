@@ -45,7 +45,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from lithos_loom.runner.signals import install_sigterm_exit
+from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_exit
 
 from ...plugin_runner import write_result_atomically
 from . import check_runner, engines, sandbox_facts
@@ -670,6 +670,7 @@ def main(argv: list[str] | None = None) -> int:
     # daemon shutdown; without this the container teardown in `finally`
     # never runs and the run's containers idle on
     install_sigterm_exit()
+    bind_lifetime_to_parent()
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"

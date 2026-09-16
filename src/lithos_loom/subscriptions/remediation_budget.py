@@ -3,7 +3,8 @@
 ``metadata.external_remediation`` — ``{pr_url, rounds_used,
 last_loom_pushed_sha, last_seen_head_sha, needs_human_gate_id,
 needs_human_reason, no_change_refunded, last_status, last_settled,
-in_flight_boot_id, in_flight_pid}``, url-scoped
+in_flight_boot_id, in_flight_pid, in_flight_pid_start, in_flight_host_boot}``,
+url-scoped
 — is the on-disk contract :mod:`.external_remediation` reads and writes and
 :mod:`.remediation_escalation` records its gate in. A separate key from
 ``external_review_seen`` and the merge marker — no marker may trip another's
@@ -93,6 +94,11 @@ class RemediationBudget:
     # converge child, so a live pid beside a foreign boot id is a run still
     # going — never refunded and re-dispatched beside (opus review of 2b).
     in_flight_pid: int = 0
+    # ...pinned to one incarnation (re-review of PR #416): the process's
+    # start ticks and the host boot id, so a reused pid never reads as the
+    # run — see runner.orphans.ProcessIdentity
+    in_flight_pid_start: int = 0
+    in_flight_host_boot: str = ""
 
     def as_marker(self) -> dict[str, Any]:
         return {
@@ -107,6 +113,8 @@ class RemediationBudget:
             "last_settled": self.last_settled,
             "in_flight_boot_id": self.in_flight_boot_id,
             "in_flight_pid": self.in_flight_pid,
+            "in_flight_pid_start": self.in_flight_pid_start,
+            "in_flight_host_boot": self.in_flight_host_boot,
         }
 
 
@@ -136,13 +144,21 @@ def read_budget(gate: Any, pr_url: str) -> RemediationBudget:
             if isinstance(raw.get("in_flight_boot_id"), str)
             else ""
         ),
-        in_flight_pid=(
-            raw["in_flight_pid"]
-            if isinstance(raw.get("in_flight_pid"), int)
-            and not isinstance(raw.get("in_flight_pid"), bool)
-            and raw["in_flight_pid"] >= 0
-            else 0
+        in_flight_pid=_non_negative_int(raw.get("in_flight_pid")),
+        in_flight_pid_start=_non_negative_int(raw.get("in_flight_pid_start")),
+        in_flight_host_boot=(
+            raw["in_flight_host_boot"]
+            if isinstance(raw.get("in_flight_host_boot"), str)
+            else ""
         ),
+    )
+
+
+def _non_negative_int(value: object) -> int:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else 0
     )
 
 

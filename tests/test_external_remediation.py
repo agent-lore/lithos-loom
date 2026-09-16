@@ -3219,12 +3219,18 @@ async def test_a_child_that_outlived_the_daemon_is_not_re_dispatched_beside(
 
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
+    from lithos_loom.runner.orphans import process_identity
+
+    me = process_identity(os.getpid())
+    assert me is not None
     stale = RemediationBudget(
         pr_url=_PR_URL,
         rounds_used=1,
         last_seen_head_sha=_HEAD,
         in_flight_boot_id="dead-boot",
-        in_flight_pid=os.getpid(),  # alive: this very process
+        in_flight_pid=me.pid,  # alive: this very process, by full identity
+        in_flight_pid_start=me.start_ticks,
+        in_flight_host_boot=me.host_boot,
     )
     await client.task_update(
         task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: stale.as_marker()}
@@ -3240,6 +3246,44 @@ async def test_a_child_that_outlived_the_daemon_is_not_re_dispatched_beside(
     assert budget.rounds_used == 1  # untouched while the child lives
     assert (await _marker(client, gate.id))["in_flight_boot_id"] == "dead-boot"
     assert _findings(client) == []
+    # Dave's review of #416 (High): the live foreign run is a REAL hold — on
+    # the single-flight slot and on the per-PR holds the peers read — not a
+    # memory note; a new batch this sweep must wait behind it
+    assert rem.busy is True and rem.busy_on(_PR_URL) is True
+    assert await _consider(client, gate, story, rem, budget=budget) == "deferred_busy"
+
+
+async def test_a_foreign_run_whose_identity_died_releases_the_hold_and_refunds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from lithos_loom.runner import orphans
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    stale = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=1,
+        last_seen_head_sha=_HEAD,
+        in_flight_boot_id="dead-boot",
+        in_flight_pid=os.getpid(),
+        in_flight_pid_start=12345,  # a different process wore this pid
+        in_flight_host_boot=orphans.host_boot_id(),
+    )
+    await client.task_update(
+        task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: stale.as_marker()}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert budget.rounds_used == 0  # a reused pid is not the run: refunded
+    assert rem.busy is False and rem.busy_on(_PR_URL) is False
 
 
 async def test_the_reservation_carries_the_dispatchers_pid(tmp_path: Path) -> None:
@@ -3257,10 +3301,18 @@ async def test_the_reservation_carries_the_dispatchers_pid(tmp_path: Path) -> No
     rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=hanging, boot_id="b")
     assert await _consider(client, gate, story, rem) == "dispatched"
     await started.wait()
-    assert (await _marker(client, gate.id))["in_flight_pid"] == os.getpid()
+    from lithos_loom.runner.orphans import process_identity
+
+    me = process_identity(os.getpid())
+    assert me is not None
+    marker = await _marker(client, gate.id)
+    assert marker["in_flight_pid"] == me.pid
+    assert marker["in_flight_pid_start"] == me.start_ticks
+    assert marker["in_flight_host_boot"] == me.host_boot
     await rem.shutdown()
     marker = await _marker(client, gate.id)
     assert marker["in_flight_pid"] == 0 and marker["in_flight_boot_id"] == ""
+    assert marker["in_flight_pid_start"] == 0 and marker["in_flight_host_boot"] == ""
 
 
 async def test_a_repo_mismatch_refund_clears_the_boot_stamp(tmp_path: Path) -> None:
@@ -3277,3 +3329,31 @@ async def test_a_repo_mismatch_refund_clears_the_boot_stamp(tmp_path: Path) -> N
     assert (
         marker["in_flight_boot_id"] == "" and marker["last_status"] == "repo_mismatch"
     )
+
+
+async def test_the_dispatcher_spawns_its_child_bound_to_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Dave's review of #416 (High): the supervisor kills the watcher pid, not
+    # its process group; the converge child must die with its parent
+    from lithos_loom.runner import signals
+    from lithos_loom.subscriptions.external_remediation import spawn_converge
+
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*argv, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    await spawn_converge(["true"])
+    assert captured["env"] is not None and captured["env"][signals.BOUND_ENV] == "1"

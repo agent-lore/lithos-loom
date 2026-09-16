@@ -61,7 +61,11 @@ from lithos_loom.gates import PrGateSpec, waiter_of
 from lithos_loom.github_client import GitHubClient
 from lithos_loom.github_review_activity import ExternalReviewActivity
 from lithos_loom.github_review_streams import AuthorTrust
-from lithos_loom.runner.orphans import pid_alive
+from lithos_loom.runner.orphans import (
+    ProcessIdentity,
+    identity_alive,
+    process_identity,
+)
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
 from lithos_loom.subscriptions._project_settings import (
@@ -90,10 +94,12 @@ from lithos_loom.subscriptions.remediation_outcome import (
     post_repo_mismatch_refusal,
     record_result,
     record_unsettled,
+    settled_refusal,
+)
+from lithos_loom.subscriptions.remediation_refunds import (
     refund_infra_failed,
     refund_lost_run,
     refund_repo_mismatch,
-    settled_refusal,
 )
 
 __all__ = [
@@ -181,6 +187,10 @@ class ExternalRemediation:
         # foreign stamps the guard refused (a recorded outcome beside them, a
         # malformed record, a still-live child): said once per boot each
         self._stale_logged: set[str] = set()
+        # re-review of PR #416: a run that outlived its daemon (its dispatcher
+        # identity still alive) is a REAL hold — on the single-flight slot and
+        # on the per-PR holds the peers read — until that identity dies
+        self._foreign_live: dict[str, ProcessIdentity] = {}
 
     @property
     def boot_id(self) -> str:
@@ -188,7 +198,9 @@ class ExternalRemediation:
 
     @property
     def busy(self) -> bool:
-        return self._task is not None and not self._task.done()
+        return (self._task is not None and not self._task.done()) or bool(
+            self._foreign_live
+        )
 
     def busy_on(self, pr_url: str) -> bool:
         """Whether a run is claimed or in flight on *pr_url* — the merge-gate
@@ -197,7 +209,9 @@ class ExternalRemediation:
         dispatch commits (before its reservation write, self-review of PR
         #362: a probe finishing during that await must already see it) until
         the run task ends."""
-        return self._in_flight_pr_url == pr_url
+        # ...or, after a restart, while a run a previous daemon left on that
+        # PR is still alive (re-review of PR #416)
+        return self._in_flight_pr_url == pr_url or pr_url in self._foreign_live
 
     async def observe_head(
         self,
@@ -227,7 +241,7 @@ class ExternalRemediation:
         if (
             budget.in_flight_boot_id
             and budget.in_flight_boot_id != self._boot_id
-            and not self.busy_on(spec.pr_url)
+            and self._in_flight_pr_url != spec.pr_url
         ):
             try:
                 gate, budget = await self._reconcile_lost(
@@ -291,18 +305,27 @@ class ExternalRemediation:
         so this sweep reads the record on its merits; the record keeps it,
         the next sweep tries again, and the refusal is logged once per boot.
         """
-        if budget.in_flight_pid and pid_alive(budget.in_flight_pid):
+        identity = ProcessIdentity(
+            pid=budget.in_flight_pid,
+            start_ticks=budget.in_flight_pid_start,
+            host_boot=budget.in_flight_host_boot,
+        )
+        if budget.in_flight_pid and identity_alive(identity):
+            # THAT process (not merely that pid) is still running — the run
+            # outlived its daemon. Hold everything on this PR until it ends.
+            self._foreign_live[spec.pr_url] = identity
             if spec.pr_url not in self._stale_logged:
                 self._stale_logged.add(spec.pr_url)
                 ctx.logger.warning(
                     "external-remediation: the run boot %s dispatched on %s (pid %d) "
-                    "outlived its daemon and is still running; not refunded or "
-                    "re-dispatched beside it — reconciled once it ends",
+                    "outlived its daemon and is still running; holding the PR — "
+                    "not refunded or re-dispatched beside it until it ends",
                     budget.in_flight_boot_id,
                     spec.pr_url,
                     budget.in_flight_pid,
                 )
             return gate, dataclasses.replace(budget, in_flight_boot_id="")
+        self._foreign_live.pop(spec.pr_url, None)
         if story_id is None:
             meta_story = gate.metadata.get("story_id")
             if isinstance(meta_story, str) and meta_story:
@@ -628,13 +651,16 @@ class ExternalRemediation:
         # round's outcome goes with it (#408): the spent round has none yet,
         # and a run that never records one — a crash, a restart mid-run
         # (#407) — must read as unsettled, never as the round before.
+        me = process_identity(os.getpid())
         budget = dataclasses.replace(
             budget,
             rounds_used=budget.rounds_used + 1,
             last_status="",
             last_settled=False,
             in_flight_boot_id=self._boot_id,  # #407 slice 2b
-            in_flight_pid=os.getpid(),
+            in_flight_pid=me.pid if me else os.getpid(),
+            in_flight_pid_start=me.start_ticks if me else 0,
+            in_flight_host_boot=me.host_boot if me else "",
         )
         try:
             await ctx.lithos.task_update(
@@ -914,6 +940,8 @@ class ExternalRemediation:
                 last_settled=False,
                 in_flight_boot_id="",
                 in_flight_pid=0,
+                in_flight_pid_start=0,
+                in_flight_host_boot="",
             )
             await write_marker(
                 ctx,

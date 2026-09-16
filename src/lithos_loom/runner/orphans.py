@@ -14,8 +14,19 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 
-__all__ = ["PID_LABEL", "pid_alive", "reap_orphaned_containers"]
+__all__ = [
+    "PID_LABEL",
+    "ProcessIdentity",
+    "host_boot_id",
+    "start_ticks",
+    "identity_alive",
+    "pid_alive",
+    "process_identity",
+    "reap_orphaned_containers",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +35,62 @@ PID_LABEL = "loom.pid"
 
 #: One docker call must never hang the boot on a dead daemon.
 _DOCKER_TIMEOUT_S = 30
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """A process, not a number (#407 slice 2b re-review): a pid is reused —
+    after a host reboot quite plausibly by the new watcher itself — so
+    "pid alive" alone reads a genuinely lost run as alive forever. The
+    kernel's start time (clock ticks since boot, ``/proc/<pid>/stat`` field
+    22) and the host's boot id pin the number to one incarnation."""
+
+    pid: int
+    start_ticks: int
+    host_boot: str
+
+
+def host_boot_id() -> str:
+    """The kernel's boot id (``/proc/sys/kernel/random/boot_id``); ``""``
+    where it cannot be read."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def start_ticks(pid: int) -> int | None:
+    """The process's start time in clock ticks since boot, or ``None`` when
+    there is no such process (or no procfs)."""
+    if pid <= 0:
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # the comm field is parenthesised and may itself hold spaces or parens:
+    # everything after the LAST ")" is the numbered fields from 3 on
+    tail = stat.rsplit(")", 1)[-1].split()
+    try:
+        return int(tail[19])  # field 22 (1-based) → index 19 past state (3)
+    except (IndexError, ValueError):
+        return None
+
+
+def process_identity(pid: int) -> ProcessIdentity | None:
+    """The identity of a live process, or ``None``."""
+    start = start_ticks(pid)
+    if start is None:
+        return None
+    return ProcessIdentity(pid=pid, start_ticks=start, host_boot=host_boot_id())
+
+
+def identity_alive(identity: ProcessIdentity) -> bool:
+    """Whether THAT process — the same incarnation of the pid, on the same
+    host boot — is still running."""
+    if not identity.pid or identity.host_boot != host_boot_id():
+        return False
+    return start_ticks(identity.pid) == identity.start_ticks
 
 
 def pid_alive(pid: int) -> bool | None:

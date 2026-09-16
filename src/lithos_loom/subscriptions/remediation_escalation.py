@@ -182,6 +182,8 @@ async def _escalate(
             # (#407 slice 2b review)
             in_flight_boot_id="",
             in_flight_pid=0,
+            in_flight_pid_start=0,
+            in_flight_host_boot="",
         )
         ok = await write_marker(
             ctx,

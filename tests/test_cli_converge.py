@@ -1318,3 +1318,25 @@ def test_converge_installs_the_sigterm_teardown_handler(
     with pytest.raises(SystemExit) as exc:
         handler(signal.SIGTERM, None)  # type: ignore[operator]
     assert exc.value.code == 143
+
+
+def test_converge_binds_its_lifetime_to_a_loom_parent(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Dave's review of #416 (High): a SIGKILLed watcher left its converge
+    # child running, so the next boot re-dispatched beside it. The child
+    # now dies with its loom parent (PDEATHSIG) — bound in the develop group
+    # like the SIGTERM handler.
+    from lithos_loom.runner import signals
+
+    bound: list[bool] = []
+    monkeypatch.setattr(signals, "install_sigterm_exit", lambda: None)
+    monkeypatch.setattr(signals, "bind_lifetime_to_parent", lambda: bound.append(True))
+    from lithos_loom.cli import develop as develop_cli
+
+    monkeypatch.setattr(
+        develop_cli, "bind_lifetime_to_parent", lambda: bound.append(True)
+    )
+    result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+    assert result.exit_code == 0, result.output
+    assert bound
