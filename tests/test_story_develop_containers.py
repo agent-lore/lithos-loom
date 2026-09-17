@@ -685,13 +685,24 @@ def test_start_ticks_reads_the_real_proc_stat_of_this_process() -> None:
     assert len(orphans.host_boot_id()) >= 8
 
 
-def test_process_identity_falls_back_to_ps_and_sysctl_off_linux(monkeypatch) -> None:
+def _no_proc_here(pid: int) -> int | None:
+    raise AssertionError("/proc consulted on a host without procfs")
+
+
+def _no_ps_here(pid: int) -> int | None:
+    raise AssertionError("ps consulted on a procfs host")
+
+
+def test_process_identity_uses_ps_and_sysctl_off_linux(monkeypatch) -> None:
     # Dave's re-review of #416 (High): macOS is a documented target and has
     # no /proc; `ps -o lstart=` and `sysctl kern.boottime` carry the same two
-    # facts
+    # facts. PR #417 review: the platform picks the provider — /proc is not
+    # consulted there at all, so a marker never changes unit under a process.
     import os
 
-    monkeypatch.setattr(orphans, "_proc_start_ticks", lambda pid: None)
+    monkeypatch.setattr(orphans, "_PROCFS", False)
+    monkeypatch.setattr(orphans, "_proc_start_ticks", _no_proc_here)
+    monkeypatch.setattr(orphans, "_boot_id_file", lambda: _no_proc_here(0) or "")
     monkeypatch.setattr(
         orphans,
         "_ps_start_epoch",
@@ -714,6 +725,44 @@ def test_process_identity_is_none_when_no_source_can_name_the_process(
     monkeypatch.setattr(orphans, "_proc_start_ticks", lambda pid: None)
     monkeypatch.setattr(orphans, "_ps_start_epoch", lambda pid: None)
     assert orphans.process_identity(os.getpid()) is None
+
+
+# --- PR #417 review (Medium): one provider per host, never a unit change ------
+
+
+def test_start_ticks_never_falls_through_to_ps_on_a_procfs_host(monkeypatch) -> None:
+    # a failed /proc read is UNKNOWN, not ps's epoch seconds: the two are
+    # different numbers for the same live process, and "same pid, different
+    # marker" is what positive death looks like
+    monkeypatch.setattr(orphans, "_PROCFS", True)
+    monkeypatch.setattr(orphans, "_proc_start_ticks", lambda pid: None)
+    monkeypatch.setattr(orphans, "_ps_start_epoch", _no_ps_here)
+    assert orphans.start_ticks(4242) is None
+    monkeypatch.setattr(orphans, "_boot_id_file", lambda: "")
+    monkeypatch.setattr(orphans, "_sysctl_boottime", lambda: "{ sec = 1 }")
+    assert orphans.host_boot_id() == ""  # not sysctl's answer either
+
+
+def test_start_ticks_never_reads_proc_off_a_procfs_host(monkeypatch) -> None:
+    monkeypatch.setattr(orphans, "_PROCFS", False)
+    monkeypatch.setattr(orphans, "_proc_start_ticks", _no_proc_here)
+    monkeypatch.setattr(orphans, "_ps_start_epoch", lambda pid: 1700000000)
+    assert orphans.start_ticks(4242) == 1700000000
+
+
+def test_identity_alive_holds_through_a_transient_proc_failure(monkeypatch) -> None:
+    # the reviewer's reproduction: a marker stamped from /proc, then one probe
+    # where /proc does not answer. Before: the probe fell through to ps, read
+    # epoch seconds, saw a different number, and returned False — a live
+    # foreign remediation refunded. Now: unknown, and the run is held.
+    import os
+
+    ident = orphans.process_identity(os.getpid())
+    assert ident is not None
+    monkeypatch.setattr(orphans, "_PROCFS", True)
+    monkeypatch.setattr(orphans, "_proc_start_ticks", lambda pid: None)
+    monkeypatch.setattr(orphans, "_ps_start_epoch", _no_ps_here)
+    assert orphans.identity_alive(ident) is None
 
 
 def test_process_identity_is_none_when_boot_cannot_be_named(monkeypatch) -> None:
