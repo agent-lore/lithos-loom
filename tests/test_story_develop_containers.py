@@ -658,6 +658,24 @@ def test_identity_alive_requires_the_same_process_not_the_same_number(
     assert orphans.identity_alive(gone) is False
 
 
+def test_identity_alive_distinguishes_probe_failure_from_death(monkeypatch) -> None:
+    import os
+
+    ident = orphans.ProcessIdentity(
+        pid=os.getpid(), start_ticks=100, host_boot="boot-a"
+    )
+    monkeypatch.setattr(orphans, "host_boot_id", lambda: "")
+    assert orphans.identity_alive(ident) is None  # boot probe unavailable
+
+    monkeypatch.setattr(orphans, "host_boot_id", lambda: "boot-a")
+    monkeypatch.setattr(orphans, "start_ticks", lambda pid: None)
+    monkeypatch.setattr(orphans, "pid_alive", lambda pid: True)
+    assert orphans.identity_alive(ident) is None  # live pid, start probe unavailable
+
+    monkeypatch.setattr(orphans, "pid_alive", lambda pid: False)
+    assert orphans.identity_alive(ident) is False  # positive evidence of death
+
+
 def test_start_ticks_reads_the_real_proc_stat_of_this_process() -> None:
     import os
 
@@ -695,4 +713,12 @@ def test_process_identity_is_none_when_no_source_can_name_the_process(
 
     monkeypatch.setattr(orphans, "_proc_start_ticks", lambda pid: None)
     monkeypatch.setattr(orphans, "_ps_start_epoch", lambda pid: None)
+    assert orphans.process_identity(os.getpid()) is None
+
+
+def test_process_identity_is_none_when_boot_cannot_be_named(monkeypatch) -> None:
+    import os
+
+    monkeypatch.setattr(orphans, "start_ticks", lambda pid: 123)
+    monkeypatch.setattr(orphans, "host_boot_id", lambda: "")
     assert orphans.process_identity(os.getpid()) is None

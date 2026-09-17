@@ -981,8 +981,10 @@ async def test_a_sweep_after_an_ungraceful_death_refunds_and_re_dispatches(
     gate refunds the stale reservation, re-parks the trigger, tells the
     story — and, the trigger being parked with rounds left, dispatches the
     run again in the same sweep."""
+    import os
     from pathlib import Path as _Path
 
+    from lithos_loom.runner.orphans import process_identity
     from lithos_loom.subscriptions import external_remediation as rem_mod
     from lithos_loom.subscriptions.external_remediation import (
         PENDING_KEY,
@@ -1001,11 +1003,16 @@ async def test_a_sweep_after_an_ungraceful_death_refunds_and_re_dispatches(
     client = FakeLithosClient(agent_id="a")
     story, gate = await _gate_with_story(client)
     pr = _open_pr()
+    me = process_identity(os.getpid())
+    assert me is not None
     stale = RemediationBudget(
         pr_url=_PR_URL,
         rounds_used=1,
         last_seen_head_sha=pr.head_sha,
         in_flight_boot_id="dead-boot",
+        in_flight_pid=me.pid,
+        in_flight_pid_start=me.start_ticks + 1,
+        in_flight_host_boot=me.host_boot,
     )
     await client.task_update(
         task_id=gate.id, metadata={REMEDIATION_KEY: stale.as_marker()}

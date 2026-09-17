@@ -3027,13 +3027,24 @@ async def test_a_crash_clears_the_boot_stamp(tmp_path: Path) -> None:
 async def _stale_stamped_gate(
     client: FakeLithosClient, *, boot: str, last_status: str = ""
 ):
+    import os
+
+    from lithos_loom.runner.orphans import process_identity
+
     story, gate = await _gate_with_story(client)
+    me = process_identity(os.getpid())
+    assert me is not None
     stale = RemediationBudget(
         pr_url=_PR_URL,
         rounds_used=2,
         last_seen_head_sha=_HEAD,
         last_status=last_status,
         in_flight_boot_id=boot,
+        # A positive dead identity, not the pid-0 "unknown" state. The live
+        # pid's different start marker proves this old incarnation is gone.
+        in_flight_pid=me.pid,
+        in_flight_pid_start=me.start_ticks + 1,
+        in_flight_host_boot=me.host_boot,
     )
     await client.task_update(
         task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: stale.as_marker()}
@@ -3162,7 +3173,13 @@ async def test_a_foreign_stamp_never_breaks_the_sweep(
 
 async def test_an_orphan_gate_is_refunded_without_a_finding(tmp_path: Path) -> None:
     # opus round (Medium): the refund needs no story; only the finding does
+    import os
+
+    from lithos_loom.runner.orphans import process_identity
+
     client = FakeLithosClient()
+    me = process_identity(os.getpid())
+    assert me is not None
     gate_id = await client.task_create(
         title="Awaiting merge: x",
         agent="a",
@@ -3173,7 +3190,12 @@ async def test_an_orphan_gate_is_refunded_without_a_finding(tmp_path: Path) -> N
             "pr_number": 62,
             "pr_url": _PR_URL,
             REMEDIATION_KEY: RemediationBudget(
-                pr_url=_PR_URL, rounds_used=1, in_flight_boot_id="dead-boot"
+                pr_url=_PR_URL,
+                rounds_used=1,
+                in_flight_boot_id="dead-boot",
+                in_flight_pid=me.pid,
+                in_flight_pid_start=me.start_ticks + 1,
+                in_flight_host_boot=me.host_boot,
             ).as_marker(),
         },
     )
@@ -3442,43 +3464,61 @@ async def test_a_foreign_hold_is_released_when_its_identity_dies_off_sweep(
     assert spec is not None
     await rem.observe_head(gate, spec, _pr(), _ctx(client))
     assert rem.busy
+    monkeypatch.setattr(rem_mod, "identity_alive", lambda ident: None)
+    assert rem.busy and rem.busy_on(_PR_URL)  # uncertainty fails closed
     monkeypatch.setattr(rem_mod, "identity_alive", lambda ident: False)
     assert not rem.busy and not rem.busy_on(_PR_URL)
 
 
-async def test_an_unverifiable_identity_is_refunded_because_the_child_is_bound(
+async def test_dispatch_waits_when_its_identity_cannot_be_captured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Dave's re-review of #416 (High): where no process identity can be
-    # captured, the old behaviour refunded blind. The run cannot outlive its
-    # dispatcher anywhere now (the portable lifetime bind), so an
-    # unverifiable stamp IS a dead run — refunded, and said so
+    # Review of f4bfe47: without a durable identity a later boot cannot prove
+    # this dispatcher died. Do not create the ambiguous reservation or start
+    # a push-capable child; leave the pending trigger for the next sweep.
     from lithos_loom.subscriptions import external_remediation as rem_mod
+    from lithos_loom.subscriptions.external_remediation import PENDING_KEY
 
     monkeypatch.setattr(rem_mod, "process_identity", lambda pid: None)
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
-    started = asyncio.Event()
+    await client.task_update(
+        task_id=gate.id, metadata={PENDING_KEY: {"pr_url": _PR_URL}}
+    )
+    spawn, calls = _spawner(None)
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn, boot_id="b")
+    assert await _consider(client, gate, story, rem) == "identity_unavailable"
+    assert calls == [] and not rem.busy and not rem.busy_on(_PR_URL)
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    assert gate.metadata.get(PENDING_KEY) == {"pr_url": _PR_URL}
+    assert REMEDIATION_KEY not in gate.metadata
 
-    async def hanging(cmd: list[str]) -> tuple[int, str]:
-        started.set()
-        await asyncio.sleep(3600)
-        return 0, ""
 
-    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=hanging, boot_id="b")
-    assert await _consider(client, gate, story, rem) == "dispatched"
-    await started.wait()
-    marker = await _marker(client, gate.id)
-    assert marker["in_flight_pid"] == 0 and marker["in_flight_host_boot"] == ""
-    rem._task.cancel()  # type: ignore[union-attr]
-    with pytest.raises(asyncio.CancelledError):
-        await rem._task  # type: ignore[misc]
-    later = ExternalRemediation(
-        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="c"
+async def test_an_unverifiable_foreign_reservation_is_held_not_refunded(
+    tmp_path: Path,
+) -> None:
+    # A legacy/malformed pid-0 stamp cannot prove its run died. The lifetime
+    # bind follows the old watcher and is not evidence that watcher is gone.
+    client = FakeLithosClient()
+    _story, gate = await _gate_with_story(client)
+    stale = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=1,
+        last_seen_head_sha=_HEAD,
+        in_flight_boot_id="old-boot",
+    )
+    await client.task_update(
+        task_id=gate.id, metadata={REMEDIATION_KEY: stale.as_marker()}
     )
     gate = await client.task_get(task_id=gate.id)
     assert gate is not None
     spec = parse_pr_gate(gate)
     assert spec is not None
-    budget = await later.observe_head(gate, spec, _pr(), _ctx(client))
-    assert budget.rounds_used == 0 and not later.busy
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert budget.rounds_used == 1
+    assert rem.busy and rem.busy_on(_PR_URL)
+    assert (await _marker(client, gate.id))["in_flight_boot_id"] == "old-boot"

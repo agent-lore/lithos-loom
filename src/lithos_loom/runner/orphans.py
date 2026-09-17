@@ -125,19 +125,38 @@ def start_ticks(pid: int) -> int | None:
 
 
 def process_identity(pid: int) -> ProcessIdentity | None:
-    """The identity of a live process, or ``None``."""
+    """The stable identity of a live process, or ``None`` when either half
+    cannot be captured. A start marker without a boot marker is not durable
+    across a reboot and therefore must not authorize a crash-safe dispatch."""
     start = start_ticks(pid)
     if start is None:
         return None
-    return ProcessIdentity(pid=pid, start_ticks=start, host_boot=host_boot_id())
+    boot = host_boot_id()
+    if not boot:
+        return None
+    return ProcessIdentity(pid=pid, start_ticks=start, host_boot=boot)
 
 
-def identity_alive(identity: ProcessIdentity) -> bool:
-    """Whether THAT process — the same incarnation of the pid, on the same
-    host boot — is still running."""
-    if not identity.pid or identity.host_boot != host_boot_id():
+def identity_alive(identity: ProcessIdentity) -> bool | None:
+    """Whether THAT process is alive, dead, or currently unverifiable.
+
+    ``None`` is deliberately distinct from death: a transient ``/proc``,
+    ``ps``, or ``sysctl`` failure must hold a push-capable run rather than
+    permit a second one beside it.
+    """
+    if identity.pid <= 0 or identity.start_ticks <= 0 or not identity.host_boot:
+        return None
+    boot = host_boot_id()
+    if not boot:
+        return None
+    if identity.host_boot != boot:
         return False
-    return start_ticks(identity.pid) == identity.start_ticks
+    start = start_ticks(identity.pid)
+    if start is not None:
+        return start == identity.start_ticks
+    # A missing start marker can mean either "gone" or "the probe failed".
+    # Only the kernel positively denying the pid is evidence of death.
+    return False if pid_alive(identity.pid) is False else None
 
 
 def pid_alive(pid: int) -> bool | None:

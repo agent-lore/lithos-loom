@@ -210,7 +210,7 @@ class ExternalRemediation:
         dead = [
             url
             for url, ident in self._foreign_live.items()
-            if not identity_alive(ident)
+            if identity_alive(ident) is False
         ]
         for url in dead:
             del self._foreign_live[url]
@@ -335,31 +335,33 @@ class ExternalRemediation:
             start_ticks=budget.in_flight_pid_start,
             host_boot=budget.in_flight_host_boot,
         )
-        if not budget.in_flight_pid:
-            # no identity could be captured where this was dispatched (no
-            # /proc, no ps): still a dead run — a run loom spawns is bound to
-            # its dispatcher's life everywhere (the portable parent watch),
-            # so the boot that made this stamp took its run with it
-            ctx.logger.info(
-                "external-remediation: the reservation boot %s left on %s carries "
-                "no process identity; refunding on the lifetime bind",
-                budget.in_flight_boot_id,
-                spec.pr_url,
-            )
-        elif identity_alive(identity):
-            # THAT process (not merely that pid) is still running — the run
-            # outlived its daemon. Hold everything on this PR until it ends.
+        alive = identity_alive(identity)
+        if alive is not False:
+            # THAT process is still running, OR the host cannot currently
+            # prove it died. Both fail closed: the lifetime bind only says a
+            # child dies after this dispatcher dies; it is not proof that an
+            # unidentifiable dispatcher has already died.
             self._foreign_live[spec.pr_url] = identity
             if spec.pr_url not in self._stale_logged:
                 self._stale_logged.add(spec.pr_url)
-                ctx.logger.warning(
-                    "external-remediation: the run boot %s dispatched on %s (pid %d) "
-                    "outlived its daemon and is still running; holding the PR — "
-                    "not refunded or re-dispatched beside it until it ends",
-                    budget.in_flight_boot_id,
-                    spec.pr_url,
-                    budget.in_flight_pid,
-                )
+                if alive:
+                    ctx.logger.warning(
+                        "external-remediation: the run boot %s dispatched on %s "
+                        "(pid %d) outlived its daemon and is still running; holding "
+                        "the PR — not refunded or re-dispatched beside it until it "
+                        "ends",
+                        budget.in_flight_boot_id,
+                        spec.pr_url,
+                        budget.in_flight_pid,
+                    )
+                else:
+                    ctx.logger.warning(
+                        "external-remediation: the run boot %s dispatched on %s "
+                        "cannot currently be identified; holding the PR — not "
+                        "refunded or re-dispatched without proof it died",
+                        budget.in_flight_boot_id,
+                        spec.pr_url,
+                    )
             return gate, dataclasses.replace(budget, in_flight_boot_id="")
         self._foreign_live.pop(spec.pr_url, None)
         if story_id is None:
@@ -688,16 +690,24 @@ class ExternalRemediation:
         # and a run that never records one — a crash, a restart mid-run
         # (#407) — must read as unsettled, never as the round before.
         me = process_identity(os.getpid())
+        if me is None:
+            self._in_flight_pr_url = ""
+            ctx.logger.warning(
+                "[Friction] external-remediation: could not capture a stable "
+                "dispatcher identity for %s; not reserving or dispatching — will "
+                "retry next sweep",
+                spec.pr_url,
+            )
+            return "identity_unavailable"
         budget = dataclasses.replace(
             budget,
             rounds_used=budget.rounds_used + 1,
             last_status="",
             last_settled=False,
             in_flight_boot_id=self._boot_id,  # #407 slice 2b
-            # no identity → pid 0: "unverifiable", refunded on the lifetime bind
-            in_flight_pid=me.pid if me else 0,
-            in_flight_pid_start=me.start_ticks if me else 0,
-            in_flight_host_boot=me.host_boot if me else "",
+            in_flight_pid=me.pid,
+            in_flight_pid_start=me.start_ticks,
+            in_flight_host_boot=me.host_boot,
         )
         try:
             await ctx.lithos.task_update(
