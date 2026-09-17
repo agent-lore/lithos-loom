@@ -215,6 +215,28 @@ def test_spawner_alive_reads_a_reused_pid_as_dead(monkeypatch) -> None:
     assert signals.spawner_alive(4242, 1234) is False  # same number, other process
 
 
+def test_spawner_alive_holds_through_a_transient_proc_failure(monkeypatch) -> None:
+    # PR #417 review (Medium): the spawner stamped clock ticks from /proc; one
+    # probe later /proc does not answer. Before, `start_ticks` fell through to
+    # `ps` and read epoch seconds — a different number for the same live
+    # spawner, so this returned False and the watch SIGTERMed a healthy run.
+    # Now the marker is unknown and the pid's liveness holds the run.
+    import os
+
+    from lithos_loom.runner import orphans
+
+    stamped = signals.start_ticks(os.getpid())
+    assert stamped is not None
+    monkeypatch.setattr(orphans, "_PROCFS", True)
+    monkeypatch.setattr(orphans, "_proc_start_ticks", lambda pid: None)
+
+    def never(pid):
+        raise AssertionError("ps consulted on a procfs host")
+
+    monkeypatch.setattr(orphans, "_ps_start_epoch", never)
+    assert signals.spawner_alive(os.getpid(), stamped) is True
+
+
 def test_spawner_alive_falls_back_to_pid_liveness_without_a_marker(monkeypatch) -> None:
     monkeypatch.setattr(signals, "start_ticks", lambda pid: None)
     monkeypatch.setattr(signals, "pid_alive", lambda pid: False)

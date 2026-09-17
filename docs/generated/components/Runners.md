@@ -65,8 +65,8 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 
 ### `lithos_loom.runner.orphans`
 - class `ProcessIdentity` — A process, not a number (#407 slice 2b re-review): a pid is reused — after a host reboot quite plausibly by the new watcher itself — so "pid alive" alone reads a genuinely lost run as alive forever. The kernel's start time (clock ticks since boot, ``/proc/<pid>/stat`` field 22) and the host's boot id pin the number to one incarnation.
-- def `host_boot_id` — Something that changes on every host boot: the kernel's boot id (Linux), else ``kern.boottime`` (macOS / BSD), else ``""``.
-- def `start_ticks` — A start-time marker for the process — kernel ticks on Linux, epoch seconds via ``ps`` elsewhere — or ``None`` when there is no such process (or no way to ask).
+- def `host_boot_id` — Something that changes on every host boot: the kernel's boot id on a procfs host, ``kern.boottime`` (macOS / BSD) elsewhere, ``""`` when the host's provider cannot answer. One provider per host — see :data:`_PROCFS`.
+- def `start_ticks` — A start-time marker for the process — kernel ticks on a procfs host, epoch seconds via ``ps`` elsewhere — or ``None`` when there is no such process or the host's provider cannot answer. The two units are never mixed on one host: a marker is only ever compared against a re-read through the same provider (see :data:`_PROCFS`).
 - def `process_identity` — The stable identity of a live process, or ``None`` when either half cannot be captured. A start marker without a boot marker is not durable across a reboot and therefore must not authorize a crash-safe dispatch.
 - def `identity_alive` — Whether THAT process is alive, dead, or currently unverifiable.
 - def `pid_alive` — ``None`` when the label is not a pid the kernel can be asked about (an all-digit label too large for a C long raises ``OverflowError`` — PR #415 review: the reaper runs before the boot gate, so one stale label must never keep loom from starting).
