@@ -51,6 +51,19 @@ class ProcessIdentity:
     host_boot: str
 
 
+#: Whether this host has a procfs to read process facts from — decided once,
+#: because it does not change while the process runs. It selects the ONE
+#: provider each fact is read through (PR #417 review, Medium): ``/proc``
+#: reports a start time in clock ticks since boot and ``ps -o lstart=`` in
+#: epoch seconds, so a marker stamped by one provider and re-read through the
+#: other is a different number for the SAME live process — which reads as a
+#: reused pid, i.e. positive death, and would SIGTERM a bound run or refund a
+#: live remediation. A provider is therefore chosen by platform, never by
+#: whether a read happened to succeed; a failed read is *unknown*, not the
+#: other provider's unit.
+_PROCFS = Path("/proc/self/stat").exists()
+
+
 def _boot_id_file() -> str:
     try:
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
@@ -71,9 +84,11 @@ def _sysctl_boottime() -> str:
 
 
 def host_boot_id() -> str:
-    """Something that changes on every host boot: the kernel's boot id
-    (Linux), else ``kern.boottime`` (macOS / BSD), else ``""``."""
-    return _boot_id_file() or _sysctl_boottime()
+    """Something that changes on every host boot: the kernel's boot id on a
+    procfs host, ``kern.boottime`` (macOS / BSD) elsewhere, ``""`` when the
+    host's provider cannot answer. One provider per host — see
+    :data:`_PROCFS`."""
+    return _boot_id_file() if _PROCFS else _sysctl_boottime()
 
 
 def _proc_start_ticks(pid: int) -> int | None:
@@ -115,13 +130,14 @@ def _ps_start_epoch(pid: int) -> int | None:
 
 
 def start_ticks(pid: int) -> int | None:
-    """A start-time marker for the process — kernel ticks on Linux, epoch
-    seconds via ``ps`` elsewhere — or ``None`` when there is no such process
-    (or no way to ask)."""
+    """A start-time marker for the process — kernel ticks on a procfs host,
+    epoch seconds via ``ps`` elsewhere — or ``None`` when there is no such
+    process or the host's provider cannot answer. The two units are never
+    mixed on one host: a marker is only ever compared against a re-read
+    through the same provider (see :data:`_PROCFS`)."""
     if pid <= 0:
         return None
-    ticks = _proc_start_ticks(pid)
-    return ticks if ticks is not None else _ps_start_epoch(pid)
+    return _proc_start_ticks(pid) if _PROCFS else _ps_start_epoch(pid)
 
 
 def process_identity(pid: int) -> ProcessIdentity | None:
