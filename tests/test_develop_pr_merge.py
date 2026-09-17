@@ -973,6 +973,88 @@ async def test_a_trusted_review_after_a_settled_last_round_reads_needs_human(
     assert "human push" in stored.metadata[DETAIL_KEY]
 
 
+async def test_a_sweep_after_an_ungraceful_death_refunds_and_re_dispatches(
+    tmp_path, monkeypatch
+) -> None:
+    """#407 slice 2b end to end: the old daemon died under a dispatched run
+    (SIGKILL — no shutdown refund). The new daemon's first sweep over the
+    gate refunds the stale reservation, re-parks the trigger, tells the
+    story — and, the trigger being parked with rounds left, dispatches the
+    run again in the same sweep."""
+    import os
+    from pathlib import Path as _Path
+
+    from lithos_loom.runner.orphans import process_identity
+    from lithos_loom.subscriptions import external_remediation as rem_mod
+    from lithos_loom.subscriptions.external_remediation import (
+        PENDING_KEY,
+        REMEDIATION_KEY,
+        ExternalRemediation,
+        OriginRead,
+        RemediationSettings,
+    )
+    from lithos_loom.subscriptions.remediation_budget import RemediationBudget
+
+    async def resolvable(path: _Path) -> OriginRead:
+        return OriginRead("agent-lore/lithos-loom", "ok")
+
+    monkeypatch.setattr(rem_mod, "origin_read", resolvable)
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    pr = _open_pr()
+    me = process_identity(os.getpid())
+    assert me is not None
+    stale = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=1,
+        last_seen_head_sha=pr.head_sha,
+        in_flight_boot_id="dead-boot",
+        in_flight_pid=me.pid,
+        in_flight_pid_start=me.start_ticks + 1,
+        in_flight_host_boot=me.host_boot,
+    )
+    await client.task_update(
+        task_id=gate.id, metadata={REMEDIATION_KEY: stale.as_marker()}
+    )
+    gate = await _get(client, gate.id)
+    (tmp_path / "repo").mkdir()
+    calls: list[list[str]] = []
+    started = asyncio.Event()
+
+    async def spawn(cmd):
+        calls.append(cmd)
+        started.set()
+        await asyncio.sleep(3600)
+        return 0, ""
+
+    rem = ExternalRemediation(
+        RemediationSettings(
+            trusted_bots=("copilot-pull-request-reviewer[bot]",),
+            budget=2,
+            projects={"p": tmp_path / "repo"},
+            work_dir=tmp_path / "work",
+        ),
+        spawn=spawn,
+        boot_id="new-boot",
+    )
+    try:
+        outcome = await reconcile_pr_gate(
+            gate, _github(pr), _ctx(client), ingest_reviews=True, remediation=rem
+        )
+        assert outcome == "still_open"
+        findings = [f["summary"] for f in client._findings]
+        assert any("lost to a daemon restart" in f for f in findings)
+        await asyncio.wait_for(started.wait(), 5)  # re-dispatched this sweep
+        stored = await _get(client, gate.id)
+        marker = stored.metadata[REMEDIATION_KEY]
+        assert marker["rounds_used"] == 1  # refunded to 0, re-reserved to 1
+        assert marker["in_flight_boot_id"] == "new-boot"
+        assert PENDING_KEY not in stored.metadata  # consumed by the re-dispatch
+    finally:
+        await rem.shutdown()
+
+
 async def test_reconcile_busy_slot_parks_the_trigger_with_the_marks(
     tmp_path,
 ) -> None:
@@ -1416,7 +1498,7 @@ async def test_still_open_branch_recovers_a_debt_before_observing_the_head() -> 
             return False
 
     class _Remediation:
-        async def observe_head(self, gate, spec, pr, ctx):
+        async def observe_head(self, gate, spec, pr, ctx, *, story_id=None):
             order.append("observe")
             return None
 

@@ -2,7 +2,9 @@
 
 ``metadata.external_remediation`` — ``{pr_url, rounds_used,
 last_loom_pushed_sha, last_seen_head_sha, needs_human_gate_id,
-needs_human_reason, no_change_refunded, last_status, last_settled}``, url-scoped
+needs_human_reason, no_change_refunded, last_status, last_settled,
+in_flight_boot_id, in_flight_pid, in_flight_pid_start, in_flight_host_boot}``,
+url-scoped
 — is the on-disk contract :mod:`.external_remediation` reads and writes and
 :mod:`.remediation_escalation` records its gate in. A separate key from
 ``external_review_seen`` and the merge marker — no marker may trip another's
@@ -82,6 +84,21 @@ class RemediationBudget:
     # before the fields existed reads the same way.
     last_status: str = ""
     last_settled: bool = False
+    # #407 slice 2b: the boot that reserved the round and has its run in
+    # flight. Every outcome write clears it (the round is decided); the
+    # shutdown refund clears it (slice 2a). A stamp from ANOTHER boot with
+    # no recorded outcome is a run the daemon lost without a shutdown — a
+    # SIGKILL, a host crash — and the first sweep of a later boot refunds it.
+    in_flight_boot_id: str = ""
+    # ...and the dispatcher's pid: a SIGKILL of the daemon does not kill its
+    # converge child, so a live pid beside a foreign boot id is a run still
+    # going — never refunded and re-dispatched beside (opus review of 2b).
+    in_flight_pid: int = 0
+    # ...pinned to one incarnation (re-review of PR #416): the process's
+    # start ticks and the host boot id, so a reused pid never reads as the
+    # run — see runner.orphans.ProcessIdentity
+    in_flight_pid_start: int = 0
+    in_flight_host_boot: str = ""
 
     def as_marker(self) -> dict[str, Any]:
         return {
@@ -94,6 +111,10 @@ class RemediationBudget:
             "no_change_refunded": self.no_change_refunded,
             "last_status": self.last_status,
             "last_settled": self.last_settled,
+            "in_flight_boot_id": self.in_flight_boot_id,
+            "in_flight_pid": self.in_flight_pid,
+            "in_flight_pid_start": self.in_flight_pid_start,
+            "in_flight_host_boot": self.in_flight_host_boot,
         }
 
 
@@ -118,6 +139,26 @@ def read_budget(gate: Any, pr_url: str) -> RemediationBudget:
         no_change_refunded=raw.get("no_change_refunded") is True,
         last_status=last_status if isinstance(last_status, str) else "",
         last_settled=raw.get("last_settled") is True,
+        in_flight_boot_id=(
+            raw["in_flight_boot_id"]
+            if isinstance(raw.get("in_flight_boot_id"), str)
+            else ""
+        ),
+        in_flight_pid=_non_negative_int(raw.get("in_flight_pid")),
+        in_flight_pid_start=_non_negative_int(raw.get("in_flight_pid_start")),
+        in_flight_host_boot=(
+            raw["in_flight_host_boot"]
+            if isinstance(raw.get("in_flight_host_boot"), str)
+            else ""
+        ),
+    )
+
+
+def _non_negative_int(value: object) -> int:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else 0
     )
 
 

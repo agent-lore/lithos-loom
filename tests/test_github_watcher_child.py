@@ -618,9 +618,9 @@ async def test_reconcile_pass_threads_remediation_to_the_gate_branch() -> None:
 
     original = rem.observe_head
 
-    async def spying_observe(gate, spec, pr, ctx):
+    async def spying_observe(gate, spec, pr, ctx, **kw):
         observed.append(pr.head_sha)
-        return await original(gate, spec, pr, ctx)
+        return await original(gate, spec, pr, ctx, **kw)
 
     rem.observe_head = spying_observe  # type: ignore[method-assign]
 

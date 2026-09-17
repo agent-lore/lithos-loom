@@ -50,7 +50,7 @@ from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.plugins.story_develop import engines, handoff, run_outcome
 from lithos_loom.plugins.story_develop.idempotency import lookup_completed
-from lithos_loom.runner.signals import install_sigterm_exit
+from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_exit
 
 develop_app = typer.Typer(
     name="develop",
@@ -64,8 +64,10 @@ def _develop_group() -> None:
     """Runs before every ``develop`` subcommand (#407 slice 2a): the daemon
     stops a dispatched converge / merge-gate / review with SIGTERM, and the
     container teardown lives in ``finally`` blocks that a bare SIGTERM
-    would skip. One install, every subcommand."""
+    would skip. One install, every subcommand. And the lifetime bind: a
+    run loom spawned dies with loom (PDEATHSIG), never beside a successor."""
     install_sigterm_exit()
+    bind_lifetime_to_parent()
 
 
 # `develop review` (#154): run the panel + gate on an existing change. Registered

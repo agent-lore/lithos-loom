@@ -348,7 +348,9 @@ async def reconcile_pr_gate(
         budget = None
         note = None
         if remediation is not None:
-            budget = await remediation.observe_head(gate, spec, pr, ctx)
+            budget = await remediation.observe_head(
+                gate, spec, pr, ctx, story_id=story_id
+            )
             note = remediation.exhaustion_note(budget)
         ingest = await ingest_external_reviews(
             gate,

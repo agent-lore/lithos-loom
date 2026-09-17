@@ -15,8 +15,8 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
 | `lithos_loom.runner.git` | M | 1 | 29 |
-| `lithos_loom.runner.orphans` | S | 0 | 1 |
-| `lithos_loom.runner.signals` | XS | 0 | 1 |
+| `lithos_loom.runner.orphans` | S | 1 | 6 |
+| `lithos_loom.runner.signals` | S | 0 | 5 |
 | `lithos_loom.runner.worktree` | S | 0 | 6 |
 
 ## Public API
@@ -64,10 +64,20 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `delete_branch` — Delete local *branch* (``-D``: a throwaway trial-merge branch is never merged anywhere, so the safe ``-d`` would always refuse). Raises when the branch does not exist or is checked out.
 
 ### `lithos_loom.runner.orphans`
+- class `ProcessIdentity` — A process, not a number (#407 slice 2b re-review): a pid is reused — after a host reboot quite plausibly by the new watcher itself — so "pid alive" alone reads a genuinely lost run as alive forever. The kernel's start time (clock ticks since boot, ``/proc/<pid>/stat`` field 22) and the host's boot id pin the number to one incarnation.
+- def `host_boot_id` — Something that changes on every host boot: the kernel's boot id (Linux), else ``kern.boottime`` (macOS / BSD), else ``""``.
+- def `start_ticks` — A start-time marker for the process — kernel ticks on Linux, epoch seconds via ``ps`` elsewhere — or ``None`` when there is no such process (or no way to ask).
+- def `process_identity` — The stable identity of a live process, or ``None`` when either half cannot be captured. A start marker without a boot marker is not durable across a reboot and therefore must not authorize a crash-safe dispatch.
+- def `identity_alive` — Whether THAT process is alive, dead, or currently unverifiable.
+- def `pid_alive` — ``None`` when the label is not a pid the kernel can be asked about (an all-digit label too large for a C long raises ``OverflowError`` — PR #415 review: the reaper runs before the boot gate, so one stale label must never keep loom from starting).
 - def `reap_orphaned_containers` — #407: remove every loom-labelled container whose owner process is gone.
 
 ### `lithos_loom.runner.signals`
 - def `install_sigterm_exit` — Make SIGTERM raise ``SystemExit`` in the main thread (no-op where the interpreter cannot install handlers, e.g. a non-main thread).
+- def `set_pdeathsig` — ``prctl(option, arg)`` via libc; raises ``OSError`` when it fails or ``AttributeError`` where libc has no prctl (not Linux).
+- def `watch_parent` — Poll our parent pid; the moment it is not *expected* any more, SIGTERM ourselves (the handler runs the teardown). The portable half of the bind — it needs no prctl, so it holds on macOS too — and the subreaper-proof half: it compares against the spawner's pid, not against 1. Returns when *stop* is set (tests) or after firing.
+- def `start_parent_watch`
+- def `bind_lifetime_to_parent` — Die with the loom that spawned us (#407 slice 2b re-reviews).
 
 ### `lithos_loom.runner.worktree`
 - def `create` — Create a per-task worktree off *base_branch* and return its path.

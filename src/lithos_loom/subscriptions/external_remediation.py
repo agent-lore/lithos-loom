@@ -49,16 +49,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import os
 import sys
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from lithos_loom.errors import LithosClientError
-from lithos_loom.gates import PrGateSpec
+from lithos_loom.gates import PrGateSpec, waiter_of
 from lithos_loom.github_client import GitHubClient
 from lithos_loom.github_review_activity import ExternalReviewActivity
 from lithos_loom.github_review_streams import AuthorTrust
+from lithos_loom.runner.orphans import (
+    ProcessIdentity,
+    identity_alive,
+    process_identity,
+)
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import write_marker
 from lithos_loom.subscriptions._project_settings import (
@@ -87,10 +94,12 @@ from lithos_loom.subscriptions.remediation_outcome import (
     post_repo_mismatch_refusal,
     record_result,
     record_unsettled,
+    settled_refusal,
+)
+from lithos_loom.subscriptions.remediation_refunds import (
     refund_infra_failed,
     refund_lost_run,
     refund_repo_mismatch,
-    settled_refusal,
 )
 
 __all__ = [
@@ -154,10 +163,14 @@ class ExternalRemediation:
         *,
         spawn: Spawn | None = None,
         hold: Hold | None = None,
+        boot_id: str | None = None,
     ):
         self._settings = settings
         self._spawn: Spawn = spawn if spawn is not None else spawn_converge
         self._hold = hold
+        # #407 slice 2b: stamped on every reservation; a stamp from another
+        # boot with no outcome is a run this daemon never saw end
+        self._boot_id = boot_id or uuid.uuid4().hex
         self._task: asyncio.Task[None] | None = None
         self._in_flight_pr_url = ""
         # #407: what the in-flight run is about — so shutdown can refund the
@@ -166,10 +179,42 @@ class ExternalRemediation:
         # #377: PR urls whose last run this boot ended `infra_failed` — held
         # from re-dispatch until the daemon restarts (the operator's fix attempt)
         self._infra_held: set[str] = set()
+        # #407 slice 2b: PR urls whose lost reservation this sweep refunded and
+        # re-parked — the sweep's own gate copy predates that write, so
+        # resume_pending re-reads the gate for these before looking for the
+        # trigger (else the re-dispatch would wait a whole sweep)
+        self._reparked: dict[str, str] = {}  # pr_url -> gate id
+        # foreign stamps the guard refused (a recorded outcome beside them, a
+        # malformed record, a still-live child): said once per boot each
+        self._stale_logged: set[str] = set()
+        # re-review of PR #416: a run that outlived its daemon (its dispatcher
+        # identity still alive) is a REAL hold — on the single-flight slot and
+        # on the per-PR holds the peers read — until that identity dies
+        self._foreign_live: dict[str, ProcessIdentity] = {}
+
+    @property
+    def boot_id(self) -> str:
+        return self._boot_id
 
     @property
     def busy(self) -> bool:
-        return self._task is not None and not self._task.done()
+        return (self._task is not None and not self._task.done()) or bool(
+            self._live_foreign_holds()
+        )
+
+    def _live_foreign_holds(self) -> dict[str, ProcessIdentity]:
+        """The cached foreign holds, re-probed: a gate that stopped being
+        swept (merged, closed) must not pin the global slot through a stale
+        entry, so the slot asks the kernel whether what it holds still runs
+        (re-review of PR #416)."""
+        dead = [
+            url
+            for url, ident in self._foreign_live.items()
+            if identity_alive(ident) is False
+        ]
+        for url in dead:
+            del self._foreign_live[url]
+        return self._foreign_live
 
     def busy_on(self, pr_url: str) -> bool:
         """Whether a run is claimed or in flight on *pr_url* — the merge-gate
@@ -178,10 +223,18 @@ class ExternalRemediation:
         dispatch commits (before its reservation write, self-review of PR
         #362: a probe finishing during that await must already see it) until
         the run task ends."""
-        return self._in_flight_pr_url == pr_url
+        # ...or, after a restart, while a run a previous daemon left on that
+        # PR is still alive (re-review of PR #416)
+        return self._in_flight_pr_url == pr_url or pr_url in self._live_foreign_holds()
 
     async def observe_head(
-        self, gate: Any, spec: PrGateSpec, pr: Any, ctx: SubscriptionContext
+        self,
+        gate: Any,
+        spec: PrGateSpec,
+        pr: Any,
+        ctx: SubscriptionContext,
+        *,
+        story_id: str | None = None,
     ) -> RemediationBudget:
         """Track the PR head and apply the human-push reset. Never raises.
 
@@ -194,6 +247,41 @@ class ExternalRemediation:
         headroom, never a stuck loop.
         """
         budget = read_budget(gate, spec.pr_url)
+        # re-review of PR #416: the cached hold follows the DURABLE stamp. The
+        # survivor's own outcome write clears the stamp (or a later boot's
+        # reservation replaces it); either is proof the run this hold stood
+        # for has settled — release it before anything reads busy.
+        held = self._foreign_live.get(spec.pr_url)
+        if held is not None and (
+            budget.in_flight_pid != held.pid
+            or budget.in_flight_pid_start != held.start_ticks
+            or budget.in_flight_host_boot != held.host_boot
+        ):
+            del self._foreign_live[spec.pr_url]
+        # #407 slice 2b: a reservation stamped by ANOTHER boot with no run in
+        # flight here and no recorded outcome is a run the previous daemon
+        # lost without a shutdown (SIGKILL, a host crash — slice 2a's refund
+        # never ran). Refund it, re-park its trigger, say so; the parked
+        # trigger then re-dispatches later in this very sweep.
+        if (
+            budget.in_flight_boot_id
+            and budget.in_flight_boot_id != self._boot_id
+            and self._in_flight_pr_url != spec.pr_url
+        ):
+            try:
+                gate, budget = await self._reconcile_lost(
+                    gate, spec, budget, ctx, story_id
+                )
+            except Exception as exc:  # noqa: BLE001 — observe_head never raises
+                ctx.logger.warning(
+                    "[Friction] external-remediation: reconciling the reservation "
+                    "boot %s left on %s failed (%s: %s); the next sweep retries",
+                    budget.in_flight_boot_id,
+                    spec.pr_url,
+                    type(exc).__name__,
+                    exc,
+                )
+                budget = dataclasses.replace(budget, in_flight_boot_id="")
         head = getattr(pr, "head_sha", "") or ""
         held = self._hold is not None and self._hold(spec.pr_url)
         if self.busy or held or not head or head == budget.last_seen_head_sha:
@@ -221,6 +309,100 @@ class ExternalRemediation:
             subsystem="external-remediation",
         )
         return budget
+
+    async def _reconcile_lost(
+        self,
+        gate: Any,
+        spec: PrGateSpec,
+        budget: RemediationBudget,
+        ctx: SubscriptionContext,
+        story_id: str | None,
+    ) -> tuple[Any, RemediationBudget]:
+        """Refund a reservation another boot left in flight (#407 slice 2b);
+        returns the gate + budget to go on with. *story_id* is the sweep's
+        (the waits_on_gate edge, authoritative); the gate's provenance and
+        then the edge are the fallbacks. A stamp whose dispatcher pid is
+        still alive is a run that outlived its daemon (a SIGKILL does not
+        kill the child): left alone — its containers are spared by the boot
+        reaper for the same reason — and reconciled once it ends. When the
+        refund does not apply (a recorded outcome beside the stamp, a
+        malformed record) or does not land, the stamp is dropped in memory
+        so this sweep reads the record on its merits; the record keeps it,
+        the next sweep tries again, and the refusal is logged once per boot.
+        """
+        identity = ProcessIdentity(
+            pid=budget.in_flight_pid,
+            start_ticks=budget.in_flight_pid_start,
+            host_boot=budget.in_flight_host_boot,
+        )
+        alive = identity_alive(identity)
+        if alive is not False:
+            # THAT process is still running, OR the host cannot currently
+            # prove it died. Both fail closed: the lifetime bind only says a
+            # child dies after this dispatcher dies; it is not proof that an
+            # unidentifiable dispatcher has already died.
+            self._foreign_live[spec.pr_url] = identity
+            if spec.pr_url not in self._stale_logged:
+                self._stale_logged.add(spec.pr_url)
+                if alive:
+                    ctx.logger.warning(
+                        "external-remediation: the run boot %s dispatched on %s "
+                        "(pid %d) outlived its daemon and is still running; holding "
+                        "the PR — not refunded or re-dispatched beside it until it "
+                        "ends",
+                        budget.in_flight_boot_id,
+                        spec.pr_url,
+                        budget.in_flight_pid,
+                    )
+                else:
+                    ctx.logger.warning(
+                        "external-remediation: the run boot %s dispatched on %s "
+                        "cannot currently be identified; holding the PR — not "
+                        "refunded or re-dispatched without proof it died",
+                        budget.in_flight_boot_id,
+                        spec.pr_url,
+                    )
+            return gate, dataclasses.replace(budget, in_flight_boot_id="")
+        self._foreign_live.pop(spec.pr_url, None)
+        if story_id is None:
+            meta_story = gate.metadata.get("story_id")
+            if isinstance(meta_story, str) and meta_story:
+                story_id = meta_story
+            else:
+                story_id = await waiter_of(ctx.lithos, gate.id)
+        refund = await refund_lost_run(
+            ctx,
+            gate_id=gate.id,
+            story_id=story_id,
+            spec=spec,
+            budget_limit=self._settings.budget,
+            work_dir=self._settings.work_dir,
+            cause="a daemon restart",
+            next_step="it re-dispatches later in this sweep",
+        )
+        if refund is None:
+            if spec.pr_url not in self._stale_logged:
+                self._stale_logged.add(spec.pr_url)
+                ctx.logger.warning(
+                    "external-remediation: the reservation boot %s left on %s "
+                    "was not refundable (a recorded outcome beside it, a malformed "
+                    "record, or the write did not land); reading the record as it "
+                    "is — the stamp stays for the next sweep",
+                    budget.in_flight_boot_id,
+                    spec.pr_url,
+                )
+            return gate, dataclasses.replace(budget, in_flight_boot_id="")
+        self._reparked[spec.pr_url] = gate.id
+        try:
+            latest = await ctx.lithos.task_get(task_id=gate.id)
+        except Exception:  # noqa: BLE001 — the refund landed; go on from it
+            latest = None
+        if latest is None:
+            return gate, refund  # the copy the write landed, not the stale one
+        budget = read_budget(latest, spec.pr_url)
+        if budget.in_flight_boot_id and budget.in_flight_boot_id != self._boot_id:
+            budget = dataclasses.replace(budget, in_flight_boot_id="")
+        return latest, budget
 
     def exhaustion_note(self, budget: RemediationBudget) -> str | None:
         """The S5b exhaustion sentence for the ``[ExternalReview]`` body.
@@ -364,6 +546,17 @@ class ExternalRemediation:
         after the reset / the decision) and is consumed atomically with the
         budget reservation on dispatch.
         """
+        if self._reparked.get(spec.pr_url) == gate.id:
+            # this sweep's own re-park (#407 slice 2b) is newer than the gate
+            # copy the sweep was handed
+            self._reparked.pop(spec.pr_url, None)
+            try:
+                latest = await ctx.lithos.task_get(task_id=gate.id)
+            except Exception:  # noqa: BLE001 — a failed re-read reads the copy
+                latest = None
+            if latest is not None:
+                gate = latest
+                budget = read_budget(gate, spec.pr_url)
         raw = gate.metadata.get(PENDING_KEY)
         if not isinstance(raw, dict) or raw.get("pr_url") != spec.pr_url:
             return None
@@ -496,11 +689,25 @@ class ExternalRemediation:
         # round's outcome goes with it (#408): the spent round has none yet,
         # and a run that never records one — a crash, a restart mid-run
         # (#407) — must read as unsettled, never as the round before.
+        me = process_identity(os.getpid())
+        if me is None:
+            self._in_flight_pr_url = ""
+            ctx.logger.warning(
+                "[Friction] external-remediation: could not capture a stable "
+                "dispatcher identity for %s; not reserving or dispatching — will "
+                "retry next sweep",
+                spec.pr_url,
+            )
+            return "identity_unavailable"
         budget = dataclasses.replace(
             budget,
             rounds_used=budget.rounds_used + 1,
             last_status="",
             last_settled=False,
+            in_flight_boot_id=self._boot_id,  # #407 slice 2b
+            in_flight_pid=me.pid,
+            in_flight_pid_start=me.start_ticks,
+            in_flight_host_boot=me.host_boot,
         )
         try:
             await ctx.lithos.task_update(
@@ -516,6 +723,7 @@ class ExternalRemediation:
                 exc,
             )
             return "reservation_failed"
+        self._reparked.pop(spec.pr_url, None)  # the reservation consumed the trigger
         ctx.logger.info(
             "external-remediation: dispatching converge --from-github for %s "
             "(round %d/%d)",
@@ -777,6 +985,10 @@ class ExternalRemediation:
                 rounds_used=max(0, budget.rounds_used - 1),
                 last_status="no_result",  # the round's outcome (#407 review)
                 last_settled=False,
+                in_flight_boot_id="",
+                in_flight_pid=0,
+                in_flight_pid_start=0,
+                in_flight_host_boot="",
             )
             await write_marker(
                 ctx,

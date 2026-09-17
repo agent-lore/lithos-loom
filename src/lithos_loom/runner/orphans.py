@@ -14,8 +14,20 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
 
-__all__ = ["PID_LABEL", "reap_orphaned_containers"]
+__all__ = [
+    "PID_LABEL",
+    "ProcessIdentity",
+    "host_boot_id",
+    "start_ticks",
+    "identity_alive",
+    "pid_alive",
+    "process_identity",
+    "reap_orphaned_containers",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +38,128 @@ PID_LABEL = "loom.pid"
 _DOCKER_TIMEOUT_S = 30
 
 
-def _pid_alive(pid: int) -> bool | None:
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """A process, not a number (#407 slice 2b re-review): a pid is reused —
+    after a host reboot quite plausibly by the new watcher itself — so
+    "pid alive" alone reads a genuinely lost run as alive forever. The
+    kernel's start time (clock ticks since boot, ``/proc/<pid>/stat`` field
+    22) and the host's boot id pin the number to one incarnation."""
+
+    pid: int
+    start_ticks: int
+    host_boot: str
+
+
+def _boot_id_file() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _sysctl_boottime() -> str:
+    """macOS / BSD: ``sysctl -n kern.boottime`` — a string that changes on
+    every boot, which is all the identity needs."""
+    try:
+        proc = subprocess.run(
+            ["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def host_boot_id() -> str:
+    """Something that changes on every host boot: the kernel's boot id
+    (Linux), else ``kern.boottime`` (macOS / BSD), else ``""``."""
+    return _boot_id_file() or _sysctl_boottime()
+
+
+def _proc_start_ticks(pid: int) -> int | None:
+    """Linux: the process's start time in clock ticks since boot."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # the comm field is parenthesised and may itself hold spaces or parens:
+    # everything after the LAST ")" is the numbered fields from 3 on
+    tail = stat.rsplit(")", 1)[-1].split()
+    try:
+        return int(tail[19])  # field 22 (1-based) → index 19 past state (3)
+    except (IndexError, ValueError):
+        return None
+
+
+def _ps_start_epoch(pid: int) -> int | None:
+    """Anywhere with ``ps``: the process's start time as epoch seconds
+    (``lstart`` is a full timestamp; ``start`` truncates to the day)."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = proc.stdout.strip()
+    if proc.returncode != 0 or not text:
+        return None
+    for fmt in ("%a %b %d %H:%M:%S %Y", "%a %d %b %H:%M:%S %Y"):
+        try:
+            return int(time.mktime(time.strptime(text, fmt)))
+        except ValueError:
+            continue
+    return None
+
+
+def start_ticks(pid: int) -> int | None:
+    """A start-time marker for the process — kernel ticks on Linux, epoch
+    seconds via ``ps`` elsewhere — or ``None`` when there is no such process
+    (or no way to ask)."""
+    if pid <= 0:
+        return None
+    ticks = _proc_start_ticks(pid)
+    return ticks if ticks is not None else _ps_start_epoch(pid)
+
+
+def process_identity(pid: int) -> ProcessIdentity | None:
+    """The stable identity of a live process, or ``None`` when either half
+    cannot be captured. A start marker without a boot marker is not durable
+    across a reboot and therefore must not authorize a crash-safe dispatch."""
+    start = start_ticks(pid)
+    if start is None:
+        return None
+    boot = host_boot_id()
+    if not boot:
+        return None
+    return ProcessIdentity(pid=pid, start_ticks=start, host_boot=boot)
+
+
+def identity_alive(identity: ProcessIdentity) -> bool | None:
+    """Whether THAT process is alive, dead, or currently unverifiable.
+
+    ``None`` is deliberately distinct from death: a transient ``/proc``,
+    ``ps``, or ``sysctl`` failure must hold a push-capable run rather than
+    permit a second one beside it.
+    """
+    if identity.pid <= 0 or identity.start_ticks <= 0 or not identity.host_boot:
+        return None
+    boot = host_boot_id()
+    if not boot:
+        return None
+    if identity.host_boot != boot:
+        return False
+    start = start_ticks(identity.pid)
+    if start is not None:
+        return start == identity.start_ticks
+    # A missing start marker can mean either "gone" or "the probe failed".
+    # Only the kernel positively denying the pid is evidence of death.
+    return False if pid_alive(identity.pid) is False else None
+
+
+def pid_alive(pid: int) -> bool | None:
     """``None`` when the label is not a pid the kernel can be asked about (an
     all-digit label too large for a C long raises ``OverflowError`` — PR #415
     review: the reaper runs before the boot gate, so one stale label must
@@ -88,7 +221,7 @@ def reap_orphaned_containers() -> list[str]:
             pid = int(parts[1])
         except ValueError:
             pid = None
-        alive = _pid_alive(pid) if pid is not None else None
+        alive = pid_alive(pid) if pid is not None else None
         if alive is None:
             logger.warning(
                 "orphan-container reap: %s carries an unusable owner label %s; skipped",

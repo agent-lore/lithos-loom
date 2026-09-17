@@ -613,3 +613,112 @@ def test_stop_container_never_hangs_on_a_wedged_docker(monkeypatch) -> None:
     monkeypatch.setattr(containers.subprocess, "run", hung)
     containers.stop_container("c")  # no raise
     assert seen and seen[0] is not None
+
+
+# --- #407 slice 2b re-review: a process identity, not a naked pid -------------
+
+
+def test_process_identity_is_pid_start_and_host_boot(monkeypatch) -> None:
+    import os
+
+    monkeypatch.setattr(
+        orphans, "start_ticks", lambda pid: 219573937 if pid == os.getpid() else None
+    )
+    monkeypatch.setattr(orphans, "host_boot_id", lambda: "boot-xyz")
+    ident = orphans.process_identity(os.getpid())
+    assert ident == orphans.ProcessIdentity(
+        pid=os.getpid(), start_ticks=219573937, host_boot="boot-xyz"
+    )
+    assert orphans.process_identity(0) is None  # nothing to identify
+
+
+def test_identity_alive_requires_the_same_process_not_the_same_number(
+    monkeypatch,
+) -> None:
+    # Dave's review of #416 (High): a numeric pid is reused — after a host
+    # reboot quite plausibly by the new watcher itself — so "pid alive"
+    # would read a genuinely lost run as alive forever
+    import os
+
+    monkeypatch.setattr(
+        orphans, "start_ticks", lambda pid: 100 if pid == os.getpid() else None
+    )
+    monkeypatch.setattr(orphans, "host_boot_id", lambda: "boot-a")
+    live = orphans.ProcessIdentity(pid=os.getpid(), start_ticks=100, host_boot="boot-a")
+    assert orphans.identity_alive(live) is True
+    reused = orphans.ProcessIdentity(
+        pid=os.getpid(), start_ticks=99, host_boot="boot-a"
+    )
+    assert orphans.identity_alive(reused) is False
+    rebooted = orphans.ProcessIdentity(
+        pid=os.getpid(), start_ticks=100, host_boot="boot-z"
+    )
+    assert orphans.identity_alive(rebooted) is False
+    gone = orphans.ProcessIdentity(pid=999999999, start_ticks=100, host_boot="boot-a")
+    assert orphans.identity_alive(gone) is False
+
+
+def test_identity_alive_distinguishes_probe_failure_from_death(monkeypatch) -> None:
+    import os
+
+    ident = orphans.ProcessIdentity(
+        pid=os.getpid(), start_ticks=100, host_boot="boot-a"
+    )
+    monkeypatch.setattr(orphans, "host_boot_id", lambda: "")
+    assert orphans.identity_alive(ident) is None  # boot probe unavailable
+
+    monkeypatch.setattr(orphans, "host_boot_id", lambda: "boot-a")
+    monkeypatch.setattr(orphans, "start_ticks", lambda pid: None)
+    monkeypatch.setattr(orphans, "pid_alive", lambda pid: True)
+    assert orphans.identity_alive(ident) is None  # live pid, start probe unavailable
+
+    monkeypatch.setattr(orphans, "pid_alive", lambda pid: False)
+    assert orphans.identity_alive(ident) is False  # positive evidence of death
+
+
+def test_start_ticks_reads_the_real_proc_stat_of_this_process() -> None:
+    import os
+
+    ticks = orphans.start_ticks(os.getpid())
+    assert isinstance(ticks, int) and ticks > 0
+    assert orphans.start_ticks(999999999) is None
+    assert len(orphans.host_boot_id()) >= 8
+
+
+def test_process_identity_falls_back_to_ps_and_sysctl_off_linux(monkeypatch) -> None:
+    # Dave's re-review of #416 (High): macOS is a documented target and has
+    # no /proc; `ps -o lstart=` and `sysctl kern.boottime` carry the same two
+    # facts
+    import os
+
+    monkeypatch.setattr(orphans, "_proc_start_ticks", lambda pid: None)
+    monkeypatch.setattr(
+        orphans,
+        "_ps_start_epoch",
+        lambda pid: 1700000000 if pid == os.getpid() else None,
+    )
+    monkeypatch.setattr(orphans, "_boot_id_file", lambda: "")
+    monkeypatch.setattr(orphans, "_sysctl_boottime", lambda: "{ sec = 1699990000 }")
+    ident = orphans.process_identity(os.getpid())
+    assert ident == orphans.ProcessIdentity(
+        pid=os.getpid(), start_ticks=1700000000, host_boot="{ sec = 1699990000 }"
+    )
+    assert ident is not None and orphans.identity_alive(ident) is True
+
+
+def test_process_identity_is_none_when_no_source_can_name_the_process(
+    monkeypatch,
+) -> None:
+    import os
+
+    monkeypatch.setattr(orphans, "_proc_start_ticks", lambda pid: None)
+    monkeypatch.setattr(orphans, "_ps_start_epoch", lambda pid: None)
+    assert orphans.process_identity(os.getpid()) is None
+
+
+def test_process_identity_is_none_when_boot_cannot_be_named(monkeypatch) -> None:
+    import os
+
+    monkeypatch.setattr(orphans, "start_ticks", lambda pid: 123)
+    monkeypatch.setattr(orphans, "host_boot_id", lambda: "")
+    assert orphans.process_identity(os.getpid()) is None
