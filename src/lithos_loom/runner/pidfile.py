@@ -1,42 +1,71 @@
 """The supervisor's pidfile — how ``lithos-loom drain`` finds the daemon.
 
-``lithos-loom run`` writes it under the work dir after the boot gate and
-removes it on exit. It records a process **identity** (pid + start time +
-host boot id — :class:`~lithos_loom.runner.orphans.ProcessIdentity`, the
-#407 slice 2b notion), never a bare pid: a pid is reused, and a drain must
-never signal whatever now wears the number. When the identity cannot be
-captured the file still names the pid (with zero markers) — a drain then
-falls back to the kernel's own liveness check, the best available.
+``lithos-loom run`` claims it first thing and holds it for its lifetime.
+**Ownership is an exclusive ``flock`` on the file's inode**: taken
+non-blocking at boot, released by the kernel when the process ends — however
+it ends — and never by an unlink, because nothing unlinks the file. That is
+what makes the claim race-free (PR #418 review): a stale file is simply one
+nobody holds the lock on, so there is no read-then-evict step for two
+concurrent boots to interleave — the second claimant's ``flock`` fails and
+it stands down. Liveness is therefore the lock, not the pid.
+
+The content records a process **identity** (pid + start time + host boot id
+— :class:`~lithos_loom.runner.orphans.ProcessIdentity`, the #407 slice 2b
+notion), never a bare pid: a pid is reused, and a drain must never signal
+whatever now wears the number. When the identity cannot be captured the
+file still names the pid (with zero markers); the lock still decides
+liveness, and only where the lock itself is unknowable does a drain fall
+back to the identity, then to the kernel's pid check.
+
+The content is written in place under the lock (the inode must stay the
+one locked), so a reader in the microseconds of that write sees an empty
+file and reports "no daemon pidfile" — a `drain` that races the boot by that
+much simply re-runs.
 """
 
 from __future__ import annotations
 
-import contextlib
+import fcntl
 import json
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from lithos_loom.runner import orphans
 from lithos_loom.runner.orphans import ProcessIdentity
 
 __all__ = [
-    "CLAIM_ATTEMPTS",
     "PIDFILE_NAME",
+    "PidfileClaim",
     "claim_pidfile",
     "daemon_alive",
+    "holder_alive",
     "pidfile_path",
     "read_pidfile",
-    "remove_pidfile",
-    "write_pidfile",
 ]
 
 PIDFILE_NAME = "supervisor.pid"
-CLAIM_ATTEMPTS = 3
 
 
 def pidfile_path(work_dir: Path) -> Path:
     """Where the daemon for *work_dir* records itself."""
     return work_dir / PIDFILE_NAME
+
+
+@dataclass
+class PidfileClaim:
+    """This process's ownership of the pidfile: the lock, held until
+    :meth:`release` (or the process ends)."""
+
+    path: Path
+    identity: ProcessIdentity
+    _fd: int | None = field(default=None, repr=False)
+
+    def release(self) -> None:
+        """Let the lock go; the file stays (now stale). Idempotent."""
+        if self._fd is not None:
+            os.close(self._fd)  # closing the description releases the flock
+            self._fd = None
 
 
 def _me() -> ProcessIdentity:
@@ -45,54 +74,38 @@ def _me() -> ProcessIdentity:
     )
 
 
-def _write_temp(path: Path, me: ProcessIdentity) -> Path:
-    """Write *me* to a sibling temp file (complete before it is visible)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    payload = {"pid": me.pid, "start_ticks": me.start_ticks, "host_boot": me.host_boot}
-    temp.write_text(json.dumps(payload), encoding="utf-8")
-    return temp
+def claim_pidfile(path: Path) -> PidfileClaim | None:
+    """Take the pidfile for this process, or ``None`` if a live daemon holds it.
 
-
-def write_pidfile(path: Path) -> ProcessIdentity:
-    """Record this process at *path* unconditionally (atomic replace) and
-    return what was written, for :func:`remove_pidfile` to match later.
-    The daemon uses :func:`claim_pidfile`; this is the unguarded form."""
-    me = _me()
-    temp = _write_temp(path, me)
-    os.replace(temp, path)
-    return me
-
-
-def claim_pidfile(path: Path) -> ProcessIdentity | None:
-    """Record this process at *path* unless a live daemon already has.
-
-    The exclusive hard link is the arbiter — two boots racing the same
-    (absent or stale) file admit exactly one: the loser's link fails, it
-    re-reads, finds a live holder and returns ``None``. A stale or malformed
-    file is removed and the claim retried (bounded). Raises ``OSError`` when
-    the file cannot be written at all (the caller decides what a missing
-    pidfile costs).
+    Opens (creating) *path*, takes an exclusive non-blocking ``flock`` on it
+    — the one arbiter between concurrent boots — and, holding it, rewrites
+    the content with this process's identity. Raises ``OSError`` when the
+    file cannot be opened or locked at all (no directory, no permission, a
+    filesystem without ``flock``): the caller fails closed, since without
+    the lock one-daemon-per-work-dir cannot be proven.
     """
     me = _me()
-    for _ in range(CLAIM_ATTEMPTS):
-        temp = _write_temp(path, me)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
         try:
-            os.link(temp, path)
-        except FileExistsError:
-            holder = read_pidfile(path)
-            if holder is not None and daemon_alive(holder):
-                return None
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()  # stale or torn: nobody's
-            continue
-        else:
-            return me
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                temp.unlink()
-    holder = read_pidfile(path)
-    return None if holder is not None and daemon_alive(holder) else me
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return None
+        payload = {
+            "pid": me.pid,
+            "start_ticks": me.start_ticks,
+            "host_boot": me.host_boot,
+        }
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, json.dumps(payload).encode("utf-8"))
+        os.fsync(fd)
+    except OSError:
+        os.close(fd)
+        raise
+    return PidfileClaim(path=path, identity=me, _fd=fd)
 
 
 def read_pidfile(path: Path) -> ProcessIdentity | None:
@@ -114,22 +127,40 @@ def read_pidfile(path: Path) -> ProcessIdentity | None:
     return ProcessIdentity(pid=pid, start_ticks=start, host_boot=boot)
 
 
-def remove_pidfile(path: Path, mine: ProcessIdentity) -> None:
-    """Remove *path* if it still records *mine* — a daemon that booted over a
-    stale file owns it now, and a missing file is nothing to remove."""
-    if read_pidfile(path) != mine:
-        return
-    with contextlib.suppress(FileNotFoundError):
-        path.unlink()
+def holder_alive(path: Path) -> bool | None:
+    """Whether some process holds the pidfile's lock: ``True`` (a daemon is
+    up), ``False`` (no file, or nobody holds it), ``None`` (the lock is
+    unknowable here — the probe itself failed)."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        fcntl.flock(fd, fcntl.LOCK_UN)  # we took a free lock: nobody's
+        return False
+    finally:
+        os.close(fd)
 
 
-def daemon_alive(identity: ProcessIdentity) -> bool:
+def daemon_alive(path: Path, identity: ProcessIdentity) -> bool:
     """Whether the daemon the pidfile names is still running.
 
-    A verifiable identity answers for itself (a reused pid, or one from
-    another boot, is dead). An unverifiable one falls back to the kernel's
-    pid check; a pid the kernel cannot even represent is not alive.
+    The lock answers when it can. Otherwise a verifiable identity answers
+    for itself (a reused pid, or one from another boot, is dead), and an
+    unverifiable one falls back to the kernel's pid check; a pid the kernel
+    cannot even represent is not alive.
     """
+    held = holder_alive(path)
+    if held is not None:
+        return held
     verdict = orphans.identity_alive(identity)
     if verdict is not None:
         return verdict

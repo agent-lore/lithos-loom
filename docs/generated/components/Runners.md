@@ -16,7 +16,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.runner.detection` | S | 0 | 3 |
 | `lithos_loom.runner.git` | M | 1 | 29 |
 | `lithos_loom.runner.orphans` | S | 1 | 6 |
-| `lithos_loom.runner.pidfile` | S | 0 | 6 |
+| `lithos_loom.runner.pidfile` | S | 1 | 5 |
 | `lithos_loom.runner.signals` | S | 0 | 5 |
 | `lithos_loom.runner.worktree` | S | 0 | 6 |
 
@@ -75,10 +75,10 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 
 ### `lithos_loom.runner.pidfile`
 - def `pidfile_path` — Where the daemon for *work_dir* records itself.
-- def `write_pidfile` — Record this process at *path* unconditionally (atomic replace) and return what was written, for :func:`remove_pidfile` to match later. The daemon uses :func:`claim_pidfile`; this is the unguarded form.
-- def `claim_pidfile` — Record this process at *path* unless a live daemon already has.
+- class `PidfileClaim` — This process's ownership of the pidfile: the lock, held until :meth:`release` (or the process ends).
+- def `claim_pidfile` — Take the pidfile for this process, or ``None`` if a live daemon holds it.
 - def `read_pidfile` — The identity recorded at *path*, or ``None`` when there is no well-formed file there (missing, unreadable, not the expected shape).
-- def `remove_pidfile` — Remove *path* if it still records *mine* — a daemon that booted over a stale file owns it now, and a missing file is nothing to remove.
+- def `holder_alive` — Whether some process holds the pidfile's lock: ``True`` (a daemon is up), ``False`` (no file, or nobody holds it), ``None`` (the lock is unknowable here — the probe itself failed).
 - def `daemon_alive` — Whether the daemon the pidfile names is still running.
 
 ### `lithos_loom.runner.signals`

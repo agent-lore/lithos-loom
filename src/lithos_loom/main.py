@@ -122,34 +122,33 @@ def run(
     # surface, per-call traffic doesn't.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     # #407 slice 3: one daemon per work dir. The pidfile is how `drain` finds
-    # it; a live one there means a second boot beside a running daemon (two
-    # route-runners claiming the same tasks), refused before anything else —
-    # the claim is exclusive (no check-then-write window across the reap and
-    # the boot gate below). A pidfile that cannot be written is a friction,
-    # not a refusal: the daemon needs nothing from it, only `drain` does.
+    # it, and its lock is the singleton boundary: a held one means a second
+    # boot beside a running daemon (two route-runners claiming the same
+    # tasks), refused before anything else — the reap and the boot gate
+    # below open no window. A lock that cannot be established at all is a
+    # refusal too (PR #418 review): without it the boundary cannot be proven.
     pidfile_path = pidfile.pidfile_path(cfg.orchestrator.work_dir)
     try:
-        mine = pidfile.claim_pidfile(pidfile_path)
+        claim = pidfile.claim_pidfile(pidfile_path)
     except OSError as exc:
-        logging.getLogger(__name__).warning(
-            "[Friction] could not write the daemon pidfile %s (%s); "
-            "`lithos-loom drain` cannot find this daemon — stop it with "
-            "SIGTERM instead (a killed remediation round is refunded)",
-            pidfile_path,
-            exc,
+        typer.echo(
+            f"lithos-loom run: could not claim the daemon pidfile {pidfile_path} "
+            f"({exc}); refusing to start — one daemon per work_dir cannot be "
+            "guaranteed without it (fix the work_dir, or point the config at one "
+            "that can hold a lock)",
+            err=True,
         )
-        mine = None
-    else:
-        if mine is None:
-            holder = pidfile.read_pidfile(pidfile_path)
-            typer.echo(
-                f"lithos-loom run: a daemon (pid "
-                f"{holder.pid if holder else '?'}) is already running on "
-                f"work_dir {cfg.orchestrator.work_dir} — `lithos-loom drain` or "
-                f"stop it first (pidfile {pidfile_path})",
-                err=True,
-            )
-            raise typer.Exit(1)
+        raise typer.Exit(1) from None
+    if claim is None:
+        holder = pidfile.read_pidfile(pidfile_path)
+        typer.echo(
+            f"lithos-loom run: a daemon (pid "
+            f"{holder.pid if holder else '?'}) is already running on "
+            f"work_dir {cfg.orchestrator.work_dir} — `lithos-loom drain` or "
+            f"stop it first (pidfile {pidfile_path})",
+            err=True,
+        )
+        raise typer.Exit(1)
     # Boot gate (Epic G US1): refuse to start against a Lithos that lacks the
     # task-graph extension — the runner's dependency scheduling relies on it, so
     # an incompatible server must surface at boot, not mid-PRD. This is a real
@@ -175,8 +174,7 @@ def run(
         )
         exit_code = asyncio.run(sup.run())
     finally:
-        if mine is not None:
-            pidfile.remove_pidfile(pidfile_path, mine)
+        claim.release()  # the file stays; the released lock is what makes it stale
     raise typer.Exit(exit_code)
 
 

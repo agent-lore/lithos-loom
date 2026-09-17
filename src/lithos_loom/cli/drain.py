@@ -1,8 +1,9 @@
 """``lithos-loom drain`` — ask the running daemon to finish and exit (#407 slice 3).
 
 The daemon is found through the supervisor's pidfile under the configured
-work dir (:mod:`lithos_loom.runner.pidfile`). The identity it names is
-verified to be the process still running (a reused pid is never signalled),
+work dir (:mod:`lithos_loom.runner.pidfile`). Liveness is the pidfile's
+lock (held by the daemon for its lifetime; the identity it names is the
+fallback where the lock is unknowable, so a reused pid is never signalled),
 SIGUSR1 is sent, and the command waits for the daemon to exit: the
 supervisor relays the signal, each child stops admitting new dispatch,
 finishes what is in flight and exits 0, and the supervisor exits when the
@@ -45,7 +46,7 @@ def drain_daemon(
     *,
     timeout: float = 0.0,
     poll: float = DEFAULT_POLL_SECONDS,
-    alive: Callable[[ProcessIdentity], bool] | None = None,
+    alive: Callable[[Path, ProcessIdentity], bool] | None = None,
     kill: Callable[[int, int], None] | None = None,
     sleep: Callable[[float], None] | None = None,
     clock: Callable[[], float] | None = None,
@@ -68,11 +69,15 @@ def drain_daemon(
             f"drain: no daemon pidfile at {path}; is `lithos-loom run` up with "
             "this config's work_dir?",
         )
-    if not alive(identity):
+
+    def is_alive() -> bool:
+        return alive(path, identity)
+
+    if not is_alive():
         return DrainOutcome(
             1,
-            f"drain: stale pidfile {path} — pid {identity.pid} is not the daemon "
-            "that wrote it (it exited, or the host rebooted); nothing signalled",
+            f"drain: stale pidfile {path} — no daemon holds it (pid {identity.pid} "
+            "wrote it and has since exited, or the host rebooted); nothing signalled",
         )
     try:
         kill(identity.pid, signal.SIGUSR1)
@@ -91,7 +96,7 @@ def drain_daemon(
             1, f"drain: could not signal daemon pid {identity.pid}: {exc}"
         )
     started = clock()
-    while alive(identity):
+    while is_alive():
         if timeout > 0 and clock() - started >= timeout:
             return DrainOutcome(
                 2,

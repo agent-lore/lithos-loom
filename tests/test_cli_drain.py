@@ -37,8 +37,8 @@ class _Host:
         self.slept: list[float] = []
         self.now = 0.0
 
-    def alive(self, identity: ProcessIdentity) -> bool:
-        assert identity == _IDENTITY
+    def alive(self, path: Path, identity: ProcessIdentity) -> bool:
+        assert path.name == "supervisor.pid" and identity == _IDENTITY
         if self._alive_for > 0:
             self._alive_for -= 1
             return True
@@ -156,12 +156,13 @@ def test_command_reads_the_pidfile_under_the_configured_work_dir(
 ) -> None:
     config = _config(tmp_path)
     work = tmp_path / "work"
-    work.mkdir()
-    pidfile.write_pidfile(pidfile.pidfile_path(work))  # this test process
+    claim = pidfile.claim_pidfile(pidfile.pidfile_path(work))  # this test process
+    assert claim is not None
     sent: list[tuple[int, int]] = []
     polls = {"n": 0}
 
-    def _alive(identity: ProcessIdentity) -> bool:
+    def _alive(path: Path, identity: ProcessIdentity) -> bool:
+        assert path == pidfile.pidfile_path(work)
         polls["n"] += 1
         return polls["n"] <= 2
 
@@ -169,10 +170,34 @@ def test_command_reads_the_pidfile_under_the_configured_work_dir(
     monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append((pid, sig)))
     monkeypatch.setattr(drain_mod.time, "sleep", lambda s: None)
 
-    result = runner.invoke(app, ["drain", "--config", str(config), "--timeout", "5"])
+    try:
+        result = runner.invoke(
+            app, ["drain", "--config", str(config), "--timeout", "5"]
+        )
+    finally:
+        claim.release()
     assert result.exit_code == 0, result.output
     assert sent == [(os.getpid(), signal.SIGUSR1)]
     assert "exited" in result.output
+
+
+def test_a_released_pidfile_is_stale_even_though_its_pid_lives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Liveness is the lock, not the pid: the file a finished daemon left
+    behind names a pid that may well be alive (reused, or — here — the
+    test process itself); nothing is signalled."""
+    config = _config(tmp_path)
+    claim = pidfile.claim_pidfile(pidfile.pidfile_path(tmp_path / "work"))
+    assert claim is not None
+    claim.release()
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append((pid, sig)))
+
+    result = runner.invoke(app, ["drain", "--config", str(config)])
+    assert result.exit_code == 1, result.output
+    assert "stale" in result.output
+    assert sent == []
 
 
 def test_command_exit_codes_follow_the_outcome(

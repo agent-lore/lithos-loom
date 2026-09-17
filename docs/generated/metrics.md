@@ -36,10 +36,10 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 |---|---:|---:|---:|---:|---:|---:|---|---:|
 | Bus | 1 | 207 | 168 | 4 | 0 | 0.00 | 11 (`lithos_loom.bus._matches_struct`) | 1 |
 | Children | 6 | 1626 | 1229 | 0 | 8 | 1.00 | 44 (`lithos_loom.children.obsidian_sync._amain`) | 2 |
-| Cli | 14 | 6290 | 5295 | 2 | 9 | 0.82 | 60 (`lithos_loom.cli.converge.converge_command`) | 22 |
+| Cli | 14 | 6295 | 5298 | 2 | 9 | 0.82 | 60 (`lithos_loom.cli.converge.converge_command`) | 22 |
 | Config | 1 | 1262 | 1075 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
-| Entrypoint | 2 | 722 | 577 | 0 | 10 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
+| Entrypoint | 2 | 720 | 575 | 0 | 10 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
 | Errors | 1 | 46 | 28 | 11 | 0 | 0.00 | 1 (`lithos_loom.errors.LithosClientError.__init__`) | 0 |
 | Evals | 23 | 6668 | 5576 | 1 | 2 | 0.67 | 29 (`lithos_loom.evals.review.case.load_case`) | 24 |
 | GitHub | 4 | 1723 | 1336 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 1 |
@@ -48,7 +48,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Plugins | 51 | 18557 | 14953 | 2 | 5 | 0.71 | 98 (`lithos_loom.plugins.story_develop.__main__.main`) | 47 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
-| Runners | 8 | 1652 | 1332 | 5 | 1 | 0.17 | 12 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 1 |
+| Runners | 8 | 1683 | 1362 | 5 | 1 | 0.17 | 12 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 1 |
 | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
 | Subscriptions | 48 | 16294 | 13224 | 4 | 11 | 0.73 | 60 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 34 |
@@ -57,7 +57,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **180**, lines: **63774**, SLOC: **51733**
+- Modules: **180**, lines: **63808**, SLOC: **51764**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
 - Modules over 800 lines: **9**
   - `lithos_loom.cli.develop`
@@ -139,4 +139,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.60** (102102 test lines / 63774 source lines)
+- Test-to-source line ratio: **1.60** (102143 test lines / 63808 source lines)
