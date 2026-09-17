@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from lithos_loom.runner.signals import BOUND_ENV
+from lithos_loom.runner.signals import BOUND_ENV, PARENT_PID_ENV
 
 __all__ = ["spawn_command"]
 
@@ -47,7 +47,7 @@ async def spawn_command(
         # #407: the child binds its lifetime to this process (PDEATHSIG), so a
         # SIGKILLed watcher cannot leave a converge running that the next
         # boot would then dispatch beside
-        env={**os.environ, BOUND_ENV: "1"},
+        env={**os.environ, BOUND_ENV: "1", PARENT_PID_ENV: str(os.getpid())},
     )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)

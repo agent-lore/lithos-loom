@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,20 +51,33 @@ class ProcessIdentity:
     host_boot: str
 
 
-def host_boot_id() -> str:
-    """The kernel's boot id (``/proc/sys/kernel/random/boot_id``); ``""``
-    where it cannot be read."""
+def _boot_id_file() -> str:
     try:
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     except OSError:
         return ""
 
 
-def start_ticks(pid: int) -> int | None:
-    """The process's start time in clock ticks since boot, or ``None`` when
-    there is no such process (or no procfs)."""
-    if pid <= 0:
-        return None
+def _sysctl_boottime() -> str:
+    """macOS / BSD: ``sysctl -n kern.boottime`` — a string that changes on
+    every boot, which is all the identity needs."""
+    try:
+        proc = subprocess.run(
+            ["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def host_boot_id() -> str:
+    """Something that changes on every host boot: the kernel's boot id
+    (Linux), else ``kern.boottime`` (macOS / BSD), else ``""``."""
+    return _boot_id_file() or _sysctl_boottime()
+
+
+def _proc_start_ticks(pid: int) -> int | None:
+    """Linux: the process's start time in clock ticks since boot."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
@@ -75,6 +89,39 @@ def start_ticks(pid: int) -> int | None:
         return int(tail[19])  # field 22 (1-based) → index 19 past state (3)
     except (IndexError, ValueError):
         return None
+
+
+def _ps_start_epoch(pid: int) -> int | None:
+    """Anywhere with ``ps``: the process's start time as epoch seconds
+    (``lstart`` is a full timestamp; ``start`` truncates to the day)."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = proc.stdout.strip()
+    if proc.returncode != 0 or not text:
+        return None
+    for fmt in ("%a %b %d %H:%M:%S %Y", "%a %d %b %H:%M:%S %Y"):
+        try:
+            return int(time.mktime(time.strptime(text, fmt)))
+        except ValueError:
+            continue
+    return None
+
+
+def start_ticks(pid: int) -> int | None:
+    """A start-time marker for the process — kernel ticks on Linux, epoch
+    seconds via ``ps`` elsewhere — or ``None`` when there is no such process
+    (or no way to ask)."""
+    if pid <= 0:
+        return None
+    ticks = _proc_start_ticks(pid)
+    return ticks if ticks is not None else _ps_start_epoch(pid)
 
 
 def process_identity(pid: int) -> ProcessIdentity | None:

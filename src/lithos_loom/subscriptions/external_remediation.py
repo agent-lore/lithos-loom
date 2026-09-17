@@ -199,8 +199,22 @@ class ExternalRemediation:
     @property
     def busy(self) -> bool:
         return (self._task is not None and not self._task.done()) or bool(
-            self._foreign_live
+            self._live_foreign_holds()
         )
+
+    def _live_foreign_holds(self) -> dict[str, ProcessIdentity]:
+        """The cached foreign holds, re-probed: a gate that stopped being
+        swept (merged, closed) must not pin the global slot through a stale
+        entry, so the slot asks the kernel whether what it holds still runs
+        (re-review of PR #416)."""
+        dead = [
+            url
+            for url, ident in self._foreign_live.items()
+            if not identity_alive(ident)
+        ]
+        for url in dead:
+            del self._foreign_live[url]
+        return self._foreign_live
 
     def busy_on(self, pr_url: str) -> bool:
         """Whether a run is claimed or in flight on *pr_url* — the merge-gate
@@ -211,7 +225,7 @@ class ExternalRemediation:
         the run task ends."""
         # ...or, after a restart, while a run a previous daemon left on that
         # PR is still alive (re-review of PR #416)
-        return self._in_flight_pr_url == pr_url or pr_url in self._foreign_live
+        return self._in_flight_pr_url == pr_url or pr_url in self._live_foreign_holds()
 
     async def observe_head(
         self,
@@ -233,6 +247,17 @@ class ExternalRemediation:
         headroom, never a stuck loop.
         """
         budget = read_budget(gate, spec.pr_url)
+        # re-review of PR #416: the cached hold follows the DURABLE stamp. The
+        # survivor's own outcome write clears the stamp (or a later boot's
+        # reservation replaces it); either is proof the run this hold stood
+        # for has settled — release it before anything reads busy.
+        held = self._foreign_live.get(spec.pr_url)
+        if held is not None and (
+            budget.in_flight_pid != held.pid
+            or budget.in_flight_pid_start != held.start_ticks
+            or budget.in_flight_host_boot != held.host_boot
+        ):
+            del self._foreign_live[spec.pr_url]
         # #407 slice 2b: a reservation stamped by ANOTHER boot with no run in
         # flight here and no recorded outcome is a run the previous daemon
         # lost without a shutdown (SIGKILL, a host crash — slice 2a's refund
@@ -310,7 +335,18 @@ class ExternalRemediation:
             start_ticks=budget.in_flight_pid_start,
             host_boot=budget.in_flight_host_boot,
         )
-        if budget.in_flight_pid and identity_alive(identity):
+        if not budget.in_flight_pid:
+            # no identity could be captured where this was dispatched (no
+            # /proc, no ps): still a dead run — a run loom spawns is bound to
+            # its dispatcher's life everywhere (the portable parent watch),
+            # so the boot that made this stamp took its run with it
+            ctx.logger.info(
+                "external-remediation: the reservation boot %s left on %s carries "
+                "no process identity; refunding on the lifetime bind",
+                budget.in_flight_boot_id,
+                spec.pr_url,
+            )
+        elif identity_alive(identity):
             # THAT process (not merely that pid) is still running — the run
             # outlived its daemon. Hold everything on this PR until it ends.
             self._foreign_live[spec.pr_url] = identity
@@ -658,7 +694,8 @@ class ExternalRemediation:
             last_status="",
             last_settled=False,
             in_flight_boot_id=self._boot_id,  # #407 slice 2b
-            in_flight_pid=me.pid if me else os.getpid(),
+            # no identity → pid 0: "unverifiable", refunded on the lifetime bind
+            in_flight_pid=me.pid if me else 0,
             in_flight_pid_start=me.start_ticks if me else 0,
             in_flight_host_boot=me.host_boot if me else "",
         )

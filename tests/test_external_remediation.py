@@ -3356,4 +3356,129 @@ async def test_the_dispatcher_spawns_its_child_bound_to_itself(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     await spawn_converge(["true"])
+    import os
+
     assert captured["env"] is not None and captured["env"][signals.BOUND_ENV] == "1"
+    assert captured["env"][signals.PARENT_PID_ENV] == str(os.getpid())
+
+
+# ── #416 re-review: the cached hold follows the durable stamp ────────────────
+
+
+async def _foreign_live_gate(client: FakeLithosClient, *, rounds_used: int = 1):
+    import os
+
+    from lithos_loom.runner.orphans import process_identity
+
+    story, gate = await _gate_with_story(client)
+    me = process_identity(os.getpid())
+    assert me is not None
+    stale = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=rounds_used,
+        last_seen_head_sha=_HEAD,
+        in_flight_boot_id="dead-boot",
+        in_flight_pid=me.pid,
+        in_flight_pid_start=me.start_ticks,
+        in_flight_host_boot=me.host_boot,
+    )
+    await client.task_update(
+        task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: stale.as_marker()}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    return story, gate
+
+
+async def test_a_foreign_hold_is_released_when_the_survivor_records_its_outcome(
+    tmp_path: Path,
+) -> None:
+    """Dave's re-review of #416 (High, reproduced): the old watcher's run
+    finished and recorded — clearing every in-flight field — and the new
+    watcher's cached hold stayed forever, blocking every remediation
+    globally and both peers on the PR. A cleared or changed stamp is proof
+    the run settled; the hold follows the durable record."""
+    client = FakeLithosClient()
+    story, gate = await _foreign_live_gate(client)
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert rem.busy and rem.busy_on(_PR_URL)  # the survivor is running
+
+    settled = RemediationBudget(
+        pr_url=_PR_URL,
+        rounds_used=1,
+        last_seen_head_sha=_HEAD,
+        last_status="converged",
+        last_settled=True,
+    )
+    await client.task_update(
+        task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: settled.as_marker()}
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    budget = await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert budget.rounds_used == 1 and budget.last_status == "converged"
+    assert not rem.busy and not rem.busy_on(_PR_URL)
+    assert await _consider(client, gate, story, rem, budget=budget) != "deferred_busy"
+
+
+async def test_a_foreign_hold_is_released_when_its_identity_dies_off_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a gate that stops being swept (merged, closed) must not pin the global
+    # slot through a stale cache entry: the slot re-probes what it holds
+    from lithos_loom.subscriptions import external_remediation as rem_mod
+
+    client = FakeLithosClient()
+    story, gate = await _foreign_live_gate(client)
+    rem = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="new-boot"
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    await rem.observe_head(gate, spec, _pr(), _ctx(client))
+    assert rem.busy
+    monkeypatch.setattr(rem_mod, "identity_alive", lambda ident: False)
+    assert not rem.busy and not rem.busy_on(_PR_URL)
+
+
+async def test_an_unverifiable_identity_is_refunded_because_the_child_is_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Dave's re-review of #416 (High): where no process identity can be
+    # captured, the old behaviour refunded blind. The run cannot outlive its
+    # dispatcher anywhere now (the portable lifetime bind), so an
+    # unverifiable stamp IS a dead run — refunded, and said so
+    from lithos_loom.subscriptions import external_remediation as rem_mod
+
+    monkeypatch.setattr(rem_mod, "process_identity", lambda pid: None)
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started = asyncio.Event()
+
+    async def hanging(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await asyncio.sleep(3600)
+        return 0, ""
+
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=hanging, boot_id="b")
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    await started.wait()
+    marker = await _marker(client, gate.id)
+    assert marker["in_flight_pid"] == 0 and marker["in_flight_host_boot"] == ""
+    rem._task.cancel()  # type: ignore[union-attr]
+    with pytest.raises(asyncio.CancelledError):
+        await rem._task  # type: ignore[misc]
+    later = ExternalRemediation(
+        _settings(tmp_path, budget=2), spawn=_spawner(None)[0], boot_id="c"
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    budget = await later.observe_head(gate, spec, _pr(), _ctx(client))
+    assert budget.rounds_used == 0 and not later.busy

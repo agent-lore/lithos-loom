@@ -34,7 +34,7 @@ from typing import Any
 import jsonschema
 
 from lithos_loom.errors import PluginContractError
-from lithos_loom.runner.signals import BOUND_ENV
+from lithos_loom.runner.signals import BOUND_ENV, PARENT_PID_ENV
 
 __all__ = ["run_plugin", "write_result_atomically", "validate_result_schema"]
 
@@ -100,7 +100,11 @@ async def run_plugin(
 
     # #407: the plugin binds its lifetime to this process (PDEATHSIG) — a
     # SIGKILLed route-runner must not leave a story run going on without it
-    bound_env = {**(env if env is not None else os.environ), BOUND_ENV: "1"}
+    bound_env = {
+        **(env if env is not None else os.environ),
+        BOUND_ENV: "1",
+        PARENT_PID_ENV: str(os.getpid()),
+    }
     proc = await asyncio.create_subprocess_exec(*argv, env=bound_env)
     try:
         if max_runtime_seconds is None:
