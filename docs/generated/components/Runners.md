@@ -16,7 +16,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.runner.detection` | S | 0 | 3 |
 | `lithos_loom.runner.git` | M | 1 | 29 |
 | `lithos_loom.runner.orphans` | S | 1 | 6 |
-| `lithos_loom.runner.signals` | S | 0 | 5 |
+| `lithos_loom.runner.signals` | S | 0 | 9 |
 | `lithos_loom.runner.worktree` | S | 0 | 6 |
 
 ## Public API
@@ -74,10 +74,14 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 
 ### `lithos_loom.runner.signals`
 - def `install_sigterm_exit` — Make SIGTERM raise ``SystemExit`` in the main thread (no-op where the interpreter cannot install handlers, e.g. a non-main thread).
+- def `bound_child_env` — The environment a loom spawner hands a child it wants bound to it: *base* (this process's environment when omitted) plus the marker, the spawner's pid and its start marker. Both spawn sites use this, so they cannot drift from what :func:`bind_lifetime_to_parent` reads.
 - def `set_pdeathsig` — ``prctl(option, arg)`` via libc; raises ``OSError`` when it fails or ``AttributeError`` where libc has no prctl (not Linux).
-- def `watch_parent` — Poll our parent pid; the moment it is not *expected* any more, SIGTERM ourselves (the handler runs the teardown). The portable half of the bind — it needs no prctl, so it holds on macOS too — and the subreaper-proof half: it compares against the spawner's pid, not against 1. Returns when *stop* is set (tests) or after firing.
+- def `parent_of` — The parent pid of *pid* — ``/proc/<pid>/stat`` field 4 on Linux, ``ps -o ppid=`` elsewhere — or ``None`` when there is no such process (or no way to ask).
+- def `spawner_is_ancestor` — Whether *expected* is this process's parent, grandparent, … — walking up from :func:`os.getppid` through :func:`parent_of`, at most :data:`MAX_ANCESTOR_HOPS` hops. Pid 1 and below are never a spawner: a child whose chain reaches init without meeting *expected* was reparented because *expected* died.
+- def `spawner_alive` — Whether the spawner — *pid* as the incarnation that had start marker *start* — is alive, dead, or currently unverifiable (``None``: a transient probe failure must not end a run).
+- def `watch_parent` — Poll *alive*; the moment it answers ``False``, SIGTERM ourselves (the handler runs the teardown). ``None`` (unverifiable) keeps polling. The portable half of the bind — it needs no prctl, so it holds on macOS too — and the half that sees THROUGH an intermediary: ``PR_SET_PDEATHSIG`` fires on the immediate parent's death only, and with ``uv`` between loom and the plugin that parent outlives a SIGKILLed loom. Returns when *stop* is set (tests) or after firing.
 - def `start_parent_watch`
-- def `bind_lifetime_to_parent` — Die with the loom that spawned us (#407 slice 2b re-reviews).
+- def `bind_lifetime_to_parent` — Die with the loom that spawned us (#407 slice 2b re-reviews; f6537c52).
 
 ### `lithos_loom.runner.worktree`
 - def `create` — Create a per-task worktree off *base_branch* and return its path.
