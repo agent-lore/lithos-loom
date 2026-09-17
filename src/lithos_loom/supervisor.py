@@ -20,6 +20,15 @@ Concretely the supervisor:
    ``shutdown_grace_seconds``, and SIGKILLs anything that overstays.
 5. Returns 0 if every child exited cleanly via supervisor-initiated shutdown;
    non-zero if any child crashed before shutdown or had to be force-killed.
+
+**Drain (#407 slice 3).** ``lithos-loom drain`` sends the supervisor
+SIGUSR1. The supervisor relays it to every live child and then *waits*: a
+draining child stops admitting new dispatch, finishes what is in flight and
+exits 0 on its own — no SIGTERM, no grace clock — and the supervisor
+returns 0 once the last one has. A non-zero exit during the drain is a
+crash like any other (recorded; the rest are stopped), and SIGTERM / SIGINT
+during a drain is the ordinary shutdown (the remaining children are
+terminated, in-flight remediation refunded by the child as usual).
 """
 
 from __future__ import annotations
@@ -82,6 +91,8 @@ class Supervisor:
         self._shutdown_grace_seconds = shutdown_grace_seconds
         self._children: list[ChildProcess] = []
         self._shutdown_event: asyncio.Event | None = None
+        self._drain_event: asyncio.Event | None = None
+        self._draining = False
         self._crashes: list[str] = []
 
     @property
@@ -97,6 +108,16 @@ class Supervisor:
         if self._shutdown_event is not None:
             self._shutdown_event.set()
 
+    async def drain(self) -> None:
+        """Ask every child to finish what is in flight and exit (SIGUSR1).
+
+        Safe to call before or during ``run``; a no-op before ``run``
+        (there is nothing to drain — the event is created by ``run``).
+        Called again during a drain it relays the signal again — a child
+        that was still importing ignored the first one.
+        """
+        self._on_drain_signal()
+
     async def run(self) -> int:
         """Spawn children, wait for shutdown or a crash, clean up, return exit code."""
         if not self._enabled:
@@ -104,6 +125,8 @@ class Supervisor:
 
         loop = asyncio.get_running_loop()
         self._shutdown_event = asyncio.Event()
+        self._drain_event = asyncio.Event()
+        self._draining = False
 
         self._install_signal_handlers(loop)
 
@@ -139,35 +162,73 @@ class Supervisor:
         return ChildProcess(spec=spec, proc=proc, argv=tuple(argv))
 
     async def _wait_for_shutdown_or_crash(self) -> None:
+        """Park until shutdown, a crash, or — after a drain — the last child exit.
+
+        Outside a drain any child exit is a crash. During a drain a child's
+        exit 0 is the expected end of its drain; the wait continues until
+        every child has exited that way (return: nothing left to terminate).
+        A non-zero exit is a crash in either mode, and shutdown wins over a
+        drain in progress.
+        """
         assert self._shutdown_event is not None
-        wait_tasks = {
-            asyncio.create_task(c.proc.wait(), name=f"wait-{c.spec.name}")
+        assert self._drain_event is not None
+        waits = {
+            asyncio.create_task(c.proc.wait(), name=f"wait-{c.spec.name}"): c
             for c in self._children
         }
         shutdown_task = asyncio.create_task(
             self._shutdown_event.wait(), name="shutdown"
         )
-
-        done, pending = await asyncio.wait(
-            wait_tasks | {shutdown_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        for task in pending:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-        if shutdown_task not in done:
-            # A child exited on its own before shutdown — record as crash.
-            for child in self._children:
-                if child.proc.returncode is not None:
+        drain_task = asyncio.create_task(self._drain_event.wait(), name="drain")
+        try:
+            while waits:
+                # the drain task leaves the set once it fired: a completed
+                # task in the set would return every wait at once (a core
+                # spent spinning beside the run the drain protects)
+                pending = set(waits) | {shutdown_task}
+                if not self._draining:
+                    pending.add(drain_task)
+                done, _ = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                if shutdown_task in done:
+                    return
+                # child exits are judged under the flag as it was when they
+                # happened: an exit that landed with the drain event in the
+                # same tick preceded the relay, so it is a crash
+                for task in [t for t in done if t in waits]:
+                    child = waits.pop(task)
+                    rc = child.proc.returncode
+                    if self._draining and rc == 0:
+                        logger.info("supervisor: child %s drained", child.spec.name)
+                        continue
                     self._crashes.append(child.spec.name)
                     logger.warning(
-                        "[Friction] child %s exited unexpectedly with code %d",
+                        "[Friction] child %s exited unexpectedly with code %s",
                         child.spec.name,
-                        child.proc.returncode,
+                        rc,
                     )
+                    return
+                if drain_task in done and not self._draining:
+                    self._draining = True
+                    self._relay_drain()
+            logger.info("supervisor: every child drained; exiting")
+        finally:
+            for task in (*waits, shutdown_task, drain_task):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    def _relay_drain(self) -> None:
+        alive = [c for c in self._children if c.proc.returncode is None]
+        logger.info(
+            "supervisor: draining — relaying SIGUSR1 to %d child(ren); waiting "
+            "for in-flight runs to finish (SIGTERM stops them now instead)",
+            len(alive),
+        )
+        for child in alive:
+            with contextlib.suppress(ProcessLookupError):
+                child.proc.send_signal(signal.SIGUSR1)
 
     async def _terminate_remaining(self) -> None:
         alive = [c for c in self._children if c.proc.returncode is None]
@@ -215,15 +276,24 @@ class Supervisor:
         for sig in (signal.SIGTERM, signal.SIGINT):
             with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, self._on_signal)
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signal.SIGUSR1, self._on_drain_signal)
 
     def _uninstall_signal_handlers(self, loop: asyncio.AbstractEventLoop) -> None:
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1):
             with contextlib.suppress(NotImplementedError):
                 loop.remove_signal_handler(sig)
 
     def _on_signal(self) -> None:
         if self._shutdown_event is not None:
             self._shutdown_event.set()
+
+    def _on_drain_signal(self) -> None:
+        if self._drain_event is None:
+            return
+        if self._draining:
+            self._relay_drain()  # again: a child may have missed the first
+        self._drain_event.set()
 
 
 def default_categories() -> list[CategorySpec]:

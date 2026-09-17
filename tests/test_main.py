@@ -692,3 +692,152 @@ def test_run_reaps_orphaned_containers_before_spawning_children(
     # runs before the boot gate can refuse (opus round 1)
     assert order == ["reap", "gate", "supervisor"]
     assert grace == [30.0]
+
+
+# ── the supervisor's pidfile (#407 slice 3) ──────────────────────────────
+
+
+def test_run_writes_the_pidfile_for_the_supervisor_and_removes_it_on_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import pidfile
+
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    _patch_client(monkeypatch, FakeLithosClient())
+    path = pidfile.pidfile_path(tmp_path / "work")
+    seen: list[Any] = []
+
+    class _Sup:
+        def __init__(self, *a: object, **kw: object) -> None:
+            pass
+
+        async def run(self) -> int:
+            seen.append(pidfile.read_pidfile(path))
+            return 0
+
+    monkeypatch.setattr(main_module, "Supervisor", _Sup)
+    result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert seen and seen[0] is not None  # written before the supervisor ran
+    assert seen[0].pid == __import__("os").getpid()
+    assert not path.exists()  # and gone after it returned
+
+
+def test_run_removes_the_pidfile_when_the_supervisor_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import pidfile
+
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    _patch_client(monkeypatch, FakeLithosClient())
+    path = pidfile.pidfile_path(tmp_path / "work")
+
+    class _Sup:
+        def __init__(self, *a: object, **kw: object) -> None:
+            pass
+
+        async def run(self) -> int:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(main_module, "Supervisor", _Sup)
+    result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code != 0
+    assert not path.exists()
+
+
+def test_run_refuses_to_boot_beside_a_live_daemon_on_the_same_work_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import pidfile
+
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    _patch_client(monkeypatch, FakeLithosClient())
+    constructed = _stub_supervisor(monkeypatch)
+    path = pidfile.pidfile_path(tmp_path / "work")
+    live = pidfile.write_pidfile(path)  # this very process: alive by construction
+
+    result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code == 1, result.output
+    assert "already running" in result.output and str(live.pid) in result.output
+    assert constructed == []
+    assert pidfile.read_pidfile(path) == live  # the other daemon's file is untouched
+
+
+def test_run_boots_over_a_stale_pidfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import pidfile
+
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    _patch_client(monkeypatch, FakeLithosClient())
+    constructed = _stub_supervisor(monkeypatch)
+    path = pidfile.pidfile_path(tmp_path / "work")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"pid": 4242, "start_ticks": 1, "host_boot": "another-boot"}', encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert len(constructed) == 1
+    assert not path.exists()
+
+
+def test_run_refuses_a_second_daemon_before_reaping_or_probing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim is the first thing `run` does: no window between a
+    liveness check and the write (the reap + the boot gate took seconds),
+    and a refused boot touches neither containers nor Lithos."""
+    from lithos_loom.runner import pidfile
+
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    touched: list[str] = []
+    monkeypatch.setattr(
+        main_module.orphans, "reap_orphaned_containers", lambda: touched.append("reap")
+    )
+    monkeypatch.setattr(
+        main_module, "_require_task_graph_or_exit", lambda cfg: touched.append("gate")
+    )
+    constructed = _stub_supervisor(monkeypatch)
+    path = pidfile.pidfile_path(tmp_path / "work")
+    pidfile.write_pidfile(path)
+
+    result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code == 1, result.output
+    assert touched == [] and constructed == []
+
+
+def test_run_boots_without_a_pidfile_when_it_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The pidfile is an operability aid for `drain`, not a boot
+    prerequisite: a work dir that cannot take it is a [Friction], not a
+    refusal — and the daemon still runs."""
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    _patch_client(monkeypatch, FakeLithosClient())
+    constructed = _stub_supervisor(monkeypatch)
+    (tmp_path / "work").write_text("a file where the work dir should be")
+
+    with caplog.at_level("WARNING"):
+        result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    assert len(constructed) == 1
+    assert any(
+        "[Friction]" in r.getMessage() and "pidfile" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_run_removes_the_pidfile_when_the_boot_gate_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import pidfile
+
+    config = _write_doctor_config(tmp_path, vault_path=None)
+    fake = FakeLithosClient()
+    fake.raise_on["task_ready"] = LithosClientError("unknown_tool", "no such tool")
+    _patch_client(monkeypatch, fake)
+    result = runner.invoke(app, ["run", "--config", str(config)])
+    assert result.exit_code != 0
+    assert not pidfile.pidfile_path(tmp_path / "work").exists()

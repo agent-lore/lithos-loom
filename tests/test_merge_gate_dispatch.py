@@ -1852,3 +1852,90 @@ async def test_settle_probe_stays_probing_while_the_probe_is_still_out(
 async def test_settle_probe_without_a_probe_is_probing(tmp_path: Path) -> None:
     dispatch = MergeGateDispatch(_settings(tmp_path), spawn=_spawner(None)[0])
     assert await dispatch.settle_probe("no-such-gate") == "probing"
+
+
+# ── drain (#407 slice 3) ─────────────────────────────────────────────────
+
+
+async def test_a_draining_dispatcher_refuses_before_any_probe_or_reservation(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(_record("green"))
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    dispatch.begin_drain()
+
+    assert await _consider(client, gate, story, dispatch) == "draining"
+    assert calls == []
+    refreshed = await _refresh(client, gate.id)
+    assert refreshed.metadata.get(MERGE_GATE_KEY) is None
+
+
+async def test_drained_waits_for_the_run_in_flight_and_its_record_lands(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    started, release = asyncio.Event(), asyncio.Event()
+    inner, calls = _spawner(_record("green"))
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        if "--resolve-only" not in cmd:
+            started.set()
+            await release.wait()
+        return await inner(cmd)
+
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await asyncio.wait_for(started.wait(), 1.0)
+
+    dispatch.begin_drain()
+    drained = asyncio.create_task(dispatch.drained())
+    await asyncio.sleep(0.05)
+    assert not drained.done()
+    assert dispatch.busy_on(_PR_URL)
+    release.set()
+    await asyncio.wait_for(drained, 2.0)
+    assert not dispatch.busy_on(_PR_URL)
+    refreshed = await _refresh(client, gate.id)
+    assert refreshed.metadata[MERGE_GATE_KEY]["status"] == "green"
+
+
+async def test_drained_returns_at_once_when_idle(tmp_path: Path) -> None:
+    dispatch = MergeGateDispatch(
+        _settings(tmp_path), spawn=_spawner(_record("green"))[0]
+    )
+    dispatch.begin_drain()
+    await asyncio.wait_for(dispatch.drained(), 1.0)
+
+
+async def test_a_probe_that_settles_after_the_drain_began_starts_no_run(
+    tmp_path: Path,
+) -> None:
+    """The probe is a zero-token spawn already in flight; the run it would
+    start on a moved fingerprint is a paid one — refused at the start site,
+    synchronously with the flag, and `drained()` waits for the probe."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _green_at_fp(client, gate)
+    inner, calls = _spawner(_record("red", fp="new-fp"), probe=_probe("new-fp"))
+    probe_release = asyncio.Event()
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        if "--resolve-only" in cmd:
+            await probe_release.wait()
+        return await inner(cmd)
+
+    dispatch = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "probing"
+
+    dispatch.begin_drain()
+    drained = asyncio.create_task(dispatch.drained())
+    await asyncio.sleep(0.05)
+    assert not drained.done()  # the probe is still out
+    probe_release.set()
+    assert await dispatch.settle_probe(gate.id) == "draining"
+    await asyncio.wait_for(drained, 2.0)
+    assert _runs(calls) == []  # the moved fingerprint started nothing
+    assert not dispatch.busy_on(_PR_URL)

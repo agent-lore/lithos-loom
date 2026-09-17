@@ -508,3 +508,167 @@ def test_github_watcher_enabled_when_section_present_and_enabled(
     cfg_enabled = replace(cfg, github_watcher=GitHubWatcherConfig(enabled=True))
     spec = next(c for c in default_categories() if c.name == "github-watcher")
     assert spec.enabled(cfg_enabled) is True
+
+
+# ── drain (#407 slice 3) ─────────────────────────────────────────────────
+
+
+async def test_drain_forwards_sigusr1_and_exits_zero_once_every_child_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`lithos-loom drain`: the supervisor relays SIGUSR1, then waits for
+    the children to finish what is in flight and exit on their own — no
+    SIGTERM, no grace clock — and returns 0 when the last one has."""
+    _patch_subprocess_stderr(monkeypatch)
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[
+            _echo_category("slow", extra_args=("--exit-on-drain-after", "0.3")),
+            _echo_category("quick", extra_args=("--exit-on-drain-after", "0")),
+        ],
+        shutdown_grace_seconds=0.05,  # far shorter than the slow child's drain
+    )
+    run_task = asyncio.create_task(sup.run())
+    await _wait_children_ready(sup, count=2)
+    await sup.drain()
+
+    exit_code = await asyncio.wait_for(run_task, timeout=5.0)
+    assert exit_code == 0
+    assert [c.proc.returncode for c in sup.children] == [0, 0]
+    assert sup.crashes == ()
+
+
+async def test_a_child_that_crashes_while_draining_is_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_subprocess_stderr(monkeypatch)
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[
+            _echo_category("slow", extra_args=("--exit-on-drain-after", "10")),
+            _echo_category("bad", extra_args=("--crash-on-drain",)),
+        ],
+        shutdown_grace_seconds=3.0,
+    )
+    run_task = asyncio.create_task(sup.run())
+    await _wait_children_ready(sup, count=2)
+    await sup.drain()
+
+    exit_code = await asyncio.wait_for(run_task, timeout=5.0)
+    assert exit_code == 1
+    assert sup.crashes == ("bad",)
+    # the crash ends the drain the way it ends a run: the rest are stopped
+    assert sup.children[0].proc.returncode == 0
+
+
+async def test_sigterm_during_a_drain_stops_the_remaining_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_subprocess_stderr(monkeypatch)
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[_echo_category("slow", extra_args=("--exit-on-drain-after", "10"))],
+        shutdown_grace_seconds=3.0,
+    )
+    run_task = asyncio.create_task(sup.run())
+    await _wait_children_ready(sup, count=1)
+    await sup.drain()
+    await asyncio.sleep(0.1)
+    assert not run_task.done()
+    await sup.shutdown()
+
+    exit_code = await asyncio.wait_for(run_task, timeout=5.0)
+    assert exit_code == 0
+    assert sup.children[0].proc.returncode == 0
+
+
+async def test_drain_before_run_is_harmless(tmp_path: Path) -> None:
+    sup = Supervisor(_minimal_cfg(tmp_path), categories=[])
+    await sup.drain()
+    assert await sup.run() == 0
+
+
+def test_supervisor_installs_a_sigusr1_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The drain CLI's contract: SIGUSR1 at the supervisor is a drain."""
+    import signal as _signal
+
+    from lithos_loom.supervisor import Supervisor as _Sup
+
+    seen: dict[int, object] = {}
+
+    class _Loop:
+        def add_signal_handler(self, sig: int, cb: object) -> None:
+            seen[sig] = cb
+
+    sup = _Sup(_minimal_cfg(Path("/tmp")), categories=[])
+    sup._install_signal_handlers(_Loop())  # type: ignore[arg-type]
+    assert set(seen) == {_signal.SIGTERM, _signal.SIGINT, _signal.SIGUSR1}
+
+
+async def test_a_drain_wait_does_not_spin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of this slice: the drain event's task stayed in the wait set
+    after it completed, so every wait returned at once and the supervisor
+    pegged a core for the whole drain — beside the very run it protects."""
+    import time
+
+    _patch_subprocess_stderr(monkeypatch)
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[
+            _echo_category("slow", extra_args=("--exit-on-drain-after", "1.0"))
+        ],
+        shutdown_grace_seconds=3.0,
+    )
+    run_task = asyncio.create_task(sup.run())
+    await _wait_children_ready(sup, count=1)
+    await sup.drain()
+    cpu_before = time.process_time()
+    assert await asyncio.wait_for(run_task, timeout=5.0) == 0
+    assert time.process_time() - cpu_before < 0.3  # a second of waiting, not spinning
+
+
+async def test_a_child_that_exited_zero_before_the_drain_is_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 0 is the expected end of a drain only AFTER the drain was
+    relayed; a child that leaves on its own beforehand crashed."""
+    _patch_subprocess_stderr(monkeypatch)
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[
+            _echo_category("leaver", extra_args=("--exit-after", "0.1")),
+            _echo_category("stayer", extra_args=("--exit-on-drain-after", "0")),
+        ],
+        shutdown_grace_seconds=3.0,
+    )
+    run_task = asyncio.create_task(sup.run())
+    await _wait_children_ready(sup, count=2)
+    await asyncio.wait_for(sup.children[0].proc.wait(), timeout=2.0)
+    await sup.drain()  # too late to make that exit a drain
+
+    assert await asyncio.wait_for(run_task, timeout=5.0) == 1
+    assert sup.crashes == ("leaver",)
+
+
+async def test_a_second_drain_is_relayed_to_children_that_missed_the_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child still importing ignores SIGUSR1 (its loop handler does not
+    exist yet); the operator's second `lithos-loom drain` must reach it,
+    so every SIGUSR1 at the supervisor is relayed, not just the first."""
+    _patch_subprocess_stderr(monkeypatch)
+    sup = Supervisor(
+        _minimal_cfg(tmp_path),
+        categories=[_echo_category("late", extra_args=("--ignore-first-drain",))],
+        shutdown_grace_seconds=3.0,
+    )
+    run_task = asyncio.create_task(sup.run())
+    await _wait_children_ready(sup, count=1)
+    await sup.drain()
+    await asyncio.sleep(0.2)
+    assert not run_task.done()  # the first signal was ignored
+    await sup.drain()
+    assert await asyncio.wait_for(run_task, timeout=5.0) == 0
+    assert sup.crashes == ()

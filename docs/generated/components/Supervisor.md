@@ -11,7 +11,7 @@ Long-lived child-process supervisor (spawn / monitor / restart by category).
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.supervisor` | S | 3 | 1 |
+| `lithos_loom.supervisor` | M | 3 | 1 |
 
 ## Public API
 

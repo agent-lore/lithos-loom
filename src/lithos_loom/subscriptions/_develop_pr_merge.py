@@ -411,6 +411,19 @@ async def reconcile_pr_gate(
 
     # PRD S7: the one writer of the gate's reconciliation state, after every
     # dispatcher has run — derived from the gate as it is NOW.
+    if any(
+        getattr(d, "draining", False)
+        for d in (remediation, merge_gate, conflict_resolve)
+    ):
+        # #407 slice 3: `draining` is a refusal to decide, not a verdict —
+        # the state stays as the last deciding sweep recorded it (a
+        # recorded green would otherwise read as "unconfirmed" until the
+        # next boot's sweep re-probes)
+        ctx.logger.debug(
+            "reconciliation-state: draining — %s left as recorded", spec.pr_url
+        )
+        return "still_open"
+
     async def write_state(regate: str | None) -> None:
         # busy is read at WRITE time: a probe that found a moved fingerprint
         # starts its run as it settles

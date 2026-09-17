@@ -204,6 +204,44 @@ class RouteRunner:
         # bootstrap re-surfaces open tasks on startup anyway.
         self._resume_tasks: dict[str, asyncio.Task[None]] = {}
         self._resume_counts: dict[str, int] = {}
+        # #407 slice 3 (`lithos-loom drain`): once draining, no new claim —
+        # `_handle` refuses before any Lithos read and again right before
+        # the claim (readiness + admission are awaits a drain can begin
+        # under). `_idle` is clear exactly while a claimed run is in flight
+        # — a COUNT of runs, not a flag: `_handle` has two owners (the bus
+        # loop and the usage-limit resume sleeper), so two runs can be in
+        # flight and the first to end must not read as idle.
+        self._draining = False
+        self._runs_in_flight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    # ── drain ─────────────────────────────────────────────────────────
+
+    def begin_drain(self) -> None:
+        """Refuse every new dispatch from now on; the run in flight finishes."""
+        if not self._draining:
+            logger.info(
+                "RouteRunner %s: draining — no new claims; %s",
+                self.route.name,
+                f"waiting for {self._runs_in_flight} run(s) in flight"
+                if self._runs_in_flight
+                else "idle",
+            )
+        self._draining = True
+
+    async def drained(self) -> None:
+        """Return once no claimed run is in flight (at once when idle)."""
+        await self._idle.wait()
+
+    def _run_started(self) -> None:
+        self._runs_in_flight += 1
+        self._idle.clear()
+
+    def _run_ended(self) -> None:
+        self._runs_in_flight -= 1
+        if self._runs_in_flight == 0:
+            self._idle.set()
 
     @property
     def subscription(self) -> Subscription:
@@ -233,6 +271,13 @@ class RouteRunner:
             return
         if payload.get("status") != "open":
             return  # nothing to do for terminal-state observations
+        if self._draining:
+            logger.debug(
+                "RouteRunner %s: draining — not dispatching %s",
+                self.route.name,
+                task_id,
+            )
+            return
         if event.origin == GATE_RESOLVED_ORIGIN:
             # b91177d2: the operator completed this story's needs-human gate —
             # THE retry gesture. The in-process "fail once per task" set
@@ -315,7 +360,21 @@ class RouteRunner:
                 return
         self._rechecker.settled(task_id)  # admitted: fresh budget
         try:
-            await self._claim_and_run(task_id, payload)
+            if self._draining:
+                # the drain began while readiness / admission were read: no
+                # await between this check and `_run_started()`, so a
+                # `drained()` that saw idle can never be followed by a claim
+                logger.info(
+                    "RouteRunner %s: draining — not claiming %s",
+                    self.route.name,
+                    task_id,
+                )
+                return
+            self._run_started()
+            try:
+                await self._claim_and_run(task_id, payload)
+            finally:
+                self._run_ended()
         finally:
             if admission is not None:  # the reservation ends with the run
                 await admission.release(task_id, route=self.route.name)

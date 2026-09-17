@@ -9,6 +9,8 @@ Subcommands:
 * ``lithos-loom validate-config --dry-run`` — also poll Lithos and print
   which routes / subscriptions would fire for each open task
 * ``lithos-loom config --show`` — print the merged effective config
+* ``lithos-loom drain`` — ask the running daemon to finish its in-flight
+  runs and exit, so a restart is safe by construction (#407)
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import typer
 
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.cli import develop_app, obsidian_sync_app, project_app, task_app
+from lithos_loom.cli.drain import drain_daemon
 from lithos_loom.cli.gates import collect_gate_rows, render_report
 from lithos_loom.config import (
     LoomConfig,
@@ -43,7 +46,7 @@ from lithos_loom.doctor import (
 )
 from lithos_loom.errors import LithosClientError, LithosLoomError
 from lithos_loom.lithos_client import BlockedTask, Blocker, LithosClient, Task
-from lithos_loom.runner import orphans
+from lithos_loom.runner import orphans, pidfile
 from lithos_loom.subscriptions import (
     SUBSCRIPTION_ACTIONS,
     SubscriptionContext,
@@ -118,6 +121,35 @@ def run(
     # operational logs. Demote to WARNING — connection failures still
     # surface, per-call traffic doesn't.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # #407 slice 3: one daemon per work dir. The pidfile is how `drain` finds
+    # it; a live one there means a second boot beside a running daemon (two
+    # route-runners claiming the same tasks), refused before anything else —
+    # the claim is exclusive (no check-then-write window across the reap and
+    # the boot gate below). A pidfile that cannot be written is a friction,
+    # not a refusal: the daemon needs nothing from it, only `drain` does.
+    pidfile_path = pidfile.pidfile_path(cfg.orchestrator.work_dir)
+    try:
+        mine = pidfile.claim_pidfile(pidfile_path)
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "[Friction] could not write the daemon pidfile %s (%s); "
+            "`lithos-loom drain` cannot find this daemon — stop it with "
+            "SIGTERM instead (a killed remediation round is refunded)",
+            pidfile_path,
+            exc,
+        )
+        mine = None
+    else:
+        if mine is None:
+            holder = pidfile.read_pidfile(pidfile_path)
+            typer.echo(
+                f"lithos-loom run: a daemon (pid "
+                f"{holder.pid if holder else '?'}) is already running on "
+                f"work_dir {cfg.orchestrator.work_dir} — `lithos-loom drain` or "
+                f"stop it first (pidfile {pidfile_path})",
+                err=True,
+            )
+            raise typer.Exit(1)
     # Boot gate (Epic G US1): refuse to start against a Lithos that lacks the
     # task-graph extension — the runner's dependency scheduling relies on it, so
     # an incompatible server must surface at boot, not mid-PRD. This is a real
@@ -127,21 +159,61 @@ def run(
     # not. Reap the ones whose owner is gone before any child starts a run —
     # and before the boot gate, which needs Lithos: "Lithos is down, restart
     # loom" is exactly the boot where the old containers are still around.
-    reaped = orphans.reap_orphaned_containers()
-    if reaped:
-        logging.getLogger(__name__).warning(
-            "reaped %d orphaned run container(s) from a previous daemon: %s",
-            len(reaped),
-            ", ".join(reaped),
+    try:
+        reaped = orphans.reap_orphaned_containers()
+        if reaped:
+            logging.getLogger(__name__).warning(
+                "reaped %d orphaned run container(s) from a previous daemon: %s",
+                len(reaped),
+                ", ".join(reaped),
+            )
+        _require_task_graph_or_exit(cfg)
+        sup = Supervisor(
+            cfg,
+            default_categories(),
+            shutdown_grace_seconds=cfg.orchestrator.shutdown_grace_seconds,
         )
-    _require_task_graph_or_exit(cfg)
-    sup = Supervisor(
-        cfg,
-        default_categories(),
-        shutdown_grace_seconds=cfg.orchestrator.shutdown_grace_seconds,
-    )
-    exit_code = asyncio.run(sup.run())
+        exit_code = asyncio.run(sup.run())
+    finally:
+        if mine is not None:
+            pidfile.remove_pidfile(pidfile_path, mine)
     raise typer.Exit(exit_code)
+
+
+@app.command()
+def drain(
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Explicit TOML config path (overrides LITHOS_LOOM_CONFIG).",
+    ),
+    timeout: float = typer.Option(
+        0.0,
+        "--timeout",
+        min=0.0,
+        help="Seconds to wait for the daemon to exit; 0 waits without a deadline.",
+    ),
+) -> None:
+    """Ask the running daemon to finish its in-flight runs and exit.
+
+    Sends SIGUSR1 to the supervisor named by the pidfile under the
+    configured work dir: every child stops admitting new dispatch (the
+    route-runner claims nothing more; the watcher's remediation, merge-gate
+    and conflict-resolve dispatchers answer `draining`), finishes what is in
+    flight, and exits; the supervisor exits 0 when the last one has, and
+    this command returns then — the restart is safe by construction and no
+    run is killed. Exit codes: `0` the daemon exited; `1` no daemon to
+    signal (no pidfile, a stale one, or the signal could not be sent); `2`
+    `--timeout` ran out with the daemon still draining (it keeps draining;
+    SIGTERM stops it now instead, refunding a killed remediation round).
+    """
+    cfg = _load_or_exit(config)
+    outcome = drain_daemon(
+        pidfile.pidfile_path(cfg.orchestrator.work_dir), timeout=timeout
+    )
+    typer.echo(outcome.message)
+    raise typer.Exit(outcome.code)
 
 
 @app.command()

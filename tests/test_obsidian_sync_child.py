@@ -1692,3 +1692,22 @@ async def test_dir_watcher_spawns_when_obsidian_sync_present(
 # moved to children/_boot.py (ARCH-6); the MCP-SSE-pin + httpx-silencing
 # behaviour (originally soak regressions 2026-05-24 / 2026-05-29) is now
 # pinned once in tests/test_child_boot.py.
+
+
+async def _sigusr1_soon(delay: float = 0.1) -> None:
+    await asyncio.sleep(delay)
+    os.kill(os.getpid(), signal.SIGUSR1)
+
+
+async def test_obsidian_sync_treats_a_drain_as_a_stop(
+    tmp_path: Path, stub_io: list[EventBus]
+) -> None:
+    """#407 slice 3: nothing this child runs is a paid run to finish, so the
+    supervisor's relayed SIGUSR1 (`lithos-loom drain`) ends it like SIGTERM."""
+    cfg = _cfg_with_obsidian(tmp_path)
+    sender = asyncio.create_task(_sigusr1_soon())
+    try:
+        rc = await asyncio.wait_for(_amain(cfg), timeout=2.0)
+    finally:
+        await _cancel_and_drain(sender)
+    assert rc == 0

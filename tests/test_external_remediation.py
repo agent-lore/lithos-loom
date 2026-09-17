@@ -46,6 +46,7 @@ from lithos_loom.github_review_activity import (
 )
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions.external_remediation import (
+    PENDING_KEY,
     REMEDIATION_KEY,
     ExternalRemediation,
     OriginRead,
@@ -3522,3 +3523,131 @@ async def test_an_unverifiable_foreign_reservation_is_held_not_refunded(
     assert budget.rounds_used == 1
     assert rem.busy and rem.busy_on(_PR_URL)
     assert (await _marker(client, gate.id))["in_flight_boot_id"] == "old-boot"
+
+
+# ── drain (#407 slice 3) ─────────────────────────────────────────────────
+
+
+def _blocking_spawner(
+    payload: dict[str, Any],
+) -> tuple[Any, asyncio.Event, asyncio.Event]:
+    """A spawn that parks until released — the run "in flight" a drain waits for."""
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await release.wait()
+        path = Path(cmd[cmd.index("--json") + 1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return 0, "converge output"
+
+    return spawn, started, release
+
+
+async def test_a_draining_dispatcher_refuses_before_any_reservation(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner({"status": "converged", "pushed": False})
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    rem.begin_drain()
+
+    assert await _consider(client, gate, story, rem) == "draining"
+    assert calls == []
+    assert await _marker(client, gate.id) is None  # nothing reserved
+
+
+async def test_a_parked_trigger_is_not_resumed_into_a_drain(tmp_path: Path) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={PENDING_KEY: {"pr_url": _PR_URL, "batch": "b1"}},
+    )
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    spawn, calls = _spawner({"status": "converged", "pushed": False})
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    rem.begin_drain()
+
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    label = await rem.resume_pending(
+        gate, spec, story, RemediationBudget(pr_url=_PR_URL), _github(), _ctx(client)
+    )
+    assert label == "draining"
+    assert calls == []
+    gate = await client.task_get(task_id=gate.id)
+    assert gate is not None
+    assert gate.metadata.get(PENDING_KEY) is not None  # still parked
+
+
+async def test_drained_waits_for_the_run_in_flight_and_its_outcome_lands(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, started, release = _blocking_spawner(
+        {"status": "converged", "pushed": True, "pushed_sha": "ab" * 20, "rounds": 1}
+    )
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    await asyncio.wait_for(started.wait(), 1.0)
+
+    rem.begin_drain()
+    drained = asyncio.create_task(rem.drained())
+    await asyncio.sleep(0.05)
+    assert not drained.done()
+    assert rem.busy  # still the single-flight holder while it finishes
+    release.set()
+    await asyncio.wait_for(drained, 2.0)
+    assert not rem.busy
+    marker = await _marker(client, gate.id)
+    assert marker["last_status"] == "converged"  # the outcome was recorded
+    assert marker["last_loom_pushed_sha"] == "ab" * 20
+
+
+async def test_drained_returns_at_once_when_idle(tmp_path: Path) -> None:
+    rem = ExternalRemediation(_settings(tmp_path), spawn=_spawner(None)[0])
+    rem.begin_drain()
+    await asyncio.wait_for(rem.drained(), 1.0)
+
+
+async def test_drained_covers_a_dispatch_between_its_check_and_its_spawn(
+    tmp_path: Path,
+) -> None:
+    """The reservation write is an await a drain can begin under: a
+    `drained()` that ran then must not return before the run it did not
+    yet see has started AND ended (else the child exits with a stamped
+    round that the next boot must refund — sloppy, though self-healing)."""
+    write_started, write_release = asyncio.Event(), asyncio.Event()
+
+    class _SlowWrite(FakeLithosClient):
+        async def task_update(self, *a: Any, **kw: Any) -> Any:
+            if REMEDIATION_KEY in (kw.get("metadata") or {}):
+                write_started.set()
+                await write_release.wait()
+            return await super().task_update(*a, **kw)
+
+    client = _SlowWrite()
+    story, gate = await _gate_with_story(client)
+    spawn, started, release = _blocking_spawner(
+        {"status": "converged", "pushed": False}
+    )
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+    considering = asyncio.create_task(_consider(client, gate, story, rem))
+    await asyncio.wait_for(write_started.wait(), 1.0)  # inside the reservation
+
+    rem.begin_drain()
+    drained = asyncio.create_task(rem.drained())
+    await asyncio.sleep(0.05)
+    assert not drained.done()  # a dispatch is committing
+    write_release.set()
+    assert await asyncio.wait_for(considering, 1.0) == "dispatched"
+    await asyncio.wait_for(started.wait(), 1.0)
+    await asyncio.sleep(0.05)
+    assert not drained.done()  # and now its run is in flight
+    release.set()
+    await asyncio.wait_for(drained, 2.0)
