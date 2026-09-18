@@ -257,6 +257,9 @@ async def _amain(cfg: LoomConfig) -> int:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed = _boot.install_stop_signals(loop, stop_event.set)
+    # #407 slice 3: nothing here is a paid run to finish — the supervisor's
+    # relayed drain (SIGUSR1) is a stop
+    installed += _boot.install_drain_signal(loop, stop_event.set)
 
     try:
         # The fs watcher's lifecycle is gated on ``[obsidian_sync]``

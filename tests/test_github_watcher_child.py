@@ -946,3 +946,85 @@ async def test_reconcile_pass_threads_the_notifier_to_the_gate_branch() -> None:
     (notice,) = notifier.notices
     assert notice.story_id == story
     assert notice.reason == "pr_closed_unmerged"
+
+
+async def test_reconcile_pass_leaves_the_state_alone_while_draining() -> None:
+    """#407 slice 3 review: `draining` is a dispatcher's refusal to decide,
+    not a verdict — a sweep during a drain must not rewrite the S7 state
+    (a recorded green would read as `awaiting_review` until the next boot)."""
+    import logging
+    from unittest.mock import AsyncMock
+
+    from lithos_loom.github_client import PullRequest
+    from lithos_loom.lithos_client import Task
+    from lithos_loom.subscriptions import SubscriptionContext
+
+    def _gate() -> Task:
+        return Task(
+            id="gate-1",
+            title="Awaiting merge: US9",
+            status="open",
+            tags=(),
+            metadata={
+                "gate_type": "pr",
+                "repo": "o/r",
+                "pr_number": 9,
+                "pr_url": "https://github.com/o/r/pull/9",
+            },
+            claims=(),
+            task_type="gate",
+        )
+
+    pr = PullRequest(
+        repo="o/r",
+        number=9,
+        state="open",
+        merged=False,
+        merged_at=None,
+        merge_commit_sha=None,
+        head_sha="e" * 40,
+        base_sha="b" * 40,
+        mergeable=True,
+        mergeable_state="clean",
+    )
+
+    class _MergeGate:
+        def __init__(self, label: str) -> None:
+            self.label = label
+            self.draining = label == "draining"
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            return self.label
+
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+    async def sweep(label: str) -> list[str]:
+        lithos = AsyncMock()
+        lithos.task_list = AsyncMock(return_value=[_gate()])
+        lithos.task_edge_list = AsyncMock(return_value=[])
+        lithos.task_get = AsyncMock(return_value=_gate())
+        github = AsyncMock()
+        github.get_pull_request = AsyncMock(return_value=pr)
+        github.get_ref_sha = AsyncMock(return_value="b" * 40)
+        ctx = SubscriptionContext(
+            lithos=lithos, logger=logging.getLogger("test-gate"), agent_id="a"
+        )
+        await _run_reconcile_pass(
+            lithos=lithos,
+            push_handler=AsyncMock(),
+            ctx=ctx,
+            resolved_window=None,
+            github=github,
+            pr_merge_enabled=True,
+            merge_gate=_MergeGate(label),  # type: ignore[arg-type]
+        )
+        return [
+            str(call.kwargs.get("metadata", {}).get("reconciliation_state"))
+            for call in lithos.task_update.await_args_list
+            if "reconciliation_state" in (call.kwargs.get("metadata") or {})
+        ]
+
+    assert sweep is not None
+    assert await sweep("unchanged")  # the control: an ordinary sweep writes it
+    assert await sweep("draining") == []  # a draining sweep leaves it as recorded

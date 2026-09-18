@@ -18,6 +18,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
+| `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
 | `lithos_loom.cli.merge_gate` | M | 0 | 1 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
@@ -71,6 +72,10 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `develop_prune` — Remove the on-disk run-state dirs of **finished** story-develop runs.
 - def `develop_dump` — Print the assembled conversation log for a run (finished or in-flight).
 - def `develop_attach` — Follow a live run until it reaches a **terminal state**, printing handoffs as they land plus the current round + active agent, then a one-line outcome summary. Following keys on terminal state, not agent liveness, so it spans both the startup window before the first container and the commit / test-gate / teardown after the last agent turn, grace-polling through the window where the plugin has stopped its containers but not yet written the outcome. An **approved** verdict is not yet the end in daemon mode — PR delivery (push + ``result.json``) runs after the dialogue approves, shown as a distinct "delivering PR…" phase — so attach follows through it instead of exiting early. If the work dir is reaped on success before a poll observes the result, the outcome is recovered from the plugin's completion store. Read-only; ``Ctrl-C`` exits cleanly. When docker is unavailable it still follows the handoff files (active agent shows as ``—``).
+
+### `lithos_loom.cli.drain`
+- class `DrainOutcome` — What ``drain`` found and did: the exit code and the line to print.
+- def `drain_daemon` — Signal the daemon recorded at *path* to drain and wait for it to exit.
 
 ### `lithos_loom.cli.gates`
 - class `GateRow` — One open gate plus its waiter, as the listing renders it.

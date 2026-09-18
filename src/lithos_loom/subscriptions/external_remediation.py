@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import logging
 import os
 import sys
 import uuid
@@ -75,6 +76,7 @@ from lithos_loom.subscriptions._project_settings import (
     resolve_project_repo,
 )
 from lithos_loom.subscriptions._subprocess import spawn_command
+from lithos_loom.subscriptions.draining import DrainState, wait_idle
 from lithos_loom.subscriptions.external_reviews import (
     IngestResult,
     PendingMarkerProvider,
@@ -114,6 +116,8 @@ __all__ = [
     "read_budget",
     "spawn_converge",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 # Project-context metadata key: per-project dial for autonomous dispatch.
@@ -191,10 +195,34 @@ class ExternalRemediation:
         # identity still alive) is a REAL hold — on the single-flight slot and
         # on the per-PR holds the peers read — until that identity dies
         self._foreign_live: dict[str, ProcessIdentity] = {}
+        # #407 slice 3 (`lithos-loom drain`): no new dispatch once draining
+        self._drain = DrainState()
 
     @property
     def boot_id(self) -> str:
         return self._boot_id
+
+    # ── drain ──────────────────────────────────────────────────────────
+
+    def begin_drain(self) -> None:
+        """Refuse every new dispatch from now on; the run in flight finishes
+        and records its outcome as usual (parked triggers wait for the next
+        boot, exactly as a busy slot leaves them)."""
+        if self._drain.begin():
+            logger.info(
+                "external-remediation: draining — no new dispatch; %s",
+                f"waiting for the run on {self._in_flight_pr_url}"
+                if self._in_flight is not None
+                else "idle",
+            )
+
+    async def drained(self) -> None:
+        """Return once no run of ours is in flight or committing."""
+        await wait_idle(lambda: self._drain.committing or self._in_flight is not None)
+
+    @property
+    def draining(self) -> bool:
+        return self._drain.draining
 
     @property
     def busy(self) -> bool:
@@ -446,6 +474,8 @@ class ExternalRemediation:
         settings = self._settings
         if settings.budget <= 0:
             return "disabled"
+        if self._drain.draining:
+            return "draining"  # the trigger stays parked for the next boot
         # the gate before the count (PR #389 review): lifting it re-arms
         budget, pending = await decision_pending(
             ctx, gate_id=gate.id, spec=spec, budget=budget
@@ -588,6 +618,22 @@ class ExternalRemediation:
         ctx: SubscriptionContext,
     ) -> str:
         """The shared dispatch tail: project resolve → reserve → spawn."""
+        if self._drain.draining:
+            return "draining"  # the trigger stays parked for the next boot
+        self._drain.enter()  # a dispatch is committing: `drained()` waits
+        try:
+            return await self._dispatch_inner(gate, spec, story_id, budget, ctx)
+        finally:
+            self._drain.leave()
+
+    async def _dispatch_inner(
+        self,
+        gate: Any,
+        spec: PrGateSpec,
+        story_id: str,
+        budget: RemediationBudget,
+        ctx: SubscriptionContext,
+    ) -> str:
         if spec.pr_url in self._infra_held:
             # #377: decided before any read — nothing about this PR can
             # change until the daemon restarts (the parked trigger waits).

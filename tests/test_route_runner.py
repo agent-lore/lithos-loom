@@ -12,6 +12,7 @@ without HTTP or real subprocesses.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -3343,3 +3344,163 @@ async def test_runner_releases_the_admission_slot_on_a_lost_claim(
     await _run_for(runner)
 
     assert admission.released == [("task-1", "story-develop")]
+
+
+# ── drain (#407 slice 3) ─────────────────────────────────────────────────
+
+
+async def test_a_draining_runner_refuses_a_new_task_before_any_lithos_read(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path, ready_ids=("task-1",))
+    runner.begin_drain()
+
+    await bus.publish(_evt(payload=_payload()))
+    await _run_for(runner)
+    lithos.task_ready.assert_not_awaited()
+    lithos.task_claim.assert_not_awaited()
+
+
+async def test_drained_returns_at_once_when_nothing_is_in_flight(
+    tmp_path: Path,
+) -> None:
+    runner, _ = _make_runner(bus=EventBus(), work_dir=tmp_path)
+    runner.begin_drain()
+    await asyncio.wait_for(runner.drained(), timeout=1.0)
+
+
+async def test_drained_waits_for_the_run_in_flight_and_no_second_claim_follows(
+    tmp_path: Path,
+) -> None:
+    """The point of the slice: the run that is in flight finishes and lands
+    (its plugin result is applied), the queued task behind it is never
+    claimed, and `drained()` returns only when the run is over."""
+    bus = EventBus()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_plugin(**_kw: Any) -> dict[str, Any]:
+        started.set()
+        await release.wait()
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path, plugin_runner=slow_plugin)
+    await bus.publish(_evt(payload=_payload("task-1")))
+    await bus.publish(_evt(payload=_payload("task-2")))
+    run_task = asyncio.create_task(runner.run())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        runner.begin_drain()
+        drained = asyncio.create_task(runner.drained())
+        await asyncio.sleep(0.05)
+        assert not drained.done()  # task-1's run is still in flight
+        release.set()
+        await asyncio.wait_for(drained, timeout=1.0)
+        await asyncio.sleep(0.05)  # give task-2's event every chance to be taken
+        assert lithos.task_claim.await_count == 1
+        lithos.task_complete.assert_awaited_once()  # task-1 landed
+    finally:
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+
+async def test_a_drain_that_begins_after_admission_refuses_and_releases_the_slot(
+    tmp_path: Path,
+) -> None:
+    """The last check sits right before the claim: a drain that began while
+    readiness / admission were being read still wins, and the admission
+    reservation is handed back (nothing ran under it)."""
+    bus = EventBus()
+
+    class _DrainingAdmission(_StubAdmission):
+        def __init__(self, runner_ref: list[RouteRunner]) -> None:
+            super().__init__(True)
+            self._runner_ref = runner_ref
+
+        async def admit(self, **kw: Any) -> Any:
+            verdict = await super().admit(**kw)
+            self._runner_ref[0].begin_drain()
+            return verdict
+
+    ref: list[RouteRunner] = []
+    admission = _DrainingAdmission(ref)
+    runner, lithos = _delivering_runner(bus, tmp_path, admission)
+    ref.append(runner)
+    await bus.publish(_evt(payload=_payload(metadata={"project": "lens"})))
+    await _run_for(runner)
+
+    lithos.task_claim.assert_not_awaited()
+    assert admission.released == [("task-1", "story-develop")]
+
+
+async def test_the_resume_sleeper_does_not_re_dispatch_into_a_drain(
+    tmp_path: Path,
+) -> None:
+    """A usage-limit pause is not an in-flight run: its re-dispatch is
+    refused like any other new dispatch (it re-surfaces after the restart
+    through the bootstrap, as it always has)."""
+    runner, lithos = _make_runner(
+        bus=EventBus(), work_dir=tmp_path, ready_ids=("task-1",)
+    )
+    lithos.task_get.return_value = _open_task()
+    runner.begin_drain()
+    await runner._resume_dispatch("task-1", 0.0)
+    lithos.task_claim.assert_not_awaited()
+
+
+async def test_drained_waits_for_every_run_in_flight_not_just_the_first(
+    tmp_path: Path,
+) -> None:
+    """Review of this slice: `_handle` has two owners — the bus loop and the
+    usage-limit resume sleeper call it concurrently — so "idle" must be a
+    count, not a flag: the first run to end must not release the drain
+    while the other is still running its plugin."""
+    bus = EventBus()
+    started = {"task-1": asyncio.Event(), "task-2": asyncio.Event()}
+    release = {"task-1": asyncio.Event(), "task-2": asyncio.Event()}
+
+    async def slow_plugin(**kw: Any) -> dict[str, Any]:
+        task_id = json.loads(Path(kw["task_json_path"]).read_text())["task"]["id"]
+        started[task_id].set()
+        await release[task_id].wait()
+        return {
+            "schema_version": 1,
+            "task_id": task_id,
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    runner, lithos = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        plugin_runner=slow_plugin,
+        ready_ids=("task-1", "task-2"),
+    )
+    lithos.task_get.return_value = _open_task("task-2")
+    await bus.publish(_evt(payload=_payload("task-1")))
+    run_task = asyncio.create_task(runner.run())
+    resume = asyncio.create_task(runner._resume_dispatch("task-2", 0.0))
+    try:
+        await asyncio.wait_for(started["task-1"].wait(), timeout=1.0)
+        await asyncio.wait_for(started["task-2"].wait(), timeout=1.0)
+        assert lithos.task_claim.await_count == 2  # two paid runs in flight
+
+        runner.begin_drain()
+        drained = asyncio.create_task(runner.drained())
+        release["task-1"].set()
+        await asyncio.sleep(0.05)
+        assert not drained.done()  # task-2's plugin is still running
+        release["task-2"].set()
+        await asyncio.wait_for(drained, timeout=1.0)
+        await asyncio.wait_for(resume, timeout=1.0)
+        assert lithos.task_complete.await_count == 2
+    finally:
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task

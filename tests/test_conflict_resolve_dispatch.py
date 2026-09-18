@@ -11,6 +11,7 @@ gate (``conflict_unresolved``); a clean merge or a moved head just records.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -913,3 +914,99 @@ async def test_an_infra_failure_posts_friction_and_re_arms_on_a_restart(
     assert await _consider(client, gate, story, second) == "dispatched"
     await second.drain()
     assert len(calls) == 2
+
+
+# ── drain (#407 slice 3) ─────────────────────────────────────────────────
+
+
+async def test_a_draining_dispatcher_refuses_before_any_reservation(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _with_conflict(client, gate)
+    spawn, calls = _spawner(_result("converged"))
+    dispatch = ConflictResolveDispatch(_settings(tmp_path), spawn=spawn)
+    dispatch.begin_drain()
+
+    assert await _consider(client, gate, story, dispatch) == "draining"
+    assert calls == []
+    refreshed = await _refresh(client, gate.id)
+    assert refreshed.metadata.get(CONFLICT_RESOLVE_KEY) is None
+
+
+async def test_drained_waits_for_the_run_in_flight_and_its_record_lands(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _with_conflict(client, gate)
+    started, release = asyncio.Event(), asyncio.Event()
+    inner, calls = _spawner(_result("converged"))
+
+    async def spawn(cmd: list[str]) -> tuple[int, str]:
+        started.set()
+        await release.wait()
+        return await inner(cmd)
+
+    dispatch = ConflictResolveDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await asyncio.wait_for(started.wait(), 1.0)
+
+    dispatch.begin_drain()
+    drained = asyncio.create_task(dispatch.drained())
+    await asyncio.sleep(0.05)
+    assert not drained.done()
+    assert dispatch.busy()
+    release.set()
+    await asyncio.wait_for(drained, 2.0)
+    assert not dispatch.busy()
+    refreshed = await _refresh(client, gate.id)
+    assert refreshed.metadata[CONFLICT_RESOLVE_KEY]["status"] == "converged"
+
+
+async def test_drained_returns_at_once_when_idle(tmp_path: Path) -> None:
+    dispatch = ConflictResolveDispatch(
+        _settings(tmp_path), spawn=_spawner(_result("converged"))[0]
+    )
+    dispatch.begin_drain()
+    await asyncio.wait_for(dispatch.drained(), 1.0)
+
+
+async def test_a_debt_is_still_flushed_while_draining(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settling a debt is the run's own outcome write, not a new run: a
+    sweep during the drain must still flush it (else the record + budget of
+    a pushed merge wait for the next boot's recovery)."""
+    from lithos_loom.subscriptions import conflict_resolve_outcome as out
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _with_conflict(client, gate)
+    spawn, _calls = _spawner(_result("converged"))
+    dispatch = ConflictResolveDispatch(_settings(tmp_path), spawn=spawn)
+    real = out.write_marker
+    fail = {"on": False}
+
+    async def flaky(ctx, *, task_id, marker, subsystem):
+        if fail["on"] and REMEDIATION_KEY in marker:
+            return False
+        return await real(ctx, task_id=task_id, marker=marker, subsystem=subsystem)
+
+    monkeypatch.setattr(out, "write_marker", flaky)
+    monkeypatch.setattr(out, "STRICT_WRITE_DELAYS", ())
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    fail["on"] = True
+    await dispatch.drain()
+    assert dispatch.debt_on(_PR_URL)
+
+    dispatch.begin_drain()
+    fail["on"] = False
+    gate = await _refresh(client, gate.id)
+    assert await _consider(client, gate, story, dispatch, pr=_pr(head=_PUSHED)) == (
+        "debt_settled"
+    )
+    assert not dispatch.debt_on(_PR_URL)
+    gate = await _refresh(client, gate.id)
+    assert read_budget(gate, _PR_URL).last_loom_pushed_sha == _PUSHED

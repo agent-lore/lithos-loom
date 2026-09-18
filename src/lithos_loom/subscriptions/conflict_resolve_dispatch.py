@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -73,6 +74,7 @@ from lithos_loom.subscriptions.conflict_resolve_record import (
     Debt,
     read_record,
 )
+from lithos_loom.subscriptions.draining import DrainState, wait_idle
 from lithos_loom.subscriptions.merge_gate_record import (
     read_record as read_merge_record,
 )
@@ -99,6 +101,8 @@ __all__ = [
     "read_record",
     "spawn_resolve",
 ]
+
+logger = logging.getLogger(__name__)
 
 # A resolution is a coder session plus a panel loop: same ceiling as remediation.
 RUN_TIMEOUT_SECONDS = 4 * 3600
@@ -153,6 +157,8 @@ class ConflictResolveDispatch:
         self._boot_id = boot_id or uuid.uuid4().hex
         self._task: asyncio.Task[None] | None = None
         self._in_flight_pr_url = ""
+        # #407 slice 3 (`lithos-loom drain`): no new run once draining
+        self._drain = DrainState()
         # every (pr_url, head, base) this boot has spent on — the in-memory
         # half of the once-per-pair bound, which no failed write can erase
         self._attempted: set[tuple[str, str, str]] = set()
@@ -184,6 +190,25 @@ class ConflictResolveDispatch:
         if self._task is not None:
             await asyncio.gather(self._task, return_exceptions=True)
 
+    def begin_drain(self) -> None:
+        """Refuse every new run from now on; the run in flight finishes and
+        records as usual."""
+        if self._drain.begin():
+            logger.info(
+                "conflict-resolve: draining — no new runs; %s",
+                f"waiting for the run on {self._in_flight_pr_url}"
+                if self.busy()
+                else "idle",
+            )
+
+    async def drained(self) -> None:
+        """Return once no run of ours is in flight or committing."""
+        await wait_idle(lambda: self._drain.committing or self.busy())
+
+    @property
+    def draining(self) -> bool:
+        return self._drain.draining
+
     async def shutdown(self) -> None:
         """Cancel + await the in-flight run; the cancellation-safe spawn
         terminates the converge child so a stopped loom leaves no orphan
@@ -209,8 +234,11 @@ class ConflictResolveDispatch:
             return "disabled"
         if spec.pr_url in self._debts:
             # a pushed resolution whose record + budget write has not landed:
-            # flush it before anything else (the PR stays held meanwhile)
+            # flush it before anything else (the PR stays held meanwhile) —
+            # a drain included: this is the run's own outcome, not a new run
             return await self._settle_debt(spec.pr_url, ctx)
+        if self._drain.draining:
+            return "draining"
         if story_id is None:
             return "no_story"
         head = getattr(pr, "head_sha", "") or ""
@@ -280,46 +308,52 @@ class ConflictResolveDispatch:
             and (prior.repo_path, prior.origin_seen) == (str(repo), seen.repo.lower())
         ):
             return "unchanged"  # the refusal settled on what the sweep still sees
-        attempts = 1
-        # reserve the attempt on the gate BEFORE the spawn (PR #366 review
-        # F2): the once-per-pair bound must not depend on a breadcrumb the
-        # crashed run's outcome path may fail to write
-        reservation = ConflictResolveRecord(
-            spec.pr_url,
-            head,
-            base,
-            status="running",
-            attempts=attempts,
-            boot_id=self._boot_id,
-            repo_path=str(repo),
-            origin_seen=seen.repo.lower(),
-        )
-        if not await strict_write(
-            gate.id, {CONFLICT_RESOLVE_KEY: reservation.as_marker()}, ctx
-        ):
-            ctx.logger.warning(
-                "[Friction] conflict-resolve: could not reserve the attempt on "
-                "gate %s for %s; nothing spawned (retried next sweep)",
-                gate.id,
+        if self._drain.draining:
+            return "draining"
+        self._drain.enter()  # a dispatch is committing: `drained()` waits
+        try:
+            attempts = 1
+            # reserve the attempt on the gate BEFORE the spawn (PR #366 review
+            # F2): the once-per-pair bound must not depend on a breadcrumb the
+            # crashed run's outcome path may fail to write
+            reservation = ConflictResolveRecord(
                 spec.pr_url,
+                head,
+                base,
+                status="running",
+                attempts=attempts,
+                boot_id=self._boot_id,
+                repo_path=str(repo),
+                origin_seen=seen.repo.lower(),
             )
-            return "reserve_failed"
-        self._attempted.add((spec.pr_url, head, base))
-        ctx.logger.info(
-            "conflict-resolve: dispatching converge --resolve-conflicts for %s "
-            "(head %s, base %s, attempt %d)",
-            spec.pr_url,
-            head[:12],
-            base[:12],
-            attempts,
-        )
-        self._in_flight_pr_url = spec.pr_url
-        budget = read_budget(gate, spec.pr_url)  # the dispatch-time snapshot
-        self._task = asyncio.create_task(
-            self._run(gate.id, story_id, spec, repo, reservation, budget, ctx),
-            name=f"conflict-resolve-{spec.pr_number}",
-        )
-        return "dispatched"
+            if not await strict_write(
+                gate.id, {CONFLICT_RESOLVE_KEY: reservation.as_marker()}, ctx
+            ):
+                ctx.logger.warning(
+                    "[Friction] conflict-resolve: could not reserve the attempt on "
+                    "gate %s for %s; nothing spawned (retried next sweep)",
+                    gate.id,
+                    spec.pr_url,
+                )
+                return "reserve_failed"
+            self._attempted.add((spec.pr_url, head, base))
+            ctx.logger.info(
+                "conflict-resolve: dispatching converge --resolve-conflicts for %s "
+                "(head %s, base %s, attempt %d)",
+                spec.pr_url,
+                head[:12],
+                base[:12],
+                attempts,
+            )
+            self._in_flight_pr_url = spec.pr_url
+            budget = read_budget(gate, spec.pr_url)  # the dispatch-time snapshot
+            self._task = asyncio.create_task(
+                self._run(gate.id, story_id, spec, repo, reservation, budget, ctx),
+                name=f"conflict-resolve-{spec.pr_number}",
+            )
+            return "dispatched"
+        finally:
+            self._drain.leave()
 
     async def _settle_debt(self, pr_url: str, ctx: SubscriptionContext) -> str:
         debt = self._debts[pr_url]

@@ -16,6 +16,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.runner.detection` | S | 0 | 3 |
 | `lithos_loom.runner.git` | M | 1 | 29 |
 | `lithos_loom.runner.orphans` | S | 1 | 6 |
+| `lithos_loom.runner.pidfile` | S | 1 | 5 |
 | `lithos_loom.runner.signals` | S | 0 | 9 |
 | `lithos_loom.runner.worktree` | S | 0 | 6 |
 
@@ -71,6 +72,14 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `identity_alive` — Whether THAT process is alive, dead, or currently unverifiable.
 - def `pid_alive` — ``None`` when the label is not a pid the kernel can be asked about (an all-digit label too large for a C long raises ``OverflowError`` — PR #415 review: the reaper runs before the boot gate, so one stale label must never keep loom from starting).
 - def `reap_orphaned_containers` — #407: remove every loom-labelled container whose owner process is gone.
+
+### `lithos_loom.runner.pidfile`
+- def `pidfile_path` — Where the daemon for *work_dir* records itself.
+- class `PidfileClaim` — This process's ownership of the pidfile: the lock, held until :meth:`release` (or the process ends).
+- def `claim_pidfile` — Take the pidfile for this process, or ``None`` if a live daemon holds it.
+- def `read_pidfile` — The identity recorded at *path*, or ``None`` when there is no well-formed file there (missing, unreadable, not the expected shape).
+- def `holder_alive` — Whether some process holds the pidfile's lock: ``True`` (a daemon is up), ``False`` (no file, or nobody holds it), ``None`` (the lock is unknowable here — the probe itself failed).
+- def `daemon_alive` — Whether THE daemon *identity* names still runs and still owns the file.
 
 ### `lithos_loom.runner.signals`
 - def `install_sigterm_exit` — Make SIGTERM raise ``SystemExit`` in the main thread (no-op where the interpreter cannot install handlers, e.g. a non-main thread).

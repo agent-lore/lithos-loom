@@ -325,8 +325,10 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
     )
 
     stop_event = asyncio.Event()
+    drain_event = asyncio.Event()  # #407 slice 3: the supervisor's relayed SIGUSR1
     loop = asyncio.get_running_loop()
     installed = _boot.install_stop_signals(loop, stop_event.set)
+    installed += _boot.install_drain_signal(loop, drain_event.set)
 
     try:
         bus = EventBus()
@@ -603,7 +605,13 @@ async def _amain(cfg: LoomConfig, config_path: Path | None = None) -> int:
                 asyncio.create_task(periodic_reconcile(), name="github-push-reconcile"),
             ]
             try:
-                await stop_event.wait()
+                # on drain: the three dispatchers answer `draining` to every
+                # new decision (the sweep keeps observing and recording), the
+                # runs in flight land, then the child exits 0 — the
+                # shutdowns below find nothing to cancel or refund
+                await _boot.run_until_stopped(
+                    stop_event, drain_event, (remediation, merge_gate, conflict_resolve)
+                )
             finally:
                 for t in tasks:
                     t.cancel()

@@ -54,6 +54,7 @@ timeouts, the probe itself) lives in :mod:`.merge_gate_command`.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
@@ -72,6 +73,7 @@ from lithos_loom.subscriptions._project_settings import (
     read_project_flag,
     resolve_project_repo,
 )
+from lithos_loom.subscriptions.draining import DrainState, wait_idle
 from lithos_loom.subscriptions.merge_gate_command import (
     PROBE_TIMEOUT_SECONDS,
     MergeGateSettings,
@@ -118,6 +120,8 @@ __all__ = [
     "read_record",
     "spawn_merge_gate",
 ]
+
+logger = logging.getLogger(__name__)
 
 # Project-context metadata key: per-project dial for the base-move re-gate.
 MERGE_GATE_SETTING = "develop_merge_gate"
@@ -174,6 +178,8 @@ class MergeGateDispatch:
         self._hold = hold
         self._tasks: dict[str, asyncio.Task[None]] = {}  # project slug → run
         self._in_flight: dict[str, str] = {}  # project slug → pr url
+        # #407 slice 3 (`lithos-loom drain`): no new run once draining
+        self._drain = DrainState()
         # gate id → probe; a probe's result is its settled label (see
         # `settle_probe`)
         self._probes: dict[str, asyncio.Task[str]] = {}
@@ -228,6 +234,23 @@ class MergeGateDispatch:
         while live := self._live():
             await asyncio.gather(*live, return_exceptions=True)
 
+    def begin_drain(self) -> None:
+        """Refuse every new run from now on; runs and probes in flight
+        finish and record as usual — a probe that settles after this never
+        starts the run it would have."""
+        if self._drain.begin():
+            logger.info(
+                "merge-gate: draining — no new runs; %d in flight", len(self._live())
+            )
+
+    async def drained(self) -> None:
+        """Return once no probe or run of ours is in flight."""
+        await wait_idle(lambda: bool(self._live()))
+
+    @property
+    def draining(self) -> bool:
+        return self._drain.draining
+
     async def shutdown(self) -> None:
         """Cancel + await the in-flight probes and runs; the
         cancellation-safe spawn terminates each merge-gate child, so a
@@ -256,6 +279,8 @@ class MergeGateDispatch:
         """
         if not self._settings.enabled:
             return "disabled"
+        if self._drain.draining:
+            return "draining"
         if story_id is None:
             return "no_story"  # `--story` is how the run resolves the config
         head = getattr(pr, "head_sha", "") or ""
@@ -453,6 +478,8 @@ class MergeGateDispatch:
                 probe = self._probes.get(gate.id)
                 if probe is not None and not probe.done():
                     return "probing"
+                if self._drain.draining:
+                    return "draining"  # the origin read above was an await
                 # prune finished probes so a long-lived daemon's map stays
                 # bounded by the gates currently probing, not ever probed
                 self._probes = {k: t for k, t in self._probes.items() if not t.done()}
@@ -478,10 +505,9 @@ class MergeGateDispatch:
         stale = self._probes.get(gate.id)
         if stale is not None and not stale.done():
             stale.cancel()
-        self._start_run(
+        return self._start_run(
             gate.id, story_id, spec, slug, repo, head, base, attempts, budget, ctx
         )
-        return "dispatched"
 
     def _start_run(
         self,
@@ -495,7 +521,14 @@ class MergeGateDispatch:
         attempts: int,
         budget: RemediationBudget,
         ctx: SubscriptionContext,
-    ) -> None:
+    ) -> str:
+        if self._drain.draining:
+            # synchronous with the flag: no await between this check and the
+            # task's creation, so a `drained()` that saw idle stays right
+            ctx.logger.info(
+                "merge-gate: draining — not starting the run for %s", spec.pr_url
+            )
+            return "draining"
         ctx.logger.info(
             "merge-gate: dispatching merge-gate for %s (head %s, base %s, attempt %d)",
             spec.pr_url,
@@ -508,6 +541,7 @@ class MergeGateDispatch:
             self._run(gate_id, story_id, spec, repo, head, base, attempts, budget, ctx),
             name=f"merge-gate-{spec.pr_number}",
         )
+        return "dispatched"
 
     async def _probe_then_run(
         self,
@@ -588,8 +622,9 @@ class MergeGateDispatch:
                 spec.pr_url,
             )
             return "superseded"
-        self._start_run(gate_id, story_id, spec, slug, repo, head, base, 1, budget, ctx)
-        return "dispatched"
+        return self._start_run(
+            gate_id, story_id, spec, slug, repo, head, base, 1, budget, ctx
+        )
 
     # ── the run itself ─────────────────────────────────────────────────
 

@@ -40,6 +40,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.conflict_resolve_record` | S | 2 | 1 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
 | `lithos_loom.subscriptions.dispatch_guards` | L | 1 | 12 |
+| `lithos_loom.subscriptions.draining` | XS | 1 | 1 |
 | `lithos_loom.subscriptions.escalation` | M | 1 | 4 |
 | `lithos_loom.subscriptions.escalation_resolver` | S | 1 | 0 |
 | `lithos_loom.subscriptions.external_remediation` | L | 1 | 1 |
@@ -195,6 +196,10 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `record_failed_attempt` — Best-effort persist the failed attempt on the task. Returns whether the write landed.
 - def `release_with_failure` — The whole failure-path release: marker (+stamp), finding, release.
 - def `clear_superseded_failure` — Best-effort per-key delete of ``route``'s failed-attempt marker, iff the dispatch-time ``payload`` carried one (no round trip otherwise).
+
+### `lithos_loom.subscriptions.draining`
+- class `DrainState` — The draining flag plus the count of dispatches committing right now.
+- def `wait_idle` — Return once ``is_busy()`` is false (at once when it already is).
 
 ### `lithos_loom.subscriptions.escalation`
 - class `Escalation` — Why a run ended without delivering, in the gate's shape: a closed- vocabulary *reason*, a one-line *summary*, and the *brief* (branch, rounds, cost, gate verdict, findings, paths) the gate carries as ``run_brief``.

@@ -94,6 +94,13 @@ uv run lithos-loom run
 
 Loom runs as a foreground process. For background operation, use `tmux`, `nohup`, or a `systemd --user` unit.
 
+To restart it without losing a run in flight, drain first:
+
+```bash
+uv run lithos-loom drain   # children finish their in-flight runs and exit; returns when the daemon has
+uv run lithos-loom run
+```
+
 ### 6. Install the Obsidian macros (optional)
 
 If you want to create tasks or project-context docs from inside Obsidian, follow [`docs/macros/README.md`](docs/macros/README.md). Summary: copy `docs/macros/capture-task.md` and `docs/macros/create-project.md` verbatim into your vault's Templater Template Folder, register them, then bind hotkeys to **`Templater: Insert capture-task`** / **`Templater: Insert create-project`**. Verify the CLI-on-PATH check above first.

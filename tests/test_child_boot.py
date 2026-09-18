@@ -122,3 +122,119 @@ async def test_remove_stop_signals_is_safe_on_empty_list() -> None:
     loop = asyncio.get_running_loop()
     # No-op, must not raise — the "child ran to process exit" path.
     _boot.remove_stop_signals(loop, [])
+
+
+# ── drain signal (#407 slice 3) ──────────────────────────────────────────
+
+
+def test_install_drain_signal_suppresses_unsupported_platform() -> None:
+    loop = cast("asyncio.AbstractEventLoop", _NoSignalLoop())
+    assert _boot.install_drain_signal(loop, lambda: None) == []
+
+
+async def test_install_drain_signal_registers_sigusr1_only() -> None:
+    loop = asyncio.get_running_loop()
+    drain = asyncio.Event()
+    installed = _boot.install_drain_signal(loop, drain.set)
+    try:
+        assert installed == [signal.SIGUSR1]
+    finally:
+        _boot.remove_stop_signals(loop, installed)
+
+
+async def test_a_delivered_sigusr1_trips_the_drain_callback_not_the_stop() -> None:
+    loop = asyncio.get_running_loop()
+    stop, drain = asyncio.Event(), asyncio.Event()
+    installed = _boot.install_stop_signals(loop, stop.set)
+    installed += _boot.install_drain_signal(loop, drain.set)
+    if signal.SIGUSR1 not in installed:
+        _boot.remove_stop_signals(loop, installed)
+        pytest.skip("event loop does not support signal handlers")
+    try:
+        signal.raise_signal(signal.SIGUSR1)
+        async with asyncio.timeout(1.0):
+            await drain.wait()
+        assert not stop.is_set()
+    finally:
+        _boot.remove_stop_signals(loop, installed)
+
+
+class _FakeDrainable:
+    def __init__(self, *, finish: asyncio.Event | None = None) -> None:
+        self.began = False
+        self._finish = finish
+
+    def begin_drain(self) -> None:
+        self.began = True
+
+    async def drained(self) -> None:
+        if self._finish is not None:
+            await self._finish.wait()
+
+
+async def test_run_until_stopped_returns_on_stop_without_draining() -> None:
+    stop, drain = asyncio.Event(), asyncio.Event()
+    d = _FakeDrainable()
+    task = asyncio.create_task(_boot.run_until_stopped(stop, drain, [d]))
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+    assert d.began is False
+
+
+async def test_run_until_stopped_drains_every_drainable_then_returns() -> None:
+    stop, drain = asyncio.Event(), asyncio.Event()
+    finish = asyncio.Event()
+    slow, quick = _FakeDrainable(finish=finish), _FakeDrainable()
+    task = asyncio.create_task(_boot.run_until_stopped(stop, drain, [slow, quick]))
+    drain.set()
+    await asyncio.sleep(0.01)
+    assert slow.began and quick.began
+    assert not task.done()  # the slow one is still finishing its run
+    finish.set()
+    await asyncio.wait_for(task, 1.0)
+
+
+async def test_a_stop_during_the_drain_ends_the_wait_at_once() -> None:
+    stop, drain = asyncio.Event(), asyncio.Event()
+    never = asyncio.Event()
+    d = _FakeDrainable(finish=never)
+    task = asyncio.create_task(_boot.run_until_stopped(stop, drain, [d]))
+    drain.set()
+    await asyncio.sleep(0.01)
+    assert d.began and not task.done()
+    stop.set()
+    await asyncio.wait_for(task, 1.0)
+
+
+async def test_run_until_stopped_with_drain_already_set_still_drains() -> None:
+    stop, drain = asyncio.Event(), asyncio.Event()
+    drain.set()
+    d = _FakeDrainable()
+    await asyncio.wait_for(_boot.run_until_stopped(stop, drain, [d]), 1.0)
+    assert d.began
+
+
+def test_importing_the_boot_helper_ignores_sigusr1_until_a_loop_handler_exists() -> (
+    None
+):
+    """SIGUSR1's default is to terminate: a drain relayed while a child is
+    still importing (~0.5 s) would kill it and read as a crash. The boot
+    helper is imported before the heavy modules, so the ignore lands first;
+    `install_drain_signal` then replaces it with the real handler."""
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import signal, lithos_loom.children._boot; "
+            "print(signal.getsignal(signal.SIGUSR1) is signal.SIG_IGN)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout.strip() == "True"

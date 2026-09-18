@@ -11,7 +11,9 @@ configured route, and — for the needs-human escalation convention
 :class:`~lithos_loom.subscriptions.escalation_resolver.EscalationResolver`
 (re-dispatch nudge when the operator completes a loom-raised gate) plus the
 :class:`~lithos_loom.notifications.Notifier` the runners fire when they raise
-one. Runs until SIGTERM/SIGINT.
+one. Runs until SIGTERM/SIGINT — or, on the supervisor's relayed SIGUSR1
+(``lithos-loom drain``, #407), until the runners have finished the run in
+flight without claiming another.
 
 Invocation contract (set by the supervisor):
 
@@ -50,7 +52,9 @@ async def _amain(cfg: LoomConfig) -> int:
     bus = EventBus()
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
+    drain_event = asyncio.Event()  # #407 slice 3: the supervisor's relayed SIGUSR1
     _boot.install_stop_signals(loop, stop_event.set)
+    _boot.install_drain_signal(loop, drain_event.set)
 
     cursor_store = CursorStore(
         cfg.orchestrator.work_dir / "route-runner" / "sse_cursors.json"
@@ -119,7 +123,9 @@ async def _amain(cfg: LoomConfig) -> int:
         ]
 
         try:
-            await stop_event.wait()
+            # on drain: the runners refuse every new claim, the run in flight
+            # (if any) lands, then the child exits 0 — nothing to cancel
+            await _boot.run_until_stopped(stop_event, drain_event, runners)
         finally:
             for t in tasks:
                 t.cancel()
