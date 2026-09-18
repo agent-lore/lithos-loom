@@ -178,6 +178,7 @@ EXPECTED_CLASS = {
     "claude_stream_disconnect.json": FailureClass.TRANSIENT_INFRA,
     "claude_api_overloaded_529.json": FailureClass.TRANSIENT_INFRA,
     "codex_stream_disconnect.json": FailureClass.TRANSIENT_INFRA,
+    "codex_model_at_capacity.json": FailureClass.TRANSIENT_INFRA,
     "codex_usage_limit.json": FailureClass.USAGE_LIMITED,
     "docker_exec_killed_137.json": FailureClass.OOM_OR_SPAWN,
     "docker_container_not_running.json": FailureClass.OOM_OR_SPAWN,
@@ -237,6 +238,8 @@ def test_auth_wordings(text: str) -> None:
         "getaddrinfo EAI_AGAIN api.anthropic.com",
         "API Error: 503 Service Unavailable",
         "API Error: 529 overloaded_error",
+        # #419: a provider-side capacity refusal (codex, lens 28105098)
+        "Selected model is at capacity. Please try a different model.",
     ],
 )
 def test_transient_wordings(text: str) -> None:
@@ -385,6 +388,86 @@ _AGENT_PROSE = [
     "OAuth session expired is the message our own login page shows.",
     "The user is not logged in, so the page says 'Please run /login' (#382 prose).",
 ]
+
+
+def test_at_capacity_in_the_agents_own_words_is_not_the_providers_refusal() -> None:
+    """#419 review: retained unparseable stdout (the #405 shape) carries the
+    claude payload's ``result`` — the agent's final message — into the
+    transport text, and "at capacity" is ordinary reviewer English in a
+    codebase with admission caps. The pattern is the provider's sentence
+    shape (the model … at capacity), not the bare phrase."""
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": (
+                "Blocking: the pool silently drops writes when it is at capacity."
+            ),
+            "session_id": "s1",
+            "total_cost_usd": 0.1,
+        }
+    )
+    turn = ClaudeEngine().parse_turn(
+        "warning: something printed before the JSON\n" + payload + "\n",
+        exit_code=1,
+        stderr="",
+    )
+    assert turn.raw is not None and turn.raw.get("unparsed_stdout")
+    assert classify_failure(turn) == AGENT_ERROR
+
+
+_CAPACITY = "Selected model is at capacity. Please try a different model."
+_CAPACITY_PROSE = (
+    "Blocking: the selected model remains at capacity after a slot is released, "
+    "so the picker never fades it."
+)
+
+
+def test_the_providers_capacity_sentence_in_agent_prose_is_still_not_infra() -> None:
+    """PR #421 review: the exact `model … at capacity` tokens, in the agent's
+    own final message, through the real claude parser (the #405 shape puts
+    that message into retained stdout). The provider's refusal is read only
+    in structured error channels, never in retained agent output."""
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": _CAPACITY_PROSE,
+            "session_id": "s1",
+            "total_cost_usd": 0.1,
+        }
+    )
+    turn = ClaudeEngine().parse_turn(
+        "warning: something printed before the JSON\n" + payload + "\n",
+        exit_code=1,
+        stderr="",
+    )
+    assert turn.raw is not None and _CAPACITY_PROSE in str(turn.raw["unparsed_stdout"])
+    assert classify_failure(turn) == AGENT_ERROR
+
+
+def test_the_capacity_sentence_counts_only_in_structured_error_channels() -> None:
+    # retained stdout alone — even the provider's exact sentence — is not it
+    turn = _failed(result_text="", raw={"unparsed_stdout": _CAPACITY})
+    assert classify_failure(turn) == AGENT_ERROR
+    # a codex failure event is (the captured shape)
+    turn = _failed(
+        result_text="",
+        raw={"failure_events": [{"type": "error", "message": _CAPACITY}]},
+    )
+    assert classify_failure(turn) == FailureClass.TRANSIENT_INFRA
+    # so is the claude CLI's own error result
+    turn = _failed(result_text=_CAPACITY, raw={"is_error": True})
+    assert classify_failure(turn) == FailureClass.TRANSIENT_INFRA
+
+
+def test_transient_host_action_names_the_capacity_lever() -> None:
+    # #419 review: "check the host's network" is a dead end for a provider
+    # capacity refusal; the levers are a later re-dispatch or another model
+    action = reaction_for(FailureClass.TRANSIENT_INFRA).host_action
+    assert "capacity" in action and "different model" in action
 
 
 @pytest.mark.parametrize("text", _AGENT_PROSE)

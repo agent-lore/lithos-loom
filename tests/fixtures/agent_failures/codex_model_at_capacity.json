@@ -1,0 +1,22 @@
+{
+  "engine": "codex",
+  "exit_code": 1,
+  "result_text": "I\u2019ll trace the picker data end-to-end\u2014configuration, snapshot/claim inputs, request handling, rendering, and toggle persistence\u2014then map every acceptance point to its implementation and tests before writing the handoff review.",
+  "stderr": "Reading additional input from stdin...\n",
+  "raw": {
+    "failure_events": [
+      {
+        "type": "error",
+        "message": "Selected model is at capacity. Please try a different model."
+      },
+      {
+        "type": "turn.failed",
+        "error": {
+          "message": "Selected model is at capacity. Please try a different model."
+        }
+      }
+    ]
+  },
+  "container_running": true,
+  "_provenance": "lens story 28105098 (agent picker) daemon run 0b8eb974, 2026-09-17 23:04 BST: the correctness reviewer (codex) failed at the provider with `Selected model is at capacity. Please try a different model.` \u2014 retained verbatim in raw.failure_events; the container was still running and every check was GREEN. classification at capture: agent_error, so the run escalated (gate ed54d84d) instead of retrying (#419)."
+}

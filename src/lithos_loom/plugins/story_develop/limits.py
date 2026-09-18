@@ -24,7 +24,8 @@ Classes (:class:`FailureClass`) and their reactions:
   a genuinely revoked login fails identically until a human re-authenticates,
   and the host action says whether the retry ran on re-synced credentials;
 * ``transient_infra`` → up to two retries with backoff (stream disconnects,
-  5xx / 429 / overloaded, socket errors), then escalate;
+  5xx / 429 / overloaded, socket errors, a provider's "model … at capacity"
+  refusal — #419), then escalate;
 * ``oom_or_spawn`` → one retry (a killed process or a dead container), then
   escalate;
 * ``timeout`` / ``agent_error`` → the plain failure path, as before.
@@ -134,6 +135,18 @@ _TRANSIENT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\brate.?limit(?:ed|_error)?\b", re.IGNORECASE),
 )
 
+# #419: a provider-side capacity refusal — codex's `Selected model is at
+# capacity. Please try a different model.` (lens 28105098) — is the textbook
+# transient: the model, not the account, is full right now. Read ONLY in the
+# structured error channels (:func:`_provider_error_text`): retained
+# unparseable stdout carries the agent's own final message, and "the model
+# … at capacity" is ordinary reviewer English in a codebase with admission
+# caps (PR #421 review) — those words from the agent are a failed review,
+# never a retry.
+_PROVIDER_REFUSAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bmodel\b[^.\n]{0,40}\bat capacity\b", re.IGNORECASE),
+)
+
 # The process was killed or its container is gone. A killed process (exit
 # 137) may well succeed on a re-exec into the still-running container; a dead
 # container fails the retry too and escalates with the docker host action —
@@ -193,6 +206,17 @@ def _transport_text(turn: TurnResult) -> str:
     return "\n".join(parts)
 
 
+def _provider_error_text(turn: TurnResult) -> str:
+    """The channels where only the PROVIDER speaks: codex failure events and
+    the claude CLI's ``result`` when the payload flags ``is_error``. Never
+    stderr or retained stdout — both can carry the agent's own words."""
+    raw = turn.raw or {}
+    parts = [_failure_events_text(turn)]
+    if raw.get("is_error"):
+        parts.append(turn.result_text)
+    return "\n".join(parts)
+
+
 def _api_error_status(turn: TurnResult) -> int | None:
     raw = turn.raw or {}
     status = raw.get("api_error_status")
@@ -208,8 +232,10 @@ def classify_failure(turn: TurnResult) -> FailureClass:
     message can mention rate limiting — it must pause, never retry into the
     same wall); then a structured API status (401 → auth, 5xx / 429 →
     transient); then auth wording (a 401 inside a disconnect wording is the
-    auth problem); then transient transport; then spawn/memory wordings — the
-    infra wordings read the transport channels only (:func:`_transport_text`).
+    auth problem); then transient transport; then a provider's refusal, read
+    in the provider's own channels only (:func:`_provider_error_text`); then
+    spawn/memory wordings — the infra wordings read the transport channels
+    only (:func:`_transport_text`).
     Unknown failures default to ``agent_error`` — never mis-pause, never
     mis-retry.
     """
@@ -236,6 +262,9 @@ def classify_failure(turn: TurnResult) -> FailureClass:
     if any(p.search(text) for p in _AUTH_PATTERNS):
         return FailureClass.AUTH_FAILED
     if any(p.search(text) for p in _TRANSIENT_PATTERNS):
+        return FailureClass.TRANSIENT_INFRA
+    provider = _provider_error_text(turn)
+    if any(p.search(provider) for p in _PROVIDER_REFUSAL_PATTERNS):
         return FailureClass.TRANSIENT_INFRA
     if any(p.search(text) for p in _OOM_OR_SPAWN_PATTERNS):
         return FailureClass.OOM_OR_SPAWN
@@ -313,7 +342,9 @@ _REACTIONS: dict[FailureClass, Reaction] = {
         backoff_seconds=(30.0, 120.0),
         escalate=True,
         host_action=(
-            f"check the host's network and the provider's status page, {_COMPLETE_GATE}"
+            "check the host's network and the provider's status page — or, for a "
+            "model at capacity, re-dispatch later or pin a different model "
+            f"(a `fallback_chain`), {_COMPLETE_GATE}"
         ),
     ),
     FailureClass.OOM_OR_SPAWN: Reaction(
