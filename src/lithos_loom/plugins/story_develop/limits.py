@@ -24,7 +24,8 @@ Classes (:class:`FailureClass`) and their reactions:
   a genuinely revoked login fails identically until a human re-authenticates,
   and the host action says whether the retry ran on re-synced credentials;
 * ``transient_infra`` → up to two retries with backoff (stream disconnects,
-  5xx / 429 / overloaded, socket errors), then escalate;
+  5xx / 429 / overloaded, socket errors, a provider's "model … at capacity"
+  refusal — #419), then escalate;
 * ``oom_or_spawn`` → one retry (a killed process or a dead container), then
   escalate;
 * ``timeout`` / ``agent_error`` → the plain failure path, as before.
@@ -132,6 +133,13 @@ _TRANSIENT_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
     re.compile(r"\brate.?limit(?:ed|_error)?\b", re.IGNORECASE),
+    # #419: a provider-side capacity refusal — codex's `Selected model is at
+    # capacity. Please try a different model.` (lens 28105098) — is the
+    # textbook transient: the model, not the account, is full right now. The
+    # provider's sentence shape, not the bare phrase: retained unparseable
+    # stdout carries the agent's own final message, and "at capacity" is
+    # ordinary reviewer English in a codebase with admission caps.
+    re.compile(r"\bmodel\b[^.\n]{0,40}\bat capacity\b", re.IGNORECASE),
 )
 
 # The process was killed or its container is gone. A killed process (exit
@@ -313,7 +321,9 @@ _REACTIONS: dict[FailureClass, Reaction] = {
         backoff_seconds=(30.0, 120.0),
         escalate=True,
         host_action=(
-            f"check the host's network and the provider's status page, {_COMPLETE_GATE}"
+            "check the host's network and the provider's status page — or, for a "
+            "model at capacity, re-dispatch later or pin a different model "
+            f"(a `fallback_chain`), {_COMPLETE_GATE}"
         ),
     ),
     FailureClass.OOM_OR_SPAWN: Reaction(
