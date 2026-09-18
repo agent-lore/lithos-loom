@@ -417,6 +417,52 @@ def test_at_capacity_in_the_agents_own_words_is_not_the_providers_refusal() -> N
     assert classify_failure(turn) == AGENT_ERROR
 
 
+_CAPACITY = "Selected model is at capacity. Please try a different model."
+_CAPACITY_PROSE = (
+    "Blocking: the selected model remains at capacity after a slot is released, "
+    "so the picker never fades it."
+)
+
+
+def test_the_providers_capacity_sentence_in_agent_prose_is_still_not_infra() -> None:
+    """PR #421 review: the exact `model … at capacity` tokens, in the agent's
+    own final message, through the real claude parser (the #405 shape puts
+    that message into retained stdout). The provider's refusal is read only
+    in structured error channels, never in retained agent output."""
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": _CAPACITY_PROSE,
+            "session_id": "s1",
+            "total_cost_usd": 0.1,
+        }
+    )
+    turn = ClaudeEngine().parse_turn(
+        "warning: something printed before the JSON\n" + payload + "\n",
+        exit_code=1,
+        stderr="",
+    )
+    assert turn.raw is not None and _CAPACITY_PROSE in str(turn.raw["unparsed_stdout"])
+    assert classify_failure(turn) == AGENT_ERROR
+
+
+def test_the_capacity_sentence_counts_only_in_structured_error_channels() -> None:
+    # retained stdout alone — even the provider's exact sentence — is not it
+    turn = _failed(result_text="", raw={"unparsed_stdout": _CAPACITY})
+    assert classify_failure(turn) == AGENT_ERROR
+    # a codex failure event is (the captured shape)
+    turn = _failed(
+        result_text="",
+        raw={"failure_events": [{"type": "error", "message": _CAPACITY}]},
+    )
+    assert classify_failure(turn) == FailureClass.TRANSIENT_INFRA
+    # so is the claude CLI's own error result
+    turn = _failed(result_text=_CAPACITY, raw={"is_error": True})
+    assert classify_failure(turn) == FailureClass.TRANSIENT_INFRA
+
+
 def test_transient_host_action_names_the_capacity_lever() -> None:
     # #419 review: "check the host's network" is a dead end for a provider
     # capacity refusal; the levers are a later re-dispatch or another model
