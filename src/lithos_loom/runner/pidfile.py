@@ -25,6 +25,7 @@ much simply re-runs.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -98,9 +99,15 @@ def claim_pidfile(path: Path) -> PidfileClaim | None:
             "start_ticks": me.start_ticks,
             "host_boot": me.host_boot,
         }
+        data = json.dumps(payload).encode("utf-8")
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, json.dumps(payload).encode("utf-8"))
+        written = 0
+        while written < len(data):  # a regular-file write may be short
+            n = os.write(fd, data[written:])
+            if n <= 0:
+                raise OSError(errno.EIO, f"pidfile write made no progress at {path}")
+            written += n
         os.fsync(fd)
     except OSError:
         os.close(fd)
@@ -151,17 +158,26 @@ def holder_alive(path: Path) -> bool | None:
 
 
 def daemon_alive(path: Path, identity: ProcessIdentity) -> bool:
-    """Whether the daemon the pidfile names is still running.
+    """Whether THE daemon *identity* names still runs and still owns the file.
 
-    The lock answers when it can. Otherwise a verifiable identity answers
-    for itself (a reused pid, or one from another boot, is dead), and an
-    unverifiable one falls back to the kernel's pid check; a pid the kernel
-    cannot even represent is not alive.
+    The lock alone proves that *some* process holds the pathname, not that
+    it is this one (PR #418 re-review): a successor that claimed within a
+    poll would keep a drain waiting forever, and in the claim handoff — the
+    lock taken, the content not yet rewritten — the file still names the
+    predecessor. So: a positively dead identity is dead whatever holds the
+    lock; the content must still name the identity (a successor's, or
+    nobody's, means this daemon is gone); only then does the lock answer,
+    and only where the lock is unknowable do the identity and the kernel's
+    pid check stand in (a pid the kernel cannot represent is not alive).
     """
+    verdict = orphans.identity_alive(identity)
+    if verdict is False:
+        return False
+    if read_pidfile(path) != identity:
+        return False
     held = holder_alive(path)
     if held is not None:
         return held
-    verdict = orphans.identity_alive(identity)
     if verdict is not None:
         return verdict
     return orphans.pid_alive(identity.pid) is True

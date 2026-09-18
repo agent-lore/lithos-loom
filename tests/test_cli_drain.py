@@ -246,3 +246,36 @@ def test_a_negative_timeout_is_a_usage_error(tmp_path: Path) -> None:
         app, ["drain", "--config", str(_config(tmp_path)), "--timeout", "-1"]
     )
     assert result.exit_code == 2
+
+
+def test_a_successor_claiming_the_file_means_the_signalled_daemon_exited(
+    tmp_path: Path,
+) -> None:
+    """A exited during the wait and an automatic restart claimed the file:
+    the daemon we signalled is gone (exit 0) and the report names the
+    successor, which was neither signalled nor waited on."""
+    path = _pidfile(tmp_path)
+    host = _Host(alive_for=2)
+    real_alive = host.alive
+
+    def alive_then_replaced(identity: ProcessIdentity) -> bool:
+        verdict = real_alive(path, identity)
+        if not verdict:  # A is gone: B claims the file
+            path.write_text(
+                '{"pid": 5151, "start_ticks": 7, "host_boot": "boot-1"}',
+                encoding="utf-8",
+            )
+        return verdict
+
+    outcome = drain_daemon(
+        path,
+        timeout=0.0,
+        poll=0.5,
+        alive=lambda p, i: alive_then_replaced(i),
+        kill=host.kill,
+        sleep=host.sleep,
+        clock=host.clock,
+    )
+    assert outcome.code == 0
+    assert host.signals == [(4242, signal.SIGUSR1)]
+    assert "exited" in outcome.message and "5151" in outcome.message

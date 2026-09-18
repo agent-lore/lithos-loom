@@ -185,24 +185,147 @@ def test_daemon_alive_falls_back_to_the_identity_when_the_lock_is_unknowable(
 ) -> None:
     path = tmp_path / "supervisor.pid"
     monkeypatch.setattr(pidfile, "holder_alive", lambda p: None)
+
+    def naming(identity: ProcessIdentity) -> ProcessIdentity:
+        path.write_text(
+            json.dumps(
+                {
+                    "pid": identity.pid,
+                    "start_ticks": identity.start_ticks,
+                    "host_boot": identity.host_boot,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return identity
+
     live = orphans.process_identity(os.getpid())
     if live is not None:
-        assert pidfile.daemon_alive(path, live) is True
-    assert (
-        pidfile.daemon_alive(
-            path, ProcessIdentity(pid=os.getpid(), start_ticks=0, host_boot="")
-        )
-        is True
-    )  # unverifiable identity: the kernel's pid check
-    assert (
-        pidfile.daemon_alive(
-            path, ProcessIdentity(pid=os.getpid(), start_ticks=1, host_boot="not-this")
-        )
-        is False
+        assert pidfile.daemon_alive(path, naming(live)) is True
+    unverifiable = naming(ProcessIdentity(pid=os.getpid(), start_ticks=0, host_boot=""))
+    assert pidfile.daemon_alive(path, unverifiable) is True  # the kernel's pid check
+    other_boot = naming(
+        ProcessIdentity(pid=os.getpid(), start_ticks=1, host_boot="not-this")
     )
-    assert (
-        pidfile.daemon_alive(
-            path, ProcessIdentity(pid=2**70, start_ticks=0, host_boot="")
-        )
-        is False
+    assert pidfile.daemon_alive(path, other_boot) is False
+    huge = naming(ProcessIdentity(pid=2**70, start_ticks=0, host_boot=""))
+    assert pidfile.daemon_alive(path, huge) is False
+
+
+# ── the lock must name the identity (PR #418 re-review) ─────────────────
+
+
+_HOLDER_SCRIPT = """
+import sys, time
+from pathlib import Path
+from lithos_loom.runner import pidfile
+c = pidfile.claim_pidfile(Path(sys.argv[1]))
+print("held" if c is not None else "refused", flush=True)
+if c is not None:
+    while True:
+        time.sleep(0.2)
+"""
+
+
+def test_daemon_alive_is_false_for_an_identity_a_successor_replaced(
+    tmp_path: Path,
+) -> None:
+    """A exited, B claimed within the poll: the lock is held, but by B —
+    `daemon_alive(path, A)` must say A is gone (else `drain` waits forever
+    on a daemon that ended, and never signals the one that replaced it)."""
+    path = tmp_path / "supervisor.pid"
+    first = pidfile.claim_pidfile(path)
+    assert first is not None
+    first.release()  # A exited
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_SCRIPT, str(path)],
+        stdout=subprocess.PIPE,
+        text=True,
     )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "held"  # B claimed
+        successor = pidfile.read_pidfile(path)
+        assert successor is not None and successor.pid == holder.pid
+        assert pidfile.holder_alive(path) is True
+        assert pidfile.daemon_alive(path, first.identity) is False
+        assert pidfile.daemon_alive(path, successor) is True
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_daemon_alive_rejects_a_positively_dead_identity_under_a_held_lock(
+    tmp_path: Path,
+) -> None:
+    """The claim handoff: B holds the lock but has not rewritten the
+    content yet, so the file still names A. A is positively dead (its
+    start marker no longer matches); the held lock must not resurrect it."""
+    path = tmp_path / "supervisor.pid"
+    claim = pidfile.claim_pidfile(path)  # we are B, holding the lock
+    assert claim is not None
+    try:
+        dead = ProcessIdentity(
+            pid=os.getpid(), start_ticks=1, host_boot=orphans.host_boot_id()
+        )
+        path.write_text(
+            json.dumps(
+                {"pid": dead.pid, "start_ticks": 1, "host_boot": dead.host_boot}
+            ),
+            encoding="utf-8",
+        )
+        assert pidfile.read_pidfile(path) == dead
+        assert pidfile.holder_alive(path) is True
+        assert pidfile.daemon_alive(path, dead) is False
+    finally:
+        claim.release()
+
+
+def test_daemon_alive_under_an_unknowable_lock_still_needs_the_content_to_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "supervisor.pid"
+    monkeypatch.setattr(pidfile, "holder_alive", lambda p: None)
+    live = orphans.process_identity(os.getpid())
+    if live is None:
+        pytest.skip("no process identity on this host")
+    other = ProcessIdentity(
+        pid=live.pid + 1, start_ticks=live.start_ticks, host_boot=live.host_boot
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "pid": other.pid,
+                "start_ticks": other.start_ticks,
+                "host_boot": other.host_boot,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert pidfile.daemon_alive(path, live) is False  # the file no longer names it
+
+
+# ── the whole identity is written (PR #418 re-review, Medium) ───────────
+
+
+def test_claim_writes_the_whole_identity_when_the_kernel_writes_short(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write = os.write
+    monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, data[:1]))
+    path = tmp_path / "supervisor.pid"
+    claim = pidfile.claim_pidfile(path)
+    assert claim is not None
+    try:
+        assert pidfile.read_pidfile(path) == claim.identity
+    finally:
+        claim.release()
+
+
+def test_claim_raises_when_the_write_makes_no_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+    with pytest.raises(OSError):
+        pidfile.claim_pidfile(tmp_path / "supervisor.pid")
+    assert pidfile.holder_alive(tmp_path / "supervisor.pid") is False  # nothing held

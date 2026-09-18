@@ -105,8 +105,17 @@ def drain_daemon(
                 "it to stop now instead (a killed remediation round is refunded)",
             )
         sleep(poll)
+    elapsed = clock() - started
+    successor = read_pidfile(path)
+    if successor is not None and successor != identity:
+        return DrainOutcome(
+            0,
+            f"drain: daemon pid {identity.pid} exited after {elapsed:.1f}s; a new "
+            f"daemon (pid {successor.pid}) now owns the work dir — it was neither "
+            "signalled nor waited on",
+        )
     return DrainOutcome(
         0,
-        f"drain: daemon pid {identity.pid} exited after {clock() - started:.1f}s; "
+        f"drain: daemon pid {identity.pid} exited after {elapsed:.1f}s; "
         "safe to restart",
     )

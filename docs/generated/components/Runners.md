@@ -79,7 +79,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 - def `claim_pidfile` — Take the pidfile for this process, or ``None`` if a live daemon holds it.
 - def `read_pidfile` — The identity recorded at *path*, or ``None`` when there is no well-formed file there (missing, unreadable, not the expected shape).
 - def `holder_alive` — Whether some process holds the pidfile's lock: ``True`` (a daemon is up), ``False`` (no file, or nobody holds it), ``None`` (the lock is unknowable here — the probe itself failed).
-- def `daemon_alive` — Whether the daemon the pidfile names is still running.
+- def `daemon_alive` — Whether THE daemon *identity* names still runs and still owns the file.
 
 ### `lithos_loom.runner.signals`
 - def `install_sigterm_exit` — Make SIGTERM raise ``SystemExit`` in the main thread (no-op where the interpreter cannot install handlers, e.g. a non-main thread).
