@@ -25,6 +25,7 @@ command where text loom did not author crosses to a world-readable GitHub PR:
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import stat
@@ -75,14 +76,27 @@ class RunFacts:
     run_dir: str = ""
 
 
-def _opt_int(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+def _opt_rounds(value: Any) -> int | None:
+    """A round COUNT: a non-negative int, else unknown.
 
-
-def _opt_float(value: Any) -> float | None:
-    if isinstance(value, bool):
+    Type-correct is not enough — ``-3`` would be published as a real negative
+    round count. A value outside the domain is a malformed / partial
+    ``state.json``, and "unknown" is the only honest rendering of it."""
+    if isinstance(value, bool) or not isinstance(value, int):
         return None
-    return float(value) if isinstance(value, (int, float)) else None
+    return value if value >= 0 else None
+
+
+def _opt_cost(value: Any) -> float | None:
+    """A spend: a finite, non-negative number, else unknown.
+
+    ``json.loads`` accepts ``NaN`` / ``Infinity``, so a malformed brief can
+    otherwise reach the PR body as ``$nan`` / ``$inf`` — type-correct and
+    meaningless."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def _opt_str(value: Any) -> str:
@@ -184,21 +198,35 @@ _CLOSES_RE = re.compile(
 _MENTION_RE = re.compile(r"(?<![\w`])@([A-Za-z0-9][-A-Za-z0-9/]*)")
 # Backtick runs would break out of the fence that quotes this text.
 _FENCE_RE = re.compile(r"`{3,}")
+# GitHub renders inline HTML in a PR description, so `<img src=…>` is a live
+# off-site request (a tracking beacon on every viewer). Only a `<` that starts
+# a tag is escaped — `a < b` stays readable.
+_HTML_OPEN_RE = re.compile(r"<(?=[A-Za-z/!?])")
+# `[text](target)` is a live link. Break the syntax at the bracket.
+_LINK_RE = re.compile(r"\[(?=[^\]]*\]\()")
 
 
 def defang_markup(text: str) -> str:
     """Neutralise the markup GitHub treats as *live* in a PR description.
 
-    Agent-written text (the coder's handoff) and host diagnostics both reach
-    the PR body. GitHub closes issues named by a closing keyword anywhere in a
-    description and notifies every ``@name``, so a handoff line saying
-    ``Closes #1337 cc @org/sec`` would close an unrelated issue on merge and
-    ping strangers — under the operator's identity. Rewrite the keyword so it
-    reads the same but binds nothing, quote the mention, and defuse backtick
-    runs that would escape the fence the body wraps this in.
+    This is the SOLE defence on the unfenced provenance bullet (the redacted
+    stop reason) and belt-and-braces behind the fence that quotes the coder's
+    handoff, so it must stand alone: GitHub closes issues named by a closing
+    keyword anywhere in a description, notifies every ``@name``, renders inline
+    HTML, and follows markdown links — a line saying
+    ``Closes #1337 cc @org/sec <img src=//evil.example/p.png>`` would close an
+    unrelated issue on merge, ping strangers and fire an off-site request for
+    every viewer, all under the operator's identity.
+
+    Each construct is rewritten so it still READS the same and binds nothing:
+    the keyword keeps its word, the mention is quoted, a tag-opening ``<`` and
+    a link's ``[`` are HTML-escaped, and backtick runs that would escape the
+    fence are defused.
     """
     out = _CLOSES_RE.sub(lambda m: f"{m.group(1)} → ", text)
     out = _MENTION_RE.sub(r"`@\1`", out)
+    out = _HTML_OPEN_RE.sub("&lt;", out)
+    out = _LINK_RE.sub("&#91;", out)
     return _FENCE_RE.sub("``", out)
 
 
@@ -221,8 +249,8 @@ def run_facts(run_dir: Path) -> RunFacts:
         run_id=_opt_str(state.get("run_id")) or run_dir.name,
         status=_opt_str(state.get("status")),
         failure_reason=_opt_str(state.get("failure_reason")),
-        rounds=_opt_int(state.get("rounds")),
-        cost_usd=_opt_float(brief.get("cost_usd")),
+        rounds=_opt_rounds(state.get("rounds")),
+        cost_usd=_opt_cost(brief.get("cost_usd")),
         test_gate_verdict=_opt_str(brief.get("test_gate_verdict")) or None,
         delivered_pr_url=run_outcome.delivered_pr_url(run_dir, state),
         coder_summary=coder_summary(run_dir / "handoff"),
@@ -235,7 +263,15 @@ def run_facts(run_dir: Path) -> RunFacts:
 # like credentials. `failure_reason` is built from the agent CLI's error text,
 # the subprocess stderr, or the tail of unparsed agent stdout, so any of these
 # can be in it — and a PR body is world-readable.
-_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
+# A **protocol-relative** `//host/path` is as live as `https://host/path` and
+# neither `_ABS_PATH_RE` (its lookbehind cannot match a second `/`) nor a
+# scheme-anchored pattern would catch it.
+_URL_RE = re.compile(r"(?:\b[a-z][a-z0-9+.-]*://|(?<![\w:/])//)\S+", re.IGNORECASE)
+# Internal names leak topology without looking like a url or a path.
+_INTERNAL_HOST_RE = re.compile(
+    r"\b[\w-]+(?:\.[\w-]+)*\.(?:internal|local|corp|lan|intranet)\b(?::\d+)?",
+    re.IGNORECASE,
+)
 _HOME_PATH_RE = re.compile(r"~[\w.-]*(?:/[^\s,;)'\"]*)+")
 _ABS_PATH_RE = re.compile(r"(?<![\w/])/(?:[\w.@+-]+)(?:/[^\s,;)'\"]*)+")
 _SECRETISH_RE = re.compile(r"\b[A-Za-z0-9_-]{24,}\b")
@@ -247,17 +283,20 @@ def redact_for_publication(text: str) -> str:
 
     The PR must say **why** the run stopped (the provenance contract), and the
     raw string must not be published as-is. So the structure survives and the
-    parts that leak the host do not: urls, absolute / home paths and
+    parts that leak the host do not: urls (scheme-ful **and**
+    protocol-relative), internal hostnames, absolute / home paths and
     credential-shaped runs become placeholders, markup is defanged, and the
     result is capped. The operator still reads the untouched original on the
     story's ``[NeedsHuman]`` finding, in the gate brief and in ``--dry-run``.
     """
-    out = " ".join(text.split())
+    # Defang FIRST, substitute after: the placeholders below are angle-bracketed
+    # for the reader, and escaping them again would only print `&lt;url>`.
+    out = defang_markup(" ".join(text.split()))
     out = _URL_RE.sub("<url>", out)
+    out = _INTERNAL_HOST_RE.sub("<host>", out)
     out = _HOME_PATH_RE.sub("<path>", out)
     out = _ABS_PATH_RE.sub("<path>", out)
     out = _SECRETISH_RE.sub("<redacted>", out)
-    out = defang_markup(out)
     if len(out) > _MAX_REASON_CHARS:
         out = out[: _MAX_REASON_CHARS - 1].rstrip() + "…"
     return out

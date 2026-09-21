@@ -14,13 +14,13 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli` | XS | 0 | 0 |
 | `lithos_loom.cli._deliver_facts` | M | 1 | 7 |
 | `lithos_loom.cli._deliver_lithos` | M | 4 | 10 |
-| `lithos_loom.cli._deliver_repo` | S | 1 | 6 |
+| `lithos_loom.cli._deliver_repo` | M | 1 | 8 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
-| `lithos_loom.cli.deliver` | M | 0 | 2 |
+| `lithos_loom.cli.deliver` | L | 0 | 2 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
@@ -60,8 +60,10 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 ### `lithos_loom.cli._deliver_repo`
 - class `RemoteState` — How ``origin``'s copy of the branch stands against the local one.
+- def `run_git` — Every git call this module makes — one seam, so a test can stand in for the whole of git (a lost push response, a refused push) without reaching for a private name.
 - def `local_sha` — The branch's sha in *repo*. Raises :class:`DeliverRefused` if absent.
 - def `remote_state` — Classify the push (step 1) without writing anything.
+- def `remote_sha` — ``origin``'s sha for *branch*, or ``""`` when the ref does not exist.
 - def `push_branch` — Push *branch* to ``origin`` — append-only; a diverged ref is refused.
 - def `origin_repo_name` — ``owner/name`` of the checkout's ``origin`` — the repository every ``gh`` call in this command is pinned to.
 - def `adoptable` — Pick the open PR that is *ours* to adopt, or say why none is (pure).

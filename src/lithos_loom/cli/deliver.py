@@ -65,7 +65,8 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -335,8 +336,8 @@ def _deliver(
     # no gate work to serialise. Otherwise the claim is the cross-process
     # guard: two deliveries of one story must not interleave, or both read
     # "no pr gate" before either writes one and the story ends up with two.
-    claimed = story.status == "open"
-    if claimed and not claim_story(url, agent, story.story_id):
+    claim = _Claim(url=url, agent=agent, story_id=story.story_id)
+    if story.status == "open" and not claim.take():
         raise DeliverRefused(
             f"another `develop deliver` holds the {DELIVER_ASPECT} claim on "
             f"{story.story_id} — it is delivering this story right now. Wait "
@@ -353,10 +354,46 @@ def _deliver(
             base=base,
             no_gate=no_gate,
             json_out=json_out,
+            claim=claim,
         )
     finally:
-        if claimed:
-            release_story(url, agent, story.story_id)
+        claim.release()
+
+
+@dataclass
+class _Claim:
+    """The story's ``deliver`` lease for the length of one delivery.
+
+    Exclusivity is only ever *asserted* while the lease is provably ours, so
+    the handle remembers whether a renewal failed: a lease that would not renew
+    may already belong to another delivery, and then this process must neither
+    mutate gate state (:func:`_deliver_claimed` skips it) nor **release** —
+    releasing would hand the other holder's own claim away, since deliveries on
+    one host share the configured agent id.
+    """
+
+    url: str
+    agent: str
+    story_id: str
+    held: bool = False
+    lost: bool = False
+
+    def take(self) -> bool:
+        self.held = claim_story(self.url, self.agent, self.story_id)
+        return self.held
+
+    def renew(self) -> bool:
+        if not self.held:
+            return False
+        if renew_story(self.url, self.agent, self.story_id):
+            return True
+        # Not ours to release either: another delivery may hold it now.
+        self.lost = True
+        return False
+
+    def release(self) -> None:
+        if self.held and not self.lost:
+            release_story(self.url, self.agent, self.story_id)
 
 
 def _deliver_claimed(
@@ -370,6 +407,7 @@ def _deliver_claimed(
     base: str | None,
     no_gate: bool,
     json_out: Path | None,
+    claim: _Claim,
 ) -> dict[str, Any]:
     """Steps 1-5, under the story's ``deliver`` claim.
 
@@ -453,15 +491,20 @@ def _deliver_claimed(
     # 3 + 4 — the gate swap. A transport failure here is NOT a refusal: the PR
     # is open, so it degrades to a note and the partial exit code.
     outcome: GateOutcome | None = None
-    if not no_gate:
-        # Re-up the lease first: the git + gh phases above can legitimately
-        # spend minutes, and the gate decision is the part that must not run
-        # on a lease a second invocation could already have inherited.
-        if story.status == "open" and not renew_story(url, agent, story.story_id):
-            notes.append(
-                "could not renew the deliver claim before the gate work; a "
-                "concurrent delivery is unlikely but no longer excluded"
-            )
+    if not no_gate and claim.held and not claim.renew():
+        # Exclusivity could not be proved, so the gate work does not run: a
+        # lease that would not renew may already belong to another delivery,
+        # and creating a gate under it is exactly the duplicate the claim
+        # exists to prevent. The PR stands and the human gate stays — a safe
+        # partial that a later invocation (holding a real claim) finishes.
+        notes.append(
+            "could not renew the deliver claim, so the gate work was SKIPPED — "
+            "another delivery may hold the story. The PR is open and the "
+            "needs-human gate still holds the story; re-run to finish"
+        )
+        record["gate_complete"] = False
+        record["complete"] = False
+    elif not no_gate:
         try:
             outcome = run_gate_delivery(
                 url, agent, story=story, pr_url=pr_url, run_id=facts.run_id
@@ -489,18 +532,19 @@ def _deliver_claimed(
     # marker (written on the gate, after the post) is what makes a crash
     # between steps 4 and 5 recoverable: the next run sees it missing and
     # posts, rather than computing "nothing changed" and losing the audit.
-    # The finding is owed unless the STORY already records one for this exact
-    # delivery. Read from the gate phase's live story when there was one, else
-    # from the story read at the start (a re-run re-reads it, so --no-gate gets
-    # the same guarantee). That marker is what survives a gate the merge sweep
-    # completes, and what makes a lost post recoverable.
+    # ONE rule for the provenance finding: post it unless the STORY already
+    # records a COMPLETE delivery of this (run, PR). The marker is written only
+    # when the delivery finished (below), so a partial first pass leaves none
+    # and the run that completes it posts the corrected record — while a re-run
+    # that finds nothing left to do posts nothing, whatever changed in between.
+    # Deliberately NOT `changed or …`: a repair pass that fixes gate state must
+    # not manufacture a duplicate of a finding the story already carries.
     marked = (
         outcome.finding_marked
         if outcome is not None
         else story.delivery_marked(pr_url=pr_url, run_id=facts.run_id)
     )
-    owed = not marked
-    changed = bool(
+    record["changed"] = bool(
         record["pushed"]
         or not adopted
         or (
@@ -512,8 +556,7 @@ def _deliver_claimed(
             )
         )
     )
-    record["changed"] = changed
-    if changed or owed or notes:
+    if not marked:
         summary = delivery_finding(
             facts=facts, record=record, outcome=outcome, notes=notes
         )
@@ -525,6 +568,9 @@ def _deliver_claimed(
                 summary,
                 pr_url=pr_url,
                 run_id=facts.run_id,
+                # mark only a delivery that finished: a partial one must stay
+                # re-postable, so the run that completes it records the truth
+                mark=bool(record["gate_complete"]),
             )
         except DeliverRefused as exc:
             notes.append(
@@ -587,12 +633,43 @@ def _resolve_facts(
             f"run {facts.run_id} already delivered {facts.delivered_pr_url} — "
             "there is nothing to deliver by hand"
         )
+    _refuse_if_delivery_may_be_live(run_dir, facts)
     if not facts.branch:
         raise DeliverRefused(
             f"run {facts.run_id} recorded no branch (it stopped before its "
             "worktree was cut); pass --branch if you know it"
         )
     return facts
+
+
+def _refuse_if_delivery_may_be_live(run_dir: Path, facts: RunFacts) -> None:
+    """Refuse an **approved** run whose automated delivery may still be running.
+
+    ``develop()`` writes ``state.json`` the moment the dialogue approves, and
+    the daemon's push / PR open / ``result.json`` all happen after it returns
+    (:func:`run_outcome.delivery_complete` documents that window). A hand
+    delivery inside it would push and open a PR alongside the daemon's — and
+    the two claims are different aspects, so nothing stops them: two PRs, two
+    ``pr`` gates. The salvage this command exists for is a delivery that
+    positively **failed** (#194) or whose recorded budget has **expired**
+    (#189); anything else is deferred to the daemon that owns it.
+    """
+    if facts.status != run_outcome.APPROVED:
+        return
+    if run_outcome.delivery_failed(run_dir):
+        return  # a recorded failure: exactly the salvage case
+    deadline = run_outcome.delivery_deadline(run_dir)
+    if deadline is not None and datetime.now(UTC) > deadline:
+        return  # the automated delivery outlived its own budget
+    raise DeliverRefused(
+        f"run {facts.run_id} was APPROVED and its automated delivery has "
+        "neither completed nor failed — the daemon may be pushing and opening "
+        "its PR right now, and a hand delivery would race it into a second PR "
+        "and a second gate. Watch it with `lithos-loom develop attach "
+        f"{facts.run_id}`; deliver by hand only once it has failed or its "
+        "delivery budget has expired (or name the branch explicitly with "
+        "--branch/--story if you know the daemon is gone)"
+    )
 
 
 def _resolve_repo(host: LoomConfig, story: StoryState) -> Path:
@@ -623,16 +700,25 @@ def _write_json(json_out: Path | None, record: Mapping[str, Any]) -> None:
 
 
 def _render(record: Mapping[str, Any]) -> list[str]:
-    verb = "adopted" if record["adopted"] else "opened"
-    lines = [f"deliver {record['run_id'] or record['branch']}: {record['pr_url']}"]
+    label = record["run_id"] or record["branch"]
+    pr_url = record["pr_url"]
+    lines = [
+        f"deliver {label}: {pr_url}"
+        if pr_url
+        else f"deliver {label}: PUSHED, NO PR — the delivery is unfinished"
+    ]
     if record["pushed"]:
         lines.append(
             f"  pushed {record['pushed_sha'][:12]} → origin/{record['branch']}"
         )
     else:
         lines.append(f"  origin/{record['branch']} already up to date")
-    number = record["pr_number"]
-    lines.append(f"  {verb} PR #{number}" if number is not None else f"  {verb} the PR")
+    if pr_url:
+        verb = "adopted" if record["adopted"] else "opened"
+        number = record["pr_number"]
+        lines.append(
+            f"  {verb} PR #{number}" if number is not None else f"  {verb} the PR"
+        )
     if record["pr_gate_id"]:
         lines.append(
             f"  pr gate {record['pr_gate_id']} now blocks {record['story_id']}"

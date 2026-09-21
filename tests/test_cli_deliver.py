@@ -921,6 +921,291 @@ def test_a_symlinked_or_fifo_handoff_is_never_read(
     assert "SECRET-abc123" not in gh["created"][0]["body"]
 
 
+# ── round-4 regressions ────────────────────────────────────────────────
+
+
+def test_a_push_that_committed_but_reported_failure_is_not_a_refusal(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-002: the remote applied the update and the response was
+    lost. Asking the remote what it holds is the only honest classifier."""
+    real_git = cli_repo.run_git
+
+    def _push_then_lose_the_response(repo_path: Path, args: list[str], **kw: Any):
+        proc = real_git(repo_path, args, **kw)
+        if args[:1] == ["push"]:  # it landed; only the answer was lost
+            return subprocess.CompletedProcess(args, 1, "", "fatal: the remote hung up")
+        return proc
+
+    monkeypatch.setattr(cli_repo, "run_git", _push_then_lose_the_response)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") != ""
+    assert len(gh["created"]) == 1  # the delivery carried on
+
+
+def test_a_push_that_did_not_land_is_still_a_refusal(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-002, the other side: the remote does NOT hold our sha, so
+    "nothing was written" is true and exit 1 is right."""
+
+    real_git = cli_repo.run_git
+
+    def _refuse_to_push(repo_path: Path, args: list[str], **kw: Any):
+        if args[:1] == ["push"]:
+            return subprocess.CompletedProcess(args, 1, "", "fatal: permission denied")
+        return real_git(repo_path, args, **kw)
+
+    monkeypatch.setattr(cli_repo, "run_git", _refuse_to_push)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert "permission denied" in result.output
+    assert gh["created"] == []
+
+
+def test_a_pushed_delivery_with_no_pr_never_claims_one(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-002: the render must not say "opened the PR" over a
+    record whose own note says no PR was opened."""
+
+    def _boom(*a: Any, **k: Any):
+        raise RuntimeError("gh pr list failed: network is down")
+
+    monkeypatch.setattr(cli_repo, "list_open_prs_for_branch", _boom)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    headline = result.output.splitlines()[0]
+    assert "PUSHED, NO PR" in headline
+    # …and no line asserting a PR that does not exist
+    assert not [ln for ln in result.output.splitlines() if ln.startswith("  opened")]
+    assert not [ln for ln in result.output.splitlines() if ln.startswith("  adopted")]
+
+
+def test_the_create_path_sets_the_branch_upstream(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-013: the pinned-object refspec cannot carry `push -u`'s
+    meaning, so the tracking config is written explicitly."""
+    assert _invoke(_RUN).exit_code == 0
+    assert _git(repo, "rev-parse", "--abbrev-ref", f"{_BRANCH}@{{upstream}}") == (
+        f"origin/{_BRANCH}"
+    )
+
+
+def test_a_repair_pass_does_not_duplicate_a_recorded_finding(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-003: the marker is the SOLE gate on the finding — a pass
+    that repairs story state must not manufacture a second copy of a record
+    the story already carries."""
+    assert _invoke(_RUN).exit_code == 0
+    assert len(lithos.findings) == 1
+
+    # a lost story write: the repair pass will re-record it (changed=True)…
+    asyncio.run(
+        lithos.task_update(
+            task_id=_STORY, agent="op", metadata={STORY_GATE_ID_KEY: None}
+        )
+    )
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+
+    assert _invoke(_RUN).exit_code == 0
+    story = _get(lithos, _STORY)
+    assert story.metadata[STORY_GATE_ID_KEY]  # …repaired…
+    assert len(lithos.findings) == 1  # …and silent
+
+
+def test_a_partial_pass_stays_re_postable_until_it_completes(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-003: the marker is written only for a delivery that
+    FINISHED, so the corrected record lands exactly once."""
+    lithos.raise_on["task_create"] = LithosClientError("boom", "gate create failed")
+    assert _invoke(_RUN).exit_code == 2
+    assert len(lithos.findings) == 1
+    assert "[Friction]" in lithos.findings[0]["summary"]
+    assert "merge-tracking gate" in lithos.findings[0]["summary"]
+
+    lithos.raise_on.pop("task_create")
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+    assert _invoke(_RUN).exit_code == 0
+    assert len(lithos.findings) == 2  # the corrected record
+
+    assert _invoke(_RUN).exit_code == 0
+    assert len(lithos.findings) == 2  # …and nothing more, ever
+
+
+def test_a_failed_renewal_skips_every_gate_mutation(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-006: a lease that will not renew may already belong to
+    another delivery — so nothing is mutated and nothing is released."""
+    monkeypatch.setattr(cli, "renew_story", lambda *a, **k: False)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    assert "SKIPPED" in result.output
+    assert not lithos.calls_to("task_create")  # no gate
+    assert (_get(lithos, "gate-human")).status == "open"  # escalation kept
+    assert not lithos.calls_to("task_release")  # not ours to hand back
+    assert _PR_URL in result.output  # the PR stands
+
+
+def test_a_story_that_goes_terminal_mid_delivery_gets_no_gate(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-012: the #372 shape holds on the LIVE read too — the
+    initial one predates minutes of push and GitHub work."""
+    real_push = cli.push_branch
+
+    def _complete_the_story_then_push(repo_path: Path, branch: str, state: Any) -> None:
+        asyncio.run(lithos.task_complete(task_id=_STORY, agent="operator"))
+        real_push(repo_path, branch, state)
+
+    monkeypatch.setattr(cli, "push_branch", _complete_the_story_then_push)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    assert "became completed" in result.output
+    assert not lithos.calls_to("task_create")
+    assert (_get(lithos, "gate-human")).status == "open"
+
+
+def test_an_approved_run_mid_delivery_is_refused(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-011: `state.json` says approved before the daemon pushes
+    and opens its PR. Delivering by hand inside that window races it."""
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "delivery.json").write_text(
+        json.dumps({"deadline": "2999-01-01T00:00:00+00:00"}), encoding="utf-8"
+    )
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert "APPROVED" in result.output and "develop attach" in result.output
+    assert gh["created"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+
+
+def test_an_approved_run_whose_delivery_failed_is_salvageable(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-011: a positively recorded delivery failure (#194) is
+    exactly the salvage this command exists for."""
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "delivery.json").write_text(
+        json.dumps({"failed": True, "reason": "gh pr create failed"}), encoding="utf-8"
+    )
+
+    assert _invoke(_RUN).exit_code == 0
+    assert len(gh["created"]) == 1
+
+
+def test_an_approved_run_past_its_delivery_budget_is_salvageable(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-011: an expired #189 deadline means the daemon's delivery
+    is not coming back."""
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "delivery.json").write_text(
+        json.dumps({"deadline": "2020-01-01T00:00:00+00:00"}), encoding="utf-8"
+    )
+
+    assert _invoke(_RUN).exit_code == 0
+    assert len(gh["created"]) == 1
+
+
+def test_nonsense_rounds_and_cost_read_as_unknown(tmp_path: Path) -> None:
+    """correctness/f-014: type-correct is not truthful. A negative round count
+    or a NaN / negative spend cannot describe a run."""
+    d = tmp_path / "t-1" / "r-1"
+    (d / "handoff").mkdir(parents=True)
+    (d / "state.json").write_text(
+        json.dumps({"status": "failed", "branch": "b", "rounds": -3}), encoding="utf-8"
+    )
+    (d.parent / "result.json").write_text(
+        '{"run_id": "r-1", "status": "failed", '
+        '"escalation": {"brief": {"cost_usd": NaN}}}',
+        encoding="utf-8",
+    )
+    facts = cli_facts.run_facts(d)
+    assert facts.rounds is None and facts.cost_usd is None
+
+    (d.parent / "result.json").write_text(
+        '{"run_id": "r-1", "status": "failed", '
+        '"escalation": {"brief": {"cost_usd": -4.0}}}',
+        encoding="utf-8",
+    )
+    assert cli_facts.run_facts(d).cost_usd is None
+
+
+def test_protocol_relative_markup_never_renders_live(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-009: on the unfenced provenance bullet `defang_markup` is the
+    whole defence — inline HTML and scheme-less links must not survive it."""
+    state = json.loads((run_dir / "state.json").read_text())
+    state["failure_reason"] = (
+        "died <img src=//evil.example/p.png> see [more](//evil.example/x) "
+        "at proxy.internal:8443"
+    )
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    assert _invoke(_RUN).exit_code == 0
+    body = gh["created"][0]["body"]
+
+    provenance = body.split("## Provenance")[1]
+    assert "<img" not in provenance  # the tag no longer opens
+    assert "&lt;img" in provenance  # …it reads as text
+    assert "[more](" not in provenance  # the link no longer binds
+    assert "&#91;more]" in provenance
+    assert "evil.example" not in body  # the target redacted either way
+    assert "proxy.internal" not in body and "<host>" in body
+
+
 def test_a_fork_pr_with_the_same_branch_name_is_never_adopted(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:

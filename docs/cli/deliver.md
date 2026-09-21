@@ -43,7 +43,12 @@ partial first pass finishes the job and changes nothing else.
    push sends that exact **commit** (`<sha>:refs/heads/<branch>`), not the
    symbolic ref — a local process that advances or rewrites the branch in
    between can never make the command classify one commit and deliver another,
-   or report a sha it did not send.
+   or report a sha it did not send. A push that reports failure is checked
+   against the remote before it is believed: a ref that now holds the pushed
+   commit *did* land (the response was lost, not the update), so the delivery
+   carries on rather than claiming nothing was written. The local branch's
+   upstream is set to `origin/<branch>` either way — a pinned refspec cannot
+   carry `push -u`'s meaning, so the tracking config is written directly.
 2. **Open or adopt the PR** — but only *this branch's own* PR. `gh pr list
    --head` matches on the head **branch name** alone, so a PR opened from a
    fork whose branch carries the same name looks identical; adopting one would
@@ -98,16 +103,28 @@ partial first pass finishes the job and changes nothing else.
    adopted), the delivered sha (always — an audit that cannot be checked later
    is no audit), the `pr` gate that now holds it, and the gates retired. Any
    degradation rides along as `[Friction]` text in the same finding. The
-   finding is made one-shot by a `metadata.manual_delivery` marker written on
-   the **story** *after* the post (finding-then-mark, as the subscriptions
-   do): nothing changed *and* the marker is present → nothing posted; a
-   delivery whose post failed or died re-posts on the next run instead of
-   being computed away as "unchanged". The marker lives on the story, not the
-   gate, so `--no-gate` gets the same guarantee and a gate the merge sweep
-   completes cannot take the record with it. A crash between the post and the
-   marker costs at most one duplicate finding — the same at-least-once trade
-   every `post_finding_then_mark` caller in loom makes, and the safe direction
-   (the alternative loses the audit entirely).
+   **One rule decides whether it posts:** the `metadata.manual_delivery`
+   marker on the story. Post unless the story already records a *complete*
+   delivery of this `(run, PR)`. The marker is written **after** the post
+   (finding-then-mark, as the subscriptions do) and **only for a delivery that
+   finished** — so:
+
+   - everything works → one finding, marked, and every later run is silent
+     whatever changed in between (a repair pass never duplicates a record the
+     story already carries);
+   - a partial pass → its finding says what is owed and leaves no marker, so
+     the run that *completes* the delivery posts the corrected record once and
+     marks it;
+   - a crash between the post and the marker → at most one duplicate, the same
+     at-least-once trade every `post_finding_then_mark` caller in loom makes,
+     and the safe direction (the alternative loses the audit entirely).
+
+   The marker lives on the story, not the gate, so `--no-gate` gets the same
+   guarantee and a gate the merge sweep completes cannot take the record with
+   it. **Known boundary:** if the process dies before the finding *and* the PR
+   is merged before any re-run, the story is terminal and its PR is closed —
+   `deliver` will not find it, and the merge's own `[GateResolved]` finding is
+   the record that survives.
 
 From there the PR is a first-class PR-maintenance object (PRD
 [`pr-reconciliation.md`](../prd/pr-reconciliation.md)): landability
@@ -144,7 +161,8 @@ planted link cannot choose what a host-privileged process reads and a planted
 FIFO cannot hang the command.
 
 Provenance the run never recorded (a reaped run's rounds or cost) renders as
-`unknown`, never as a confident zero.
+`unknown`, never as a confident zero — and so does provenance that cannot be
+true (a negative round count, a negative / `NaN` / infinite cost).
 
 ## Flags
 
@@ -174,7 +192,7 @@ Provenance the run never recorded (a reaped run's rounds or cost) renders as
 | Exit | Meaning |
 |------|---------|
 | `0` | Delivered (or adopted with nothing left to do; or a `--dry-run` plan printed). |
-| `1` | **Refused, and this run wrote nothing**: a diverged remote branch, an unknown run, a branch absent from the checkout, a run that already delivered its PR, a story that is not open (without `--no-gate`), a project with no `[projects.<slug>]` mapping, an `origin` that is not a GitHub repository, another `deliver` holding the story's claim, an unreachable Lithos — or a `gh` failure / unadoptable PR **when the branch was already on `origin`**, so nothing of this run's is outside the host. |
+| `1` | **Refused, and this run wrote nothing**: a diverged remote branch, an unknown run, an **approved** run whose automated delivery has neither completed nor failed (the daemon may be opening its PR right now — watch it with `develop attach`; a recorded delivery failure or an expired delivery budget *is* deliverable), a branch absent from the checkout, a run that already delivered its PR, a story that is not open (without `--no-gate`), a project with no `[projects.<slug>]` mapping, an `origin` that is not a GitHub repository, another `deliver` holding the story's claim, an unreachable Lithos — or a `gh` failure / unadoptable PR **when the branch was already on `origin`**, so nothing of this run's is outside the host. |
 | `2` | **Partial — something is committed and something is owed.** The branch was pushed but no PR could be opened or adopted; or the PR is open but the gate half did not complete (no `pr` gate, a gate watching another PR, a needs-human gate that would not close, a lost story write, a `[ManualDelivery]` that would not post); or the `--json` record the operator asked for could not be written. Whatever landed is printed and the `[Friction]` says what is owed; re-running finishes it. The classification follows what has been **committed**, not which step raised — once anything is outside the host, this command never claims it wrote nothing. |
 
 ## Requirements

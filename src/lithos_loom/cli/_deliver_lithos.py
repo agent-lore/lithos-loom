@@ -80,7 +80,8 @@ gate completed by the merge sweep would take a gate-side marker with it, and
 the next run would re-post provenance for a delivery already recorded. Written
 AFTER the finding (the finding-then-mark ordering the subscriptions use), so a
 crash in between costs at most one duplicate finding rather than losing the
-audit trail entirely."""
+audit trail entirely — and only when the delivery **finished**, so a partial
+pass stays re-postable and the run that completes it records the truth."""
 
 DELIVER_ASPECT = "deliver"
 """Claim aspect serialising concurrent deliveries of the same story. Two
@@ -266,6 +267,17 @@ async def gate_delivery(
     # the PR open, so a gate raised in between (a concurrent deliver, the
     # daemon) must be seen — adopting beats duplicating.
     live = await read_story(client, story.story_id)
+    if live.status != "open":
+        # The story went terminal while this delivery pushed and opened its PR
+        # (the operator completed it, or the issue mirror did). A terminal
+        # story takes no gate — #372's shape: gating a done story strands an
+        # open blocker nothing will resolve, and counts against admission.
+        outcome.problems.append(
+            f"the story became {live.status} while this delivery ran — no pr "
+            "gate was created and no needs-human gate was completed. The PR "
+            "stands and is now the operator's own (nothing tracks its merge)"
+        )
+        return outcome
     ours = [gate for gate in live.pr_gates if gate.pr_url == pr_url]
     foreign = [gate for gate in live.pr_gates if gate.pr_url != pr_url]
 
@@ -398,12 +410,14 @@ async def _post_coro(
     *,
     pr_url: str,
     run_id: str,
+    mark: bool,
 ) -> None:
     async with LithosClient(url, agent_id=agent) as client:
         await client.finding_post(task_id=story_id, summary=summary, agent=agent)
-        await mark_delivery_finding(
-            client, story_id=story_id, pr_url=pr_url, run_id=run_id, agent=agent
-        )
+        if mark:
+            await mark_delivery_finding(
+                client, story_id=story_id, pr_url=pr_url, run_id=run_id, agent=agent
+            )
 
 
 async def _claim_coro(url: str, agent: str, story_id: str) -> bool:
@@ -457,9 +471,19 @@ def post_finding(
     *,
     pr_url: str = "",
     run_id: str = "",
+    mark: bool = True,
 ) -> None:
-    """Step 5: post ``[ManualDelivery]``, then mark the story (in that order)."""
-    run_lithos(_post_coro(url, agent, story_id, summary, pr_url=pr_url, run_id=run_id))
+    """Step 5: post ``[ManualDelivery]``, then mark the story (in that order).
+
+    *mark* is False for a delivery that did NOT finish: the marker is what
+    silences later runs, so a partial pass must not write one — the run that
+    completes the delivery posts the corrected record and marks it then.
+    """
+    run_lithos(
+        _post_coro(
+            url, agent, story_id, summary, pr_url=pr_url, run_id=run_id, mark=mark
+        )
+    )
 
 
 def claim_story(url: str, agent: str, story_id: str) -> bool:

@@ -49,6 +49,8 @@ __all__ = [
     "open_or_adopt",
     "origin_repo_name",
     "push_branch",
+    "run_git",
+    "remote_sha",
     "remote_state",
 ]
 
@@ -68,9 +70,12 @@ class RemoteState:
     remote_sha: str  # "" when the remote ref does not exist
 
 
-def _git(
+def run_git(
     repo: Path, args: list[str], *, timeout: int = 300
 ) -> subprocess.CompletedProcess[str]:
+    """Every git call this module makes — one seam, so a test can stand in for
+    the whole of git (a lost push response, a refused push) without reaching
+    for a private name."""
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,
@@ -81,7 +86,7 @@ def _git(
 
 def local_sha(repo: Path, branch: str) -> str:
     """The branch's sha in *repo*. Raises :class:`DeliverRefused` if absent."""
-    proc = _git(repo, ["rev-parse", "--verify", f"refs/heads/{branch}"], timeout=120)
+    proc = run_git(repo, ["rev-parse", "--verify", f"refs/heads/{branch}"], timeout=120)
     if proc.returncode != 0:
         raise DeliverRefused(
             f"branch {branch!r} does not exist in {repo} — the run's commits are "
@@ -92,32 +97,53 @@ def local_sha(repo: Path, branch: str) -> str:
 
 
 def remote_state(repo: Path, branch: str) -> RemoteState:
-    """Classify the push (step 1) without writing anything.
+    """Classify the push (step 1) without writing anything."""
+    local = local_sha(repo, branch)
+    remote = remote_sha(repo, branch)
+    if not remote:
+        return RemoteState(action=PUSH_CREATE, local_sha=local, remote_sha="")
+    if remote == local:
+        return RemoteState(action=PUSH_UP_TO_DATE, local_sha=local, remote_sha=remote)
+    anc = run_git(
+        repo, ["merge-base", "--is-ancestor", remote, local], timeout=120
+    ).returncode
+    action = PUSH_FAST_FORWARD if anc == 0 else PUSH_DIVERGED
+    return RemoteState(action=action, local_sha=local, remote_sha=remote)
+
+
+def remote_sha(repo: Path, branch: str) -> str:
+    """``origin``'s sha for *branch*, or ``""`` when the ref does not exist.
 
     ``ls-remote`` patterns tail-match, so the fully-qualified ref is queried
     and the returned ref name matched exactly — a bare branch name would also
     match an unrelated ``a/<branch>``.
     """
-    local = local_sha(repo, branch)
     dst = f"refs/heads/{branch}"
-    ls = _git(repo, ["ls-remote", "--heads", "origin", dst], timeout=120)
+    ls = run_git(repo, ["ls-remote", "--heads", "origin", dst], timeout=120)
     if ls.returncode != 0:
         raise DeliverRefused(f"git ls-remote origin {dst} failed: {ls.stderr.strip()}")
-    remote = ""
     for line in ls.stdout.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[1] == dst:
-            remote = parts[0]
-            break
-    if not remote:
-        return RemoteState(action=PUSH_CREATE, local_sha=local, remote_sha="")
-    if remote == local:
-        return RemoteState(action=PUSH_UP_TO_DATE, local_sha=local, remote_sha=remote)
-    anc = _git(
-        repo, ["merge-base", "--is-ancestor", remote, local], timeout=120
-    ).returncode
-    action = PUSH_FAST_FORWARD if anc == 0 else PUSH_DIVERGED
-    return RemoteState(action=action, local_sha=local, remote_sha=remote)
+            return parts[0]
+    return ""
+
+
+def _set_upstream(repo: Path, branch: str) -> None:
+    """Point the local branch at ``origin/<branch>`` (the ``push -u`` half).
+
+    The push itself sends a pinned object refspec, which cannot carry ``-u``'s
+    meaning, so the tracking config is written directly — no network, and it
+    lands whether the ref was created now or already existed. Best-effort: the
+    delivery does not depend on it, only the operator's later ``git status``
+    does.
+    """
+    run_git(repo, ["config", f"branch.{branch}.remote", "origin"], timeout=120)
+    run_git(
+        repo,
+        ["config", f"branch.{branch}.merge", f"refs/heads/{branch}"],
+        timeout=120,
+    )
 
 
 def push_branch(repo: Path, branch: str, state: RemoteState) -> None:
@@ -146,9 +172,17 @@ def push_branch(repo: Path, branch: str, state: RemoteState) -> None:
     # naming a program to run — CWE-88, the same reason the reads above
     # fully-qualify.) A remote that moved under us still fails closed: git
     # rejects a non-fast-forward, and we never pass --force.
-    proc = _git(repo, ["push", "origin", f"{state.local_sha}:refs/heads/{branch}"])
+    proc = run_git(repo, ["push", "origin", f"{state.local_sha}:refs/heads/{branch}"])
     if proc.returncode != 0:
-        raise DeliverRefused(f"git push failed: {proc.stderr.strip()}")
+        # A push can COMMIT and still report failure — the remote applied the
+        # update and the response was lost. Ask the remote what it holds before
+        # calling this "nothing was written": exiting 1 on a ref that now
+        # exists would send the operator looking for a branch that is already
+        # there, and would hide a delivery half-done.
+        landed = remote_sha(repo, branch)
+        if landed != state.local_sha:
+            raise DeliverRefused(f"git push failed: {proc.stderr.strip()}")
+    _set_upstream(repo, branch)
 
 
 def origin_repo_name(repo: Path) -> str:
@@ -163,7 +197,7 @@ def origin_repo_name(repo: Path) -> str:
     adoption search to that repository's open PRs. Resolved once, passed to
     every call as ``--repo``.
     """
-    proc = _git(repo, ["remote", "get-url", "origin"], timeout=120)
+    proc = run_git(repo, ["remote", "get-url", "origin"], timeout=120)
     if proc.returncode != 0:
         raise DeliverRefused(
             f"{repo} has no `origin` remote ({proc.stderr.strip()}); there is "
