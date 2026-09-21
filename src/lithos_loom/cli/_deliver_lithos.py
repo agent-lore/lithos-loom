@@ -11,10 +11,10 @@ lives with the code that enforces it.
 Three invariants live here rather than in the command:
 
 * **The gate must watch THIS PR.** An open ``pr`` gate is adopted only when
-  its ``pr_url`` is the PR being delivered. A gate watching a *different* PR
-  means the story is already behind someone else's delivery — the command
-  refuses rather than pointing the maintenance machine at the wrong PR while
-  retiring the story's escalation.
+  its ``pr_url`` is the PR being delivered. A gate watching a *different* PR —
+  even beside one that matches — means the story is already behind someone
+  else's delivery: the command refuses rather than pointing the maintenance
+  machine at the wrong PR while retiring the story's escalation.
 * **The story write is repaired, not assumed.** ``record_delivery_on_story``
   runs whenever the LIVE story does not already say what a delivered story
   says — so a first pass that created the gate but lost the metadata write is
@@ -58,6 +58,7 @@ __all__ = [
     "GateOutcome",
     "PrGateRef",
     "StoryState",
+    "DELIVER_CLAIM_TTL_MINUTES",
     "claim_story",
     "gate_delivery",
     "mark_delivery_finding",
@@ -65,15 +66,21 @@ __all__ = [
     "read_story",
     "read_story_sync",
     "release_story",
+    "renew_story",
     "run_gate_delivery",
 ]
 
 DELIVERY_MARKER_KEY = "manual_delivery"
-"""Gate-metadata key recording that this delivery's ``[ManualDelivery]``
-finding was posted: ``{"run_id": …, "pr_url": …}``. Written on the **gate**
-(the thing that survives and is re-read), AFTER the finding — the
-finding-then-mark ordering the subscriptions use, so a crash in between costs
-at most one duplicate finding rather than losing the provenance entirely."""
+"""Story-metadata key recording that this delivery's ``[ManualDelivery]``
+finding was posted: ``{"run_id": …, "pr_url": …}``.
+
+On the **story**, not the gate: the story is the one object every mode reads
+(``--no-gate`` raises no gate at all) and the one that outlives the gate — a
+gate completed by the merge sweep would take a gate-side marker with it, and
+the next run would re-post provenance for a delivery already recorded. Written
+AFTER the finding (the finding-then-mark ordering the subscriptions use), so a
+crash in between costs at most one duplicate finding rather than losing the
+audit trail entirely."""
 
 DELIVER_ASPECT = "deliver"
 """Claim aspect serialising concurrent deliveries of the same story. Two
@@ -81,6 +88,16 @@ DELIVER_ASPECT = "deliver"
 otherwise each create one; the claim is the same cross-process primitive the
 route-runner uses to win a dispatch race. Its own aspect, so it never contends
 with a route's claim."""
+
+DELIVER_CLAIM_TTL_MINUTES = 60
+"""Claim lifetime. It must **exceed every external operation the claim
+covers**, or a second invocation inherits an expired claim while the first is
+still working and both decide "no gate yet". The command's own subprocess
+budget alone is ~14 minutes (push 300s + PR list 120s + default branch 120s +
+PR create 300s), before GitHub and Lithos latency, so the TTL is set well
+above it and :func:`renew_story` re-ups the lease before the gate work — the
+window that actually needs exclusivity — so the gate phase never runs on a
+lease the git/gh phases spent."""
 
 
 class DeliverRefused(LithosLoomError):
@@ -95,16 +112,6 @@ class PrGateRef:
     pr_url: str
     """The PR this gate watches (``""`` when its metadata is unparseable — a
     malformed gate is never treated as watching ours)."""
-    marker: Mapping[str, Any] = field(default_factory=dict)
-    """:data:`DELIVERY_MARKER_KEY` as read off the gate."""
-
-    def marks(self, *, pr_url: str, run_id: str) -> bool:
-        """Whether this gate already records a ``[ManualDelivery]`` finding for
-        this exact delivery."""
-        return (
-            self.marker.get("pr_url") == pr_url
-            and str(self.marker.get("run_id") or "") == run_id
-        )
 
 
 @dataclass(frozen=True)
@@ -156,6 +163,16 @@ class StoryState:
         body = self.description.strip()
         return f"{self.title}\n\n{body}" if body else self.title
 
+    def delivery_marked(self, *, pr_url: str, run_id: str) -> bool:
+        """Whether the story already records a ``[ManualDelivery]`` finding for
+        this exact delivery (:data:`DELIVERY_MARKER_KEY`)."""
+        marker = self.metadata.get(DELIVERY_MARKER_KEY)
+        if not isinstance(marker, Mapping):
+            return False
+        return (
+            marker.get("pr_url") == pr_url and str(marker.get("run_id") or "") == run_id
+        )
+
     def delivery_recorded(self, gate_id: str) -> bool:
         """Whether the story already carries everything a delivered story
         carries: this gate's id, and neither retirement left behind."""
@@ -191,12 +208,10 @@ async def read_story(client: Any, story_id: str) -> StoryState:
             human_gates.append(gate.id)
         elif is_pr_gate(gate):
             spec = parse_pr_gate(gate)
-            marker = (gate.metadata or {}).get(DELIVERY_MARKER_KEY)
             pr_gates.append(
                 PrGateRef(
                     gate_id=gate.id,
                     pr_url=spec.pr_url if spec is not None else "",
-                    marker=marker if isinstance(marker, Mapping) else {},
                 )
             )
     return StoryState(
@@ -254,29 +269,32 @@ async def gate_delivery(
     ours = [gate for gate in live.pr_gates if gate.pr_url == pr_url]
     foreign = [gate for gate in live.pr_gates if gate.pr_url != pr_url]
 
+    outcome.finding_marked = live.delivery_marked(pr_url=pr_url, run_id=run_id)
+
+    if foreign:
+        # The story is (also) behind a delivery of a DIFFERENT PR. Checked
+        # BEFORE the adopt branch, not as its `else`: a mixed state — one gate
+        # for this PR, one for another — is not an idempotent re-run, and
+        # completing the human gates there would leave the story's merge
+        # semantics hostage to a PR that does not contain this branch. Refuse
+        # and let the operator resolve the older delivery.
+        watched = ", ".join(
+            f"{g.gate_id} → {g.pr_url or '(unparseable)'}" for g in ours + foreign
+        )
+        outcome.problems.append(
+            f"an open pr gate already holds this story and watches a different "
+            f"PR ({watched}) — {pr_url} was NOT gated and no needs-human gate "
+            "was completed. Resolve the existing delivery first (merge or "
+            "close its PR, or complete its gate)"
+        )
+        return outcome
     if ours:
         outcome.pr_gate_id = ours[0].gate_id
-        outcome.finding_marked = ours[0].marks(pr_url=pr_url, run_id=run_id)
         if len(ours) > 1:
             outcome.problems.append(
                 "the story carries more than one open pr gate for this PR "
                 f"({', '.join(g.gate_id for g in ours)}); complete the stale one"
             )
-    elif foreign:
-        # The story is already behind a delivery of a DIFFERENT PR. Adopting
-        # that gate would point merge tracking, review ingestion and the
-        # story's completion at a PR that does not contain this branch —
-        # while retiring the escalation that says so. Refuse instead.
-        watched = ", ".join(
-            f"{g.gate_id} → {g.pr_url or '(unparseable)'}" for g in ours + foreign
-        )
-        outcome.problems.append(
-            f"an open pr gate already holds this story, but it watches a "
-            f"different PR ({watched}) — {pr_url} was NOT gated and no "
-            "needs-human gate was completed. Resolve the existing delivery "
-            "first (merge or close its PR, or complete its gate)"
-        )
-        return outcome
     else:
         gate_id, problem = await create_pr_gate_best_effort(
             client,
@@ -329,16 +347,18 @@ async def gate_delivery(
 
 
 async def mark_delivery_finding(
-    client: Any, *, gate_id: str, pr_url: str, run_id: str, agent: str
+    client: Any, *, story_id: str, pr_url: str, run_id: str, agent: str
 ) -> None:
-    """Record on the ``pr`` gate that this delivery's finding was posted.
+    """Record on the **story** that this delivery's finding was posted.
 
     Finding-then-mark: the marker is what makes ``[ManualDelivery]`` one-shot,
     and writing it only after the post means a crash in between re-posts next
-    run rather than losing the provenance.
+    run rather than losing the provenance. It lives on the story (not the
+    gate) so ``--no-gate`` gets the same guarantee and so a gate the merge
+    sweep completes cannot take the record with it.
     """
     await client.task_update(
-        task_id=gate_id,
+        task_id=story_id,
         agent=agent,
         metadata={DELIVERY_MARKER_KEY: {"run_id": run_id, "pr_url": pr_url}},
     )
@@ -376,29 +396,40 @@ async def _post_coro(
     story_id: str,
     summary: str,
     *,
-    gate_id: str | None,
     pr_url: str,
     run_id: str,
 ) -> None:
     async with LithosClient(url, agent_id=agent) as client:
         await client.finding_post(task_id=story_id, summary=summary, agent=agent)
-        if gate_id is not None:
-            await mark_delivery_finding(
-                client, gate_id=gate_id, pr_url=pr_url, run_id=run_id, agent=agent
-            )
+        await mark_delivery_finding(
+            client, story_id=story_id, pr_url=pr_url, run_id=run_id, agent=agent
+        )
 
 
 async def _claim_coro(url: str, agent: str, story_id: str) -> bool:
     async with LithosClient(url, agent_id=agent) as client:
         try:
             await client.task_claim(
-                task_id=story_id, aspect=DELIVER_ASPECT, agent=agent, ttl_minutes=15
+                task_id=story_id,
+                aspect=DELIVER_ASPECT,
+                agent=agent,
+                ttl_minutes=DELIVER_CLAIM_TTL_MINUTES,
             )
         except LithosClientError as exc:
             if exc.code == "claim_failed":
                 return False
             raise
     return True
+
+
+async def _renew_coro(url: str, agent: str, story_id: str) -> None:
+    async with LithosClient(url, agent_id=agent) as client:
+        await client.task_renew(
+            task_id=story_id,
+            aspect=DELIVER_ASPECT,
+            agent=agent,
+            ttl_minutes=DELIVER_CLAIM_TTL_MINUTES,
+        )
 
 
 async def _release_coro(url: str, agent: str, story_id: str) -> None:
@@ -424,22 +455,29 @@ def post_finding(
     story_id: str,
     summary: str,
     *,
-    gate_id: str | None = None,
     pr_url: str = "",
     run_id: str = "",
 ) -> None:
-    """Step 5: post ``[ManualDelivery]``, then mark the gate (in that order)."""
-    run_lithos(
-        _post_coro(
-            url, agent, story_id, summary, gate_id=gate_id, pr_url=pr_url, run_id=run_id
-        )
-    )
+    """Step 5: post ``[ManualDelivery]``, then mark the story (in that order)."""
+    run_lithos(_post_coro(url, agent, story_id, summary, pr_url=pr_url, run_id=run_id))
 
 
 def claim_story(url: str, agent: str, story_id: str) -> bool:
     """Take the ``deliver`` claim on the story; ``False`` when another process
     holds it (two deliveries of one story must not interleave)."""
     return run_lithos(_claim_coro(url, agent, story_id))
+
+
+def renew_story(url: str, agent: str, story_id: str) -> bool:
+    """Re-up the ``deliver`` lease before the gate work — the phase that must
+    be exclusive — so it never runs on a lease the git / gh phases spent.
+    ``False`` when the renewal did not land (the caller notes it; the gate
+    work still runs, since refusing there would strand an open PR)."""
+    try:
+        run_lithos(_renew_coro(url, agent, story_id))
+    except DeliverRefused:
+        return False
+    return True
 
 
 def release_story(url: str, agent: str, story_id: str) -> None:

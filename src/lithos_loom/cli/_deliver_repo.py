@@ -15,10 +15,12 @@ Two guards live here:
 * **Adopt only what is ours.** ``gh pr list --head`` filters on the head
   *branch name* alone, so a PR opened from a fork with the same branch name is
   indistinguishable from ours. Adoption additionally requires a same-repository
-  head at the exact sha we pushed — nobody else can produce a PR whose head is
-  our commit — and every gh call is pinned with ``--repo`` to the ``origin``
-  the branch was pushed to (gh's own inference resolves a *fork* checkout to
-  its parent).
+  head at the exact sha we pushed, onto the base this delivery targets — nobody
+  else can produce a PR whose head is our commit — and every gh call is pinned
+  with ``--repo`` to the ``origin`` the branch was pushed to (gh's own
+  inference resolves a *fork* checkout to its parent). Every one of those
+  checks fails **closed**: a field GitHub did not report is unknown
+  provenance, never ours.
 """
 
 from __future__ import annotations
@@ -135,13 +137,16 @@ def push_branch(repo: Path, branch: str, state: RemoteState) -> None:
         )
     if state.action == PUSH_UP_TO_DATE:
         return
-    # A fully-qualified refspec, never a bare positional: a ref legitimately
-    # named `--receive-pack=…` would otherwise be read by git as an option
-    # naming a program to run (CWE-88) — the same reason the reads above
-    # fully-qualify.
-    proc = _git(
-        repo, ["push", "-u", "origin", f"refs/heads/{branch}:refs/heads/{branch}"]
-    )
+    # Push the **object** the classification was made against, not the symbolic
+    # ref: a local process that advances or rewrites the branch between the
+    # classification and the push would otherwise have us send a commit nobody
+    # decided was append-only, and then report the measured sha as delivered.
+    # (Also a fully-qualified refspec, never a bare positional: a ref
+    # legitimately named `--receive-pack=…` would be read by git as an option
+    # naming a program to run — CWE-88, the same reason the reads above
+    # fully-qualify.) A remote that moved under us still fails closed: git
+    # rejects a non-fast-forward, and we never pass --force.
+    proc = _git(repo, ["push", "origin", f"{state.local_sha}:refs/heads/{branch}"])
     if proc.returncode != 0:
         raise DeliverRefused(f"git push failed: {proc.stderr.strip()}")
 
@@ -174,7 +179,7 @@ def origin_repo_name(repo: Path) -> str:
 
 
 def adoptable(
-    candidates: Sequence[OpenPullRequest], *, head_sha: str, base: str | None
+    candidates: Sequence[OpenPullRequest], *, head_sha: str, base: str
 ) -> tuple[OpenPullRequest | None, str]:
     """Pick the open PR that is *ours* to adopt, or say why none is (pure).
 
@@ -183,34 +188,41 @@ def adoptable(
     a same-repo one — and adopting it would point the `pr` gate, merge
     tracking, review ingestion and the story's eventual completion at a third
     party's work while retiring the story's escalation. So a candidate is ours
-    only when it is same-repo AND its head is the sha we just pushed; the head
-    check alone kills the class, since nobody else can produce a PR whose head
-    is our commit. Returns ``(pr, "")`` or ``(None, reason)``.
+    only when it is same-repo, its head is the sha we just pushed, and its base
+    is the base this delivery targets; the head check alone kills the class,
+    since nobody else can produce a PR whose head is our commit.
+
+    **Every check fails closed.** A field GitHub did not report reads as
+    ``""``/unknown, and unknown provenance is never ours: a verification step
+    that silently does not run is the failure this function exists to prevent.
+    *base* is the RESOLVED base (``--base`` or the repo's default), never
+    ``None`` — skipping the comparison when the operator named no base would
+    let an adopted PR merge into a branch ``deliver`` would never have opened
+    onto, with the `pr` gate tracking that merge. Returns ``(pr, "")`` or
+    ``(None, reason)``.
     """
     for pr in candidates:
         if pr.cross_repository:
             continue
-        if pr.head_sha and pr.head_sha != head_sha:
+        if pr.head_sha != head_sha:
             continue
-        if base is not None and pr.base_ref and pr.base_ref != base:
+        if pr.base_ref != base:
             continue
         return pr, ""
     if not candidates:
         return None, ""
     described = "; ".join(
-        f"#{pr.number} head {pr.head_sha[:12] or '?'}"
+        f"#{pr.number} head {pr.head_sha[:12] or '(not reported)'}"
         f"{' (fork ' + (pr.head_owner or '?') + ')' if pr.cross_repository else ''}"
-        f" → {pr.base_ref or '?'}"
+        f" → {pr.base_ref or '(not reported)'}"
         for pr in candidates
     )
     return None, (
         f"an open PR already claims this branch name but is not this delivery "
         f"({described}); expected a same-repository PR whose head is "
-        f"{head_sha[:12]}"
-        + (f" and whose base is {base}" if base else "")
-        + ". Refusing to adopt a PR that is not this branch's — nothing was "
-        "gated. Close or rename the other PR, or deliver from a branch name "
-        "it does not claim"
+        f"{head_sha[:12]} and whose base is {base}. Refusing to adopt a PR "
+        "that is not this branch's — nothing was gated. Close or rename the "
+        "other PR, or deliver from a branch name it does not claim"
     )
 
 
@@ -234,8 +246,12 @@ def open_or_adopt(
     the PR exists from that moment and its url must never be lost.
     """
     try:
+        # Resolved BEFORE the adoption decision: the base a candidate must
+        # match is the one this delivery targets, whether the operator named
+        # it or the repository's default supplied it.
+        resolved_base = base or default_base_branch(repo, repo_name=repo_name)
         candidates = list_open_prs_for_branch(repo, branch, repo_name=repo_name)
-        existing, refusal = adoptable(candidates, head_sha=head_sha, base=base)
+        existing, refusal = adoptable(candidates, head_sha=head_sha, base=resolved_base)
         if existing is not None:
             return existing.url, True
         if refusal:
@@ -244,7 +260,7 @@ def open_or_adopt(
             create_pr(
                 repo,
                 branch=branch,
-                base=base or default_base_branch(repo, repo_name=repo_name),
+                base=resolved_base,
                 title=title,
                 # built lazily: an adopted PR needs no body, and composing one
                 # costs a run-dir read

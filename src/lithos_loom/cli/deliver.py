@@ -42,12 +42,15 @@ From there the PR is a first-class PR-maintenance object: landability, external
 review ingestion, the base-move re-gate, the conflict resolver, merge → story
 completed + dependents nudged, and the S6 admission count.
 
-**Failure is phase-aware.** Everything up to and including the PR open may
-refuse (exit 1) — nothing is written yet. From the moment the PR exists, no
-failure may lose its url: the gate swap, the finding and the ``--json`` record
-each degrade into a ``[Friction]`` note and the command exits 2, saying what is
-owed. The whole delivery runs under a short-lived ``deliver`` claim on the
-story, so two invocations cannot interleave into two gates.
+**Failure is classified by what is committed, not by which step raised.** The
+record is built before the first external write and filled in as each step
+lands. A refusal with nothing of this run's outside the host is exit 1; from
+the first committed effect — the push — every later failure degrades into a
+``[Friction]`` note and exits 2 saying what is owed, whether that is a PR that
+could not be opened, a gate that did not land, a finding that would not post,
+or a ``--json`` record that could not be written. The whole delivery runs under
+a ``deliver`` claim on the story, renewed before the gate work, so two
+invocations cannot interleave into two gates.
 
 **The repo, not the worktree.** ``state.json`` names the branch, and the branch
 ref lives in the project's own checkout whether or not the run's worktree still
@@ -60,15 +63,15 @@ Lithos. ``--branch`` / ``--story`` is the explicit fallback for a host with
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import typer
 
+from lithos_loom.cli._deliver_facts import RunFacts, pr_body, run_facts
 from lithos_loom.cli._deliver_lithos import (
     DELIVER_ASPECT,
     DeliverRefused,
@@ -78,6 +81,7 @@ from lithos_loom.cli._deliver_lithos import (
     post_finding,
     read_story_sync,
     release_story,
+    renew_story,
     run_gate_delivery,
 )
 from lithos_loom.cli._deliver_repo import (
@@ -95,8 +99,6 @@ from lithos_loom.config import LoomConfig, load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.plugins.story_develop import run_outcome
 from lithos_loom.plugins.story_develop.pr_delivery import (
-    build_pr_body,
-    closes_line,
     pr_number_from_url,
     request_operator_review,
 )
@@ -115,183 +117,6 @@ MANUAL_DELIVERY = "[ManualDelivery]"
 # delivery the operator must finish, so it never shares an exit code with a
 # refusal that wrote nothing.
 EXIT_CODES = {"delivered": 0, "refused": 1, "ungated": 2}
-
-
-# ── run facts (pure; read off the on-disk contract) ─────────────────────
-
-
-@dataclass(frozen=True)
-class RunFacts:
-    """What the stopped run left on disk, for the PR body and the finding.
-
-    Everything but *branch* and *story_id* is best-effort: ``--branch`` /
-    ``--story`` delivers a branch whose run dir was reaped, and a run dir may
-    hold a ``state.json`` without the newer fields. Absent facts are omitted
-    from the PR body rather than guessed at.
-    """
-
-    story_id: str
-    branch: str
-    run_id: str = ""
-    status: str = ""
-    failure_reason: str = ""
-    rounds: int | None = None
-    cost_usd: float | None = None
-    test_gate_verdict: str | None = None
-    delivered_pr_url: str | None = None
-    coder_summary: str = ""
-    """The last round's coder handoff ``## Summary`` — what the branch does,
-    in the author's own words (bounded + control-stripped: handoffs are
-    agent-written)."""
-    run_dir: str = ""
-
-
-def _opt_int(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _opt_float(value: Any) -> float | None:
-    if isinstance(value, bool):
-        return None
-    return float(value) if isinstance(value, (int, float)) else None
-
-
-def _opt_str(value: Any) -> str:
-    return value.strip() if isinstance(value, str) else ""
-
-
-# Handoff files are bind-mounted RW into agent containers, so their bodies are
-# agent-written: bound the read, strip terminal control bytes, and cap what
-# reaches a PR body. (`cli/develop` bounds the same files for the terminal.)
-_CODER_DONE_RE = re.compile(r"^round_(\d+)_coder_done\.md$")
-_MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
-_MAX_SUMMARY_CHARS = 600
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-_SUMMARY_HEADING_RE = re.compile(r"^\s*#{1,6}\s*summary\s*$", re.IGNORECASE)
-_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
-
-
-def coder_summary(handoff_dir: Path) -> str:
-    """The last round's coder handoff ``## Summary``, as one bounded line.
-
-    What the branch's author said it does — the PR body's most useful
-    sentence, and the one thing a reader cannot reconstruct from the run's
-    metadata. Absent / unreadable / summary-less handoffs give ``""``; the
-    body then simply omits the line.
-    """
-    best: tuple[int, Path] | None = None
-    try:
-        for path in handoff_dir.iterdir():
-            m = _CODER_DONE_RE.match(path.name)
-            if m and (best is None or int(m.group(1)) > best[0]):
-                best = (int(m.group(1)), path)
-    except OSError:
-        return ""
-    if best is None:
-        return ""
-    try:
-        with best[1].open("rb") as fh:
-            raw = fh.read(_MAX_HANDOFF_BYTES)
-    except OSError:
-        return ""
-    text = raw.decode("utf-8", errors="replace")
-    lines = text.splitlines()
-    body: list[str] = []
-    collecting = False
-    for line in lines:
-        if _SUMMARY_HEADING_RE.match(line):
-            collecting = True
-            continue
-        if collecting and _HEADING_RE.match(line):
-            break
-        if collecting:
-            body.append(line)
-    summary = " ".join(" ".join(body).split())
-    summary = _CONTROL_CHARS_RE.sub("", summary)
-    if len(summary) > _MAX_SUMMARY_CHARS:
-        summary = summary[: _MAX_SUMMARY_CHARS - 1].rstrip() + "…"
-    return summary
-
-
-def run_facts(run_dir: Path) -> RunFacts:
-    """Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
-
-    ``state.json`` carries the verdict, branch and round count; the run's
-    ``result.json`` carries the ``escalation`` block the runner built its
-    needs-human gate from — cost, test-gate verdict — bound to THIS run by
-    ``run_id`` so a prior run's leftover is never read as this one's.
-    """
-    state = run_outcome.read_state(run_dir) or {}
-    result = run_outcome.result_for_run(run_dir) or {}
-    escalation = result.get("escalation")
-    brief = escalation.get("brief") if isinstance(escalation, Mapping) else None
-    brief = brief if isinstance(brief, Mapping) else {}
-    return RunFacts(
-        story_id=run_dir.parent.name,
-        branch=_opt_str(state.get("branch")),
-        run_id=_opt_str(state.get("run_id")) or run_dir.name,
-        status=_opt_str(state.get("status")),
-        failure_reason=_opt_str(state.get("failure_reason")),
-        rounds=_opt_int(state.get("rounds")),
-        cost_usd=_opt_float(brief.get("cost_usd")),
-        test_gate_verdict=_opt_str(brief.get("test_gate_verdict")) or None,
-        delivered_pr_url=run_outcome.delivered_pr_url(run_dir, state),
-        coder_summary=coder_summary(run_dir / "handoff"),
-        run_dir=str(run_dir),
-    )
-
-
-def provenance_lines(facts: RunFacts) -> list[str]:
-    """The PR body's ``## Provenance`` block: where this branch came from.
-
-    The run's ``failure_reason`` is deliberately NOT published here. It is not
-    a curated label: for the reason-bearing statuses it is the first line of
-    the agent CLI's error text, the subprocess stderr, or the tail of unparsed
-    agent stdout — host paths, provider endpoints and auth-error payloads all
-    reach it. A PR body is world-readable on a public repo, whereas the
-    operator already has the full reason on the story's ``[NeedsHuman]``
-    finding, in the gate brief, and in ``--dry-run``. So the PR carries the
-    **classification** (a closed vocabulary) and nothing more.
-    """
-    lines = [
-        "delivered by hand with `lithos-loom develop deliver` — the run that "
-        "wrote this branch stopped before it could open a PR"
-    ]
-    if facts.run_id:
-        stop = f"run `{facts.run_id}`"
-        if facts.status:
-            stop += f" stopped `{facts.status}` (see the story for why)"
-        lines.append(stop)
-    lines.append(f"branch `{facts.branch}`")
-    if facts.coder_summary:
-        lines.append(f"coder's final handoff: {facts.coder_summary}")
-    return lines
-
-
-def reviews_summary(facts: RunFacts) -> str:
-    """The Review section's verdict line: this branch was NOT panel-approved."""
-    if facts.status and facts.status != run_outcome.APPROVED:
-        return (
-            f"not approved — the run stopped `{facts.status}` before the panel "
-            "agreed; review this PR as you would any other"
-        )
-    return "not recorded — delivered by hand from a stopped run"
-
-
-def pr_body(*, facts: RunFacts, story: StoryState, repo_name: str) -> str:
-    """The generated body for a newly opened PR — the shared builder plus this
-    delivery's provenance. Built lazily: an adopted PR needs none."""
-    return build_pr_body(
-        description=story.task_text,
-        acceptance_criteria=story.acceptance_criteria,
-        reviews_summary=reviews_summary(facts),
-        rounds=facts.rounds,
-        gate_verdict=facts.test_gate_verdict,
-        cost_usd=facts.cost_usd,
-        task_id=story.story_id,
-        issue_closes=closes_line(story.github_issue_url, repo_name),
-        provenance=provenance_lines(facts),
-    )
 
 
 def delivery_finding(
@@ -449,11 +274,12 @@ def deliver_command(
         raise typer.Exit(EXIT_CODES["delivered"])
     for line in _render(record):
         typer.echo(line)
-    # The PR is open either way; a gate half that did not complete is a
-    # PARTIAL delivery (the story is unguarded, or still double-blocked) and
-    # says so with its own exit code.
+    # Anything committed but not finished — a push with no PR, a gate that did
+    # not land, a finding that would not post, a `--json` record that could not
+    # be written — is a PARTIAL delivery with its own exit code. Exit 1 is only
+    # ever a refusal that wrote nothing.
     raise typer.Exit(
-        EXIT_CODES["delivered"] if record["gate_complete"] else EXIT_CODES["ungated"]
+        EXIT_CODES["delivered"] if record["complete"] else EXIT_CODES["ungated"]
     )
 
 
@@ -489,7 +315,6 @@ def _deliver(
         )
     repo = _resolve_repo(host, story)
     repo_name = origin_repo_name(repo)
-    state = remote_state(repo, facts.branch)
     # the same title rule story-develop's own delivery applies
     heading = story.title.strip()
     title = heading.splitlines()[0][:90] if heading else facts.branch
@@ -500,7 +325,7 @@ def _deliver(
             repo=repo,
             repo_name=repo_name,
             base=base or "the repo's default branch",
-            state=state,
+            state=remote_state(repo, facts.branch),
             title=title,
             no_gate=no_gate,
         )
@@ -524,7 +349,6 @@ def _deliver(
             story=story,
             repo=repo,
             repo_name=repo_name,
-            state=state,
             title=title,
             base=base,
             no_gate=no_gate,
@@ -542,47 +366,75 @@ def _deliver_claimed(
     story: StoryState,
     repo: Path,
     repo_name: str,
-    state: RemoteState,
     title: str,
     base: str | None,
     no_gate: bool,
     json_out: Path | None,
 ) -> dict[str, Any]:
-    """Steps 1-5, under the story's ``deliver`` claim."""
+    """Steps 1-5, under the story's ``deliver`` claim.
+
+    The record is built BEFORE the first external write and filled in as each
+    step lands, so a failure is classified by what has already been committed
+    rather than by which step raised: once the push is on ``origin`` the
+    command owes the operator a report, not a "nothing written" refusal.
+    """
     agent = host.orchestrator.agent_id
     url = host.orchestrator.lithos_url
-
-    # 1 — push, append-only (a diverged ref raises before anything is written).
-    push_branch(repo, facts.branch, state)
-
-    # 2 — adopt this branch's own open PR, or open one. The last step that may
-    # refuse: after it, the PR exists.
-    pr_url, adopted = open_or_adopt(
-        repo,
-        branch=facts.branch,
-        repo_name=repo_name,
-        base=base,
-        head_sha=state.local_sha,
-        title=title,
-        body=lambda: pr_body(facts=facts, story=story, repo_name=repo_name),
-    )
 
     notes: list[str] = []
     record: dict[str, Any] = {
         "run_id": facts.run_id,
         "story_id": story.story_id,
         "branch": facts.branch,
-        "pushed": state.action in (PUSH_CREATE, PUSH_FAST_FORWARD),
-        "pushed_sha": state.local_sha,
-        "pr_url": pr_url,
+        "pushed": False,
+        "pushed_sha": "",
+        "pr_url": None,
         "pr_number": None,
-        "adopted": adopted,
+        "adopted": False,
         "pr_gate_id": None,
         "human_gates_completed": [],
         "gate_complete": True,
         "changed": True,
+        "complete": True,
         "notes": notes,
     }
+
+    # 1 — push, append-only. Classified HERE, under the claim and immediately
+    # before the push, and the push sends that exact object: a local process
+    # that moves the branch in between can no longer have us classify one
+    # commit and deliver another.
+    state = remote_state(repo, facts.branch)
+    record["pushed_sha"] = state.local_sha
+    push_branch(repo, facts.branch, state)
+    record["pushed"] = state.action in (PUSH_CREATE, PUSH_FAST_FORWARD)
+
+    # 2 — adopt this branch's own open PR, or open one.
+    try:
+        pr_url, adopted = open_or_adopt(
+            repo,
+            branch=facts.branch,
+            repo_name=repo_name,
+            base=base,
+            head_sha=state.local_sha,
+            title=title,
+            body=lambda: pr_body(facts=facts, story=story, repo_name=repo_name),
+        )
+    except (DeliverRefused, OSError, subprocess.SubprocessError) as exc:
+        if not record["pushed"]:
+            raise  # nothing of ours is on the remote — a plain refusal
+        # The branch IS on origin now. Report that rather than claiming
+        # nothing was written, so the operator knows what a re-run inherits.
+        notes.append(
+            f"the branch was pushed but no PR was opened or adopted ({exc}); "
+            "the story is NOT gated. Re-run to finish — the push is "
+            "append-only, so a second run is a no-op on the remote"
+        )
+        record["gate_complete"] = False
+        record["complete"] = False
+        _file_record(json_out, record, notes)
+        return record
+    record["pr_url"] = pr_url
+    record["adopted"] = adopted
     try:
         record["pr_number"] = pr_number_from_url(pr_url)
     except RuntimeError as exc:
@@ -602,6 +454,14 @@ def _deliver_claimed(
     # is open, so it degrades to a note and the partial exit code.
     outcome: GateOutcome | None = None
     if not no_gate:
+        # Re-up the lease first: the git + gh phases above can legitimately
+        # spend minutes, and the gate decision is the part that must not run
+        # on a lease a second invocation could already have inherited.
+        if story.status == "open" and not renew_story(url, agent, story.story_id):
+            notes.append(
+                "could not renew the deliver claim before the gate work; a "
+                "concurrent delivery is unlikely but no longer excluded"
+            )
         try:
             outcome = run_gate_delivery(
                 url, agent, story=story, pr_url=pr_url, run_id=facts.run_id
@@ -613,10 +473,12 @@ def _deliver_claimed(
                 "needs-human gate still holds the story. Re-run to finish"
             )
             record["gate_complete"] = False
+            record["complete"] = False
         else:
             record["pr_gate_id"] = outcome.pr_gate_id
             record["human_gates_completed"] = list(outcome.human_gates_completed)
             record["gate_complete"] = not outcome.problems
+            record["complete"] = record["complete"] and record["gate_complete"]
             notes.extend(outcome.problems)
     # --no-gate needs no note here: it is a choice, not friction, and
     # `delivery_finding` says UNMONITORED in the finding's own body. Keeping
@@ -627,11 +489,17 @@ def _deliver_claimed(
     # marker (written on the gate, after the post) is what makes a crash
     # between steps 4 and 5 recoverable: the next run sees it missing and
     # posts, rather than computing "nothing changed" and losing the audit.
-    owed = (
-        outcome is not None
-        and outcome.pr_gate_id is not None
-        and not (outcome.finding_marked)
+    # The finding is owed unless the STORY already records one for this exact
+    # delivery. Read from the gate phase's live story when there was one, else
+    # from the story read at the start (a re-run re-reads it, so --no-gate gets
+    # the same guarantee). That marker is what survives a gate the merge sweep
+    # completes, and what makes a lost post recoverable.
+    marked = (
+        outcome.finding_marked
+        if outcome is not None
+        else story.delivery_marked(pr_url=pr_url, run_id=facts.run_id)
     )
+    owed = not marked
     changed = bool(
         record["pushed"]
         or not adopted
@@ -655,7 +523,6 @@ def _deliver_claimed(
                 agent,
                 story.story_id,
                 summary,
-                gate_id=record["pr_gate_id"],
                 pr_url=pr_url,
                 run_id=facts.run_id,
             )
@@ -665,14 +532,27 @@ def _deliver_claimed(
                 "to leave the provenance"
             )
             record["gate_complete"] = False
-    if json_out is not None:
-        try:
-            _write_json(json_out, record)
-        except OSError as exc:
-            # The delivery already happened; a record we could not file is a
-            # note, not a failure of the delivery.
-            notes.append(f"could not write the JSON record to {json_out} ({exc})")
+            record["complete"] = False
+    _file_record(json_out, record, notes)
     return record
+
+
+def _file_record(
+    json_out: Path | None, record: dict[str, Any], notes: list[str]
+) -> None:
+    """Write the ``--json`` record, if one was asked for.
+
+    A record the operator asked for and did not get is a partial result, not a
+    footnote: the delivery stands, but the output they will script against is
+    missing, so it lowers ``complete`` (exit 2) as well as leaving a note.
+    """
+    if json_out is None:
+        return
+    try:
+        _write_json(json_out, record)
+    except OSError as exc:
+        notes.append(f"could not write the JSON record to {json_out} ({exc})")
+        record["complete"] = False
 
 
 def _resolve_facts(

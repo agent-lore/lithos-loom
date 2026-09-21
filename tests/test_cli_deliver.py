@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from lithos_loom.cli import _deliver_facts as cli_facts
 from lithos_loom.cli import _deliver_lithos as cli_lithos
 from lithos_loom.cli import _deliver_repo as cli_repo
 from lithos_loom.cli import deliver as cli
@@ -706,6 +708,219 @@ def test_a_branch_named_like_a_git_option_is_pushed_not_parsed(
     assert _git(repo, "ls-remote", "origin", f"refs/heads/{hostile}") != ""
 
 
+def test_a_pr_failure_after_the_push_is_a_partial_not_nothing_written(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-002: the push is externally committed, so a gh failure
+    after it must not be reported as a refusal that wrote nothing."""
+
+    def _boom(*a: Any, **k: Any):
+        raise RuntimeError("gh pr list failed: network is down")
+
+    monkeypatch.setattr(cli_repo, "list_open_prs_for_branch", _boom)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    assert "pushed but no PR" in result.output
+    assert "nothing written" not in result.output
+    # …and the push really did land, so a re-run inherits it
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") != ""
+    assert (_get(lithos, "gate-human")).status == "open"
+
+
+def test_a_gh_failure_with_nothing_pushed_is_still_a_plain_refusal(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-002, the other side: when the remote ref was already
+    equal this run wrote nothing, so exit 1 is the honest answer."""
+    _git(repo, "push", "origin", _BRANCH)
+
+    def _boom(*a: Any, **k: Any):
+        raise RuntimeError("gh pr list failed: network is down")
+
+    monkeypatch.setattr(cli_repo, "list_open_prs_for_branch", _boom)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert lithos.mutating_calls == ["task_claim", "task_release"]
+
+
+def test_an_unwritable_json_record_is_a_partial_delivery(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-002: the operator asked for a record and did not get it;
+    the delivery stands but the run is not complete."""
+    result = _invoke(_RUN, "--json", str(run_dir / "handoff"))  # a directory
+
+    assert result.exit_code == 2, result.output
+    assert "could not write the JSON record" in result.output
+    assert _PR_URL in result.output  # the delivery itself stands
+
+
+def test_no_gate_re_posts_a_lost_finding_and_then_stays_silent(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-003: --no-gate raises no gate, so the durable marker lives
+    on the STORY — otherwise a lost finding could never be recovered."""
+    lithos.raise_on["finding_post"] = LithosClientError("boom", "post failed")
+    assert _invoke(_RUN, "--no-gate").exit_code == 2
+    assert lithos.findings == []
+
+    lithos.raise_on.pop("finding_post")
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+    assert _invoke(_RUN, "--no-gate").exit_code == 0
+    assert len(lithos.findings) == 1
+
+    assert _invoke(_RUN, "--no-gate").exit_code == 0
+    assert len(lithos.findings) == 1  # marked: nothing more to say
+
+
+def test_the_delivery_marker_survives_the_gate_being_completed(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-003: the marker is on the story, so a gate the merge
+    sweep completes cannot take the provenance record with it."""
+    assert _invoke(_RUN).exit_code == 0
+    gate_id = _get(lithos, _STORY).metadata[STORY_GATE_ID_KEY]
+    asyncio.run(lithos.task_complete(task_id=gate_id, agent="watcher"))
+
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+    assert _invoke(_RUN, "--no-gate").exit_code == 0
+    assert len(lithos.findings) == 1  # still one — the story remembers
+
+
+def test_a_foreign_gate_beside_a_matching_one_still_refuses(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-005: a MIXED state is not an idempotent re-run — the
+    story's merge semantics would stay hostage to the other PR."""
+    for gate_id, number, url in (
+        ("gate-pr-ours", 99, _PR_URL),
+        ("gate-pr-other", 42, "https://github.com/agent-lore/lithos-loom/pull/42"),
+    ):
+        lithos.add_task(
+            make_task(
+                gate_id,
+                title=f"Awaiting merge: {number}",
+                task_type="gate",
+                metadata={
+                    "gate_type": GATE_TYPE_PR,
+                    "repo": "agent-lore/lithos-loom",
+                    "pr_number": number,
+                    "pr_url": url,
+                    "required_state": "merged",
+                },
+            )
+        )
+        lithos.add_edge(from_task_id=gate_id, to_task_id=_STORY, type=WAITS_ON_GATE)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    assert "gate-pr-other" in result.output
+    assert (_get(lithos, "gate-human")).status == "open"  # escalation kept
+    assert not lithos.calls_to("task_create")
+
+
+def test_the_claim_is_renewed_before_the_gate_work(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-006: the git + gh phases can legitimately spend minutes,
+    so the gate decision starts on a fresh lease."""
+    assert _invoke(_RUN).exit_code == 0
+
+    order = [
+        c.method
+        for c in lithos.calls
+        if c.method in {"task_claim", "task_renew", "task_create", "task_release"}
+    ]
+    assert order.index("task_renew") < order.index("task_create")
+    claim = lithos.calls_to("task_claim")[0]
+    assert claim["ttl_minutes"] == cli_lithos.DELIVER_CLAIM_TTL_MINUTES >= 60
+
+
+def test_the_push_sends_the_commit_it_classified(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-009: a local process that moves the branch between the
+    classification and the push must not change what is delivered."""
+    classified = _head(repo)
+    real_push = cli_repo.push_branch
+
+    def _move_the_branch_then_push(repo_path: Path, branch: str, state: Any) -> None:
+        (repo_path / "raced.py").write_text("late = 1\n", encoding="utf-8")
+        _git(repo_path, "add", "-A")
+        _git(repo_path, "commit", "-m", "a concurrent local commit")
+        real_push(repo_path, branch, state)
+
+    # `deliver` imports push_branch by name, so its own binding is the seam
+    monkeypatch.setattr(cli, "push_branch", _move_the_branch_then_push)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    remote = _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}").split()[0]
+    assert remote == classified  # the measured object, not the moved ref
+    assert classified[:12] in lithos.findings[-1]["summary"]
+
+
+def test_the_handoff_summary_is_fenced_and_defanged(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-006: the handoff is agent-written into a RW mount and a PR
+    description is live markup — closing keywords close issues, @names ping."""
+    (run_dir / "handoff" / "round_04_coder_done.md").write_text(
+        "## Status: LGTM\n\n## Summary\nDone. Closes #1337 cc @evil-org/sec\n",
+        encoding="utf-8",
+    )
+
+    assert _invoke(_RUN).exit_code == 0
+    body = gh["created"][0]["body"]
+
+    assert "```text" in body  # quoted, not spliced into live markup
+    assert "Closes #1337" not in body  # the keyword no longer binds
+    assert "#1337" in body  # …but the operator still sees what was said
+    assert "`@evil-org/sec`" in body
+
+
+def test_a_symlinked_or_fifo_handoff_is_never_read(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    tmp_path: Path,
+) -> None:
+    """security/f-007: the handoff dir is agent-writable, so it must not decide
+    what a host-privileged process opens — and a FIFO must not hang it."""
+    secret = tmp_path / "another-run.md"
+    secret.write_text("## Summary\nSECRET-abc123\n", encoding="utf-8")
+    (run_dir / "handoff" / "round_07_coder_done.md").symlink_to(secret)
+    os.mkfifo(run_dir / "handoff" / "round_08_coder_done.md")
+
+    result = _invoke(_RUN)  # must not hang, must not read the link target
+
+    assert result.exit_code == 0, result.output
+    assert "SECRET-abc123" not in gh["created"][0]["body"]
+
+
 def test_a_fork_pr_with_the_same_branch_name_is_never_adopted(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:
@@ -724,7 +939,9 @@ def test_a_fork_pr_with_the_same_branch_name_is_never_adopted(
 
     result = _invoke(_RUN)
 
-    assert result.exit_code == 1, result.output
+    # the push already landed, so this is a PARTIAL delivery (exit 2), never a
+    # "nothing written" refusal — but the PR is still not adopted
+    assert result.exit_code == 2, result.output
     assert "1234" in result.output and "attacker" in result.output
     assert gh["created"] == []  # nothing opened either — the state is ambiguous
     assert (_get(lithos, "gate-human")).status == "open"
@@ -739,7 +956,7 @@ def test_a_same_name_pr_on_another_head_is_never_adopted(
 
     result = _invoke(_RUN)
 
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 2, result.output  # the push landed first
     assert "#7" in result.output
     assert gh["created"] == []
 
@@ -754,16 +971,45 @@ def test_every_gh_call_is_pinned_to_the_origin_repository(
     assert gh["created"][0]["repo_name"] == _REPO_NAME
 
 
-def test_the_pr_body_never_carries_the_raw_failure_reason(
+def test_the_pr_body_carries_the_stop_reason_redacted(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:
-    """security/f-003: `failure_reason` is raw agent/infra text (host paths,
-    endpoints, auth payloads). The PR is world-readable; the classification
-    goes in, the raw line stays on the story."""
+    """correctness/f-010 + security/f-003 together: the provenance contract
+    wants WHY the run stopped, and the raw line is agent/infra text (host
+    paths, endpoints, credential-shaped runs). So the reason travels,
+    redacted and bounded."""
+    state = json.loads((run_dir / "state.json").read_text())
+    state["failure_reason"] = (
+        "coder died: auth 401 from https://proxy.internal/v1 reading "
+        "/home/dns/.config/gh/hosts.yml with ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    )
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
     assert _invoke(_RUN).exit_code == 0
     body = gh["created"][0]["body"]
-    assert "deadlocked on the AC" not in body
-    assert "`disputed`" in body  # the classification still travels
+
+    assert "coder died: auth 401" in body  # the reason itself travels
+    assert "`disputed`" in body  # and its classification
+    assert "proxy.internal" not in body  # …but not the endpoint
+    assert "/home/dns" not in body  # …nor the host path
+    assert "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345" not in body  # …nor the token
+    assert "<url>" in body and "<path>" in body and "<redacted>" in body
+    # the operator's own copy is untouched
+    assert "proxy.internal" in _invoke(_RUN, "--dry-run").output
+
+
+def test_redaction_is_bounded_and_markup_inert() -> None:
+    """The pure half of correctness/f-010."""
+    assert cli_facts.redact_for_publication("") == ""
+    assert cli_facts.redact_for_publication("plain words") == "plain words"
+    assert "<path>" in cli_facts.redact_for_publication("wrote ~/loom/work/run.json")
+    long = cli_facts.redact_for_publication("stalled after " + "word " * 200)
+    assert len(long) <= 200 and long.endswith("…")
+    # closing keywords and mentions never travel LIVE: the keyword no longer
+    # binds to the issue ref, the mention is quoted
+    out = cli_facts.redact_for_publication("gave up. Closes #12 cc @agent-lore/sec")
+    assert "Closes #12" not in out and "#12" in out
+    assert "`@agent-lore/sec`" in out
 
 
 def test_the_pr_body_carries_the_coders_final_handoff_summary(
@@ -877,19 +1123,39 @@ def test_origin_repo_name_refuses_a_non_github_origin(repo: Path) -> None:
         cli_repo.origin_repo_name(repo)  # the fixture's origin is a local path
 
 
-def test_adoptable_takes_only_our_own_head(tmp_path: Path) -> None:
+def test_adoptable_takes_only_our_own_head() -> None:
     ours = _open_pr(head_sha="a" * 40)
     fork = _open_pr(number=2, head_sha="a" * 40, cross_repository=True)
     stale = _open_pr(number=3, head_sha="b" * 40)
-    assert cli_repo.adoptable([ours], head_sha="a" * 40, base=None) == (ours, "")
-    assert cli_repo.adoptable([fork, ours], head_sha="a" * 40, base=None) == (ours, "")
-    assert cli_repo.adoptable([], head_sha="a" * 40, base=None) == (None, "")
-    pr, reason = cli_repo.adoptable([fork, stale], head_sha="a" * 40, base=None)
+    assert cli_repo.adoptable([ours], head_sha="a" * 40, base="main") == (ours, "")
+    assert cli_repo.adoptable([fork, ours], head_sha="a" * 40, base="main") == (
+        ours,
+        "",
+    )
+    assert cli_repo.adoptable([], head_sha="a" * 40, base="main") == (None, "")
+    pr, reason = cli_repo.adoptable([fork, stale], head_sha="a" * 40, base="main")
     assert pr is None and "#2" in reason and "#3" in reason
-    # a PR onto another base is not this delivery either
+
+
+def test_adoptable_fails_closed_on_fields_github_did_not_report() -> None:
+    """correctness/f-008 + security/f-008: a check that silently does not run
+    is the failure this function exists to prevent. Unknown provenance is
+    never ours."""
+    no_head = _open_pr(number=4, head_sha="")
+    pr, reason = cli_repo.adoptable([no_head], head_sha="a" * 40, base="main")
+    assert pr is None and "#4" in reason and "not reported" in reason
+
+    no_base = _open_pr(number=5, head_sha="a" * 40, base_ref="")
+    pr, reason = cli_repo.adoptable([no_base], head_sha="a" * 40, base="main")
+    assert pr is None and "#5" in reason
+
+
+def test_adoptable_checks_the_base_even_when_the_operator_named_none() -> None:
+    """security/f-008: the comparison is against the RESOLVED base, so an
+    adopted PR can never target a branch `deliver` would not have opened onto."""
     other_base = _open_pr(head_sha="a" * 40, base_ref="release")
     pr, reason = cli_repo.adoptable([other_base], head_sha="a" * 40, base="main")
-    assert pr is None and "release" in reason
+    assert pr is None and "release" in reason and "main" in reason
 
 
 def test_coder_summary_is_bounded_and_control_stripped(tmp_path: Path) -> None:
@@ -898,13 +1164,13 @@ def test_coder_summary_is_bounded_and_control_stripped(tmp_path: Path) -> None:
     (handoff / "round_02_coder_done.md").write_text(
         "## Status: LGTM\n\n## Summary\n" + "x" * 5000 + "\n", encoding="utf-8"
     )
-    summary = cli.coder_summary(handoff)
+    summary = cli_facts.coder_summary(handoff)
     assert len(summary) <= 600 and summary.endswith("…")
-    assert cli.coder_summary(tmp_path / "nope") == ""
+    assert cli_facts.coder_summary(tmp_path / "nope") == ""
 
 
 def test_run_facts_reads_state_and_the_escalation_brief(run_dir: Path) -> None:
-    facts = cli.run_facts(run_dir)
+    facts = cli_facts.run_facts(run_dir)
     assert facts.story_id == _STORY
     assert facts.run_id == _RUN
     assert facts.branch == _BRANCH
@@ -918,14 +1184,14 @@ def test_run_facts_reads_state_and_the_escalation_brief(run_dir: Path) -> None:
 def test_run_facts_tolerates_an_empty_run_dir(tmp_path: Path) -> None:
     d = tmp_path / "t-1" / "r-1"
     (d / "handoff").mkdir(parents=True)
-    facts = cli.run_facts(d)
-    assert facts == cli.RunFacts(
+    facts = cli_facts.run_facts(d)
+    assert facts == cli_facts.RunFacts(
         story_id="t-1", branch="", run_id="r-1", run_dir=str(d)
     )
 
 
 def test_provenance_names_the_run_and_why_it_stopped(run_dir: Path) -> None:
-    lines = cli.provenance_lines(cli.run_facts(run_dir))
+    lines = cli_facts.provenance_lines(cli_facts.run_facts(run_dir))
     assert any("develop deliver" in line for line in lines)
     assert any(_RUN in line and "disputed" in line for line in lines)
     assert any(_BRANCH in line for line in lines)

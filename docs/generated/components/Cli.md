@@ -12,14 +12,15 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
-| `lithos_loom.cli._deliver_lithos` | M | 4 | 9 |
+| `lithos_loom.cli._deliver_facts` | M | 1 | 7 |
+| `lithos_loom.cli._deliver_lithos` | M | 4 | 10 |
 | `lithos_loom.cli._deliver_repo` | S | 1 | 6 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
-| `lithos_loom.cli.deliver` | L | 1 | 7 |
+| `lithos_loom.cli.deliver` | M | 0 | 2 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
@@ -31,6 +32,16 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 ## Public API
 
+### `lithos_loom.cli._deliver_facts`
+- class `RunFacts` — What the stopped run left on disk, for the PR body and the finding.
+- def `coder_summary` — The last round's coder handoff ``## Summary``, as one bounded line.
+- def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
+- def `run_facts` — Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
+- def `redact_for_publication` — A bounded, markup-inert rendering of host diagnostic text.
+- def `provenance_lines` — The PR body's ``## Provenance`` block: where this branch came from.
+- def `reviews_summary` — The Review section's verdict line: this branch was NOT panel-approved.
+- def `pr_body` — The generated body for a newly opened PR — the shared builder plus this delivery's provenance. Built lazily: an adopted PR needs none.
+
 ### `lithos_loom.cli._deliver_lithos`
 - class `DeliverRefused` — A precondition failed and nothing was written. Exits ``1``.
 - class `PrGateRef` — An open ``pr`` gate holding the story, and what it watches.
@@ -38,12 +49,13 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `read_story` — Read the story plus the open gates blocking it.
 - class `GateOutcome` — What the Lithos half of the delivery managed to do.
 - def `gate_delivery` — Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire the stop's human gates.
-- def `mark_delivery_finding` — Record on the ``pr`` gate that this delivery's finding was posted.
+- def `mark_delivery_finding` — Record on the **story** that this delivery's finding was posted.
 - def `run_lithos` — Run one Lithos phase, mapping transport failures onto the refusal.
 - def `read_story_sync` — Step 0: the live story + the gates holding it.
 - def `run_gate_delivery` — Steps 3 + 4, in one client session.
-- def `post_finding` — Step 5: post ``[ManualDelivery]``, then mark the gate (in that order).
+- def `post_finding` — Step 5: post ``[ManualDelivery]``, then mark the story (in that order).
 - def `claim_story` — Take the ``deliver`` claim on the story; ``False`` when another process holds it (two deliveries of one story must not interleave).
+- def `renew_story` — Re-up the ``deliver`` lease before the gate work — the phase that must be exclusive — so it never runs on a lease the git / gh phases spent. ``False`` when the renewal did not land (the caller notes it; the gate work still runs, since refusing there would strand an open PR).
 - def `release_story` — Release the ``deliver`` claim. Best-effort: a lingering claim only expires with its short TTL.
 
 ### `lithos_loom.cli._deliver_repo`
@@ -93,12 +105,6 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `converge_command` — Converge an existing PR to review-green (panel + gate), then push.
 
 ### `lithos_loom.cli.deliver`
-- class `RunFacts` — What the stopped run left on disk, for the PR body and the finding.
-- def `coder_summary` — The last round's coder handoff ``## Summary``, as one bounded line.
-- def `run_facts` — Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
-- def `provenance_lines` — The PR body's ``## Provenance`` block: where this branch came from.
-- def `reviews_summary` — The Review section's verdict line: this branch was NOT panel-approved.
-- def `pr_body` — The generated body for a newly opened PR — the shared builder plus this delivery's provenance. Built lazily: an adopted PR needs none.
 - def `delivery_finding` — The ``[ManualDelivery]`` summary posted on the story (pure).
 - def `deliver_command` — Push a stopped run's branch, open its PR, and swap the needs-human gate for a pr gate.
 

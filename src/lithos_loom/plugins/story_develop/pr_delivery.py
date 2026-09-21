@@ -107,12 +107,16 @@ def build_pr_body(
     task_id: str | None,
     issue_closes: str = "",
     provenance: Sequence[str] = (),
+    provenance_quote: str = "",
 ) -> str:
     """The generated PR body: provenance + verdicts, not the whole log.
 
     ``rounds`` / ``cost_usd`` are ``None`` when nothing recorded them (a hand
     delivery whose run dir was reaped) and render as ``unknown`` — never as a
     confident zero.
+
+    *provenance_quote* is untrusted text (an agent's handoff) rendered as a
+    fenced block so none of it is active markup.
 
     *provenance* is an optional block of extra lines about where the branch
     came from — empty for a run that delivered itself (the Review section
@@ -143,9 +147,23 @@ def build_pr_body(
     )
     if task_id:
         parts.append(f"- Lithos task: `{task_id}`")
-    if provenance:
+    if provenance or provenance_quote:
         parts += ["", "## Provenance", ""]
         parts += [f"- {line}" for line in provenance]
+    if provenance_quote:
+        # FENCED, deliberately: *provenance_quote* is text an agent wrote (the
+        # coder's handoff), and a PR description is live markup — GitHub
+        # honours closing keywords and @-mentions anywhere in it. Inside a code
+        # block neither fires, and the operator still sees exactly what was
+        # written.
+        parts += [
+            "",
+            "Coder's final handoff, verbatim:",
+            "",
+            "```text",
+            provenance_quote,
+            "```",
+        ]
     parts += [
         "",
         "Per-round commits are intentional (the dialogue history); "
