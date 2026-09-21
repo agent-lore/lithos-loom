@@ -12,13 +12,14 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
-| `lithos_loom.cli._deliver_lithos` | S | 3 | 6 |
+| `lithos_loom.cli._deliver_lithos` | M | 4 | 9 |
+| `lithos_loom.cli._deliver_repo` | S | 1 | 6 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
-| `lithos_loom.cli.deliver` | M | 2 | 8 |
+| `lithos_loom.cli.deliver` | L | 1 | 7 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
@@ -32,14 +33,27 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 ### `lithos_loom.cli._deliver_lithos`
 - class `DeliverRefused` — A precondition failed and nothing was written. Exits ``1``.
-- class `StoryState` — The live story, and the loom ``human`` gates that hold it.
-- def `read_story` — Read the story plus the open loom ``human`` gates blocking it.
+- class `PrGateRef` — An open ``pr`` gate holding the story, and what it watches.
+- class `StoryState` — The live story, and the gates that hold it.
+- def `read_story` — Read the story plus the open gates blocking it.
 - class `GateOutcome` — What the Lithos half of the delivery managed to do.
-- def `gate_delivery` — Steps 3 + 4: raise the ``pr`` gate, then retire the stop's human gates.
+- def `gate_delivery` — Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire the stop's human gates.
+- def `mark_delivery_finding` — Record on the ``pr`` gate that this delivery's finding was posted.
 - def `run_lithos` — Run one Lithos phase, mapping transport failures onto the refusal.
 - def `read_story_sync` — Step 0: the live story + the gates holding it.
 - def `run_gate_delivery` — Steps 3 + 4, in one client session.
-- def `post_finding` — Step 5.
+- def `post_finding` — Step 5: post ``[ManualDelivery]``, then mark the gate (in that order).
+- def `claim_story` — Take the ``deliver`` claim on the story; ``False`` when another process holds it (two deliveries of one story must not interleave).
+- def `release_story` — Release the ``deliver`` claim. Best-effort: a lingering claim only expires with its short TTL.
+
+### `lithos_loom.cli._deliver_repo`
+- class `RemoteState` — How ``origin``'s copy of the branch stands against the local one.
+- def `local_sha` — The branch's sha in *repo*. Raises :class:`DeliverRefused` if absent.
+- def `remote_state` — Classify the push (step 1) without writing anything.
+- def `push_branch` — Push *branch* to ``origin`` — append-only; a diverged ref is refused.
+- def `origin_repo_name` — ``owner/name`` of the checkout's ``origin`` — the repository every ``gh`` call in this command is pinned to.
+- def `adoptable` — Pick the open PR that is *ours* to adopt, or say why none is (pure).
+- def `open_or_adopt` — Step 2: adopt this branch's own open PR, else open one. Returns ``(url, adopted)``.
 
 ### `lithos_loom.cli._github_metadata`
 - class `GithubMetadataError` — Raised when the CLI cannot complete a project-context mutation.
@@ -80,13 +94,11 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 ### `lithos_loom.cli.deliver`
 - class `RunFacts` — What the stopped run left on disk, for the PR body and the finding.
+- def `coder_summary` — The last round's coder handoff ``## Summary``, as one bounded line.
 - def `run_facts` — Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
 - def `provenance_lines` — The PR body's ``## Provenance`` block: where this branch came from.
 - def `reviews_summary` — The Review section's verdict line: this branch was NOT panel-approved.
-- class `RemoteState` — How ``origin``'s copy of the branch stands against the local one.
-- def `local_sha` — The branch's sha in *repo*. Raises :class:`DeliverRefused` if absent.
-- def `remote_state` — Classify the push (step 1) without writing anything.
-- def `push_branch` — Push *branch* to ``origin`` — append-only; a diverged ref is refused.
+- def `pr_body` — The generated body for a newly opened PR — the shared builder plus this delivery's provenance. Built lazily: an adopted PR needs none.
 - def `delivery_finding` — The ``[ManualDelivery]`` summary posted on the story (pure).
 - def `deliver_command` — Push a stopped run's branch, open its PR, and swap the needs-human gate for a pr gate.
 

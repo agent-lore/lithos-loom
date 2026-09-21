@@ -40,21 +40,44 @@ partial first pass finishes the job and changes nothing else.
    refused** (exit 1) naming both shas. `deliver` never force-pushes — the
    divergence may be a collaborator's commit, and re-developing the story is
    the operator's other lever.
-2. **Open or adopt the PR.** An open PR whose head is the branch is *adopted*
-   (printed as `adopted PR #N`); otherwise one is opened through the same
-   `pr_delivery` seam story-develop uses on approval, onto `--base` or the
-   repo's default branch. The body is the generated one — what / acceptance
-   criteria / review / `Closes #N` for an issue-linked story — plus a
-   **`## Provenance`** section naming the run, why it stopped, and that it was
-   delivered by hand. `[story_develop] operator_github_login`, when set, is
-   asked for review exactly as on a daemon delivery.
+2. **Open or adopt the PR** — but only *this branch's own* PR. `gh pr list
+   --head` matches on the head **branch name** alone, so a PR opened from a
+   fork whose branch carries the same name looks identical; adopting one would
+   point the `pr` gate, merge tracking, review ingestion and the story's
+   eventual completion at a third party's work while retiring the story's
+   escalation. A candidate is adopted only when it is **same-repository** and
+   its **head is the sha just pushed** (and its base matches `--base` when
+   given); anything else is refused (exit 1) naming what was found. Otherwise
+   a PR is opened through the same `pr_delivery` seam story-develop uses on
+   approval, onto `--base` or the repo's default branch. The body is the
+   generated one — what / acceptance criteria / review / `Closes #N` for an
+   issue-linked story — plus a **`## Provenance`** section naming the run, its
+   stop *classification*, the branch, and the coder's final handoff summary.
+   `[story_develop] operator_github_login`, when set, is asked for review
+   exactly as on a daemon delivery.
+
+   Every `gh` call is **pinned** to `--repo <owner/name>` resolved from the
+   checkout's `origin` — the remote step 1 pushed to. Letting `gh` infer the
+   target would, for a fork checkout, resolve to the *parent* repository: the
+   PR, the review request and the gate's `repo` metadata would land somewhere
+   the branch was never pushed.
 3. **Raise the `pr` gate** on the story and record it: `pr_gate_id`, and — on
    the same write — a per-key delete of the stop's failed-attempt marker and
    its `needs_human_gate_id` provenance. This is literally the write the
    daemon's own delivering exit makes (`record_delivery_on_story`), so a
    hand-delivered story is indistinguishable from a daemon-delivered one to
-   every later sweep. A story that already carries an open `pr` gate adopts it
-   rather than stacking a second blocker.
+   every later sweep. The story write is made whenever the **live** story does
+   not already say it, so a first pass that created the gate but lost the
+   metadata write is *repaired* by the next run rather than skipped.
+
+   A gate is adopted only when it watches **this** PR. An open `pr` gate
+   pointing at a *different* PR means the story is already behind another
+   delivery: the command refuses (exit 2), leaves that gate alone and leaves
+   the needs-human gate open, rather than claiming a PR is monitored when the
+   watcher is looking elsewhere. The gate decision is taken on a **fresh**
+   read (the initial one predates the push), and the whole delivery runs under
+   a short-lived `deliver` claim on the story, so two concurrent invocations
+   cannot both decide "no gate yet" and raise one each.
 4. **Complete the stop's loom `human` gate(s)** — found from the story's
    incoming `waits_on_gate` **edges**, never from the `needs_human_gate_id`
    key (provenance only: it can be stale, and a story may carry several
@@ -65,9 +88,14 @@ partial first pass finishes the job and changes nothing else.
    the human gate is deliberately **left open** — it is then the only thing
    standing between the story and a re-dispatch.
 5. **Post `[ManualDelivery]`** on the story: the run, the PR (opened or
-   adopted), the pushed sha, the `pr` gate that now holds it, and the gates
-   retired. Any degradation rides along as `[Friction]` text in the same
-   finding. Nothing changed → nothing posted.
+   adopted), the delivered sha (always — an audit that cannot be checked later
+   is no audit), the `pr` gate that now holds it, and the gates retired. Any
+   degradation rides along as `[Friction]` text in the same finding. The
+   finding is made one-shot by a `metadata.manual_delivery` marker written on
+   the **gate** *after* the post (finding-then-mark, as the subscriptions do):
+   nothing changed *and* the marker is present → nothing posted; a delivery
+   whose post failed or died re-posts on the next run instead of being
+   computed away as "unchanged".
 
 From there the PR is a first-class PR-maintenance object (PRD
 [`pr-reconciliation.md`](../prd/pr-reconciliation.md)): landability
@@ -78,9 +106,21 @@ admission cap.
 
 **The repo, not the worktree.** `state.json` names the branch, and the branch
 ref lives in the project's own checkout whether or not the run's worktree
-survived a salvage. So the run dir is used only to *find* the branch and the
-story; every write is `git -C <repo>` + `gh` + Lithos. The checkout is the
-story's project: `metadata.project` → `[projects.<slug>].repo`.
+survived a salvage. So the run dir is used only to *find* the branch, the
+story, and the run's provenance (rounds from `state.json`, cost + test-gate
+verdict from its `result.json` `escalation.brief`, the final coder handoff
+from `handoff/`); every write is `git -C <repo>` + `gh` + Lithos. The checkout
+is the story's project: `metadata.project` → `[projects.<slug>].repo`.
+
+**What the PR body does not carry.** The run's raw `failure_reason` stays
+host-side. It is not a curated label — for the reason-bearing statuses it is
+the first line of the agent CLI's error text, the subprocess stderr, or the
+tail of unparsed agent stdout, so host paths, provider endpoints and
+auth-error payloads can all reach it, and a PR body is world-readable on a
+public repo. The PR carries the stop's **classification** (`disputed`,
+`max_rounds`, …); the full reason is on the story's `[NeedsHuman]` finding, in
+the gate brief, and in `--dry-run`. Provenance the run never recorded (a
+reaped run's rounds or cost) renders as `unknown`, never as a confident zero.
 
 ## Flags
 
@@ -101,15 +141,16 @@ story's project: `metadata.project` → `[projects.<slug>].repo`.
   human gates completed, and one `[Friction]` line per degradation.
 - **JSON** (`--json`): `run_id`, `story_id`, `branch`, `pushed`, `pushed_sha`,
   `pr_url`, `pr_number`, `adopted`, `pr_gate_id`, `human_gates_completed[]`,
-  `gate_complete`, `changed`, `notes[]`.
+  `gate_complete`, `changed`, `notes[]`. Written after the delivery, so a
+  record that cannot be filed is a `[Friction]` note, not a failed delivery.
 
 ## Exit codes
 
 | Exit | Meaning |
 |------|---------|
 | `0` | Delivered (or adopted with nothing left to do; or a `--dry-run` plan printed). |
-| `1` | **Refused, nothing written**: a diverged remote branch, an unknown run, a branch absent from the checkout, a run that already delivered its PR, a story that is not open (without `--no-gate`), a project with no `[projects.<slug>]` mapping, an unreachable Lithos, or a `gh` call that could not answer. |
-| `2` | **Partial**: the PR is open but the gate half did not complete — no `pr` gate, or a needs-human gate that would not close. The PR url is printed and the `[Friction]` says what is owed; re-running finishes it. |
+| `1` | **Refused, nothing written**: a diverged remote branch, an unknown run, a branch absent from the checkout, a run that already delivered its PR, a story that is not open (without `--no-gate`), a project with no `[projects.<slug>]` mapping, an `origin` that is not a GitHub repository, a same-named PR that is not this branch's (a fork's, or one on another head), another `deliver` holding the story's claim, an unreachable Lithos, or a `gh` call that could not answer. Every refusal happens **before** the PR exists. |
+| `2` | **Partial**: the PR is open but the gate half did not complete — no `pr` gate, a gate watching another PR, a needs-human gate that would not close, a lost story write, or a `[ManualDelivery]` that would not post. The PR url is printed and the `[Friction]` says what is owed; re-running finishes it. Once the PR exists nothing downgrades to exit 1: the url is never lost. |
 
 ## Requirements
 

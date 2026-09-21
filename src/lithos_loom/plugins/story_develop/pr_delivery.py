@@ -17,7 +17,6 @@ thin ``gh`` / ``git`` wrappers at the bottom (monkeypatched in tests).
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 from collections.abc import Sequence
@@ -102,14 +101,18 @@ def build_pr_body(
     description: str,
     acceptance_criteria: str | None,
     reviews_summary: str,
-    rounds: int,
+    rounds: int | None,
     gate_verdict: str | None,
-    cost_usd: float,
+    cost_usd: float | None,
     task_id: str | None,
     issue_closes: str = "",
     provenance: Sequence[str] = (),
 ) -> str:
     """The generated PR body: provenance + verdicts, not the whole log.
+
+    ``rounds`` / ``cost_usd`` are ``None`` when nothing recorded them (a hand
+    delivery whose run dir was reaped) and render as ``unknown`` — never as a
+    confident zero.
 
     *provenance* is an optional block of extra lines about where the branch
     came from — empty for a run that delivered itself (the Review section
@@ -126,11 +129,18 @@ def build_pr_body(
         "## Review",
         "",
         f"- verdicts: {reviews_summary}",
-        f"- rounds: {rounds}",
+        # `None` is "nobody recorded this", which a hand delivery of a reaped
+        # run genuinely hits — and "0 rounds / $0.00" would assert something
+        # false about the branch rather than admit the gap.
+        f"- rounds: {rounds if rounds is not None else 'unknown'}",
     ]
     if gate_verdict:
         parts.append(f"- test gate: {gate_verdict}")
-    parts.append(f"- agent cost: ${cost_usd:.2f}")
+    parts.append(
+        f"- agent cost: ${cost_usd:.2f}"
+        if cost_usd is not None
+        else "- agent cost: unknown"
+    )
     if task_id:
         parts.append(f"- Lithos task: `{task_id}`")
     if provenance:
@@ -196,8 +206,18 @@ def _run(
 
 
 def push_branch(wt: Path, branch: str) -> None:
-    """Host-side push of the worktree branch to origin. Raises on failure."""
-    proc = _run(["git", "push", "-u", "origin", branch], cwd=wt, timeout=300)
+    """Host-side push of the worktree branch to origin. Raises on failure.
+
+    The branch travels as a fully-qualified **refspec**, never as a bare
+    positional: a ref legitimately named ``--receive-pack=…`` would otherwise
+    be parsed by git as an option naming a program to execute (CWE-88). The
+    same hardening the ``ls-remote`` / ``rev-parse`` reads already carry.
+    """
+    proc = _run(
+        ["git", "push", "-u", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
+        cwd=wt,
+        timeout=300,
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"git push failed: {proc.stderr.strip()}")
 
@@ -356,50 +376,27 @@ def push_to_pr_ref(
     return head_sha  # the exact sha pushed (== the reviewed HEAD)
 
 
-def find_open_pr_for_branch(repo: Path, branch: str) -> tuple[int, str] | None:
-    """``(number, url)`` of the open PR whose head is *branch*, or ``None``.
+def create_pr(
+    wt: Path,
+    *,
+    branch: str,
+    base: str,
+    title: str,
+    body: str,
+    repo_name: str | None = None,
+) -> str:
+    """Open the PR; returns its URL. Raises on failure.
 
-    The adopt half of an idempotent delivery (``develop deliver``): a second
-    invocation must find the PR the first one opened rather than opening a
-    duplicate. gh-CLI-shaped like :func:`create_pr` — it resolves the head
-    ref against the checkout's own remote, which the REST API cannot do
-    without already knowing ``owner/repo`` and the head's owner. Raises on a
-    gh failure (the caller must not read "could not ask" as "no PR").
+    *repo_name* pins the target repository (``--repo owner/name``) rather
+    than letting ``gh`` infer it — for a fork checkout gh's default is the
+    *parent*, which is not where the branch was pushed.
     """
     proc = _run(
         [
             "gh",
             "pr",
-            "list",
-            "--head",
-            branch,
-            "--state",
-            "open",
-            "--json",
-            "number,url",
-        ],
-        cwd=repo,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"gh pr list failed: {proc.stderr.strip()}")
-    try:
-        rows = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"gh pr list returned no JSON: {proc.stdout!r}") from exc
-    for row in rows if isinstance(rows, list) else []:
-        number, url = row.get("number"), row.get("url")
-        if isinstance(number, int) and isinstance(url, str) and url:
-            return number, url
-    return None
-
-
-def create_pr(wt: Path, *, branch: str, base: str, title: str, body: str) -> str:
-    """Open the PR; returns its URL. Raises on failure."""
-    proc = _run(
-        [
-            "gh",
-            "pr",
             "create",
+            *(["--repo", repo_name] if repo_name else []),
             "--head",
             branch,
             "--base",

@@ -39,7 +39,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
-| `lithos_loom.plugins.story_develop.github_access` | S | 0 | 3 |
+| `lithos_loom.plugins.story_develop.github_access` | S | 1 | 4 |
 | `lithos_loom.plugins.story_develop.handoff` | M | 3 | 13 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
@@ -50,7 +50,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.panel_prompts` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
-| `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 16 |
+| `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
@@ -265,6 +265,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `github_call` — Run one GitHub REST operation against a typed client, synchronously.
 - def `repo_name_with_owner` — ``owner/repo`` of the local checkout's ``origin`` remote, via ``gh``.
 - def `default_base_branch` — The default branch of the checkout's ``origin`` repository, via ``gh``.
+- class `OpenPullRequest` — An open PR ``gh`` reports for a head branch, with the fields an adopter must verify before treating it as ours.
+- def `list_open_prs_for_branch` — Every open PR whose head branch is *branch*, with its identity fields.
 
 ### `lithos_loom.plugins.story_develop.handoff`
 - def `severity_at_or_above` — True if *severity* meets or exceeds *threshold* (minor < major < critical).
@@ -356,7 +358,6 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `ForkPushUnsupported` — The PR's head ref is not on ``origin`` (a fork PR), so converge cannot push to it under origin credentials (v1). The operator converges + fixes locally with ``--no-push``, or re-runs against a same-repo PR.
 - class `MergeRaceDetected` — The PR head ref advanced on the remote since converge resolved it, so a push would not be a fast-forward. Converge stops rather than ``--force`` (which would clobber the concurrent commit); the operator re-runs to pick up the new tip.
 - def `push_to_pr_ref` — Push the reviewed worktree ``HEAD`` onto the PR's head ref *remote_ref*.
-- def `find_open_pr_for_branch` — ``(number, url)`` of the open PR whose head is *branch*, or ``None``.
 - def `create_pr` — Open the PR; returns its URL. Raises on failure.
 - def `pr_number_from_url` — Extract the PR number from a canonical GitHub PR URL; raise if it can't.
 - def `request_copilot` — Request the Copilot reviewer; False (logged) on failure — non-fatal.
