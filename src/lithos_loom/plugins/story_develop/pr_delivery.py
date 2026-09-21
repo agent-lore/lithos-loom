@@ -17,8 +17,10 @@ thin ``gh`` / ``git`` wrappers at the bottom (monkeypatched in tests).
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -105,8 +107,16 @@ def build_pr_body(
     cost_usd: float,
     task_id: str | None,
     issue_closes: str = "",
+    provenance: Sequence[str] = (),
 ) -> str:
-    """The generated PR body: provenance + verdicts, not the whole log."""
+    """The generated PR body: provenance + verdicts, not the whole log.
+
+    *provenance* is an optional block of extra lines about where the branch
+    came from — empty for a run that delivered itself (the Review section
+    already says), one section for a branch delivered by hand afterwards
+    (``lithos-loom develop deliver``: the run id and why that run stopped).
+    One body builder, so a hand delivery's PR reads like every other.
+    """
     parts = ["## What", "", description.strip(), ""]
     if issue_closes:
         parts += [issue_closes, ""]
@@ -123,6 +133,9 @@ def build_pr_body(
     parts.append(f"- agent cost: ${cost_usd:.2f}")
     if task_id:
         parts.append(f"- Lithos task: `{task_id}`")
+    if provenance:
+        parts += ["", "## Provenance", ""]
+        parts += [f"- {line}" for line in provenance]
     parts += [
         "",
         "Per-round commits are intentional (the dialogue history); "
@@ -341,6 +354,43 @@ def push_to_pr_ref(
             )
         raise RuntimeError(f"git push to {remote_ref} failed: {stderr}")
     return head_sha  # the exact sha pushed (== the reviewed HEAD)
+
+
+def find_open_pr_for_branch(repo: Path, branch: str) -> tuple[int, str] | None:
+    """``(number, url)`` of the open PR whose head is *branch*, or ``None``.
+
+    The adopt half of an idempotent delivery (``develop deliver``): a second
+    invocation must find the PR the first one opened rather than opening a
+    duplicate. gh-CLI-shaped like :func:`create_pr` — it resolves the head
+    ref against the checkout's own remote, which the REST API cannot do
+    without already knowing ``owner/repo`` and the head's owner. Raises on a
+    gh failure (the caller must not read "could not ask" as "no PR").
+    """
+    proc = _run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "number,url",
+        ],
+        cwd=repo,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"gh pr list failed: {proc.stderr.strip()}")
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"gh pr list returned no JSON: {proc.stdout!r}") from exc
+    for row in rows if isinstance(rows, list) else []:
+        number, url = row.get("number"), row.get("url")
+        if isinstance(number, int) and isinstance(url, str) and url:
+            return number, url
+    return None
 
 
 def create_pr(wt: Path, *, branch: str, base: str, title: str, body: str) -> str:

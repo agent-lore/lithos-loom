@@ -68,3 +68,36 @@ def repo_name_with_owner(repo: Path) -> str:
     if proc.returncode != 0:
         raise RuntimeError(f"gh repo view failed: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def default_base_branch(repo: Path) -> str:
+    """The default branch of the checkout's ``origin`` repository, via ``gh``.
+
+    The same gh-CLI shape as :func:`repo_name_with_owner` — it answers from
+    the working tree's remote, which the REST API cannot do without already
+    knowing ``owner/repo``. Used by ``develop deliver`` to pick the PR base
+    when the operator names none (a story-develop run's own base branch is a
+    run-time config value, not something the stopped run left on disk).
+    Raises on failure.
+    """
+    proc = subprocess.run(
+        [
+            "gh",
+            "repo",
+            "view",
+            "--json",
+            "defaultBranchRef",
+            "-q",
+            ".defaultBranchRef.name",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"gh repo view failed: {proc.stderr.strip()}")
+    name = proc.stdout.strip()
+    if not name:
+        raise RuntimeError("gh repo view returned no default branch")
+    return name

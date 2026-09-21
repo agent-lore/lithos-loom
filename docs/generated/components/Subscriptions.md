@@ -38,7 +38,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.conflict_resolve_dispatch` | M | 2 | 1 |
 | `lithos_loom.subscriptions.conflict_resolve_outcome` | S | 0 | 9 |
 | `lithos_loom.subscriptions.conflict_resolve_record` | S | 2 | 1 |
-| `lithos_loom.subscriptions.delivery_gate` | S | 0 | 1 |
+| `lithos_loom.subscriptions.delivery_gate` | S | 0 | 2 |
 | `lithos_loom.subscriptions.dispatch_guards` | L | 1 | 12 |
 | `lithos_loom.subscriptions.draining` | XS | 1 | 1 |
 | `lithos_loom.subscriptions.escalation` | M | 1 | 4 |
@@ -181,6 +181,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions.delivery_gate`
 - def `gate_and_release` — Gate a delivered task on human merge, then release (``completes_task =false``).
+- def `record_delivery_on_story` — The ONE story write a delivery makes — ``pr_gate_id`` plus the retirements.
 
 ### `lithos_loom.subscriptions.dispatch_guards`
 - def `last_attempt_key` — The task-metadata key holding ``route``'s last failed attempt.

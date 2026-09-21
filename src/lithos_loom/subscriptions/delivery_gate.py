@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from lithos_loom.gates import (
@@ -26,7 +26,7 @@ from lithos_loom.subscriptions.dispatch_guards import (
     last_attempt_key,
 )
 
-__all__ = ["gate_and_release"]
+__all__ = ["gate_and_release", "record_delivery_on_story"]
 
 logger = logging.getLogger(__name__)
 
@@ -81,32 +81,19 @@ async def gate_and_release(
     # without walking edges). Only written when a gate exists; loom_delivered
     # is retired (US11) — the gate plus the runner's task_ready check are the
     # whole re-dispatch guard.
-    story_metadata: dict[str, Any] = {}
-    if gate_id is not None:
-        story_metadata[STORY_GATE_ID_KEY] = gate_id
-        # A delivery supersedes any earlier failed attempt: per-key delete of
-        # the marker (and any needs-human provenance the failure left) on the
-        # same write. Skipped when no gate exists — the loud [Friction] owns
-        # that state, and a leftover marker only declines bootstrap replay,
-        # the safe direction.
-        story_metadata[last_attempt_key(route)] = None
-        story_metadata[STORY_HUMAN_GATE_ID_KEY] = None
-
     marked = True
-    if story_metadata:
-        try:
-            await lithos.task_update(
-                task_id=task_id, agent=agent, metadata=story_metadata
-            )
-            # The marker delete rode along on this write — retire its local
-            # stamp with it (#339).
-            if stamps is not None:
-                stamps.clear(route, task_id)
-        except Exception:
-            marked = False
-            logger.exception(
-                "RouteRunner %s: recording pr_gate_id on %s failed", route, task_id
-            )
+    if gate_id is not None:
+        marked = await record_delivery_on_story(
+            lithos,
+            task_id=task_id,
+            agent=agent,
+            gate_id=gate_id,
+            routes=(route,),
+        )
+        # The marker delete rode along on that write — retire its local stamp
+        # with it (#339).
+        if marked and stamps is not None:
+            stamps.clear(route, task_id)
     released = True
     try:
         await lithos.task_release(task_id=task_id, aspect=route, agent=agent)
@@ -140,3 +127,44 @@ async def gate_and_release(
     )
     with contextlib.suppress(Exception):
         await lithos.finding_post(task_id=task_id, summary=summary, agent=agent)
+
+
+async def record_delivery_on_story(
+    lithos: Any,
+    *,
+    task_id: str,
+    agent: str,
+    gate_id: str,
+    routes: Sequence[str] = (),
+) -> bool:
+    """The ONE story write a delivery makes — ``pr_gate_id`` plus the retirements.
+
+    Records the ``pr`` gate on the story as provenance (the inverse of the
+    ``waits_on_gate`` edge, so an operator sees which gate withholds the story
+    without walking edges) and, on the same write, per-key deletes what the
+    delivery supersedes: each route's failed-attempt marker in *routes*, and
+    any needs-human provenance an earlier stop left. ``loom_delivered`` is
+    retired (US11) — the gate plus the runner's ``task_ready`` check are the
+    whole re-dispatch guard.
+
+    Shared by the daemon's delivering exit (:func:`gate_and_release`) and the
+    operator's hand delivery (``lithos-loom develop deliver``): the two must
+    leave a story in the *same* state, so there is one implementation of the
+    write rather than two hand-kept copies.
+
+    Returns whether the write landed. Never raises: a delivered branch + PR
+    exist either way, and the gate itself already blocks re-dispatch, so the
+    missing provenance is benign — the caller surfaces it as ``[Friction]``.
+    """
+    story_metadata: dict[str, Any] = {
+        STORY_GATE_ID_KEY: gate_id,
+        STORY_HUMAN_GATE_ID_KEY: None,
+    }
+    for route in routes:
+        story_metadata[last_attempt_key(route)] = None
+    try:
+        await lithos.task_update(task_id=task_id, agent=agent, metadata=story_metadata)
+    except Exception:
+        logger.exception("recording pr_gate_id on story %s failed", task_id)
+        return False
+    return True
