@@ -18,6 +18,7 @@ from typing import Any
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import (
     ESCALATION_SUMMARY_MAX_CHARS,
+    ROUTE_CONFLICT_RESOLVE,
     STORY_HUMAN_GATE_ID_KEY,
     PrGateSpec,
 )
@@ -204,7 +205,7 @@ async def escalate(
     human_gate_id, problem = await raise_needs_human(
         ctx.lithos,
         task_id=story_id,
-        route="conflict-resolve",
+        route=ROUTE_CONFLICT_RESOLVE,
         agent=ctx.agent_id,
         escalation=escalation,
         notifier=notifier,

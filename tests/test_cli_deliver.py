@@ -897,7 +897,8 @@ def test_the_handoff_summary_is_fenced_and_defanged(
     assert "```text" in body  # quoted, not spliced into live markup
     assert "Closes #1337" not in body  # the keyword no longer binds
     assert "#1337" in body  # …but the operator still sees what was said
-    assert "`@evil-org/sec`" in body
+    assert "@evil-org/sec" not in body  # the mention notifies nobody
+    assert "&#64;evil-org/sec" in body
 
 
 def test_a_symlinked_or_fifo_handoff_is_never_read(
@@ -1181,6 +1182,15 @@ def test_nonsense_rounds_and_cost_read_as_unknown(tmp_path: Path) -> None:
     )
     assert cli_facts.run_facts(d).cost_usd is None
 
+    # an arbitrary-precision int: valid JSON, outside the float domain, and
+    # `float()` RAISES on it rather than saturating (correctness/f-004)
+    (d.parent / "result.json").write_text(
+        '{"run_id": "r-1", "status": "failed", '
+        '"escalation": {"brief": {"cost_usd": 1' + "0" * 400 + "}}}",
+        encoding="utf-8",
+    )
+    assert cli_facts.run_facts(d).cost_usd is None
+
 
 def test_protocol_relative_markup_never_renders_live(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
@@ -1294,7 +1304,20 @@ def test_redaction_is_bounded_and_markup_inert() -> None:
     # binds to the issue ref, the mention is quoted
     out = cli_facts.redact_for_publication("gave up. Closes #12 cc @agent-lore/sec")
     assert "Closes #12" not in out and "#12" in out
-    assert "`@agent-lore/sec`" in out
+    assert "@agent-lore/sec" not in out and "&#64;agent-lore/sec" in out
+
+
+def test_live_github_constructs_survive_no_backtick_trick() -> None:
+    """security/f-002: `GH-<n>` closes an issue exactly like `#<n>`, and a
+    single stray backtick opens no code span — so neither may be the thing a
+    defence depends on."""
+    for keyword in ("Closes GH-1337", "fixes gh-1337"):
+        out = cli_facts.defang_markup(keyword)
+        assert out != keyword and "1337" in out
+        assert not cli_facts._CLOSES_RE.search(out)
+    # a backtick before the mention used to exempt it entirely
+    quoted = cli_facts.defang_markup("cc `@evil-user please approve")
+    assert "@evil-user" not in quoted and "&#64;evil-user" in quoted
 
 
 def test_the_pr_body_carries_the_coders_final_handoff_summary(
@@ -1389,6 +1412,237 @@ def test_an_already_delivered_run_is_refused_with_its_pr(
     assert result.exit_code == 1
     assert _PR_URL in result.output
     assert gh["created"] == []
+
+
+# ── round-5 regressions ────────────────────────────────────────────────
+
+
+def test_a_run_that_recorded_no_outcome_is_refused(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-001: `state.json` lands only at run END, while the run dir
+    exists from the first round — so a state-less run dir may be a run that is
+    live right now, and `--branch` would otherwise supply the branch its state
+    does not and deliver a mid-run commit alongside the run's own delivery."""
+    (run_dir / "state.json").unlink()
+
+    result = _invoke(_RUN, "--branch", _BRANCH)
+
+    assert result.exit_code == 1, result.output
+    assert "recorded no outcome" in result.output
+    assert "develop attach" in result.output
+    assert gh["created"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+    assert lithos.mutating_calls == []
+
+    # …and the run-dir-less form stays the operator's explicit assertion
+    assert _invoke("--branch", _BRANCH, "--story", _STORY).exit_code == 0
+
+
+def test_a_malformed_state_is_refused_like_an_absent_one(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-001: unreadable state is unknown state, not a stop."""
+    (run_dir / "state.json").write_text("{ not json", encoding="utf-8")
+
+    result = _invoke(_RUN, "--branch", _BRANCH)
+
+    assert result.exit_code == 1, result.output
+    assert "recorded no outcome" in result.output
+    assert gh["created"] == []
+
+
+def test_a_pr_create_whose_response_was_lost_is_adopted_not_abandoned(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-002: `gh pr create` can COMMIT and still report failure —
+    the same ambiguity the push resolves by re-reading the remote. An open,
+    ungated PR must never be left behind under a "no PR was opened" report."""
+
+    def _create_then_lose_the_response(repo_path: Path, **kwargs: Any) -> str:
+        gh["existing"] = [_open_pr(head_sha=_head(repo))]  # GitHub opened it
+        raise RuntimeError("gh pr create failed: connection reset by peer")
+
+    monkeypatch.setattr(cli_repo, "create_pr", _create_then_lose_the_response)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    assert _PR_URL in result.output and "adopted PR #99" in result.output
+    # …and the delivery carried on: the PR is gated and the stop retired
+    assert (_get(lithos, "gate-human")).status == "completed"
+    assert _get(lithos, _STORY).metadata[STORY_GATE_ID_KEY]
+
+
+def test_a_pr_create_that_really_failed_is_still_a_partial(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-002, the other side: the re-ask finds nothing, so the
+    original failure stands and the push is reported as unfinished."""
+
+    def _boom(repo_path: Path, **kwargs: Any) -> str:
+        raise RuntimeError("gh pr create failed: permission denied")
+
+    monkeypatch.setattr(cli_repo, "create_pr", _boom)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    assert "PUSHED, NO PR" in result.output.splitlines()[0]
+    assert not lithos.calls_to("task_create")
+
+
+@pytest.mark.parametrize("mode", ["nonzero", "raises"])
+def test_a_failed_upstream_write_never_unwinds_the_push(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """correctness/f-003: the tracking config is written AFTER the push, so a
+    read-only / locked `.git/config` must neither raise past the pushed state
+    (exit 1 would claim nothing was written) nor pass silently as though
+    `push -u` had been honoured."""
+    real_git = cli_repo.run_git
+
+    def _fail_the_config_writes(repo_path: Path, args: list[str], **kw: Any):
+        if args[:1] == ["config"]:
+            if mode == "raises":
+                raise subprocess.TimeoutExpired(cmd="git config", timeout=120)
+            return subprocess.CompletedProcess(args, 1, "", "error: could not lock")
+        return real_git(repo_path, args, **kw)
+
+    monkeypatch.setattr(cli_repo, "run_git", _fail_the_config_writes)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") != ""
+    assert len(gh["created"]) == 1
+    assert "[Friction]" in result.output and "upstream" in result.output
+    # the delivery itself stands: gated, retired, recorded
+    assert (_get(lithos, "gate-human")).status == "completed"
+
+
+def test_a_gate_problem_is_named_once_in_the_finding(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-005: `notes` already carries every gate-phase problem, so
+    reading `outcome.problems` again printed each one twice."""
+    lithos.raise_on["task_complete"] = LithosClientError("boom", "gate stuck")
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    summary = lithos.findings[-1]["summary"]
+    assert summary.count("could not complete the needs-human gate") == 1
+    assert summary.count("[Friction]") == 1
+
+
+def test_only_the_stops_own_escalation_is_retired(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, tmp_path: Path
+) -> None:
+    """security/f-001: loom raises `human` gates from several subsystems, and
+    completing an `external-remediation` decision gate is the operator's
+    CONSENT to spend another remediation budget on the delivered PR. A
+    delivery supersedes the stopped RUN's gate and nothing else."""
+    for gate_id, route in (
+        ("gate-remediation", "external-remediation"),
+        ("gate-conflict", "conflict-resolve"),
+        ("gate-routeless", None),
+    ):
+        lithos.add_task(
+            make_task(
+                gate_id,
+                title=f"Needs human: {_STORY}",
+                task_type="gate",
+                metadata={
+                    "gate_type": GATE_TYPE_HUMAN,
+                    "raised_by": RAISED_BY_LOOM,
+                    "story_id": _STORY,
+                    "escalation_reason": "disputed",
+                    **({"route": route} if route else {}),
+                },
+            )
+        )
+        lithos.add_edge(from_task_id=gate_id, to_task_id=_STORY, type=WAITS_ON_GATE)
+
+    out = tmp_path / "r.json"
+    result = _invoke(_RUN, "--json", str(out))
+
+    assert result.exit_code == 0, result.output  # kept gates are not friction
+    assert (_get(lithos, "gate-human")).status == "completed"  # the stop's own
+    for kept in ("gate-remediation", "gate-conflict", "gate-routeless"):
+        assert (_get(lithos, kept)).status == "open", kept
+    record = json.loads(out.read_text())
+    assert record["human_gates_completed"] == ["gate-human"]
+    assert len(record["human_gates_retained"]) == 3
+    summary = lithos.findings[-1]["summary"]
+    assert "gate-remediation (route external-remediation)" in summary
+    assert "left OPEN" in summary
+    assert "[Friction]" not in summary
+
+
+def test_the_dry_run_plan_names_the_gates_it_would_keep(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-001: the plan is the screen the operator decides on."""
+    lithos.add_task(
+        make_task(
+            "gate-remediation",
+            title=f"Needs human: {_STORY}",
+            task_type="gate",
+            metadata={
+                "gate_type": GATE_TYPE_HUMAN,
+                "raised_by": RAISED_BY_LOOM,
+                "route": "external-remediation",
+                "escalation_reason": "remediation_exhausted",
+            },
+        )
+    )
+    lithos.add_edge(
+        from_task_id="gate-remediation", to_task_id=_STORY, type=WAITS_ON_GATE
+    )
+
+    result = _invoke(_RUN, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    plan = [ln for ln in result.output.splitlines() if "human gates" in ln]
+    assert plan and "gate-human" in plan[0] and "gate-remediation" not in plan[0]
+    assert "leaving gate-remediation (route external-remediation) open" in result.output
+
+
+def test_the_plan_never_echoes_agent_written_control_bytes(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-003: `failure_reason` is built from agent stdout / stderr, and
+    `--dry-run` is the screen the operator reads to decide whether to publish
+    the branch — an ANSI escape there can forge or erase any line on it."""
+    state = json.loads((run_dir / "state.json").read_text())
+    # a bare BEL beside the CSI runs: click strips the ANSI *sequences* from a
+    # non-tty capture on its own, but neither it nor a real terminal saves the
+    # operator from the rest — the strip has to happen before the echo
+    state["failure_reason"] = "died\x07\x1b[2K\x1b[A  1 push: OK — nothing here"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    result = _invoke(_RUN, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "\x07" not in result.output and "\x1b" not in result.output
+    assert "died[2K[A" in result.output  # the text survives, the escapes do not
 
 
 # ── pure helpers ───────────────────────────────────────────────────────

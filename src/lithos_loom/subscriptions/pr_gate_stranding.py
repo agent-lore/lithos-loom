@@ -55,6 +55,7 @@ from typing import Any
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import (
     ESCALATION_SUMMARY_MAX_CHARS,
+    ROUTE_PR_GATE,
     STORY_HUMAN_GATE_ID_KEY,
     WAITS_ON_GATE,
     PrGateSpec,
@@ -109,7 +110,7 @@ SUPERSEDED_BY_KEY = "superseded_by_gate_id"
 conversion's idempotency key — present means the human gate holds the story
 and only the ``pr`` gate's completion may still be owed."""
 
-STRANDING_ROUTE = "pr-gate"
+STRANDING_ROUTE = ROUTE_PR_GATE
 """``metadata.route`` on the human gate: which resolver raised it."""
 
 STRANDING_REASONS: Mapping[str, str] = {

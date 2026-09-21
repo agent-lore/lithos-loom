@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ESCALATION_REASONS",
     "ESCALATION_SUMMARY_MAX_CHARS",
+    "ROUTE_CONFLICT_RESOLVE",
+    "ROUTE_EXTERNAL_REMEDIATION",
+    "ROUTE_PR_GATE",
+    "SUBSYSTEM_ROUTES",
     "GATE_TYPE_HUMAN",
     "GATE_TYPE_PR",
     "NEEDS_HUMAN_TAG",
@@ -60,6 +64,7 @@ __all__ = [
     "create_pr_gate",
     "create_pr_gate_best_effort",
     "human_gate_brief",
+    "is_dispatch_route",
     "is_human_gate",
     "is_loom_human_gate",
     "is_pr_gate",
@@ -102,6 +107,31 @@ runner clears this key when it dispatches the story again."""
 
 ESCALATION_SUMMARY_MAX_CHARS = 200
 """Cap on ``escalation_summary`` so the flat key stays one list-view line."""
+
+ROUTE_EXTERNAL_REMEDIATION = "external-remediation"
+"""``metadata.route`` of the external-remediation **decision** gate (an
+exhausted S5b budget, or a reverted external fix). Completing it is the
+operator's CONSENT to spend another budget, not a formality."""
+
+ROUTE_CONFLICT_RESOLVE = "conflict-resolve"
+"""``metadata.route`` of the conflict-resolver's unresolved-conflict gate."""
+
+ROUTE_PR_GATE = "pr-gate"
+"""``metadata.route`` of the `pr`-gate resolver's stranded-PR gate (a delivered
+PR closed unmerged / deleted)."""
+
+SUBSYSTEM_ROUTES: frozenset[str] = frozenset(
+    {ROUTE_EXTERNAL_REMEDIATION, ROUTE_CONFLICT_RESOLVE, ROUTE_PR_GATE}
+)
+"""The routes under which loom's own **subsystems** — not a dispatch route —
+raise ``human`` gates.
+
+A gate's ``route`` is what says whose escalation it is. A dispatch route's gate
+says "this story's run stopped"; each of these says something else entirely,
+and for :data:`ROUTE_EXTERNAL_REMEDIATION` completion is a decision token that
+re-arms autonomous, paid remediation. Anything acting on "the gates holding
+this story" must therefore discriminate on the route rather than sweeping up
+every loom ``human`` gate (:func:`is_dispatch_route`)."""
 
 ESCALATION_REASONS: frozenset[str] = frozenset(
     {
@@ -596,6 +626,18 @@ def is_loom_human_gate(task: Task) -> bool:
     return (
         is_human_gate(task) and (task.metadata or {}).get("raised_by") == RAISED_BY_LOOM
     )
+
+
+def is_dispatch_route(route: str | None) -> bool:
+    """Whether *route* names a **dispatch** route (a ``[[routes]]`` stanza) —
+    so a ``human`` gate raised under it is a stopped RUN's escalation.
+
+    Fails closed: a gate whose route is missing or unparseable is never
+    treated as a dispatch route's, because acting on the wrong escalation is
+    the expensive direction and leaving a gate open never is (the story stays
+    blocked either way).
+    """
+    return bool(route) and route not in SUBSYSTEM_ROUTES
 
 
 def parse_human_gate(task: Task) -> HumanGateSpec | None:

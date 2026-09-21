@@ -129,28 +129,53 @@ def remote_sha(repo: Path, branch: str) -> str:
     return ""
 
 
-def _set_upstream(repo: Path, branch: str) -> None:
+def _set_upstream(repo: Path, branch: str) -> str | None:
     """Point the local branch at ``origin/<branch>`` (the ``push -u`` half).
 
     The push itself sends a pinned object refspec, which cannot carry ``-u``'s
     meaning, so the tracking config is written directly — no network, and it
-    lands whether the ref was created now or already existed. Best-effort: the
-    delivery does not depend on it, only the operator's later ``git status``
-    does.
+    lands whether the ref was created now or already existed.
+
+    **Genuinely best-effort, and reported.** It runs AFTER the push, so a
+    read-only or locked ``.git/config`` must neither propagate an exception
+    (the caller would then classify a delivery whose branch IS on ``origin``
+    as "nothing written") nor pass silently as though the documented ``push
+    -u`` contract had been met. Every failure — a nonzero ``git config``, a
+    timeout, a missing binary — becomes one note the caller prints as
+    ``[Friction]``; the delivery itself stands, since only the operator's
+    later ``git status`` depends on this.
     """
-    run_git(repo, ["config", f"branch.{branch}.remote", "origin"], timeout=120)
-    run_git(
-        repo,
-        ["config", f"branch.{branch}.merge", f"refs/heads/{branch}"],
-        timeout=120,
-    )
+    try:
+        for args in (
+            ["config", f"branch.{branch}.remote", "origin"],
+            ["config", f"branch.{branch}.merge", f"refs/heads/{branch}"],
+        ):
+            proc = run_git(repo, args, timeout=120)
+            if proc.returncode != 0:
+                return (
+                    f"the branch is pushed, but `git {' '.join(args)}` failed "
+                    f"({proc.stderr.strip() or f'exit {proc.returncode}'}), so "
+                    f"{branch} has no upstream set — `git branch --set-upstream-to "
+                    f"origin/{branch} {branch}` finishes it"
+                )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (
+            f"the branch is pushed, but its upstream could not be set ({exc}); "
+            f"`git branch --set-upstream-to origin/{branch} {branch}` finishes it"
+        )
+    return None
 
 
-def push_branch(repo: Path, branch: str, state: RemoteState) -> None:
+def push_branch(repo: Path, branch: str, state: RemoteState) -> str | None:
     """Push *branch* to ``origin`` — append-only; a diverged ref is refused.
 
     ``develop deliver`` never rewrites a remote branch: the divergence may be
     a collaborator's commit, and re-developing is the operator's other choice.
+
+    Returns a note when the push landed but the local tracking config did not
+    (:func:`_set_upstream`), else ``None``. A failure of the push ITSELF is a
+    :class:`DeliverRefused`; nothing after the branch is on ``origin`` may
+    raise, or the caller would report a committed push as nothing written.
     """
     if state.action == PUSH_DIVERGED:
         raise DeliverRefused(
@@ -162,7 +187,7 @@ def push_branch(repo: Path, branch: str, state: RemoteState) -> None:
             "the story"
         )
     if state.action == PUSH_UP_TO_DATE:
-        return
+        return None
     # Push the **object** the classification was made against, not the symbolic
     # ref: a local process that advances or rewrites the branch between the
     # classification and the push would otherwise have us send a commit nobody
@@ -182,7 +207,7 @@ def push_branch(repo: Path, branch: str, state: RemoteState) -> None:
         landed = remote_sha(repo, branch)
         if landed != state.local_sha:
             raise DeliverRefused(f"git push failed: {proc.stderr.strip()}")
-    _set_upstream(repo, branch)
+    return _set_upstream(repo, branch)
 
 
 def origin_repo_name(repo: Path) -> str:
@@ -290,18 +315,58 @@ def open_or_adopt(
             return existing.url, True
         if refusal:
             raise DeliverRefused(refusal)
-        return (
-            create_pr(
+        try:
+            return (
+                create_pr(
+                    repo,
+                    branch=branch,
+                    base=resolved_base,
+                    title=title,
+                    # built lazily: an adopted PR needs no body, and composing
+                    # one costs a run-dir read
+                    body=body(),
+                    repo_name=repo_name,
+                ),
+                False,
+            )
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            # A create can COMMIT and still report failure — GitHub opened the
+            # PR and the response was lost. The same ambiguity the push handles
+            # by re-reading the remote: ask again before concluding that no PR
+            # exists, or the command leaves an open, UNGATED PR behind while
+            # reporting that it opened none (and, on an already-equal remote,
+            # calls the whole delivery "nothing written").
+            recovered = _created_despite_the_error(
                 repo,
                 branch=branch,
-                base=resolved_base,
-                title=title,
-                # built lazily: an adopted PR needs no body, and composing one
-                # costs a run-dir read
-                body=body(),
                 repo_name=repo_name,
-            ),
-            False,
-        )
+                head_sha=head_sha,
+                base=resolved_base,
+            )
+            if recovered is not None:
+                return recovered, True
+            raise
     except RuntimeError as exc:
         raise DeliverRefused(str(exc)) from exc
+
+
+def _created_despite_the_error(
+    repo: Path, *, branch: str, repo_name: str, head_sha: str, base: str
+) -> str | None:
+    """The PR a failed ``gh pr create`` opened anyway, or ``None``.
+
+    Re-asks with exactly the adoption rule of the first pass — same-repo, our
+    head, our base — so a PR recovered here is one this delivery could have
+    adopted. The re-list is itself best-effort: if it cannot answer, the
+    original create failure stands (the caller then reports a push with no PR,
+    which a re-run finishes).
+    """
+    try:
+        found, _ = adoptable(
+            list_open_prs_for_branch(repo, branch, repo_name=repo_name),
+            head_sha=head_sha,
+            base=base,
+        )
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return None
+    return found.url if found is not None else None

@@ -47,6 +47,7 @@ __all__ = [
     "redact_for_publication",
     "reviews_summary",
     "run_facts",
+    "sanitize_for_terminal",
 ]
 
 
@@ -92,10 +93,17 @@ def _opt_cost(value: Any) -> float | None:
 
     ``json.loads`` accepts ``NaN`` / ``Infinity``, so a malformed brief can
     otherwise reach the PR body as ``$nan`` / ``$inf`` — type-correct and
-    meaningless."""
+    meaningless. An arbitrary-precision **int** (``escalation.brief`` is
+    free-form, and ``10**400`` is valid JSON) is outside the float domain
+    altogether: ``float()`` raises rather than returning ``inf``, so the
+    conversion is guarded — an unpublishable number is unknown, never a crash
+    in the middle of resolving the facts."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
     return number if math.isfinite(number) and number >= 0 else None
 
 
@@ -112,6 +120,20 @@ _MAX_SUMMARY_CHARS = 600
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _SUMMARY_HEADING_RE = re.compile(r"^\s*#{1,6}\s*summary\s*$", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^\s*#{1,6}\s")
+
+
+def sanitize_for_terminal(text: str) -> str:
+    """Strip terminal control / escape bytes (keeping TAB + LF) from text
+    before it is echoed to the operator's terminal.
+
+    The one helper for every ``develop`` surface that prints text loom did not
+    author — a stop reason built from agent stdout / stderr, a story title a
+    GitHub issue supplied, the ``gh`` stderr inside an exception string. None
+    of those strippers may be skipped on a screen the operator uses to DECIDE:
+    an ANSI escape can forge a "push: REFUSE" line, erase it, or retitle the
+    window (CWE-117 / CWE-150).
+    """
+    return _CONTROL_CHARS_RE.sub("", text)
 
 
 def _read_regular_file(path: Path, limit: int) -> bytes | None:
@@ -191,11 +213,17 @@ def coder_summary(handoff_dir: Path) -> str:
 # notify real people. Agent-written text is quoted into the body, so neutralise
 # both before it leaves the host (the fence in `build_pr_body` is the other
 # half: keywords and mentions inside a code block are inert).
+# `GH-123` is a closing ref exactly like `#123` (GitHub's documented
+# `KEYWORD GH-ISSUE-NUMBER` form), so the lookahead admits it too.
 _CLOSES_RE = re.compile(
-    r"\b(close[sd]?|fix(e[sd])?|resolve[sd]?)(\s+|\s*:\s*)(?=#\d|[\w.-]+/[\w.-]+#\d)",
+    r"\b(close[sd]?|fix(e[sd])?|resolve[sd]?)(\s+|\s*:\s*)"
+    r"(?=#\d|GH-\d|[\w.-]+/[\w.-]+#\d)",
     re.IGNORECASE,
 )
-_MENTION_RE = re.compile(r"(?<![\w`])@([A-Za-z0-9][-A-Za-z0-9/]*)")
+# No `\`` in the lookbehind: a preceding backtick does NOT make a mention
+# inert (a single unmatched backtick opens no code span in GFM), so exempting
+# one would hand the author a one-character bypass.
+_MENTION_RE = re.compile(r"(?<!\w)@([A-Za-z0-9][-A-Za-z0-9/]*)")
 # Backtick runs would break out of the fence that quotes this text.
 _FENCE_RE = re.compile(r"`{3,}")
 # GitHub renders inline HTML in a PR description, so `<img src=…>` is a live
@@ -219,12 +247,15 @@ def defang_markup(text: str) -> str:
     every viewer, all under the operator's identity.
 
     Each construct is rewritten so it still READS the same and binds nothing:
-    the keyword keeps its word, the mention is quoted, a tag-opening ``<`` and
-    a link's ``[`` are HTML-escaped, and backtick runs that would escape the
-    fence are defused.
+    the keyword keeps its word, the mention's ``@`` becomes the entity that
+    renders as one and notifies nobody, a tag-opening ``<`` and a link's ``[``
+    are HTML-escaped, and backtick runs that would escape the fence are
+    defused. **Nothing here leans on code spans**: quoting a mention in
+    backticks only works while the backticks pair up, and the author of this
+    text chooses how many of those it contains.
     """
     out = _CLOSES_RE.sub(lambda m: f"{m.group(1)} → ", text)
-    out = _MENTION_RE.sub(r"`@\1`", out)
+    out = _MENTION_RE.sub(r"&#64;\1", out)
     out = _HTML_OPEN_RE.sub("&lt;", out)
     out = _LINK_RE.sub("&#91;", out)
     return _FENCE_RE.sub("``", out)

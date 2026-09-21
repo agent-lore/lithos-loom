@@ -12,8 +12,8 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
-| `lithos_loom.cli._deliver_facts` | M | 1 | 7 |
-| `lithos_loom.cli._deliver_lithos` | M | 4 | 10 |
+| `lithos_loom.cli._deliver_facts` | M | 1 | 8 |
+| `lithos_loom.cli._deliver_lithos` | M | 5 | 10 |
 | `lithos_loom.cli._deliver_repo` | M | 1 | 8 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
@@ -34,6 +34,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 ### `lithos_loom.cli._deliver_facts`
 - class `RunFacts` — What the stopped run left on disk, for the PR body and the finding.
+- def `sanitize_for_terminal` — Strip terminal control / escape bytes (keeping TAB + LF) from text before it is echoed to the operator's terminal.
 - def `coder_summary` — The last round's coder handoff ``## Summary``, as one bounded line.
 - def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
 - def `run_facts` — Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
@@ -45,6 +46,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 ### `lithos_loom.cli._deliver_lithos`
 - class `DeliverRefused` — A precondition failed and nothing was written. Exits ``1``.
 - class `PrGateRef` — An open ``pr`` gate holding the story, and what it watches.
+- class `HumanGateRef` — An open loom ``human`` gate holding the story, and whose escalation it is.
 - class `StoryState` — The live story, and the gates that hold it.
 - def `read_story` — Read the story plus the open gates blocking it.
 - class `GateOutcome` — What the Lithos half of the delivery managed to do.

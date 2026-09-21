@@ -8,8 +8,18 @@ seams the sync Typer command drives through ``asyncio.run``. Split out so the
 command module stays the five steps and their flags; the ordering rationale
 lives with the code that enforces it.
 
-Three invariants live here rather than in the command:
+Four invariants live here rather than in the command:
 
+* **Only the stopped run's own escalation is retired.** Loom raises ``human``
+  gates from several subsystems, and the route says whose escalation a gate
+  is. A **dispatch** route's gate says "this story's run stopped", and that is
+  exactly what a delivery supersedes. The others say something else — and
+  completing an ``external-remediation`` decision gate is the operator's
+  CONSENT to spend another remediation budget on the delivered PR, which this
+  command was never granted. So a gate raised by one of loom's own subsystems
+  (:data:`~lithos_loom.gates.SUBSYSTEM_ROUTES`) is left OPEN and named in the
+  finding; leaving it open is safe in every case, because the ``pr`` gate this
+  delivery raised holds the story either way.
 * **The gate must watch THIS PR.** An open ``pr`` gate is adopted only when
   its ``pr_url`` is the PR being delivered. A gate watching a *different* PR —
   even beside one that matches — means the story is already behind someone
@@ -43,8 +53,10 @@ from lithos_loom.gates import (
     STORY_HUMAN_GATE_ID_KEY,
     WAITS_ON_GATE,
     create_pr_gate_best_effort,
+    is_dispatch_route,
     is_loom_human_gate,
     is_pr_gate,
+    parse_human_gate,
     parse_pr_gate,
 )
 from lithos_loom.lithos_client import LithosClient
@@ -56,6 +68,7 @@ __all__ = [
     "DELIVER_ASPECT",
     "DeliverRefused",
     "GateOutcome",
+    "HumanGateRef",
     "PrGateRef",
     "StoryState",
     "DELIVER_CLAIM_TTL_MINUTES",
@@ -116,6 +129,30 @@ class PrGateRef:
 
 
 @dataclass(frozen=True)
+class HumanGateRef:
+    """An open loom ``human`` gate holding the story, and whose escalation it
+    is.
+
+    *route* is the discriminator (:func:`is_dispatch_route`): a dispatch
+    route's gate is the stopped run's own escalation, which this delivery
+    supersedes; any other is another subsystem's and is left alone.
+    """
+
+    gate_id: str
+    route: str | None
+    reason: str = ""
+
+    @property
+    def supersedable(self) -> bool:
+        """Whether delivering this branch retires this gate."""
+        return is_dispatch_route(self.route)
+
+    def describe(self) -> str:
+        """``<id> (route <route>)`` — how the finding names a gate it kept."""
+        return f"{self.gate_id} (route {self.route or 'unrecorded'})"
+
+
+@dataclass(frozen=True)
 class StoryState:
     """The live story, and the gates that hold it."""
 
@@ -124,11 +161,27 @@ class StoryState:
     description: str
     status: str
     metadata: Mapping[str, Any]
-    human_gate_ids: tuple[str, ...]
+    human_gates: tuple[HumanGateRef, ...]
     pr_gates: tuple[PrGateRef, ...] = ()
     """Open ``pr`` gates already blocking the story — a previous ``deliver``,
     or the daemon's own delivery. Their ``pr_url`` is what decides whether one
     is ours to adopt."""
+
+    @property
+    def superseded_human_gates(self) -> tuple[HumanGateRef, ...]:
+        """The stopped run's own escalations — this delivery's to complete."""
+        return tuple(gate for gate in self.human_gates if gate.supersedable)
+
+    @property
+    def retained_human_gates(self) -> tuple[HumanGateRef, ...]:
+        """Another subsystem's escalations: left OPEN, named in the finding.
+
+        Chief among them the ``external-remediation`` decision gate, whose
+        completion re-arms autonomous (paid) remediation on the delivered PR —
+        a decision that is the operator's alone, and one nothing in this
+        command was asked to make.
+        """
+        return tuple(gate for gate in self.human_gates if not gate.supersedable)
 
     @property
     def project(self) -> str | None:
@@ -189,14 +242,16 @@ async def read_story(client: Any, story_id: str) -> StoryState:
 
     The gates come from the story's incoming ``waits_on_gate`` **edges**, never
     from ``needs_human_gate_id``: that key is provenance only — stale after a
-    partial write, and it names one gate where a story may carry several.
+    partial write, and it names one gate where a story may carry several. Each
+    human gate keeps its ``route``, which is what decides whether this delivery
+    supersedes it (:class:`HumanGateRef`).
     """
     story = await client.task_get(task_id=story_id)
     if story is None:
         raise DeliverRefused(f"Lithos task {story_id!r} not found")
     raw = getattr(story, "metadata", None)
     metadata: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
-    human_gates: list[str] = []
+    human_gates: list[HumanGateRef] = []
     pr_gates: list[PrGateRef] = []
     edges = await client.task_edge_list(
         task_id=story_id, direction="incoming", types=[WAITS_ON_GATE]
@@ -206,7 +261,14 @@ async def read_story(client: Any, story_id: str) -> StoryState:
         if gate is None or gate.status != "open":
             continue
         if is_loom_human_gate(gate):
-            human_gates.append(gate.id)
+            spec = parse_human_gate(gate)
+            human_gates.append(
+                HumanGateRef(
+                    gate_id=gate.id,
+                    route=spec.route if spec is not None else None,
+                    reason=spec.reason if spec is not None else "",
+                )
+            )
         elif is_pr_gate(gate):
             spec = parse_pr_gate(gate)
             pr_gates.append(
@@ -221,7 +283,7 @@ async def read_story(client: Any, story_id: str) -> StoryState:
         description=str(getattr(story, "description", "") or ""),
         status=str(getattr(story, "status", "") or ""),
         metadata=metadata,
-        human_gate_ids=tuple(human_gates),
+        human_gates=tuple(human_gates),
         pr_gates=tuple(pr_gates),
     )
 
@@ -241,6 +303,9 @@ class GateOutcome:
     """The adopted gate already records this delivery's ``[ManualDelivery]``
     finding, so it must not be posted twice."""
     human_gates_completed: list[str] = field(default_factory=list)
+    human_gates_retained: list[str] = field(default_factory=list)
+    """Open loom ``human`` gates another subsystem raised (described with their
+    route). Left alone deliberately — not friction, so never a problem."""
     problems: list[str] = field(default_factory=list)
 
 
@@ -261,6 +326,12 @@ async def gate_delivery(
     So every path that ends without a gate for *pr_url* leaves every human
     gate open — the story stays blocked by the gate it already had, which is
     the safe direction.
+
+    Which gates are retired is decided by their **route**: the stopped run's
+    own escalation (a dispatch route) and nothing else. A gate one of loom's
+    subsystems raised is a different decision — an ``external-remediation``
+    gate is the operator's consent to spend another remediation budget on the
+    delivered PR — so it is reported and left open.
     """
     outcome = GateOutcome()
     # Re-read under THIS client: the caller's snapshot predates the push and
@@ -344,7 +415,10 @@ async def gate_delivery(
                 "already blocks re-dispatch"
             )
 
-    for human_gate_id in live.human_gate_ids:
+    outcome.human_gates_retained = [
+        gate.describe() for gate in live.retained_human_gates
+    ]
+    for human_gate_id in (gate.gate_id for gate in live.superseded_human_gates):
         try:
             await client.task_complete(task_id=human_gate_id, agent=agent)
         except (LithosClientError, OSError) as exc:
