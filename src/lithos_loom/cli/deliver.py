@@ -28,19 +28,23 @@ Five steps, each idempotent, in this order:
    is indistinguishable from a daemon-delivered one to every later sweep, made
    whenever the live story does not already say it (a partial first pass is
    repaired, not skipped).
-4. **Complete the stop's loom ``human`` gate(s)**, found from the story's
+4. **Complete this run's own loom ``human`` gate(s)**, found from the story's
    incoming ``waits_on_gate`` edges (never from the ``needs_human_gate_id``
-   provenance key, which can be stale) and narrowed by ``route`` to the
-   stopped RUN's own escalation — a gate another loom subsystem raised is a
-   different decision (completing an ``external-remediation`` one is the
-   operator's consent to re-arm a paid budget), so it is kept and named.
-   **After** step 3, so the story is never momentarily on the ready frontier:
-   the runner's readiness check then defers it, because a story behind a
-   ``pr`` gate is absent from ``task_ready``.
+   provenance key, which can be stale) and narrowed to a gate raised by a
+   route this host configures AND naming the run being delivered — another
+   run's or another subsystem's escalation is a different decision (completing
+   an ``external-remediation`` one is the operator's consent to re-arm a paid
+   budget), so it is kept and named. **After** step 3, so the story is never
+   momentarily on the ready frontier: the runner's readiness check then defers
+   it, because a story behind a ``pr`` gate is absent from ``task_ready``.
 5. **Post ``[ManualDelivery]``** on the story — the delivered sha, the PR, the
-   gate that now holds the story, the gates that were retired — one-shot via a
-   marker written on the gate after the post, so a lost finding is re-posted
-   next run rather than computed away as "nothing changed".
+   gate that now holds the story, the gates retired and the gates kept —
+   one-shot via a marker written **on the story** after the post (it must
+   outlive the gate, and ``--no-gate`` raises none), so a lost finding is
+   re-posted next run rather than computed away as "nothing changed". The
+   marker records whether the PR ended up **gated**, so the run that gates a
+   PR delivered ``--no-gate`` corrects the record instead of reading it as
+   already said.
 
 From there the PR is a first-class PR-maintenance object: landability, external
 review ingestion, the base-move re-gate, the conflict resolver, merge → story
@@ -85,25 +89,31 @@ from lithos_loom.cli._deliver_facts import (
 from lithos_loom.cli._deliver_lithos import (
     DELIVER_ASPECT,
     DeliverRefused,
+    DeliverUncertain,
     GateOutcome,
     StoryState,
+)
+from lithos_loom.cli._deliver_output import (
+    MANUAL_DELIVERY,
+    delivery_finding,
+    echo_plan,
+    render,
+)
+from lithos_loom.cli._deliver_repo import (
+    PUSH_CREATE,
+    PUSH_FAST_FORWARD,
+    open_or_adopt,
+    origin_repo_name,
+    push_branch,
+    remote_state,
+)
+from lithos_loom.cli._deliver_session import (
     claim_story,
     post_finding,
     read_story_sync,
     release_story,
     renew_story,
     run_gate_delivery,
-)
-from lithos_loom.cli._deliver_repo import (
-    PUSH_CREATE,
-    PUSH_DIVERGED,
-    PUSH_FAST_FORWARD,
-    PUSH_UP_TO_DATE,
-    RemoteState,
-    open_or_adopt,
-    origin_repo_name,
-    push_branch,
-    remote_state,
 )
 from lithos_loom.config import LoomConfig, load_config
 from lithos_loom.errors import LithosLoomError
@@ -115,13 +125,6 @@ from lithos_loom.plugins.story_develop.pr_delivery import (
 
 __all__ = ["EXIT_CODES", "MANUAL_DELIVERY", "deliver_command"]
 
-# Stable, machine-parseable finding prefix (see AGENTS.md): a stopped run's
-# branch was delivered as a PR by hand. Distinct from `[DevelopResult]` (a run
-# reporting its own outcome) because nothing ran here — no rounds, no spend,
-# no verdict; the operator moved existing work onto the maintained path, and
-# an operator grepping for how a PR came to exist wants that difference.
-MANUAL_DELIVERY = "[ManualDelivery]"
-
 # 0 delivered (or adopted, or a dry-run plan); 1 refused/failed with nothing
 # written; 2 the PR is open but the gate half did not complete — a PARTIAL
 # delivery the operator must finish, so it never shares an exit code with a
@@ -129,111 +132,7 @@ MANUAL_DELIVERY = "[ManualDelivery]"
 EXIT_CODES = {"delivered": 0, "refused": 1, "ungated": 2}
 
 
-def delivery_finding(
-    *,
-    facts: RunFacts,
-    record: Mapping[str, Any],
-    outcome: GateOutcome | None,
-    notes: Sequence[str],
-) -> str:
-    """The ``[ManualDelivery]`` summary posted on the story (pure).
-
-    *notes* is the ONE source of friction — the caller folds every gate-phase
-    problem into it as it lands, so reading ``outcome.problems`` here too would
-    name each of them twice; *outcome* says only what the gate phase achieved.
-    """
-    verb = "adopted" if record.get("adopted") else "opened"
-    parts = [
-        f"{MANUAL_DELIVERY} run {facts.run_id or '(unknown)'} delivered by hand: "
-        f"{verb} {record.get('pr_url')}"
-    ]
-    sha = str(record.get("pushed_sha") or "")[:12]
-    # Always name the commit this delivery put behind the PR — an audit that
-    # says only "branch X" cannot be checked later. The verb distinguishes a
-    # push this run made from a ref that was already on origin.
-    if record.get("pushed"):
-        parts.append(f"pushed {sha} to branch {facts.branch}")
-    elif sha:
-        parts.append(f"branch {facts.branch} already on origin at {sha}")
-    else:
-        parts.append(f"branch {facts.branch}")
-    if facts.status:
-        parts.append(f"the run had stopped {facts.status}")
-    if outcome is None:
-        parts.append(
-            "no pr gate was created (--no-gate): this PR is UNMONITORED — no "
-            "merge tracking, no external-review ingestion, no re-gate"
-        )
-    else:
-        if outcome.pr_gate_id and outcome.gate_created:
-            parts.append(f"pr gate {outcome.pr_gate_id} now blocks the story")
-        elif outcome.pr_gate_id:
-            parts.append(f"pr gate {outcome.pr_gate_id} already blocks the story")
-        for gate_id in outcome.human_gates_completed:
-            parts.append(f"needs-human gate {gate_id} completed")
-        for described in outcome.human_gates_retained:
-            # Not friction: another subsystem's escalation is not this
-            # delivery's to retire, and its own decision still stands.
-            parts.append(
-                f"needs-human gate {described} left OPEN — a different "
-                "escalation, yours to decide"
-            )
-    summary = "; ".join(parts)
-    if notes:
-        summary += "\n\n[Friction] " + "; ".join(notes)
-    return summary
-
-
 # ── the command ─────────────────────────────────────────────────────────
-
-
-def _echo_plan(
-    *,
-    facts: RunFacts,
-    story: StoryState,
-    repo: Path,
-    repo_name: str,
-    base: str,
-    state: RemoteState,
-    title: str,
-    no_gate: bool,
-) -> None:
-    push_words = {
-        PUSH_CREATE: f"create origin/{facts.branch} at {state.local_sha[:12]}",
-        PUSH_UP_TO_DATE: f"nothing — origin/{facts.branch} is already "
-        f"{state.local_sha[:12]}",
-        PUSH_FAST_FORWARD: f"fast-forward origin/{facts.branch} "
-        f"{state.remote_sha[:12]} → {state.local_sha[:12]}",
-        PUSH_DIVERGED: f"REFUSE — origin/{facts.branch} ({state.remote_sha[:12]}) "
-        f"has diverged from {state.local_sha[:12]}",
-    }
-
-    # Every line goes through `sanitize_for_terminal`: the stop reason is agent
-    # stdout / stderr and the story title can be a GitHub issue's, so an ANSI
-    # escape could otherwise forge or erase the very lines the operator reads
-    # to decide whether to publish this branch.
-    def echo(line: str) -> None:
-        typer.echo(sanitize_for_terminal(line))
-
-    echo(f"deliver {facts.run_id or facts.branch}: dry run, nothing written")
-    echo(f"  repo:   {repo} → {repo_name}")
-    echo(f"  story:  {story.story_id} [{story.status}] — {story.title}")
-    # the raw failure reason stays on the operator's terminal; the PR body
-    # carries only the classification (see `provenance_lines`)
-    echo(f"  run:    {facts.status or '?'} — {facts.failure_reason or '—'}")
-    echo(f"  1 push: {push_words[state.action]}")
-    echo(f"  2 PR:   adopt the open PR for the branch, else open onto {base}")
-    echo(f"          title {title!r}")
-    if no_gate:
-        echo("  3 gate: skipped (--no-gate) — the PR would be UNMONITORED")
-        echo("  4 human gates: left open (no pr gate would hold the story)")
-    else:
-        echo("  3 gate: create a pr gate on the story + record pr_gate_id")
-        gates = ", ".join(g.gate_id for g in story.superseded_human_gates) or "none"
-        echo(f"  4 human gates to complete after it: {gates}")
-        for gate in story.retained_human_gates:
-            echo(f"          leaving {gate.describe()} open — a different escalation")
-    echo(f"  5 post: {MANUAL_DELIVERY} on {story.story_id}")
 
 
 def deliver_command(
@@ -303,7 +202,7 @@ def deliver_command(
         raise typer.Exit(EXIT_CODES["refused"]) from exc
     if record is None:  # --dry-run: the plan was printed, nothing to record
         raise typer.Exit(EXIT_CODES["delivered"])
-    for line in _render(record):
+    for line in render(record):
         # `notes` carry git / gh / Lithos error text, which is agent- or
         # issue-authored often enough to matter (see `_echo_plan`).
         typer.echo(sanitize_for_terminal(line))
@@ -339,7 +238,28 @@ def _deliver(
     facts = _resolve_facts(host, run=run, branch=branch, story_id=story_id)
     agent = host.orchestrator.agent_id
     url = host.orchestrator.lithos_url
+    routes = _dispatch_routes(host)
     story = read_story_sync(url, agent, facts.story_id)
+    if story.route_claims:
+        # A route dispatch holds the story's claim from before its run starts
+        # until AFTER its escalation is raised — and the run writes its
+        # terminal `state.json` long before the daemon applies the result. So
+        # a stopped-looking run dir is not proof the lifecycle is over: inside
+        # that window this command would gate a story whose needs-human gate
+        # does not exist yet, complete nothing, and leave the runner to raise
+        # it afterwards — the story ends up behind BOTH gates, with the
+        # finding claiming the swap was made. The claim is the one signal that
+        # says "not yours yet", and it is a different aspect from ours, so
+        # nothing else would stop us.
+        raise DeliverRefused(
+            f"story {story.story_id} is claimed by a live dispatch "
+            f"({', '.join(story.route_claims)}) — the run's result is still "
+            "being applied, and the needs-human gate it will raise does not "
+            "exist yet. Delivering now would gate the story before that gate "
+            f"appears and leave both standing. Watch it with `lithos-loom "
+            f"develop attach {facts.run_id or facts.branch}` and re-run once "
+            "the dispatch has released the story"
+        )
     if story.status != "open" and not no_gate:
         raise DeliverRefused(
             f"story {story.story_id} is {story.status}, not open — a terminal "
@@ -352,7 +272,7 @@ def _deliver(
     heading = story.title.strip()
     title = heading.splitlines()[0][:90] if heading else facts.branch
     if dry_run:
-        _echo_plan(
+        echo_plan(
             facts=facts,
             story=story,
             repo=repo,
@@ -361,6 +281,7 @@ def _deliver(
             state=remote_state(repo, facts.branch),
             title=title,
             no_gate=no_gate,
+            retirement=story.retirement(run_id=facts.run_id, dispatch_routes=routes),
         )
         return None
 
@@ -387,6 +308,7 @@ def _deliver(
             no_gate=no_gate,
             json_out=json_out,
             claim=claim,
+            routes=routes,
         )
     finally:
         claim.release()
@@ -440,6 +362,7 @@ def _deliver_claimed(
     no_gate: bool,
     json_out: Path | None,
     claim: _Claim,
+    routes: Sequence[str],
 ) -> dict[str, Any]:
     """Steps 1-5, under the story's ``deliver`` claim.
 
@@ -461,6 +384,7 @@ def _deliver_claimed(
         "pr_url": None,
         "pr_number": None,
         "adopted": False,
+        "push_uncertain": False,
         "pr_gate_id": None,
         "human_gates_completed": [],
         "human_gates_retained": [],
@@ -476,7 +400,18 @@ def _deliver_claimed(
     # commit and deliver another.
     state = remote_state(repo, facts.branch)
     record["pushed_sha"] = state.local_sha
-    upstream_note = push_branch(repo, facts.branch, state)
+    try:
+        upstream_note = push_branch(repo, facts.branch, state)
+    except DeliverUncertain as exc:
+        # The push may have landed and the remote could not be re-read to
+        # settle it. Anything but "nothing was written" — the one claim that
+        # cannot be made — so it is a partial the operator re-runs.
+        notes.append(str(exc))
+        record["push_uncertain"] = True
+        record["gate_complete"] = False
+        record["complete"] = False
+        _file_record(json_out, record, notes)
+        return record
     record["pushed"] = state.action in (PUSH_CREATE, PUSH_FAST_FORWARD)
     if upstream_note:
         # The push landed; only the local tracking config did not. Reported,
@@ -494,15 +429,21 @@ def _deliver_claimed(
             title=title,
             body=lambda: pr_body(facts=facts, story=story, repo_name=repo_name),
         )
-    except (DeliverRefused, OSError, subprocess.SubprocessError) as exc:
-        if not record["pushed"]:
+    except (
+        DeliverUncertain,
+        DeliverRefused,
+        OSError,
+        subprocess.SubprocessError,
+    ) as exc:
+        if not record["pushed"] and not isinstance(exc, DeliverUncertain):
             raise  # nothing of ours is on the remote — a plain refusal
-        # The branch IS on origin now. Report that rather than claiming
-        # nothing was written, so the operator knows what a re-run inherits.
+        # Either the branch IS on origin, or a PR may have been opened and the
+        # read that would settle it failed too. Report what a re-run inherits
+        # rather than asserting an absence this run never established.
         notes.append(
-            f"the branch was pushed but no PR was opened or adopted ({exc}); "
-            "the story is NOT gated. Re-run to finish — the push is "
-            "append-only, so a second run is a no-op on the remote"
+            f"no PR was opened or adopted ({exc}); the story is NOT gated. "
+            "Re-run to finish — the push is append-only and an existing PR at "
+            "this head is adopted, so a second run duplicates nothing"
         )
         record["gate_complete"] = False
         record["complete"] = False
@@ -544,7 +485,12 @@ def _deliver_claimed(
     elif not no_gate:
         try:
             outcome = run_gate_delivery(
-                url, agent, story=story, pr_url=pr_url, run_id=facts.run_id
+                url,
+                agent,
+                story=story,
+                pr_url=pr_url,
+                run_id=facts.run_id,
+                dispatch_routes=routes,
             )
         except DeliverRefused as exc:
             notes.append(
@@ -577,10 +523,14 @@ def _deliver_claimed(
     # that finds nothing left to do posts nothing, whatever changed in between.
     # Deliberately NOT `changed or …`: a repair pass that fixes gate state must
     # not manufacture a duplicate of a finding the story already carries.
+    # The state this delivery actually reached — part of the marker's identity,
+    # since a `--no-gate` record does not describe a gated PR and must not
+    # silence the run that gates it (nor the other way round).
+    gated = outcome is not None and outcome.pr_gate_id is not None
     marked = (
         outcome.finding_marked
         if outcome is not None
-        else story.delivery_marked(pr_url=pr_url, run_id=facts.run_id)
+        else story.delivery_marked(pr_url=pr_url, run_id=facts.run_id, gated=gated)
     )
     record["changed"] = bool(
         record["pushed"]
@@ -596,7 +546,11 @@ def _deliver_claimed(
     )
     if not marked:
         summary = delivery_finding(
-            facts=facts, record=record, outcome=outcome, notes=notes
+            facts=facts,
+            record=record,
+            outcome=outcome,
+            notes=notes,
+            no_gate=no_gate,
         )
         try:
             post_finding(
@@ -606,6 +560,7 @@ def _deliver_claimed(
                 summary,
                 pr_url=pr_url,
                 run_id=facts.run_id,
+                gated=gated,
                 # mark only a delivery that finished: a partial one must stay
                 # re-postable, so the run that completes it records the truth
                 mark=bool(record["gate_complete"]),
@@ -732,6 +687,20 @@ def _refuse_if_run_may_be_live(run_dir: Path, facts: RunFacts) -> None:
     )
 
 
+def _dispatch_routes(host: LoomConfig) -> tuple[str, ...]:
+    """The host's configured ``[[routes]]`` names — the ALLOWLIST of routes
+    whose ``human`` gate a delivery may retire.
+
+    Named positively on purpose. The alternative (everything except the
+    subsystem routes loom happens to ship today) admits the next subsystem
+    that raises a gate, and the one it would admit first —
+    ``external-remediation`` — is a *consent* gate whose completion re-arms a
+    paid budget and cannot be undone by doing nothing. A host with no routes
+    configured therefore retires nothing, and says so.
+    """
+    return tuple(route.name for route in getattr(host, "routes", ()) or ())
+
+
 def _resolve_repo(host: LoomConfig, story: StoryState) -> Path:
     """The project checkout holding the branch — ``[projects.<slug>].repo``."""
     slug = story.project
@@ -749,49 +718,8 @@ def _resolve_repo(host: LoomConfig, story: StoryState) -> Path:
     return project.repo
 
 
-# ── output ──────────────────────────────────────────────────────────────
-
-
 def _write_json(json_out: Path | None, record: Mapping[str, Any]) -> None:
     if json_out is None:
         return
     json_out.parent.mkdir(parents=True, exist_ok=True)
     json_out.write_text(json.dumps(dict(record), indent=2), encoding="utf-8")
-
-
-def _render(record: Mapping[str, Any]) -> list[str]:
-    label = record["run_id"] or record["branch"]
-    pr_url = record["pr_url"]
-    lines = [
-        f"deliver {label}: {pr_url}"
-        if pr_url
-        else f"deliver {label}: PUSHED, NO PR — the delivery is unfinished"
-    ]
-    if record["pushed"]:
-        lines.append(
-            f"  pushed {record['pushed_sha'][:12]} → origin/{record['branch']}"
-        )
-    else:
-        lines.append(f"  origin/{record['branch']} already up to date")
-    if pr_url:
-        verb = "adopted" if record["adopted"] else "opened"
-        number = record["pr_number"]
-        lines.append(
-            f"  {verb} PR #{number}" if number is not None else f"  {verb} the PR"
-        )
-    if record["pr_gate_id"]:
-        lines.append(
-            f"  pr gate {record['pr_gate_id']} now blocks {record['story_id']}"
-        )
-    for gate_id in record["human_gates_completed"]:
-        lines.append(f"  completed needs-human gate {gate_id}")
-    for described in record["human_gates_retained"]:
-        lines.append(
-            f"  left needs-human gate {described} open — a different "
-            "escalation, not this delivery's to retire"
-        )
-    if not record["changed"]:
-        lines.append("  nothing changed — this branch was already delivered")
-    for note in record["notes"]:
-        lines.append(f"  [Friction] {note}")
-    return lines

@@ -13,14 +13,16 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
 | `lithos_loom.cli._deliver_facts` | M | 1 | 8 |
-| `lithos_loom.cli._deliver_lithos` | M | 5 | 10 |
+| `lithos_loom.cli._deliver_lithos` | M | 7 | 3 |
+| `lithos_loom.cli._deliver_output` | S | 0 | 3 |
 | `lithos_loom.cli._deliver_repo` | M | 1 | 8 |
+| `lithos_loom.cli._deliver_session` | S | 0 | 7 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
-| `lithos_loom.cli.deliver` | L | 0 | 2 |
+| `lithos_loom.cli.deliver` | L | 0 | 1 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
@@ -38,27 +40,27 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `coder_summary` — The last round's coder handoff ``## Summary``, as one bounded line.
 - def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
 - def `run_facts` — Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
-- def `redact_for_publication` — A bounded, markup-inert rendering of host diagnostic text.
+- def `redact_for_publication` — A bounded, markup-inert rendering of host text that is about to be published.
 - def `provenance_lines` — The PR body's ``## Provenance`` block: where this branch came from.
 - def `reviews_summary` — The Review section's verdict line: this branch was NOT panel-approved.
 - def `pr_body` — The generated body for a newly opened PR — the shared builder plus this delivery's provenance. Built lazily: an adopted PR needs none.
 
 ### `lithos_loom.cli._deliver_lithos`
 - class `DeliverRefused` — A precondition failed and nothing was written. Exits ``1``.
+- class `DeliverUncertain` — An external write may or may not have landed, and the read that would have settled it failed too. Never exit 1: "nothing was written" is exactly what this cannot be asserted. Exits ``2`` with what to re-run.
 - class `PrGateRef` — An open ``pr`` gate holding the story, and what it watches.
-- class `HumanGateRef` — An open loom ``human`` gate holding the story, and whose escalation it is.
+- class `HumanGateRef` — An open loom ``human`` gate holding the story, and whose escalation it is: the *route* that raised it and the *run* it escalated.
+- class `GateRetirement` — Which open ``human`` gates this delivery retires, and what stays.
 - class `StoryState` — The live story, and the gates that hold it.
 - def `read_story` — Read the story plus the open gates blocking it.
 - class `GateOutcome` — What the Lithos half of the delivery managed to do.
-- def `gate_delivery` — Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire the stop's human gates.
+- def `gate_delivery` — Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire this run's own human gate(s).
 - def `mark_delivery_finding` — Record on the **story** that this delivery's finding was posted.
-- def `run_lithos` — Run one Lithos phase, mapping transport failures onto the refusal.
-- def `read_story_sync` — Step 0: the live story + the gates holding it.
-- def `run_gate_delivery` — Steps 3 + 4, in one client session.
-- def `post_finding` — Step 5: post ``[ManualDelivery]``, then mark the story (in that order).
-- def `claim_story` — Take the ``deliver`` claim on the story; ``False`` when another process holds it (two deliveries of one story must not interleave).
-- def `renew_story` — Re-up the ``deliver`` lease before the gate work — the phase that must be exclusive — so it never runs on a lease the git / gh phases spent. ``False`` when the renewal did not land (the caller notes it; the gate work still runs, since refusing there would strand an open PR).
-- def `release_story` — Release the ``deliver`` claim. Best-effort: a lingering claim only expires with its short TTL.
+
+### `lithos_loom.cli._deliver_output`
+- def `delivery_finding` — The ``[ManualDelivery]`` summary posted on the story (pure).
+- def `echo_plan`
+- def `render`
 
 ### `lithos_loom.cli._deliver_repo`
 - class `RemoteState` — How ``origin``'s copy of the branch stands against the local one.
@@ -70,6 +72,15 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `origin_repo_name` — ``owner/name`` of the checkout's ``origin`` — the repository every ``gh`` call in this command is pinned to.
 - def `adoptable` — Pick the open PR that is *ours* to adopt, or say why none is (pure).
 - def `open_or_adopt` — Step 2: adopt this branch's own open PR, else open one. Returns ``(url, adopted)``.
+
+### `lithos_loom.cli._deliver_session`
+- def `run_lithos` — Run one Lithos phase, mapping transport failures onto the refusal.
+- def `read_story_sync` — Step 0: the live story + the gates holding it.
+- def `run_gate_delivery` — Steps 3 + 4, in one client session.
+- def `post_finding` — Step 5: post ``[ManualDelivery]``, then mark the story (in that order).
+- def `claim_story` — Take the ``deliver`` claim on the story; ``False`` when another process holds it (two deliveries of one story must not interleave).
+- def `renew_story` — Re-up the ``deliver`` lease before the gate work — the phase that must be exclusive — so it never runs on a lease the git / gh phases spent. ``False`` when the renewal did not land, and the caller then **skips the whole gate phase**: a lease that would not renew may already belong to another delivery, and a gate raised under it is the duplicate the claim exists to prevent. The PR stands and the story keeps the gate it had — a partial a later invocation finishes.
+- def `release_story` — Release the ``deliver`` claim. Best-effort: a lingering claim only expires with its short TTL.
 
 ### `lithos_loom.cli._github_metadata`
 - class `GithubMetadataError` — Raised when the CLI cannot complete a project-context mutation.
@@ -109,7 +120,6 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `converge_command` — Converge an existing PR to review-green (panel + gate), then push.
 
 ### `lithos_loom.cli.deliver`
-- def `delivery_finding` — The ``[ManualDelivery]`` summary posted on the story (pure).
 - def `deliver_command` — Push a stopped run's branch, open its PR, and swap the needs-human gate for a pr gate.
 
 ### `lithos_loom.cli.develop`

@@ -30,7 +30,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from lithos_loom.cli._deliver_lithos import DeliverRefused
+from lithos_loom.cli._deliver_lithos import DeliverRefused, DeliverUncertain
 from lithos_loom.plugins.story_develop.github_access import (
     OpenPullRequest,
     default_base_branch,
@@ -204,7 +204,20 @@ def push_branch(repo: Path, branch: str, state: RemoteState) -> str | None:
         # calling this "nothing was written": exiting 1 on a ref that now
         # exists would send the operator looking for a branch that is already
         # there, and would hide a delivery half-done.
-        landed = remote_sha(repo, branch)
+        try:
+            landed = remote_sha(repo, branch)
+        except (DeliverRefused, OSError, subprocess.SubprocessError) as exc:
+            # The push may have landed and the read that would settle it is
+            # unavailable too. "Nothing was written" is the one thing that
+            # cannot be asserted here, so say so and let the caller report a
+            # possibly-committed partial instead of a clean refusal.
+            raise DeliverUncertain(
+                f"git push reported failure ({proc.stderr.strip()}) and the "
+                f"remote could not then be read ({exc}), so it is not known "
+                f"whether {state.local_sha[:12]} reached origin/{branch}. "
+                "Nothing else was attempted; re-run when the remote answers — "
+                "the push is append-only, so a second run is safe either way"
+            ) from exc
         if landed != state.local_sha:
             raise DeliverRefused(f"git push failed: {proc.stderr.strip()}")
     return _set_upstream(repo, branch)
@@ -329,14 +342,14 @@ def open_or_adopt(
                 ),
                 False,
             )
-        except (RuntimeError, OSError, subprocess.SubprocessError):
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
             # A create can COMMIT and still report failure — GitHub opened the
             # PR and the response was lost. The same ambiguity the push handles
             # by re-reading the remote: ask again before concluding that no PR
             # exists, or the command leaves an open, UNGATED PR behind while
             # reporting that it opened none (and, on an already-equal remote,
             # calls the whole delivery "nothing written").
-            recovered = _created_despite_the_error(
+            recovered, asked = _created_despite_the_error(
                 repo,
                 branch=branch,
                 repo_name=repo_name,
@@ -345,6 +358,14 @@ def open_or_adopt(
             )
             if recovered is not None:
                 return recovered, True
+            if not asked:
+                # The re-ask failed too: a PR may exist. Never a refusal.
+                raise DeliverUncertain(
+                    f"gh pr create failed ({exc}) and the open-PR list could "
+                    "not then be read, so it is not known whether a PR was "
+                    "opened for this branch. Re-run when gh answers — an "
+                    "existing PR at this head is adopted, not duplicated"
+                ) from exc
             raise
     except RuntimeError as exc:
         raise DeliverRefused(str(exc)) from exc
@@ -352,14 +373,15 @@ def open_or_adopt(
 
 def _created_despite_the_error(
     repo: Path, *, branch: str, repo_name: str, head_sha: str, base: str
-) -> str | None:
-    """The PR a failed ``gh pr create`` opened anyway, or ``None``.
+) -> tuple[str | None, bool]:
+    """The PR a failed ``gh pr create`` opened anyway — ``(url, answered)``.
 
     Re-asks with exactly the adoption rule of the first pass — same-repo, our
     head, our base — so a PR recovered here is one this delivery could have
-    adopted. The re-list is itself best-effort: if it cannot answer, the
-    original create failure stands (the caller then reports a push with no PR,
-    which a re-run finishes).
+    adopted. *answered* separates the two ways of getting no url: GitHub said
+    there is no such PR (``(None, True)`` — the create really failed), and the
+    re-ask could not be made at all (``(None, False)`` — a PR may exist, and
+    the caller must not report an absence it never established).
     """
     try:
         found, _ = adoptable(
@@ -368,5 +390,5 @@ def _created_despite_the_error(
             base=base,
         )
     except (RuntimeError, OSError, subprocess.SubprocessError):
-        return None
-    return found.url if found is not None else None
+        return None, False
+    return (found.url if found is not None else None), True

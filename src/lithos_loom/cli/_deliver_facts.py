@@ -117,7 +117,16 @@ def _opt_str(value: Any) -> str:
 _CODER_DONE_RE = re.compile(r"^round_(\d+)_coder_done\.md$")
 _MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
 _MAX_SUMMARY_CHARS = 600
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# C0 / C1 *and* the Unicode characters that reorder or hide text without
+# being control codes: bidi overrides + isolates (trojan source — GitHub warns
+# about it in diffs) and the zero-width / invisible formatters. The hazard is
+# the one this module already accepts for ANSI escapes: `--dry-run` is the
+# screen the operator decides on, and a PR body is read by strangers, so a
+# line must not be able to render differently from the text it carries.
+_CONTROL_CHARS_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f"
+    "\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
 _SUMMARY_HEADING_RE = re.compile(r"^\s*#{1,6}\s*summary\s*$", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^\s*#{1,6}\s")
 
@@ -202,11 +211,11 @@ def coder_summary(handoff_dir: Path) -> str:
             break
         if collecting:
             body.append(line)
-    summary = " ".join(" ".join(body).split())
-    summary = _CONTROL_CHARS_RE.sub("", summary)
-    if len(summary) > _MAX_SUMMARY_CHARS:
-        summary = summary[: _MAX_SUMMARY_CHARS - 1].rstrip() + "…"
-    return defang_markup(summary)
+    # The same treatment the stop reason gets, at this section's own cap: the
+    # handoff is agent-chosen text on its way to a world-readable PR body, so
+    # host paths, urls and credential-shaped runs must not ride along. The
+    # fence `pr_body` puts around it neutralises markup, never content.
+    return redact_for_publication(" ".join(body), limit=_MAX_SUMMARY_CHARS)
 
 
 # GitHub honours closing keywords anywhere in a PR *description*, and @-names
@@ -253,8 +262,13 @@ def defang_markup(text: str) -> str:
     defused. **Nothing here leans on code spans**: quoting a mention in
     backticks only works while the backticks pair up, and the author of this
     text chooses how many of those it contains.
+
+    Control bytes go first — C0/C1 *and* the bidi / zero-width formatters
+    (:data:`_CONTROL_CHARS_RE`) — because a construct that renders in a
+    different order than it was written defeats every rewrite below it.
     """
-    out = _CLOSES_RE.sub(lambda m: f"{m.group(1)} → ", text)
+    out = _CONTROL_CHARS_RE.sub("", text)
+    out = _CLOSES_RE.sub(lambda m: f"{m.group(1)} → ", out)
     out = _MENTION_RE.sub(r"&#64;\1", out)
     out = _HTML_OPEN_RE.sub("&lt;", out)
     out = _LINK_RE.sub("&#91;", out)
@@ -297,39 +311,68 @@ def run_facts(run_dir: Path) -> RunFacts:
 # A **protocol-relative** `//host/path` is as live as `https://host/path` and
 # neither `_ABS_PATH_RE` (its lookbehind cannot match a second `/`) nor a
 # scheme-anchored pattern would catch it.
-_URL_RE = re.compile(r"(?:\b[a-z][a-z0-9+.-]*://|(?<![\w:/])//)\S+", re.IGNORECASE)
+# A **protocol-relative** `//host/path` is as live as `https://host/path`, and
+# GFM autolinks a bare `www.` host — so an unredacted `www.evil.example/beacon`
+# would render as the very clickable link `_LINK_RE` exists to prevent.
+_URL_RE = re.compile(
+    r"(?:\b[a-z][a-z0-9+.-]*://|(?<![\w:/])//|\bwww\.)\S+", re.IGNORECASE
+)
 # Internal names leak topology without looking like a url or a path.
 _INTERNAL_HOST_RE = re.compile(
     r"\b[\w-]+(?:\.[\w-]+)*\.(?:internal|local|corp|lan|intranet)\b(?::\d+)?",
     re.IGNORECASE,
 )
+# The two host shapes agent / CLI stderr produces after a hostname: a literal
+# IPv4 (a bare RFC1918 address is pure host topology) and a bare `host:port`.
+# The `host:port` rule requires a `.` or `-` in the name so ordinary text like
+# `Error:404` is left alone.
+_IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b(?::\d{1,5}\b)?")
+_HOST_PORT_RE = re.compile(r"\b(?=[\w.-]*[.-])[a-z0-9][\w.-]*:\d{2,5}\b", re.IGNORECASE)
 _HOME_PATH_RE = re.compile(r"~[\w.-]*(?:/[^\s,;)'\"]*)+")
 _ABS_PATH_RE = re.compile(r"(?<![\w/])/(?:[\w.@+-]+)(?:/[^\s,;)'\"]*)+")
 _SECRETISH_RE = re.compile(r"\b[A-Za-z0-9_-]{24,}\b")
 _MAX_REASON_CHARS = 200
 
+# Written as prose, NOT as `<url>`: `url`, `host`, `path` and `redacted` are
+# all valid HTML tag names, so an angle-bracketed placeholder is parsed as raw
+# inline HTML and dropped by GitHub's sanitizer — the redaction would then be
+# invisible on the one surface people read, and a reader could not tell a
+# redacted reason from a truncated or empty one.
+_URL_PLACEHOLDER = "(url redacted)"
+_HOST_PLACEHOLDER = "(host redacted)"
+_PATH_PLACEHOLDER = "(path redacted)"
+_REDACTED_PLACEHOLDER = "(redacted)"
 
-def redact_for_publication(text: str) -> str:
-    """A bounded, markup-inert rendering of host diagnostic text.
+
+def redact_for_publication(text: str, *, limit: int = _MAX_REASON_CHARS) -> str:
+    """A bounded, markup-inert rendering of host text that is about to be
+    published.
 
     The PR must say **why** the run stopped (the provenance contract), and the
     raw string must not be published as-is. So the structure survives and the
-    parts that leak the host do not: urls (scheme-ful **and**
-    protocol-relative), internal hostnames, absolute / home paths and
-    credential-shaped runs become placeholders, markup is defanged, and the
-    result is capped. The operator still reads the untouched original on the
-    story's ``[NeedsHuman]`` finding, in the gate brief and in ``--dry-run``.
+    parts that leak the host do not: urls (scheme-ful, protocol-relative and
+    ``www.``-autolinked), internal hostnames, IPv4 literals and bare
+    ``host:port`` pairs, absolute / home paths and credential-shaped runs
+    become placeholders, markup is defanged, and the result is capped at
+    *limit*. The operator still reads the untouched original on the story's
+    ``[NeedsHuman]`` finding, in the gate brief and in ``--dry-run``.
+
+    Every string this module publishes goes through it — the stop reason
+    **and** the coder's handoff summary. The handoff is no less host-derived
+    than the reason (the agent quotes the commands it ran, and its own inputs
+    reach it from a public GitHub issue), and the fence around it neutralises
+    markup, not content.
     """
-    # Defang FIRST, substitute after: the placeholders below are angle-bracketed
-    # for the reader, and escaping them again would only print `&lt;url>`.
     out = defang_markup(" ".join(text.split()))
-    out = _URL_RE.sub("<url>", out)
-    out = _INTERNAL_HOST_RE.sub("<host>", out)
-    out = _HOME_PATH_RE.sub("<path>", out)
-    out = _ABS_PATH_RE.sub("<path>", out)
-    out = _SECRETISH_RE.sub("<redacted>", out)
-    if len(out) > _MAX_REASON_CHARS:
-        out = out[: _MAX_REASON_CHARS - 1].rstrip() + "…"
+    out = _URL_RE.sub(_URL_PLACEHOLDER, out)
+    out = _INTERNAL_HOST_RE.sub(_HOST_PLACEHOLDER, out)
+    out = _IPV4_RE.sub(_HOST_PLACEHOLDER, out)
+    out = _HOST_PORT_RE.sub(_HOST_PLACEHOLDER, out)
+    out = _HOME_PATH_RE.sub(_PATH_PLACEHOLDER, out)
+    out = _ABS_PATH_RE.sub(_PATH_PLACEHOLDER, out)
+    out = _SECRETISH_RE.sub(_REDACTED_PLACEHOLDER, out)
+    if len(out) > limit:
+        out = out[: limit - 1].rstrip() + "…"
     return out
 
 

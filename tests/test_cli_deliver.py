@@ -30,6 +30,7 @@ from typer.testing import CliRunner
 from lithos_loom.cli import _deliver_facts as cli_facts
 from lithos_loom.cli import _deliver_lithos as cli_lithos
 from lithos_loom.cli import _deliver_repo as cli_repo
+from lithos_loom.cli import _deliver_session as cli_session
 from lithos_loom.cli import deliver as cli
 from lithos_loom.cli.develop import develop_app
 from lithos_loom.errors import LithosClientError
@@ -165,7 +166,8 @@ def lithos(monkeypatch: pytest.MonkeyPatch) -> FakeLithosClient:
         )
     )
     client.add_edge(from_task_id="gate-human", to_task_id=_STORY, type=WAITS_ON_GATE)
-    monkeypatch.setattr(cli_lithos, "LithosClient", lambda *a, **k: client)
+    # every Lithos phase runs through one short-lived session there
+    monkeypatch.setattr(cli_session, "LithosClient", lambda *a, **k: client)
     return client
 
 
@@ -180,6 +182,8 @@ def host(
             lithos_url="http://lithos.invalid",
         ),
         projects={_SLUG: SimpleNamespace(name=_SLUG, repo=repo)},
+        # the allowlist a delivery retires gates under: this host's own routes
+        routes=(SimpleNamespace(name="story-develop"),),
         story_develop=SimpleNamespace(operator_github_login=None),
     )
     monkeypatch.setattr(cli, "load_config", lambda config=None: cfg)
@@ -643,11 +647,11 @@ def test_a_gate_raised_between_the_read_and_the_pr_is_adopted_not_duplicated(
 ) -> None:
     """correctness/f-006: the gate decision is made on a FRESH read, so a gate
     that landed while this command was pushing is adopted."""
-    real_get = lithos.task_get
+    real_status = lithos.task_status
     injected = {"done": False}
 
     async def _inject_after_the_first_story_read(**kwargs: Any) -> Any:
-        task = await real_get(**kwargs)
+        task = await real_status(**kwargs)
         if kwargs.get("task_id") == _STORY and not injected["done"]:
             injected["done"] = True
             lithos.add_task(
@@ -669,7 +673,7 @@ def test_a_gate_raised_between_the_read_and_the_pr_is_adopted_not_duplicated(
             )
         return task
 
-    lithos.task_get = _inject_after_the_first_story_read  # type: ignore[method-assign]
+    lithos.task_status = _inject_after_the_first_story_read  # type: ignore[method-assign]
 
     result = _invoke(_RUN)
 
@@ -727,7 +731,7 @@ def test_a_pr_failure_after_the_push_is_a_partial_not_nothing_written(
     result = _invoke(_RUN)
 
     assert result.exit_code == 2, result.output
-    assert "pushed but no PR" in result.output
+    assert "no PR was opened" in result.output
     assert "nothing written" not in result.output
     # …and the push really did land, so a re-run inherits it
     assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") != ""
@@ -1213,7 +1217,7 @@ def test_protocol_relative_markup_never_renders_live(
     assert "[more](" not in provenance  # the link no longer binds
     assert "&#91;more]" in provenance
     assert "evil.example" not in body  # the target redacted either way
-    assert "proxy.internal" not in body and "<host>" in body
+    assert "proxy.internal" not in body and "(host redacted)" in body
 
 
 def test_a_fork_pr_with_the_same_branch_name_is_never_adopted(
@@ -1288,7 +1292,11 @@ def test_the_pr_body_carries_the_stop_reason_redacted(
     assert "proxy.internal" not in body  # …but not the endpoint
     assert "/home/dns" not in body  # …nor the host path
     assert "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345" not in body  # …nor the token
-    assert "<url>" in body and "<path>" in body and "<redacted>" in body
+    assert "(url redacted)" in body and "(path redacted)" in body
+    assert "(redacted)" in body
+    # …and never as `<url>`: GitHub drops unknown tags, so the one control
+    # that proves text was removed would leave no trace on the rendered PR
+    assert "<url>" not in body and "<path>" not in body
     # the operator's own copy is untouched
     assert "proxy.internal" in _invoke(_RUN, "--dry-run").output
 
@@ -1297,7 +1305,9 @@ def test_redaction_is_bounded_and_markup_inert() -> None:
     """The pure half of correctness/f-010."""
     assert cli_facts.redact_for_publication("") == ""
     assert cli_facts.redact_for_publication("plain words") == "plain words"
-    assert "<path>" in cli_facts.redact_for_publication("wrote ~/loom/work/run.json")
+    assert "(path redacted)" in cli_facts.redact_for_publication(
+        "wrote ~/loom/work/run.json"
+    )
     long = cli_facts.redact_for_publication("stalled after " + "word " * 200)
     assert len(long) <= 200 and long.endswith("…")
     # closing keywords and mentions never travel LIVE: the keyword no longer
@@ -1591,7 +1601,7 @@ def test_only_the_stops_own_escalation_is_retired(
     assert record["human_gates_completed"] == ["gate-human"]
     assert len(record["human_gates_retained"]) == 3
     summary = lithos.findings[-1]["summary"]
-    assert "gate-remediation (route external-remediation)" in summary
+    assert "gate-remediation (route external-remediation" in summary
     assert "left OPEN" in summary
     assert "[Friction]" not in summary
 
@@ -1622,7 +1632,7 @@ def test_the_dry_run_plan_names_the_gates_it_would_keep(
     assert result.exit_code == 0, result.output
     plan = [ln for ln in result.output.splitlines() if "human gates" in ln]
     assert plan and "gate-human" in plan[0] and "gate-remediation" not in plan[0]
-    assert "leaving gate-remediation (route external-remediation) open" in result.output
+    assert "leaving gate-remediation (route external-remediation" in result.output
 
 
 def test_the_plan_never_echoes_agent_written_control_bytes(
@@ -1643,6 +1653,389 @@ def test_the_plan_never_echoes_agent_written_control_bytes(
     assert result.exit_code == 0, result.output
     assert "\x07" not in result.output and "\x1b" not in result.output
     assert "died[2K[A" in result.output  # the text survives, the escapes do not
+
+
+# ── round-5 (review round 2) regressions ───────────────────────────────
+
+
+def _claimed(client: FakeLithosClient, *, aspect: str = "story-develop") -> None:
+    """Put a live route claim on the story, as a running dispatch does."""
+    story = asyncio.run(client.task_get(task_id=_STORY))
+    assert story is not None
+    client.add_task(
+        make_task(
+            _STORY,
+            title=story.title,
+            description=story.description,
+            metadata=dict(story.metadata),
+            claims=(
+                {
+                    "aspect": aspect,
+                    "agent": "loom-daemon",
+                    "expires_at": "2999-01-01T00:00:00+00:00",
+                },
+            ),
+        )
+    )
+
+
+def test_a_live_route_claim_refuses_before_anything_is_written(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-001: the run writes its terminal `state.json` well before
+    the daemon applies the result and raises the needs-human gate, and the
+    route holds its claim across that whole window. Delivering inside it gates
+    a story whose escalation does not exist yet — the runner then raises it
+    afterwards and the story sits behind BOTH gates."""
+    _claimed(lithos)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert "claimed by a live dispatch" in result.output
+    assert "story-develop" in result.output
+    assert gh["created"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+    assert lithos.mutating_calls == []
+
+
+def test_an_expired_claim_does_not_block_a_delivery(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-001: a claim whose TTL has run out is not a live
+    dispatch — only an unexpired (or unparseable) one holds the command."""
+    story = _get(lithos, _STORY)
+    lithos.add_task(
+        make_task(
+            _STORY,
+            title=story.title,
+            description=story.description,
+            metadata=dict(story.metadata),
+            claims=(
+                {
+                    "aspect": "story-develop",
+                    "agent": "loom-daemon",
+                    "expires_at": "2020-01-01T00:00:00+00:00",
+                },
+            ),
+        )
+    )
+
+    assert _invoke(_RUN).exit_code == 0
+    assert len(gh["created"]) == 1
+
+
+def test_a_dispatch_that_claims_mid_delivery_keeps_the_human_gate(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001, the interleaving: the claim appears only after this
+    delivery has started, so its escalation may still be on its way. The pr
+    gate is raised (that half is always safe) but NO human gate is completed —
+    completing one now could retire a gate the run has not finished raising."""
+    real_push = cli.push_branch
+
+    def _claim_while_we_push(repo_path: Path, branch: str, state: Any):
+        out = real_push(repo_path, branch, state)
+        _claimed(lithos)
+        return out
+
+    monkeypatch.setattr(cli, "push_branch", _claim_while_we_push)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    assert _PR_URL in result.output  # the PR stands and is gated
+    assert _get(lithos, _STORY).metadata[STORY_GATE_ID_KEY]
+    assert (_get(lithos, "gate-human")).status == "open"
+    assert "claimed this story while the delivery ran" in result.output
+
+
+def test_another_runs_gate_is_never_retired(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, tmp_path: Path
+) -> None:
+    """correctness/f-002: a story can match two dispatch routes, each with its
+    own stopped run and its own open escalation. Delivering run A's branch
+    must not retire run B's gate — nor delete route B's failure record."""
+    lithos.add_task(
+        make_task(
+            "gate-human-b",
+            title=f"Needs human: {_STORY}",
+            task_type="gate",
+            metadata={
+                "gate_type": GATE_TYPE_HUMAN,
+                "raised_by": RAISED_BY_LOOM,
+                "route": "docs-develop",
+                "story_id": _STORY,
+                "run_id": "other-run",
+                "escalation_reason": "stalled",
+            },
+        )
+    )
+    lithos.add_edge(from_task_id="gate-human-b", to_task_id=_STORY, type=WAITS_ON_GATE)
+    story = _get(lithos, _STORY)
+    metadata = dict(story.metadata)
+    metadata["loom_last_attempt:docs-develop"] = {"status": "failed"}
+    metadata["gate_human_run"] = None
+    asyncio.run(lithos.task_update(task_id=_STORY, agent="op", metadata=metadata))
+    # both routes are configured on this host
+    host.routes = (
+        SimpleNamespace(name="story-develop"),
+        SimpleNamespace(name="docs-develop"),
+    )
+    # the delivered run's own gate names it, so it is unambiguous
+    gate_a = _get(lithos, "gate-human")
+    lithos.add_task(
+        make_task(
+            "gate-human",
+            title=gate_a.title,
+            task_type="gate",
+            metadata={**gate_a.metadata, "run_id": _RUN},
+        )
+    )
+
+    out = tmp_path / "r.json"
+    assert _invoke(_RUN, "--json", str(out)).exit_code == 0
+
+    assert (_get(lithos, "gate-human")).status == "completed"
+    assert (_get(lithos, "gate-human-b")).status == "open"
+    metadata = _get(lithos, _STORY).metadata
+    assert "loom_last_attempt:story-develop" not in metadata
+    assert metadata["loom_last_attempt:docs-develop"]  # route B's record stands
+    record = json.loads(out.read_text())
+    assert record["human_gates_completed"] == ["gate-human"]
+    assert any("other-run" in kept for kept in record["human_gates_retained"])
+
+
+def test_two_unattributed_dispatch_gates_retire_neither(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-002: with no run recorded on either gate there is nothing
+    to match on, so the conservative rule keeps both and says why."""
+    lithos.add_task(
+        make_task(
+            "gate-human-b",
+            title=f"Needs human: {_STORY}",
+            task_type="gate",
+            metadata={
+                "gate_type": GATE_TYPE_HUMAN,
+                "raised_by": RAISED_BY_LOOM,
+                "route": "story-develop",
+                "escalation_reason": "stalled",
+            },
+        )
+    )
+    lithos.add_edge(from_task_id="gate-human-b", to_task_id=_STORY, type=WAITS_ON_GATE)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    assert (_get(lithos, "gate-human")).status == "open"
+    assert (_get(lithos, "gate-human-b")).status == "open"
+    assert "cannot tell which run raised it" in result.output
+    # route A's failure record is protected too while its gate is open
+    assert "loom_last_attempt:story-develop" in _get(lithos, _STORY).metadata
+
+
+def test_an_unconfigured_route_is_never_treated_as_a_dispatch(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-003: the rule is an ALLOWLIST of this host's configured
+    routes. A route nobody configured — the next subsystem to raise a gate —
+    is never a stopped run's, so it is never completed on a denylist miss."""
+    host.routes = (SimpleNamespace(name="docs-develop"),)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    assert (_get(lithos, "gate-human")).status == "open"
+    assert "not a dispatch route on this host" in result.output
+
+
+def test_a_failed_gate_attempt_is_never_recorded_as_no_gate(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-003: `outcome is None` is not "the operator asked for an
+    ungated PR" — it is also every way the gate phase can fail."""
+
+    def _unreachable(*a: Any, **k: Any):
+        raise cli_lithos.DeliverRefused("Lithos call failed: connection refused")
+
+    monkeypatch.setattr(cli, "run_gate_delivery", _unreachable)
+
+    assert _invoke(_RUN).exit_code == 2
+    summary = lithos.findings[-1]["summary"]
+    assert "--no-gate" not in summary
+    assert "the pr gate was NOT raised" in summary
+
+
+def test_gating_a_previously_no_gate_delivery_posts_the_correction(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-003: the marker records the state the delivery REACHED,
+    so the run that gates a PR delivered `--no-gate` must correct the story's
+    only durable provenance instead of reading it as already said."""
+    assert _invoke(_RUN, "--no-gate").exit_code == 0
+    assert "UNMONITORED" in lithos.findings[0]["summary"]
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+
+    assert _invoke(_RUN).exit_code == 0
+
+    assert len(lithos.findings) == 2
+    corrected = lithos.findings[-1]["summary"]
+    assert "UNMONITORED" not in corrected
+    assert "now blocks the story" in corrected
+    assert "needs-human gate gate-human completed" in corrected
+    # …and a third run, now that the record matches, says nothing more
+    assert _invoke(_RUN).exit_code == 0
+    assert len(lithos.findings) == 2
+
+
+def test_an_unreadable_remote_after_a_push_is_never_nothing_written(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-004: the push reported failure AND the read that would
+    settle it failed too. The one thing that cannot be asserted here is that
+    nothing was written."""
+    real_git = cli_repo.run_git
+    pushed = {"done": False}
+
+    def _lose_the_response_then_the_remote(repo_path: Path, args: list[str], **kw: Any):
+        if args[:1] == ["push"]:
+            real_git(repo_path, args, **kw)  # it lands…
+            pushed["done"] = True
+            return subprocess.CompletedProcess(args, 1, "", "fatal: the remote hung up")
+        if pushed["done"] and args[:1] == ["ls-remote"]:
+            return subprocess.CompletedProcess(args, 1, "", "fatal: could not read")
+        return real_git(repo_path, args, **kw)
+
+    monkeypatch.setattr(cli_repo, "run_git", _lose_the_response_then_the_remote)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    assert "PUSH UNCERTAIN" in result.output
+    assert "not known whether" in result.output
+    # the remote really does hold it — the command just could not prove it
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") != ""
+
+
+def test_an_unreadable_pr_list_after_a_create_is_never_nothing_written(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-004, the PR half: `gh pr create` may have opened the PR
+    and the recovery read failed too. With the branch already on origin this
+    used to exit 1 saying nothing was written."""
+    _git(repo, "push", "origin", _BRANCH)  # nothing for this run to push
+    listed = {"count": 0}
+
+    def _list_then_fail(*a: Any, **k: Any):
+        listed["count"] += 1
+        if listed["count"] > 1:
+            raise RuntimeError("gh pr list failed: network is down")
+        return []
+
+    def _create_then_lose_the_response(*a: Any, **k: Any):
+        raise RuntimeError("gh pr create failed: connection reset by peer")
+
+    monkeypatch.setattr(cli_repo, "list_open_prs_for_branch", _list_then_fail)
+    monkeypatch.setattr(cli_repo, "create_pr", _create_then_lose_the_response)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    assert "not known whether a PR was opened" in result.output
+    assert "nothing written" not in result.output
+
+
+def test_the_handoff_summary_is_redacted_like_the_stop_reason(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-001: the handoff is agent-chosen text on its way to a
+    world-readable PR body — no less host-derived than the stop reason beside
+    it, and the fence around it neutralises markup, not content."""
+    (run_dir / "handoff" / "round_04_coder_done.md").write_text(
+        "## Status: LGTM\n\n## Summary\nRan /home/dave/.config/gh/hosts.yml against "
+        "https://proxy.internal/v1 with ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345\n",
+        encoding="utf-8",
+    )
+
+    assert _invoke(_RUN).exit_code == 0
+    body = gh["created"][0]["body"]
+
+    assert "/home/dave" not in body
+    assert "proxy.internal" not in body
+    assert "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345" not in body
+    assert "(path redacted)" in body and "(url redacted)" in body
+
+
+def test_redaction_placeholders_are_visible_in_the_rendered_pr() -> None:
+    """security/f-002: `url`, `host`, `path` and `redacted` are all valid HTML
+    tag names, so an angle-bracketed placeholder is parsed as raw inline HTML
+    and dropped by GitHub's sanitizer — the redaction would leave no trace on
+    the one surface people read."""
+    out = cli_facts.redact_for_publication("auth 401 from https://proxy.internal/v1")
+    assert "<" not in out and ">" not in out
+    assert "(url redacted)" in out
+
+
+def test_bare_hosts_and_autolinked_www_never_reach_the_pr() -> None:
+    """security/f-004: an RFC1918 address or a bare `host:port` is pure host
+    topology, and GFM autolinks a `www.` host — the live link the defang pass
+    exists to prevent."""
+    assert "10.1.2.3" not in cli_facts.redact_for_publication(
+        "connection refused to 10.1.2.3:8443"
+    )
+    out = cli_facts.redact_for_publication("talking to 192.168.7.11 (gh-proxy-3:8080)")
+    assert "192.168.7.11" not in out and "gh-proxy-3:8080" not in out
+    assert "www.evil.example" not in cli_facts.redact_for_publication(
+        "see www.evil.example/beacon.png"
+    )
+    # …and ordinary text with a colon is left alone
+    assert cli_facts.redact_for_publication("Error:404 at line 12:34") == (
+        "Error:404 at line 12:34"
+    )
+
+
+def test_bidi_and_zero_width_characters_are_stripped(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-005: a bidi override reorders the rendered line — the trojan
+    source technique — so the plan the operator decides on, and the PR body,
+    can read differently from what was delivered. Neutralised in the one
+    shared pass, like the ANSI escapes beside it."""
+    state = json.loads((run_dir / "state.json").read_text())
+    state["failure_reason"] = "died \u202egnihton\u202c \u200bhidden"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    plan = _invoke(_RUN, "--dry-run")
+    assert plan.exit_code == 0, plan.output
+    assert "\u202e" not in plan.output and "\u200b" not in plan.output
+
+    assert _invoke(_RUN).exit_code == 0
+    body = gh["created"][0]["body"]
+    assert "\u202e" not in body and "\u200b" not in body
+    assert "gnihton" in body  # the text survives; only the reordering goes
+    assert cli_facts.defang_markup("a\u202eb") == "ab"
 
 
 # ── pure helpers ───────────────────────────────────────────────────────
@@ -1701,7 +2094,7 @@ def test_coder_summary_is_bounded_and_control_stripped(tmp_path: Path) -> None:
     handoff = tmp_path / "handoff"
     handoff.mkdir()
     (handoff / "round_02_coder_done.md").write_text(
-        "## Status: LGTM\n\n## Summary\n" + "x" * 5000 + "\n", encoding="utf-8"
+        "## Status: LGTM\n\n## Summary\n" + "word " * 1000 + "\n", encoding="utf-8"
     )
     summary = cli_facts.coder_summary(handoff)
     assert len(summary) <= 600 and summary.endswith("…")

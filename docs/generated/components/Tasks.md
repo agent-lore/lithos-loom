@@ -11,7 +11,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.gates` | M | 3 | 12 |
+| `lithos_loom.gates` | M | 3 | 11 |
 | `lithos_loom.task_graph` | S | 1 | 1 |
 | `lithos_loom.task_line` | S | 0 | 4 |
 | `lithos_loom.task_line_parser` | S | 2 | 1 |
@@ -31,7 +31,6 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 - def `create_human_gate_best_effort` — Raise a loom ``human`` gate, degrading instead of raising.
 - def `is_human_gate` — Whether *task* is a ``human`` gate — loom's or the operator's own.
 - def `is_loom_human_gate` — Whether *task* is a ``human`` gate loom raised (``raised_by=loom``).
-- def `is_dispatch_route` — Whether *route* names a **dispatch** route (a ``[[routes]]`` stanza) — so a ``human`` gate raised under it is a stopped RUN's escalation.
 - def `parse_human_gate` — Read a loom ``human`` gate's escalation out of its metadata, or ``None`` when it carries no ``escalation_reason`` (an operator's own gate, or a malformed one).
 - def `waiter_of` — The story a gate blocks — the ``to`` of its outgoing ``waits_on_gate`` edge — or ``None`` for an orphan gate (no waiter).
 

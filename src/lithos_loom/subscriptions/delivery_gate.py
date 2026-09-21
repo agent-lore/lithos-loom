@@ -136,6 +136,7 @@ async def record_delivery_on_story(
     agent: str,
     gate_id: str,
     routes: Sequence[str] = (),
+    clear_human_gate_id: bool = True,
 ) -> bool:
     """The ONE story write a delivery makes — ``pr_gate_id`` plus the retirements.
 
@@ -152,14 +153,20 @@ async def record_delivery_on_story(
     leave a story in the *same* state, so there is one implementation of the
     write rather than two hand-kept copies.
 
+    *clear_human_gate_id* is False for the one caller that may retire **no**
+    human gate (``develop deliver``, when every open one belongs to another
+    run or another subsystem): the key would then be the only pointer left to
+    a gate that still holds the story, and deleting provenance for a live
+    blocker is worse than leaving it. The daemon's own exit always supersedes
+    the stop it is delivering, so it keeps the default.
+
     Returns whether the write landed. Never raises: a delivered branch + PR
     exist either way, and the gate itself already blocks re-dispatch, so the
     missing provenance is benign — the caller surfaces it as ``[Friction]``.
     """
-    story_metadata: dict[str, Any] = {
-        STORY_GATE_ID_KEY: gate_id,
-        STORY_HUMAN_GATE_ID_KEY: None,
-    }
+    story_metadata: dict[str, Any] = {STORY_GATE_ID_KEY: gate_id}
+    if clear_human_gate_id:
+        story_metadata[STORY_HUMAN_GATE_ID_KEY] = None
     for route in routes:
         story_metadata[last_attempt_key(route)] = None
     try:

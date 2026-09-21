@@ -12,7 +12,7 @@
         "max_function": "lithos_loom.children.obsidian_sync._amain"
       },
       "Cli": {
-        "functions_over_10": 29,
+        "functions_over_10": 31,
         "max_complexity": 60,
         "max_function": "lithos_loom.cli.converge.converge_command"
       },
@@ -102,7 +102,7 @@
         "max_function": "lithos_loom.task_graph.build_plan"
       }
     },
-    "functions_over_10": 166,
+    "functions_over_10": 168,
     "top_functions": [
       {
         "complexity": 98,
@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.subscriptions.conflict_resolve_dispatch.ConflictResolveDispatch.consider"
       }
     ],
-    "total_functions": 1729
+    "total_functions": 1728
   },
   "domain": {
     "associations": 2,
@@ -262,7 +262,7 @@
       }
     },
     "cross_component_edges": 70,
-    "cross_component_module_edges": 370,
+    "cross_component_module_edges": 371,
     "longest_component_chain": 6,
     "module_cycle_count": 1,
     "module_cycles": [
@@ -330,16 +330,16 @@
       "tests/test_cli_deliver.py -> lithos_loom.cli._deliver_facts._CLOSES_RE",
       "tests/test_cli_deliver.py -> lithos_loom.cli._deliver_lithos",
       "tests/test_cli_deliver.py -> lithos_loom.cli._deliver_repo",
+      "tests/test_cli_deliver.py -> lithos_loom.cli._deliver_session",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._iter_run_dirs",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._latest_mtime",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._round_and_reviewers",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._sanitize",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._wait_for_run",
       "tests/test_cli_project.py -> lithos_loom.cli.project._ProjectRow",
-      "tests/test_cli_project.py -> lithos_loom.cli.project._merge_lithos_with_toml",
-      "tests/test_cli_project.py -> lithos_loom.cli.project._rows_from_toml"
+      "tests/test_cli_project.py -> lithos_loom.cli.project._merge_lithos_with_toml"
     ],
-    "tests_private_imports": 93
+    "tests_private_imports": 94
   },
   "size": {
     "components": {
@@ -364,14 +364,14 @@
         "sloc": 1229
       },
       "Cli": {
-        "classes": 29,
+        "classes": 31,
         "functions": 193,
         "largest_module": "lithos_loom.cli.project",
         "largest_module_lines": 1705,
-        "lines": 8433,
-        "modules": 18,
-        "public_symbols": 102,
-        "sloc": 7042
+        "lines": 8903,
+        "modules": 20,
+        "public_symbols": 106,
+        "sloc": 7419
       },
       "Config": {
         "classes": 11,
@@ -518,10 +518,10 @@
         "functions": 396,
         "largest_module": "lithos_loom.subscriptions.external_remediation",
         "largest_module_lines": 1097,
-        "lines": 16324,
+        "lines": 16331,
         "modules": 48,
         "public_symbols": 146,
-        "sloc": 13255
+        "sloc": 13261
       },
       "Supervisor": {
         "classes": 3,
@@ -535,13 +535,13 @@
       },
       "Tasks": {
         "classes": 6,
-        "functions": 29,
+        "functions": 28,
         "largest_module": "lithos_loom.gates",
-        "largest_module_lines": 678,
-        "lines": 1286,
+        "largest_module_lines": 660,
+        "lines": 1268,
         "modules": 4,
-        "public_symbols": 24,
-        "sloc": 1003
+        "public_symbols": 23,
+        "sloc": 981
       }
     },
     "max_module": "lithos_loom.lithos_client",
@@ -557,13 +557,13 @@
       "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 66429,
-    "total_modules": 184,
-    "total_sloc": 53899
+    "total_lines": 66888,
+    "total_modules": 186,
+    "total_sloc": 54260
   },
   "tests": {
     "ratio": 1.57,
-    "src_lines": 66429,
-    "test_lines": 104508
+    "src_lines": 66888,
+    "test_lines": 104901
   }
 }

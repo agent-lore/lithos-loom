@@ -8,18 +8,25 @@ seams the sync Typer command drives through ``asyncio.run``. Split out so the
 command module stays the five steps and their flags; the ordering rationale
 lives with the code that enforces it.
 
-Four invariants live here rather than in the command:
+Five invariants live here rather than in the command:
 
-* **Only the stopped run's own escalation is retired.** Loom raises ``human``
-  gates from several subsystems, and the route says whose escalation a gate
-  is. A **dispatch** route's gate says "this story's run stopped", and that is
-  exactly what a delivery supersedes. The others say something else — and
-  completing an ``external-remediation`` decision gate is the operator's
-  CONSENT to spend another remediation budget on the delivered PR, which this
-  command was never granted. So a gate raised by one of loom's own subsystems
-  (:data:`~lithos_loom.gates.SUBSYSTEM_ROUTES`) is left OPEN and named in the
-  finding; leaving it open is safe in every case, because the ``pr`` gate this
-  delivery raised holds the story either way.
+* **Only THIS run's own escalation is retired** (:meth:`StoryState
+  .retirement`): a gate whose route is one this host actually configures —
+  an allowlist, because a route nobody configured is never a stopped run's and
+  the first gate a denylist would wrongly admit is ``external-remediation``,
+  whose completion is the operator's CONSENT to spend another paid budget —
+  *and* which names the run being delivered, because a story may match two
+  dispatch routes, each with its own stopped run and its own open decision.
+  Everything else is left OPEN and named in the finding; leaving a gate open
+  is safe in every case, because the ``pr`` gate this delivery raised holds
+  the story either way.
+* **A live dispatch owns the story, not us.** A run writes its terminal
+  ``state.json`` long before the daemon applies its result and raises the
+  escalation, and the route holds its claim across that whole window — so the
+  story's live claims are read with it (``task_status``) and a claimed story
+  is refused before anything is written. Inside that window a delivery would
+  gate a story whose needs-human gate does not exist yet, and the runner would
+  raise it afterwards: both gates standing, and a finding claiming the swap.
 * **The gate must watch THIS PR.** An open ``pr`` gate is adopted only when
   its ``pr_url`` is the PR being delivered. A gate watching a *different* PR —
   even beside one that matches — means the story is already behind someone
@@ -41,10 +48,9 @@ unreadable story — and the command maps it onto one exit code.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from lithos_loom.errors import LithosClientError, LithosLoomError
@@ -53,34 +59,28 @@ from lithos_loom.gates import (
     STORY_HUMAN_GATE_ID_KEY,
     WAITS_ON_GATE,
     create_pr_gate_best_effort,
-    is_dispatch_route,
     is_loom_human_gate,
     is_pr_gate,
     parse_human_gate,
     parse_pr_gate,
 )
-from lithos_loom.lithos_client import LithosClient
 from lithos_loom.subscriptions.delivery_gate import record_delivery_on_story
 from lithos_loom.subscriptions.dispatch_guards import LAST_ATTEMPT_KEY_PREFIX
 
 __all__ = [
     "DELIVERY_MARKER_KEY",
     "DELIVER_ASPECT",
+    "DELIVER_CLAIM_TTL_MINUTES",
     "DeliverRefused",
+    "DeliverUncertain",
     "GateOutcome",
+    "GateRetirement",
     "HumanGateRef",
     "PrGateRef",
     "StoryState",
-    "DELIVER_CLAIM_TTL_MINUTES",
-    "claim_story",
     "gate_delivery",
     "mark_delivery_finding",
-    "post_finding",
     "read_story",
-    "read_story_sync",
-    "release_story",
-    "renew_story",
-    "run_gate_delivery",
 ]
 
 DELIVERY_MARKER_KEY = "manual_delivery"
@@ -118,6 +118,12 @@ class DeliverRefused(LithosLoomError):
     """A precondition failed and nothing was written. Exits ``1``."""
 
 
+class DeliverUncertain(LithosLoomError):
+    """An external write may or may not have landed, and the read that would
+    have settled it failed too. Never exit 1: "nothing was written" is exactly
+    what this cannot be asserted. Exits ``2`` with what to re-run."""
+
+
 @dataclass(frozen=True)
 class PrGateRef:
     """An open ``pr`` gate holding the story, and what it watches."""
@@ -131,25 +137,50 @@ class PrGateRef:
 @dataclass(frozen=True)
 class HumanGateRef:
     """An open loom ``human`` gate holding the story, and whose escalation it
-    is.
+    is: the *route* that raised it and the *run* it escalated.
 
-    *route* is the discriminator (:func:`is_dispatch_route`): a dispatch
-    route's gate is the stopped run's own escalation, which this delivery
-    supersedes; any other is another subsystem's and is left alone.
+    Both are needed to answer "is this THIS delivery's gate?". The route says
+    whether a dispatch raised it at all (a subsystem's decision gate is never
+    a delivery's to retire); the run says whether it was **this** dispatch —
+    a story can legitimately match two routes, each with its own stopped run
+    and its own open escalation.
     """
 
     gate_id: str
     route: str | None
     reason: str = ""
+    run_id: str | None = None
 
-    @property
-    def supersedable(self) -> bool:
-        """Whether delivering this branch retires this gate."""
-        return is_dispatch_route(self.route)
+    def describe(self, why: str = "") -> str:
+        """How a finding names this gate — id, route, run, and (for a gate
+        that was kept) why it was kept."""
+        parts = [f"route {self.route or 'unrecorded'}"]
+        if self.run_id:
+            parts.append(f"run {self.run_id}")
+        if why:
+            parts.append(why)
+        return f"{self.gate_id} ({', '.join(parts)})"
 
-    def describe(self) -> str:
-        """``<id> (route <route>)`` — how the finding names a gate it kept."""
-        return f"{self.gate_id} (route {self.route or 'unrecorded'})"
+
+@dataclass(frozen=True)
+class GateRetirement:
+    """Which open ``human`` gates this delivery retires, and what stays.
+
+    Selected by :meth:`StoryState.retirement`, which is where the whole rule
+    lives; *routes* are the failed-attempt markers the retired gates authorise
+    clearing (never every marker on the story — another route's failure record
+    is that route's).
+    """
+
+    superseded: tuple[HumanGateRef, ...] = ()
+    retained: tuple[str, ...] = ()
+    """Gates left open, each already described with the reason it was kept."""
+    routes: tuple[str, ...] = ()
+    clears_human_gate_id: bool = True
+    """Whether the story's ``needs_human_gate_id`` provenance may go. False
+    only while it names a gate this delivery is KEEPING open: that key is then
+    the last pointer to a live blocker, and dropping provenance for a gate
+    that still holds the story is worse than leaving a stale key."""
 
 
 @dataclass(frozen=True)
@@ -166,22 +197,97 @@ class StoryState:
     """Open ``pr`` gates already blocking the story — a previous ``deliver``,
     or the daemon's own delivery. Their ``pr_url`` is what decides whether one
     is ours to adopt."""
+    route_claims: tuple[str, ...] = ()
+    """Live claims on the story held by something other than this command —
+    i.e. a route dispatch in flight. The run writes its terminal
+    ``state.json`` well before the daemon applies its result and raises the
+    escalation, and the claim is held across that whole window, so it is the
+    one signal that says "this run's lifecycle is not finished"."""
 
-    @property
-    def superseded_human_gates(self) -> tuple[HumanGateRef, ...]:
-        """The stopped run's own escalations — this delivery's to complete."""
-        return tuple(gate for gate in self.human_gates if gate.supersedable)
+    def retirement(
+        self, *, run_id: str, dispatch_routes: Sequence[str]
+    ) -> GateRetirement:
+        """Which open ``human`` gates THIS delivery retires (pure).
 
-    @property
-    def retained_human_gates(self) -> tuple[HumanGateRef, ...]:
-        """Another subsystem's escalations: left OPEN, named in the finding.
+        Two keys, in order, both of which must say yes:
 
-        Chief among them the ``external-remediation`` decision gate, whose
-        completion re-arms autonomous (paid) remediation on the delivered PR —
-        a decision that is the operator's alone, and one nothing in this
-        command was asked to make.
+        1. **The route is a configured dispatch route** — an allowlist built
+           from this host's ``[[routes]]``, not a list of the subsystem routes
+           we happen to remember. A route nobody configured (a subsystem added
+           later, a gate from another host) is never a stopped run's, and
+           guessing wrong the other way completes a *consent* gate: an
+           ``external-remediation`` gate's completion re-arms a paid budget,
+           and unlike leaving a gate open it cannot be undone by doing nothing.
+        2. **The gate names THIS run.** A story may match two dispatch routes,
+           each with its own stopped run and its own open escalation; retiring
+           route B's gate because route A's branch was delivered silently
+           discards a decision nobody made. When no candidate names any run
+           (an older gate, or an escalation raised without one) a **single**
+           candidate is unambiguous and is retired; two are not, and neither
+           goes. The run-dir-less ``--branch``/``--story`` form takes that same
+           single-candidate rule, since it knows no run id at all.
+
+        Everything not retired is returned described, with the reason, so the
+        operator reads it in the finding rather than inferring it.
         """
-        return tuple(gate for gate in self.human_gates if not gate.supersedable)
+        allowed = set(dispatch_routes)
+        candidates: list[HumanGateRef] = []
+        retained: list[str] = []
+        for gate in self.human_gates:
+            if gate.route in allowed:
+                candidates.append(gate)
+            else:
+                retained.append(
+                    gate.describe(
+                        "not a dispatch route on this host — another "
+                        "subsystem's escalation, yours to decide"
+                    )
+                )
+        named = [gate for gate in candidates if gate.run_id]
+        if run_id and any(gate.run_id == run_id for gate in candidates):
+            superseded = [gate for gate in candidates if gate.run_id == run_id]
+        elif named:
+            # every candidate names a run, and none of them is ours
+            superseded = []
+        elif len(candidates) == 1:
+            superseded = list(candidates)
+        else:
+            superseded = []
+        chosen = {gate.gate_id for gate in superseded}
+        kept_ids = {gate.gate_id for gate in self.human_gates} - chosen
+        for gate in candidates:
+            if gate.gate_id in chosen:
+                continue
+            retained.append(
+                gate.describe(
+                    "raised by another run"
+                    if gate.run_id
+                    else "cannot tell which run raised it — name the run to retire it"
+                )
+            )
+        # Which failed-attempt markers this delivery may clear. The retired
+        # gates' own routes always; every stale marker when NO dispatch-route
+        # gate is open at all (nobody's live escalation is then being erased,
+        # and an earlier pass of this same delivery may already have retired
+        # the gate whose marker is left); nothing while a candidate gate this
+        # delivery does not supersede is still open — that route's failure
+        # record is that route's.
+        if superseded:
+            routes = sorted(
+                {gate.route for gate in superseded if gate.route}
+                & set(self.attempt_routes)
+            )
+        elif not candidates:
+            routes = list(self.attempt_routes)
+        else:
+            routes = []
+        pointer = self.metadata.get(STORY_HUMAN_GATE_ID_KEY)
+        return GateRetirement(
+            superseded=tuple(superseded),
+            retained=tuple(retained),
+            routes=tuple(routes),
+            clears_human_gate_id=not (isinstance(pointer, str) and pointer in kept_ids),
+        )
 
     @property
     def project(self) -> str | None:
@@ -200,9 +306,9 @@ class StoryState:
 
     @property
     def attempt_routes(self) -> tuple[str, ...]:
-        """Routes whose failed-attempt marker this delivery supersedes — read
-        off the story's own keys, since a stopped run records no route name on
-        disk."""
+        """Every route with a failed-attempt marker on the story. Which of
+        them a delivery may clear is :meth:`retirement`'s answer, not this
+        one's — a marker belongs to the run that wrote it."""
         return tuple(
             sorted(
                 key[len(LAST_ATTEMPT_KEY_PREFIX) :]
@@ -217,23 +323,41 @@ class StoryState:
         body = self.description.strip()
         return f"{self.title}\n\n{body}" if body else self.title
 
-    def delivery_marked(self, *, pr_url: str, run_id: str) -> bool:
+    def delivery_marked(self, *, pr_url: str, run_id: str, gated: bool) -> bool:
         """Whether the story already records a ``[ManualDelivery]`` finding for
-        this exact delivery (:data:`DELIVERY_MARKER_KEY`)."""
+        this delivery **in this state** (:data:`DELIVERY_MARKER_KEY`).
+
+        *gated* is part of the identity, not decoration — but as a **floor**,
+        not an equality. A ``--no-gate`` delivery's finding says the PR is
+        UNMONITORED, so a later run that actually gates the same PR must post
+        the corrected record rather than read that marker as "already said".
+        The other direction is not a correction: a later ``--no-gate`` pass
+        over an already-recorded gated delivery achieved nothing the story
+        does not carry, and stays silent. An old marker without the key reads
+        as ungated — the direction that re-posts.
+        """
         marker = self.metadata.get(DELIVERY_MARKER_KEY)
         if not isinstance(marker, Mapping):
             return False
         return (
-            marker.get("pr_url") == pr_url and str(marker.get("run_id") or "") == run_id
+            marker.get("pr_url") == pr_url
+            and str(marker.get("run_id") or "") == run_id
+            and (bool(marker.get("gated")) or not gated)
         )
 
-    def delivery_recorded(self, gate_id: str) -> bool:
-        """Whether the story already carries everything a delivered story
-        carries: this gate's id, and neither retirement left behind."""
+    def delivery_recorded(self, gate_id: str, retirement: GateRetirement) -> bool:
+        """Whether the story already carries everything THIS delivery records:
+        the gate's id, the retirements it is entitled to make, and — only when
+        it retired a gate — no stale needs-human provenance."""
+        human_clear = (
+            self.metadata.get(STORY_HUMAN_GATE_ID_KEY) is None
+            if retirement.clears_human_gate_id
+            else True
+        )
         return (
             self.metadata.get(STORY_GATE_ID_KEY) == gate_id
-            and self.metadata.get(STORY_HUMAN_GATE_ID_KEY) is None
-            and not self.attempt_routes
+            and human_clear
+            and not retirement.routes
         )
 
 
@@ -243,10 +367,16 @@ async def read_story(client: Any, story_id: str) -> StoryState:
     The gates come from the story's incoming ``waits_on_gate`` **edges**, never
     from ``needs_human_gate_id``: that key is provenance only — stale after a
     partial write, and it names one gate where a story may carry several. Each
-    human gate keeps its ``route``, which is what decides whether this delivery
-    supersedes it (:class:`HumanGateRef`).
+    human gate keeps its ``route`` and ``run_id``, which together decide
+    whether this delivery supersedes it (:meth:`StoryState.retirement`).
+
+    Read with ``task_status`` rather than ``task_get`` for one more field: the
+    story's live **claims**. A route dispatch holds its claim from before the
+    run starts until after its escalation is raised, so it is the signal that
+    the run's lifecycle is still someone else's (see the ``route_claims``
+    refusal in :mod:`cli.deliver`).
     """
-    story = await client.task_get(task_id=story_id)
+    story = await client.task_status(task_id=story_id)
     if story is None:
         raise DeliverRefused(f"Lithos task {story_id!r} not found")
     raw = getattr(story, "metadata", None)
@@ -267,6 +397,7 @@ async def read_story(client: Any, story_id: str) -> StoryState:
                     gate_id=gate.id,
                     route=spec.route if spec is not None else None,
                     reason=spec.reason if spec is not None else "",
+                    run_id=spec.run_id if spec is not None else None,
                 )
             )
         elif is_pr_gate(gate):
@@ -285,7 +416,38 @@ async def read_story(client: Any, story_id: str) -> StoryState:
         metadata=metadata,
         human_gates=tuple(human_gates),
         pr_gates=tuple(pr_gates),
+        route_claims=_live_claims(getattr(story, "claims", ()) or ()),
     )
+
+
+def _live_claims(claims: Any) -> tuple[str, ...]:
+    """Describe the claims on the story that are NOT this command's own.
+
+    A claim whose ``expires_at`` is in the past is spent and ignored; one that
+    cannot be parsed counts as live (fail closed — a dispatch that may be
+    running is not a dispatch that is not).
+    """
+    now = datetime.now(UTC)
+    live: list[str] = []
+    for claim in claims:
+        if not isinstance(claim, Mapping):
+            continue
+        aspect = str(claim.get("aspect") or "")
+        if not aspect or aspect == DELIVER_ASPECT:
+            continue
+        raw = claim.get("expires_at")
+        if isinstance(raw, str) and raw:
+            try:
+                expires = datetime.fromisoformat(raw)
+            except ValueError:
+                expires = None
+            if expires is not None:
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=UTC)
+                if expires <= now:
+                    continue
+        live.append(f"{aspect} (agent {claim.get('agent') or '?'})")
+    return tuple(live)
 
 
 @dataclass
@@ -316,9 +478,10 @@ async def gate_delivery(
     pr_url: str,
     run_id: str,
     agent: str,
+    dispatch_routes: Sequence[str],
 ) -> GateOutcome:
-    """Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire the stop's
-    human gates.
+    """Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire this run's
+    own human gate(s).
 
     Ordering is load-bearing: the ``pr`` gate must hold the story **before**
     any human gate is completed, or the story is momentarily on the ready
@@ -327,11 +490,8 @@ async def gate_delivery(
     gate open — the story stays blocked by the gate it already had, which is
     the safe direction.
 
-    Which gates are retired is decided by their **route**: the stopped run's
-    own escalation (a dispatch route) and nothing else. A gate one of loom's
-    subsystems raised is a different decision — an ``external-remediation``
-    gate is the operator's consent to spend another remediation budget on the
-    delivered PR — so it is reported and left open.
+    WHICH gates is :meth:`StoryState.retirement`'s rule (a configured dispatch
+    route, naming this run); everything else is reported and kept.
     """
     outcome = GateOutcome()
     # Re-read under THIS client: the caller's snapshot predates the push and
@@ -351,8 +511,8 @@ async def gate_delivery(
         return outcome
     ours = [gate for gate in live.pr_gates if gate.pr_url == pr_url]
     foreign = [gate for gate in live.pr_gates if gate.pr_url != pr_url]
-
-    outcome.finding_marked = live.delivery_marked(pr_url=pr_url, run_id=run_id)
+    retirement = live.retirement(run_id=run_id, dispatch_routes=dispatch_routes)
+    outcome.human_gates_retained = list(retirement.retained)
 
     if foreign:
         # The story is (also) behind a delivery of a DIFFERENT PR. Checked
@@ -400,13 +560,16 @@ async def gate_delivery(
     # The one story write — made whenever the LIVE story does not already say
     # what a delivered story says. An adopted gate whose first pass lost this
     # write is repaired here; a story that already carries it is untouched.
-    if not live.delivery_recorded(outcome.pr_gate_id):
+    # Only the retired gates' own failed-attempt markers are cleared: another
+    # route's failure record is that route's, not this delivery's to erase.
+    if not live.delivery_recorded(outcome.pr_gate_id, retirement):
         if await record_delivery_on_story(
             client,
             task_id=live.story_id,
             agent=agent,
             gate_id=outcome.pr_gate_id,
-            routes=live.attempt_routes,
+            routes=retirement.routes,
+            clear_human_gate_id=retirement.clears_human_gate_id,
         ):
             outcome.story_recorded = True
         else:
@@ -415,25 +578,43 @@ async def gate_delivery(
                 "already blocks re-dispatch"
             )
 
-    outcome.human_gates_retained = [
-        gate.describe() for gate in live.retained_human_gates
-    ]
-    for human_gate_id in (gate.gate_id for gate in live.superseded_human_gates):
-        try:
-            await client.task_complete(task_id=human_gate_id, agent=agent)
-        except (LithosClientError, OSError) as exc:
-            outcome.problems.append(
-                f"could not complete the needs-human gate {human_gate_id} "
-                f"({exc}); the story now carries two blockers — complete it by "
-                "hand (the pr gate holds the story, so this will not re-dispatch)"
-            )
-        else:
-            outcome.human_gates_completed.append(human_gate_id)
+    if live.route_claims:
+        # A dispatch claimed the story while this delivery ran, so its own
+        # escalation may not be raised yet (the runner writes the gate before
+        # it releases). Completing what is open now could retire a gate the
+        # run has not finished raising, or leave the story behind the one it
+        # is about to raise with no record of why. The pr gate holds it either
+        # way — that is the safe half, and it has been done.
+        outcome.problems.append(
+            "a route dispatch claimed this story while the delivery ran "
+            f"({', '.join(live.route_claims)}), so NO needs-human gate was "
+            "completed — its escalation may still be on its way. The pr gate "
+            "holds the story; re-run once the dispatch has finished"
+        )
+    else:
+        for human_gate_id in (gate.gate_id for gate in retirement.superseded):
+            try:
+                await client.task_complete(task_id=human_gate_id, agent=agent)
+            except (LithosClientError, OSError) as exc:
+                outcome.problems.append(
+                    f"could not complete the needs-human gate {human_gate_id} "
+                    f"({exc}); the story now carries two blockers — complete it "
+                    "by hand (the pr gate holds the story, so this will not "
+                    "re-dispatch)"
+                )
+            else:
+                outcome.human_gates_completed.append(human_gate_id)
+    # Read LAST: whether this delivery's provenance is already recorded
+    # depends on the state it reached — a marker written by a `--no-gate` pass
+    # does not describe the gated one that just completed.
+    outcome.finding_marked = live.delivery_marked(
+        pr_url=pr_url, run_id=run_id, gated=outcome.pr_gate_id is not None
+    )
     return outcome
 
 
 async def mark_delivery_finding(
-    client: Any, *, story_id: str, pr_url: str, run_id: str, agent: str
+    client: Any, *, story_id: str, pr_url: str, run_id: str, gated: bool, agent: str
 ) -> None:
     """Record on the **story** that this delivery's finding was posted.
 
@@ -446,140 +627,13 @@ async def mark_delivery_finding(
     await client.task_update(
         task_id=story_id,
         agent=agent,
-        metadata={DELIVERY_MARKER_KEY: {"run_id": run_id, "pr_url": pr_url}},
+        metadata={
+            DELIVERY_MARKER_KEY: {
+                "run_id": run_id,
+                "pr_url": pr_url,
+                # part of the identity: a later run that GATES this PR must
+                # post the corrected record, not read this one as "said"
+                "gated": gated,
+            }
+        },
     )
-
-
-def run_lithos(coro: Any) -> Any:
-    """Run one Lithos phase, mapping transport failures onto the refusal."""
-    try:
-        return asyncio.run(coro)
-    except (LithosClientError, OSError, ExceptionGroup) as exc:
-        # LithosClient.__aenter__ surfaces a connect failure as a plain OSError
-        # or, inside a task group, an ExceptionGroup wrapping it (the `gates`
-        # command's rationale). ExceptionGroup, not BaseExceptionGroup, so
-        # KeyboardInterrupt / SystemExit still propagate.
-        raise DeliverRefused(f"Lithos call failed: {exc}") from exc
-
-
-async def _read_story_coro(url: str, agent: str, story_id: str) -> StoryState:
-    async with LithosClient(url, agent_id=agent) as client:
-        return await read_story(client, story_id)
-
-
-async def _gate_coro(
-    url: str, agent: str, *, story: StoryState, pr_url: str, run_id: str
-) -> GateOutcome:
-    async with LithosClient(url, agent_id=agent) as client:
-        return await gate_delivery(
-            client, story=story, pr_url=pr_url, run_id=run_id, agent=agent
-        )
-
-
-async def _post_coro(
-    url: str,
-    agent: str,
-    story_id: str,
-    summary: str,
-    *,
-    pr_url: str,
-    run_id: str,
-    mark: bool,
-) -> None:
-    async with LithosClient(url, agent_id=agent) as client:
-        await client.finding_post(task_id=story_id, summary=summary, agent=agent)
-        if mark:
-            await mark_delivery_finding(
-                client, story_id=story_id, pr_url=pr_url, run_id=run_id, agent=agent
-            )
-
-
-async def _claim_coro(url: str, agent: str, story_id: str) -> bool:
-    async with LithosClient(url, agent_id=agent) as client:
-        try:
-            await client.task_claim(
-                task_id=story_id,
-                aspect=DELIVER_ASPECT,
-                agent=agent,
-                ttl_minutes=DELIVER_CLAIM_TTL_MINUTES,
-            )
-        except LithosClientError as exc:
-            if exc.code == "claim_failed":
-                return False
-            raise
-    return True
-
-
-async def _renew_coro(url: str, agent: str, story_id: str) -> None:
-    async with LithosClient(url, agent_id=agent) as client:
-        await client.task_renew(
-            task_id=story_id,
-            aspect=DELIVER_ASPECT,
-            agent=agent,
-            ttl_minutes=DELIVER_CLAIM_TTL_MINUTES,
-        )
-
-
-async def _release_coro(url: str, agent: str, story_id: str) -> None:
-    async with LithosClient(url, agent_id=agent) as client:
-        await client.task_release(task_id=story_id, aspect=DELIVER_ASPECT, agent=agent)
-
-
-def read_story_sync(url: str, agent: str, story_id: str) -> StoryState:
-    """Step 0: the live story + the gates holding it."""
-    return run_lithos(_read_story_coro(url, agent, story_id))
-
-
-def run_gate_delivery(
-    url: str, agent: str, *, story: StoryState, pr_url: str, run_id: str
-) -> GateOutcome:
-    """Steps 3 + 4, in one client session."""
-    return run_lithos(_gate_coro(url, agent, story=story, pr_url=pr_url, run_id=run_id))
-
-
-def post_finding(
-    url: str,
-    agent: str,
-    story_id: str,
-    summary: str,
-    *,
-    pr_url: str = "",
-    run_id: str = "",
-    mark: bool = True,
-) -> None:
-    """Step 5: post ``[ManualDelivery]``, then mark the story (in that order).
-
-    *mark* is False for a delivery that did NOT finish: the marker is what
-    silences later runs, so a partial pass must not write one — the run that
-    completes the delivery posts the corrected record and marks it then.
-    """
-    run_lithos(
-        _post_coro(
-            url, agent, story_id, summary, pr_url=pr_url, run_id=run_id, mark=mark
-        )
-    )
-
-
-def claim_story(url: str, agent: str, story_id: str) -> bool:
-    """Take the ``deliver`` claim on the story; ``False`` when another process
-    holds it (two deliveries of one story must not interleave)."""
-    return run_lithos(_claim_coro(url, agent, story_id))
-
-
-def renew_story(url: str, agent: str, story_id: str) -> bool:
-    """Re-up the ``deliver`` lease before the gate work — the phase that must
-    be exclusive — so it never runs on a lease the git / gh phases spent.
-    ``False`` when the renewal did not land (the caller notes it; the gate
-    work still runs, since refusing there would strand an open PR)."""
-    try:
-        run_lithos(_renew_coro(url, agent, story_id))
-    except DeliverRefused:
-        return False
-    return True
-
-
-def release_story(url: str, agent: str, story_id: str) -> None:
-    """Release the ``deliver`` claim. Best-effort: a lingering claim only
-    expires with its short TTL."""
-    with contextlib.suppress(DeliverRefused):
-        run_lithos(_release_coro(url, agent, story_id))
