@@ -85,7 +85,14 @@ __all__ = [
 
 DELIVERY_MARKER_KEY = "manual_delivery"
 """Story-metadata key recording that this delivery's ``[ManualDelivery]``
-finding was posted: ``{"run_id": …, "pr_url": …}``.
+finding was posted: ``{"run_id": …, "pr_url": …, "gated": bool}``.
+
+All three fields are contractual. ``gated`` says whether a ``pr`` gate was
+holding this PR when the finding was written, and :meth:`StoryState
+.delivery_marked` reads it as a **floor** — a later run that actually gates
+the PR posts the corrected record, while a later ungated pass over a gated
+record stays silent (it corrects nothing). A marker without the key reads as
+ungated, the direction that re-posts.
 
 On the **story**, not the gate: the story is the one object every mode reads
 (``--no-gate`` raises no gate at all) and the one that outlives the gate — a
@@ -316,6 +323,46 @@ class StoryState:
                 if key.startswith(LAST_ATTEMPT_KEY_PREFIX)
             )
         )
+
+    def escalation_landed(self, *, run_id: str, dispatch_routes: Sequence[str]) -> bool:
+        """Whether the daemon has already handed THIS run's stop over.
+
+        The durable end of the handoff, read off the story: a ``human`` gate
+        this delivery would retire (:meth:`retirement`), or a failed-attempt
+        marker naming the run — which the runner writes on the same path,
+        including the marker-only ``[BlockerFailed]`` fallback where no gate
+        could be raised. Either one proves the runner applied the run's
+        result; neither depends on a claim, which can expire under a producer
+        that is still alive (an unreachable Lithos outlives the TTL while the
+        plugin keeps running).
+        """
+        if self.retirement(run_id=run_id, dispatch_routes=dispatch_routes).superseded:
+            return True
+        if not run_id:
+            return False
+        return any(
+            isinstance(marker, Mapping) and str(marker.get("run_id") or "") == run_id
+            for key, marker in self.metadata.items()
+            if key.startswith(LAST_ATTEMPT_KEY_PREFIX)
+        )
+
+    def delivery_visible(self, run_id: str) -> bool:
+        """Whether this story already carries a delivery of its own — an open
+        ``pr`` gate, or a ``[ManualDelivery]`` marker naming this run.
+
+        Read only as an *allowance*: it is what keeps an idempotent re-run
+        (whose gates this delivery already retired) from tripping the
+        lifecycle guard. Deliberately not ``pr_gate_id``, which outlives the
+        gate it names and would let a re-developed story skip the guard.
+        """
+        marker = self.metadata.get(DELIVERY_MARKER_KEY)
+        if (
+            run_id
+            and isinstance(marker, Mapping)
+            and str(marker.get("run_id") or "") == run_id
+        ):
+            return True
+        return bool(self.pr_gates)
 
     @property
     def task_text(self) -> str:

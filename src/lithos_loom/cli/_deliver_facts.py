@@ -332,6 +332,16 @@ _HOME_PATH_RE = re.compile(r"~[\w.-]*(?:/[^\s,;)'\"]*)+")
 _ABS_PATH_RE = re.compile(r"(?<![\w/])/(?:[\w.@+-]+)(?:/[^\s,;)'\"]*)+")
 _SECRETISH_RE = re.compile(r"\b[A-Za-z0-9_-]{24,}\b")
 _MAX_REASON_CHARS = 200
+# How much text the substitution pass is allowed to SEE, as a multiple of the
+# caller's output cap. Several patterns above scan a `[\w.-]` run from every
+# start position inside it, so their cost is quadratic in the input — and one
+# caller's input is an agent-written handoff bounded only by 1 MiB, which at
+# that shape spins for hours (a `--dry-run` that never returns). Capping the
+# OUTPUT does not help: the cap is applied after the scan. So the input is
+# bounded here, once, for every caller — generously, so that what survives
+# still reads like the original and a credential-shaped run is never split
+# below `_SECRETISH_RE`'s 24-character floor.
+_REDACT_INPUT_SLACK = 8
 
 # Written as prose, NOT as `<url>`: `url`, `host`, `path` and `redacted` are
 # all valid HTML tag names, so an angle-bracketed placeholder is parsed as raw
@@ -354,8 +364,11 @@ def redact_for_publication(text: str, *, limit: int = _MAX_REASON_CHARS) -> str:
     ``www.``-autolinked), internal hostnames, IPv4 literals and bare
     ``host:port`` pairs, absolute / home paths and credential-shaped runs
     become placeholders, markup is defanged, and the result is capped at
-    *limit*. The operator still reads the untouched original on the story's
-    ``[NeedsHuman]`` finding, in the gate brief and in ``--dry-run``.
+    *limit* — which also bounds the text the patterns ever see
+    (:data:`_REDACT_INPUT_SLACK`), since several of them cost O(n²) on a long
+    dotted run and one caller's input is an agent-written file. The operator
+    still reads the untouched original on the story's ``[NeedsHuman]``
+    finding, in the gate brief and in ``--dry-run``.
 
     Every string this module publishes goes through it — the stop reason
     **and** the coder's handoff summary. The handoff is no less host-derived
@@ -363,7 +376,10 @@ def redact_for_publication(text: str, *, limit: int = _MAX_REASON_CHARS) -> str:
     reach it from a public GitHub issue), and the fence around it neutralises
     markup, not content.
     """
-    out = defang_markup(" ".join(text.split()))
+    # Bound the INPUT before any pattern runs (see `_REDACT_INPUT_SLACK`):
+    # only the first `limit` characters can survive the cap below, and the
+    # slack leaves room for the substitutions to shorten the text first.
+    out = defang_markup(" ".join(text.split())[: limit * _REDACT_INPUT_SLACK])
     out = _URL_RE.sub(_URL_PLACEHOLDER, out)
     out = _INTERNAL_HOST_RE.sub(_HOST_PLACEHOLDER, out)
     out = _IPV4_RE.sub(_HOST_PLACEHOLDER, out)

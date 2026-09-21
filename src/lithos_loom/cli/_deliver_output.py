@@ -52,12 +52,18 @@ def delivery_finding(
     outcome: GateOutcome | None,
     notes: Sequence[str],
     no_gate: bool,
+    live_gate_id: str | None = None,
 ) -> str:
     """The ``[ManualDelivery]`` summary posted on the story (pure).
 
     *notes* is the ONE source of friction — the caller folds every gate-phase
     problem into it as it lands, so reading ``outcome.problems`` here too would
     name each of them twice; *outcome* says only what the gate phase achieved.
+
+    *live_gate_id* is the open ``pr`` gate the STORY already carries for this
+    PR, if any. It is what keeps the record from contradicting itself: a
+    ``--no-gate`` pass over an already-gated PR raises nothing but must not
+    call that PR unmonitored.
     """
     verb = "adopted" if record.get("adopted") else "opened"
     parts = [
@@ -80,10 +86,23 @@ def delivery_finding(
     # object": a gate attempt that failed leaves `outcome` None too, and
     # recording that as a deliberate hand-off would tell the operator they
     # chose the unmonitored PR the command in fact failed to gate.
-    if no_gate:
+    if no_gate and live_gate_id:
+        # The operator asked for a PR only, but this PR is already behind its
+        # own gate from an earlier pass: say what HOLDS, not what was skipped.
+        parts.append(
+            f"no pr gate was raised by this run (--no-gate); pr gate "
+            f"{live_gate_id} already blocks the story and tracks this PR"
+        )
+    elif no_gate:
         parts.append(
             "no pr gate was created (--no-gate): this PR is UNMONITORED — no "
             "merge tracking, no external-review ingestion, no re-gate"
+        )
+    elif (outcome is None or outcome.pr_gate_id is None) and live_gate_id:
+        parts.append(
+            f"this run raised no pr gate (the attempt did not complete — see "
+            f"the friction below), but pr gate {live_gate_id} already blocks "
+            "the story and tracks this PR"
         )
     elif outcome is None or outcome.pr_gate_id is None:
         parts.append(
@@ -163,12 +182,24 @@ def render(record: Mapping[str, Any]) -> list[str]:
     label = record["run_id"] or record["branch"]
     pr_url = record["pr_url"]
     uncertain = record.get("push_uncertain")
+    # Three ways to end without a url, and only one of them may say "NO PR":
+    # an unverifiable `gh pr create` leaves a PR that MAY exist, and a headline
+    # asserting its absence is what makes an operator open a second one. The
+    # push half is stated the same way — never "PUSHED" over a run that pushed
+    # nothing (an already-equal remote), never an absence that was not read.
     if pr_url:
         headline = f"deliver {label}: {pr_url}"
     elif uncertain:
         headline = f"deliver {label}: PUSH UNCERTAIN — the delivery is unfinished"
-    else:
+    elif record.get("pr_uncertain"):
+        headline = (
+            f"deliver {label}: PR UNCERTAIN — a PR may have been opened; "
+            "the delivery is unfinished"
+        )
+    elif record["pushed"]:
         headline = f"deliver {label}: PUSHED, NO PR — the delivery is unfinished"
+    else:
+        headline = f"deliver {label}: NO PR — the delivery is unfinished"
     lines = [headline]
     if uncertain:
         lines.append(
@@ -188,9 +219,9 @@ def render(record: Mapping[str, Any]) -> list[str]:
             f"  {verb} PR #{number}" if number is not None else f"  {verb} the PR"
         )
     if record["pr_gate_id"]:
-        lines.append(
-            f"  pr gate {record['pr_gate_id']} now blocks {record['story_id']}"
-        )
+        # "blocks", not "now blocks": the id may be a gate an earlier pass
+        # raised and this one only found (a `--no-gate` re-run over a gated PR).
+        lines.append(f"  pr gate {record['pr_gate_id']} blocks {record['story_id']}")
     for gate_id in record["human_gates_completed"]:
         lines.append(f"  completed needs-human gate {gate_id}")
     for described in record["human_gates_retained"]:

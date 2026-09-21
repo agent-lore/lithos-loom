@@ -73,8 +73,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +82,6 @@ import typer
 from lithos_loom.cli._deliver_facts import (
     RunFacts,
     pr_body,
-    run_facts,
     sanitize_for_terminal,
 )
 from lithos_loom.cli._deliver_lithos import (
@@ -98,6 +96,12 @@ from lithos_loom.cli._deliver_output import (
     delivery_finding,
     echo_plan,
     render,
+)
+from lithos_loom.cli._deliver_preflight import (
+    dispatch_routes,
+    refuse_if_the_run_is_still_the_daemons,
+    resolve_facts,
+    resolve_repo,
 )
 from lithos_loom.cli._deliver_repo import (
     PUSH_CREATE,
@@ -117,7 +121,6 @@ from lithos_loom.cli._deliver_session import (
 )
 from lithos_loom.config import LoomConfig, load_config
 from lithos_loom.errors import LithosLoomError
-from lithos_loom.plugins.story_develop import run_outcome
 from lithos_loom.plugins.story_develop.pr_delivery import (
     pr_number_from_url,
     request_operator_review,
@@ -235,10 +238,10 @@ def _deliver(
     every step after it degrades into ``notes`` and the command exits 2 with
     the url printed and the `[Friction]` posted.
     """
-    facts = _resolve_facts(host, run=run, branch=branch, story_id=story_id)
+    facts = resolve_facts(host, run=run, branch=branch, story_id=story_id)
     agent = host.orchestrator.agent_id
     url = host.orchestrator.lithos_url
-    routes = _dispatch_routes(host)
+    routes = dispatch_routes(host)
     story = read_story_sync(url, agent, facts.story_id)
     if story.route_claims:
         # A route dispatch holds the story's claim from before its run starts
@@ -260,13 +263,16 @@ def _deliver(
             f"develop attach {facts.run_id or facts.branch}` and re-run once "
             "the dispatch has released the story"
         )
+    refuse_if_the_run_is_still_the_daemons(
+        host, facts=facts, story=story, routes=routes
+    )
     if story.status != "open" and not no_gate:
         raise DeliverRefused(
             f"story {story.story_id} is {story.status}, not open — a terminal "
             "story takes no pr gate (the PR would be the operator's own). "
             "Re-run with --no-gate to open the PR alone"
         )
-    repo = _resolve_repo(host, story)
+    repo = resolve_repo(host, story)
     repo_name = origin_repo_name(repo)
     # the same title rule story-develop's own delivery applies
     heading = story.title.strip()
@@ -385,6 +391,7 @@ def _deliver_claimed(
         "pr_number": None,
         "adopted": False,
         "push_uncertain": False,
+        "pr_uncertain": False,
         "pr_gate_id": None,
         "human_gates_completed": [],
         "human_gates_retained": [],
@@ -437,14 +444,20 @@ def _deliver_claimed(
     ) as exc:
         if not record["pushed"] and not isinstance(exc, DeliverUncertain):
             raise  # nothing of ours is on the remote — a plain refusal
-        # Either the branch IS on origin, or a PR may have been opened and the
-        # read that would settle it failed too. Report what a re-run inherits
-        # rather than asserting an absence this run never established.
-        notes.append(
-            f"no PR was opened or adopted ({exc}); the story is NOT gated. "
-            "Re-run to finish — the push is append-only and an existing PR at "
-            "this head is adopted, so a second run duplicates nothing"
-        )
+        if isinstance(exc, DeliverUncertain):
+            # A PR may exist. Every line about it must stay in the subjunctive
+            # — an operator told "no PR was opened" opens a second one by hand.
+            record["pr_uncertain"] = True
+            notes.append(
+                f"{exc} The story is NOT gated either way; re-run to settle it"
+            )
+        else:
+            # The branch IS on origin and there is positively no PR of ours.
+            notes.append(
+                f"no PR was opened or adopted ({exc}); the story is NOT gated. "
+                "Re-run to finish — the push is append-only and an existing PR "
+                "at this head is adopted, so a second run duplicates nothing"
+            )
         record["gate_complete"] = False
         record["complete"] = False
         _file_record(json_out, record, notes)
@@ -511,9 +524,9 @@ def _deliver_claimed(
     # `delivery_finding` says UNMONITORED in the finding's own body. Keeping
     # `notes` to real problems is what lets a repeat invocation stay silent.
 
-    # 5 — the provenance finding, when this run changed something OR the gate
+    # 5 — the provenance finding, when this run changed something OR the story
     # does not yet record that a finding was posted for this delivery. The
-    # marker (written on the gate, after the post) is what makes a crash
+    # marker (written on the STORY, after the post) is what makes a crash
     # between steps 4 and 5 recoverable: the next run sees it missing and
     # posts, rather than computing "nothing changed" and losing the audit.
     # ONE rule for the provenance finding: post it unless the STORY already
@@ -523,10 +536,19 @@ def _deliver_claimed(
     # that finds nothing left to do posts nothing, whatever changed in between.
     # Deliberately NOT `changed or …`: a repair pass that fixes gate state must
     # not manufacture a duplicate of a finding the story already carries.
-    # The state this delivery actually reached — part of the marker's identity,
-    # since a `--no-gate` record does not describe a gated PR and must not
-    # silence the run that gates it (nor the other way round).
-    gated = outcome is not None and outcome.pr_gate_id is not None
+    # The state this delivery LEFT BEHIND — not what this invocation did. A
+    # `--no-gate` pass (or one whose gate phase was skipped) over a PR that is
+    # already behind its own `pr` gate must neither call that PR UNMONITORED
+    # nor write a marker saying so: the story would then durably contradict
+    # its own open gate. So the live story's gates count too, matched on the
+    # PR this delivery is about.
+    live_gate_id = next(
+        (gate.gate_id for gate in story.pr_gates if gate.pr_url == pr_url), None
+    )
+    gate_id = (outcome.pr_gate_id if outcome is not None else None) or live_gate_id
+    gated = gate_id is not None
+    if record["pr_gate_id"] is None:
+        record["pr_gate_id"] = live_gate_id
     marked = (
         outcome.finding_marked
         if outcome is not None
@@ -551,6 +573,7 @@ def _deliver_claimed(
             outcome=outcome,
             notes=notes,
             no_gate=no_gate,
+            live_gate_id=live_gate_id,
         )
         try:
             post_finding(
@@ -592,130 +615,6 @@ def _file_record(
     except OSError as exc:
         notes.append(f"could not write the JSON record to {json_out} ({exc})")
         record["complete"] = False
-
-
-def _resolve_facts(
-    host: LoomConfig, *, run: str | None, branch: str | None, story_id: str | None
-) -> RunFacts:
-    """Resolve the run (or the explicit branch + story) into :class:`RunFacts`."""
-    if run is None:
-        if not (branch and story_id):
-            raise DeliverRefused(
-                "name a run (`develop deliver <run-id|task-id>`) or pass both "
-                "--branch and --story"
-            )
-        return RunFacts(story_id=story_id, branch=branch)
-    run_dir = run_outcome.resolve_run_dir(host.orchestrator.work_dir, run)
-    if run_dir is None:
-        if branch and story_id:
-            # the work dir was reaped / never retained: the operator's own
-            # branch + story stand in for it, minus the run's provenance
-            return RunFacts(story_id=story_id, branch=branch)
-        raise DeliverRefused(
-            f"no run state for {run!r} under {host.orchestrator.work_dir} "
-            "(`lithos-loom develop list` shows what is there). If the work dir "
-            "is gone, pass --branch and --story"
-        )
-    facts = run_facts(run_dir)
-    if branch:
-        facts = RunFacts(**{**asdict(facts), "branch": branch})
-    if story_id:
-        facts = RunFacts(**{**asdict(facts), "story_id": story_id})
-    if facts.delivered_pr_url:
-        raise DeliverRefused(
-            f"run {facts.run_id} already delivered {facts.delivered_pr_url} — "
-            "there is nothing to deliver by hand"
-        )
-    _refuse_if_run_may_be_live(run_dir, facts)
-    if not facts.branch:
-        raise DeliverRefused(
-            f"run {facts.run_id} recorded no branch (it stopped before its "
-            "worktree was cut); pass --branch if you know it"
-        )
-    return facts
-
-
-def _refuse_if_run_may_be_live(run_dir: Path, facts: RunFacts) -> None:
-    """Refuse a run that has not positively STOPPED — this command's whole
-    domain is a run that is over.
-
-    Two windows, both of which would put a hand delivery alongside a live
-    process's own (two PRs, two ``pr`` gates — the claims are different
-    aspects, so nothing stops them):
-
-    * **No recorded outcome.** ``state.json`` lands only at run end
-      (:func:`run_outcome.read_state`) while the run dir exists from the first
-      seeded ``handoff/``, so a run dir without a status may be a run that is
-      mid-round right now — and ``--branch`` would supply the very branch its
-      state does not, delivering a live run's tip.
-    * **Approved, delivery in flight.** ``develop()`` writes ``state.json`` the
-      moment the dialogue approves, and the daemon's push / PR open /
-      ``result.json`` all happen after it returns
-      (:func:`run_outcome.delivery_complete` documents that window). The
-      salvage this command exists for is a delivery that positively **failed**
-      (#194) or whose recorded budget has **expired** (#189).
-
-    The run-dir-less ``--branch`` + ``--story`` form stays the operator's own
-    assertion for a reaped run: no on-disk state claims anything there.
-    """
-    if not facts.status:
-        raise DeliverRefused(
-            f"run {facts.run_id} has recorded no outcome — there is no "
-            f"terminal {run_outcome.STATE_FILE} in {run_dir}, which the plugin "
-            "writes only at run end, so this run may be mid-round right now. "
-            "Delivering its branch would race the run's own delivery into a "
-            "second PR and a second gate. Watch it with `lithos-loom develop "
-            f"attach {facts.run_id}`. If the run is long gone and never wrote "
-            "its state, deliver the branch explicitly instead: `develop "
-            "deliver --branch <name> --story <id>` (no run id)"
-        )
-    if facts.status != run_outcome.APPROVED:
-        return
-    if run_outcome.delivery_failed(run_dir):
-        return  # a recorded failure: exactly the salvage case
-    deadline = run_outcome.delivery_deadline(run_dir)
-    if deadline is not None and datetime.now(UTC) > deadline:
-        return  # the automated delivery outlived its own budget
-    raise DeliverRefused(
-        f"run {facts.run_id} was APPROVED and its automated delivery has "
-        "neither completed nor failed — the daemon may be pushing and opening "
-        "its PR right now, and a hand delivery would race it into a second PR "
-        "and a second gate. Watch it with `lithos-loom develop attach "
-        f"{facts.run_id}`; deliver by hand only once it has failed or its "
-        "delivery budget has expired (or name the branch explicitly with "
-        "--branch/--story if you know the daemon is gone)"
-    )
-
-
-def _dispatch_routes(host: LoomConfig) -> tuple[str, ...]:
-    """The host's configured ``[[routes]]`` names — the ALLOWLIST of routes
-    whose ``human`` gate a delivery may retire.
-
-    Named positively on purpose. The alternative (everything except the
-    subsystem routes loom happens to ship today) admits the next subsystem
-    that raises a gate, and the one it would admit first —
-    ``external-remediation`` — is a *consent* gate whose completion re-arms a
-    paid budget and cannot be undone by doing nothing. A host with no routes
-    configured therefore retires nothing, and says so.
-    """
-    return tuple(route.name for route in getattr(host, "routes", ()) or ())
-
-
-def _resolve_repo(host: LoomConfig, story: StoryState) -> Path:
-    """The project checkout holding the branch — ``[projects.<slug>].repo``."""
-    slug = story.project
-    if slug is None:
-        raise DeliverRefused(
-            f"story {story.story_id} names no project (`metadata.project`), so "
-            "the checkout holding its branch is unknown"
-        )
-    project = host.projects.get(slug)
-    if project is None:
-        raise DeliverRefused(
-            f"project {slug!r} is not mapped in this host's config — add a "
-            f"[projects.{slug}] stanza with its `repo` path"
-        )
-    return project.repo
 
 
 def _write_json(json_out: Path | None, record: Mapping[str, Any]) -> None:

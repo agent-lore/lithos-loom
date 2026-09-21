@@ -15,6 +15,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._deliver_facts` | M | 1 | 8 |
 | `lithos_loom.cli._deliver_lithos` | M | 7 | 3 |
 | `lithos_loom.cli._deliver_output` | S | 0 | 3 |
+| `lithos_loom.cli._deliver_preflight` | S | 0 | 4 |
 | `lithos_loom.cli._deliver_repo` | M | 1 | 8 |
 | `lithos_loom.cli._deliver_session` | S | 0 | 7 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
@@ -22,7 +23,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
-| `lithos_loom.cli.deliver` | L | 0 | 1 |
+| `lithos_loom.cli.deliver` | M | 0 | 1 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
@@ -61,6 +62,12 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `delivery_finding` — The ``[ManualDelivery]`` summary posted on the story (pure).
 - def `echo_plan`
 - def `render`
+
+### `lithos_loom.cli._deliver_preflight`
+- def `resolve_facts` — Resolve the run (or the explicit branch + story) into :class:`RunFacts`.
+- def `refuse_if_the_run_is_still_the_daemons` — Refuse while the run's stop has not been handed over, and a daemon that could still be holding it is running here.
+- def `dispatch_routes` — The host's configured ``[[routes]]`` names — the ALLOWLIST of routes whose ``human`` gate a delivery may retire.
+- def `resolve_repo` — The project checkout holding the branch — ``[projects.<slug>].repo``.
 
 ### `lithos_loom.cli._deliver_repo`
 - class `RemoteState` — How ``origin``'s copy of the branch stands against the local one.

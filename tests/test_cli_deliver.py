@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -43,6 +44,7 @@ from lithos_loom.gates import (
     WAITS_ON_GATE,
 )
 from lithos_loom.plugins.story_develop.github_access import OpenPullRequest
+from lithos_loom.runner import pidfile
 from tests.support import FakeLithosClient, make_task
 
 runner = CliRunner()
@@ -2036,6 +2038,238 @@ def test_bidi_and_zero_width_characters_are_stripped(
     assert "\u202e" not in body and "\u200b" not in body
     assert "gnihton" in body  # the text survives; only the reordering goes
     assert cli_facts.defang_markup("a\u202eb") == "ab"
+
+
+# ── round-6 (review round 3) regressions ───────────────────────────────
+
+
+def _daemon(monkeypatch: pytest.MonkeyPatch, *, alive: bool) -> None:
+    """Report a loom daemon running (or not) on this host's work dir.
+
+    The command asks the pidfile — the PROCESS, not its claim — so that is the
+    seam, patched on the public module both it and `drain` read.
+    """
+    identity = SimpleNamespace(pid=4242, boot_id="b", start_ticks=1)
+    monkeypatch.setattr(
+        pidfile, "read_pidfile", lambda path: identity if alive else None
+    )
+    monkeypatch.setattr(pidfile, "daemon_alive", lambda path, ident: alive)
+
+
+def _drop_the_human_gate(client: FakeLithosClient) -> None:
+    """The story as it looks BEFORE the daemon has raised the run's gate."""
+    asyncio.run(client.task_cancel(task_id="gate-human", agent="op"))
+    story = asyncio.run(client.task_get(task_id=_STORY))
+    assert story is not None
+    metadata = {
+        key: None
+        for key in story.metadata
+        if key.startswith("loom_last_attempt:") or key == STORY_HUMAN_GATE_ID_KEY
+    }
+    asyncio.run(client.task_update(task_id=_STORY, agent="op", metadata=metadata))
+
+
+def test_a_stop_whose_escalation_has_not_landed_is_refused_under_a_live_daemon(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001: an absent CLAIM proves nothing — the runner's renew
+    loop swallows every failure, so a Lithos outage longer than the TTL leaves
+    the claim expired (and invisible) while the plugin writes its terminal
+    state and the runner waits to apply the result. The durable handoff is the
+    escalation itself; until it lands, a running daemon still owns this run."""
+    _drop_the_human_gate(lithos)
+    _daemon(monkeypatch, alive=True)
+    before = len(lithos.mutating_calls)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert "records its escalation yet" in result.output
+    assert "drain" in result.output and "--branch" in result.output
+    assert gh["created"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+    assert lithos.mutating_calls[before:] == []  # not even a claim
+
+
+def test_a_failed_attempt_marker_is_handoff_enough(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001: the marker-only `[BlockerFailed]` fallback raises no
+    gate, but the runner wrote the marker on the same path — the run's result
+    HAS been applied, so there is nothing left to race."""
+    _drop_the_human_gate(lithos)
+    asyncio.run(
+        lithos.task_update(
+            task_id=_STORY,
+            agent="op",
+            metadata={"loom_last_attempt:story-develop": {"run_id": _RUN}},
+        )
+    )
+    _daemon(monkeypatch, alive=True)
+
+    assert _invoke(_RUN).exit_code == 0
+    assert len(gh["created"]) == 1
+
+
+def test_a_landed_escalation_delivers_under_a_live_daemon_and_re_runs_cleanly(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001: the guard must not cost the ordinary case. The gate
+    the daemon raised IS the handoff — and once this delivery has retired it,
+    the story's own open `pr` gate lets the idempotent re-run through."""
+    _daemon(monkeypatch, alive=True)
+
+    assert _invoke(_RUN).exit_code == 0
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+
+    result = _invoke(_RUN)  # the gate is completed now — the pr gate answers
+
+    assert result.exit_code == 0, result.output
+    assert len(gh["created"]) == 1
+    assert len(lithos.findings) == 1
+
+
+def test_a_dead_daemon_never_blocks_the_salvage(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001: no producer on this host, so nothing can be racing —
+    which is exactly the crash this command exists to clean up after."""
+    _drop_the_human_gate(lithos)
+    _daemon(monkeypatch, alive=False)
+
+    assert _invoke(_RUN).exit_code == 0
+    assert len(gh["created"]) == 1
+
+
+def test_the_explicit_branch_form_is_the_operators_own_assertion(
+    host,
+    lithos: FakeLithosClient,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001: with no run dir there is no run to be mid-flight and
+    no state to read — the operator is the one saying it is over."""
+    _drop_the_human_gate(lithos)
+    _daemon(monkeypatch, alive=True)
+
+    assert _invoke("--branch", _BRANCH, "--story", _STORY).exit_code == 0
+    assert len(gh["created"]) == 1
+
+
+def test_no_gate_over_an_already_gated_pr_never_calls_it_unmonitored(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, tmp_path: Path
+) -> None:
+    """correctness/f-003: achieved state is not "what this invocation did". A
+    `--no-gate` pass over a PR that is already behind its own `pr` gate must
+    not durably record that PR as UNMONITORED, nor mark the delivery as an
+    ungated one — the story would contradict its own open gate."""
+    lithos.raise_on["task_complete"] = LithosClientError("boom", "gate stuck")
+    assert _invoke(_RUN).exit_code == 2  # pr gate raised, human gate not, no marker
+    gate_id = _get(lithos, _STORY).metadata[STORY_GATE_ID_KEY]
+    lithos.raise_on.pop("task_complete")
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+
+    out = tmp_path / "r.json"
+    result = _invoke(_RUN, "--no-gate", "--json", str(out))
+
+    assert result.exit_code == 0, result.output
+    summary = lithos.findings[-1]["summary"]
+    assert "UNMONITORED" not in summary
+    assert gate_id in summary and "already blocks the story" in summary
+    assert json.loads(out.read_text())["pr_gate_id"] == gate_id
+    story = _get(lithos, _STORY)
+    assert story.metadata["manual_delivery"]["gated"] is True
+
+
+def test_an_unverifiable_pr_create_never_asserts_there_is_no_pr(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """correctness/f-004: the PR may exist. Every line must stay in the
+    subjunctive — an operator told "NO PR" opens a second one by hand — and
+    the headline must not claim a push this invocation did not make."""
+    _git(repo, "push", "origin", _BRANCH)  # nothing for this run to push
+    listed = {"count": 0}
+
+    def _list_then_fail(*a: Any, **k: Any):
+        listed["count"] += 1
+        if listed["count"] > 1:
+            raise RuntimeError("gh pr list failed: network is down")
+        return []
+
+    monkeypatch.setattr(cli_repo, "list_open_prs_for_branch", _list_then_fail)
+    monkeypatch.setattr(
+        cli_repo,
+        "create_pr",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("gh pr create failed")),
+    )
+
+    out = tmp_path / "r.json"
+    result = _invoke(_RUN, "--json", str(out))
+
+    assert result.exit_code == 2, result.output
+    headline = result.output.splitlines()[0]
+    assert "PR UNCERTAIN" in headline
+    assert "NO PR" not in result.output
+    assert "no PR was opened" not in result.output
+    assert "PUSHED" not in headline  # this invocation pushed nothing
+    assert json.loads(out.read_text())["pr_uncertain"] is True
+
+
+def test_a_huge_handoff_summary_cannot_hang_the_command() -> None:
+    """security/f-006: the redaction pass runs patterns that cost O(n²) on a
+    long dotted run, and the handoff feeding it is agent-written and bounded
+    only by 1 MiB — so the INPUT is bounded, not just the output."""
+    started = time.monotonic()
+    out = cli_facts.redact_for_publication("a." * 100_000, limit=600)
+    assert time.monotonic() - started < 5.0
+    assert len(out) <= 600
+
+
+def test_a_huge_handoff_is_still_read_bounded_and_redacted(tmp_path: Path) -> None:
+    """security/f-006, end to end through the real reader: a 200 KB summary
+    with a host path in it comes back capped, redacted and fast."""
+    handoff = tmp_path / "handoff"
+    handoff.mkdir()
+    (handoff / "round_03_coder_done.md").write_text(
+        "## Status: LGTM\n\n## Summary\nRan /home/dave/.config/gh/hosts.yml "
+        + "a." * 100_000
+        + "\n",
+        encoding="utf-8",
+    )
+
+    started = time.monotonic()
+    summary = cli_facts.coder_summary(handoff)
+
+    assert time.monotonic() - started < 5.0
+    assert len(summary) <= 600
+    assert "/home/dave" not in summary and "(path redacted)" in summary
 
 
 # ── pure helpers ───────────────────────────────────────────────────────
