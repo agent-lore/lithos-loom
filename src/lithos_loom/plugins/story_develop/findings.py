@@ -434,17 +434,29 @@ class FindingLedger:
                 if f.rationale:
                     entry.rationale = f.rationale
                 if entry.decision_pending and f.is_open:
-                    # The VERDICT decides, and only one branch can run
-                    # (correctness/f-003: a concession carrying a stale
-                    # citation used to be silently contested). Only a PENDING
-                    # decision can be answered — a contest volunteered on a
-                    # finding the coder never raised one on would otherwise
-                    # pre-emptively disable the escape.
-                    if f.decision_verdict == "concede":
-                        # the escalation proceeds, and the ledger records that
-                        # a reviewer ANSWERED (security/f-003)
+                    # Only a WELL-FORMED answer acts, and only one branch can
+                    # run. The validator is the re-prompt, not the guarantee:
+                    # its combination checks are skipped for an id it already
+                    # asked about (one ask per turn — security/f-008), so the
+                    # final retry can land carrying any combination at all.
+                    # The rule here is therefore total — anything that is not
+                    # one of the two documented answers lapses to the ordinary
+                    # dispute, which is the safe direction for every shape of
+                    # it (correctness/f-007). Only a PENDING decision can be
+                    # answered: a contest volunteered on a finding the coder
+                    # never raised one on would otherwise pre-emptively
+                    # disable the escape.
+                    cites = bool(f.decision_contest.strip())
+                    if f.decision_verdict == "concede" and not cites:
+                        # A CLEAN concession — and only that — arms the
+                        # escalation, with the ledger recording that a
+                        # reviewer ANSWERED (security/f-003). A concession
+                        # that still cites the acceptance line the finding
+                        # meets contradicts itself and must not escalate: the
+                        # citation says in-scope, which is the one thing the
+                        # abuse guard exists to honour (correctness/f-007).
                         entry.decision_conceded = True
-                    elif f.decision_verdict == "contest" and f.decision_contest.strip():
+                    elif f.decision_verdict == "contest" and cites:
                         # 9d5ebca6: the reviewer showed the finding is in scope
                         # (citing the acceptance line it meets), so the
                         # decision degrades to an ordinary dispute and the
@@ -452,11 +464,14 @@ class FindingLedger:
                         entry.decision_contested = True
                         entry.decision_contest = f.decision_contest
                     else:
-                        # unanswered through the reviewer's turn (it was
-                        # re-prompted once): the decision lapses to the
-                        # ordinary dispute it also is — silence never buys an
-                        # escalation (f-003), and the reviewer's handoff is
-                        # never failed for it (f-008).
+                        # Unanswered, or answered contradictorily, through the
+                        # reviewer's turn (it was re-prompted once): the
+                        # decision lapses to the ordinary dispute it also is —
+                        # silence and self-contradiction never buy an
+                        # escalation (f-003 / f-007), and the reviewer's
+                        # handoff is never failed for either (f-008). A lapse
+                        # is not a verdict, so a clean mark next round can
+                        # re-raise it, still bounded by the two-round guard.
                         entry.decision_lapsed = True
                 entry.last_updated_round = round_no
             else:

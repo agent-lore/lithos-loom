@@ -562,16 +562,21 @@ def test_check_rejects_a_concession_that_also_contests() -> None:
     assert err is not None and "contradict" in err
 
 
-def test_a_contradictory_answer_can_never_contest_at_apply_time() -> None:
-    # Belt and braces for the same bug, below the validator: the verdict
-    # decides, so a stale citation beside `concede` cannot flip the outcome.
+def test_a_contradictory_answer_neither_contests_nor_concedes() -> None:
+    # Belt and braces for the same bug, below the validator: a stale citation
+    # beside `concede` cannot silently CONTEST (correctness/f-003) — and, since
+    # the single correction retry lands unvalidated, it cannot silently CONCEDE
+    # either (correctness/f-007). Neither half of a contradiction is a verdict,
+    # so it lapses; see test_only_the_two_documented_answers_act for the whole
+    # truth table.
     ledger = _pending_ledger()
     ledger.apply_review(
         _keeps_open(decision_verdict="concede", decision_contest="AC 2"), 2
     )
     entry = ledger.entries["f-001"]
-    assert entry.decision_contested is False and entry.decision_conceded is True
-    assert [d.finding_id for d in ledger.pending_decisions("major")] == ["f-001"]
+    assert entry.decision_contested is False and entry.decision_conceded is False
+    assert entry.decision_lapsed is True
+    assert ledger.pending_decisions("major") == []
 
 
 def test_check_rejects_a_contest_without_its_citation() -> None:
@@ -854,3 +859,71 @@ def test_collect_pending_decisions_keeps_panel_then_ledger_order() -> None:
 
     out = collect_pending_decisions([(first, "major"), (second, "major")])
     assert [d.label for d in out] == ["correctness/f-001", "security/f-002"]
+
+
+# ── only a well-formed answer acts (correctness/f-007) ─────────────────
+
+
+def test_a_contradictory_answer_that_survives_the_retry_lapses() -> None:
+    # correctness/f-007: the validator rejects `concede` + a citation, but it
+    # asks only ONCE per turn (security/f-008), so the correction retry lands
+    # carrying whatever it likes — including the same contradiction. Applied,
+    # that used to take the concede branch and arm the escalation, even though
+    # the citation says the finding IS in scope, which is exactly the case
+    # AC#4 sends to the ordinary dispute guard.
+    ledger = _pending_ledger()
+    validate = reviewer_validator_for(ledger)
+    contradictory = _keeps_open(decision_verdict="concede", decision_contest="AC 2")
+
+    assert validate(contradictory) is not None  # asked once
+    assert validate(contradictory) is None  # ... and the retry lands
+
+    ledger.apply_review(contradictory, 2)
+    entry = ledger.entries["f-001"]
+    assert entry.decision_conceded is False  # nothing armed the escalation
+    assert entry.decision_contested is False  # nor was a verdict inferred
+    assert entry.decision_lapsed is True
+    assert ledger.pending_decisions("major") == []
+    # the ordinary guard applies, as the acceptance criterion says it should
+    ledger.apply_review(_keeps_open(), 3)
+    assert ledger.disputed_deadlocks("major") == ["f-001"]
+
+
+def test_a_contest_without_its_citation_lapses_rather_than_escalating() -> None:
+    # The mirror shape, same rule: a half-formed contest is not a contest, and
+    # it is not a concession either — it lapses.
+    ledger = _pending_ledger()
+    ledger.apply_review(_keeps_open(decision_verdict="contest"), 2)
+    entry = ledger.entries["f-001"]
+    assert (entry.decision_contested, entry.decision_conceded) == (False, False)
+    assert entry.decision_lapsed is True
+    assert ledger.pending_decisions("major") == []
+
+
+def test_only_the_two_documented_answers_act() -> None:
+    # The rule at apply time is TOTAL — the validator is the re-prompt, not
+    # the guarantee, so every other combination must land in the safe
+    # direction rather than in whichever branch happens to match first.
+    for answer, expect in (
+        ({"decision_verdict": "concede"}, "conceded"),
+        (
+            {"decision_verdict": "contest", "decision_contest": "AC 2"},
+            "contested",
+        ),
+        ({"decision_verdict": "concede", "decision_contest": "AC 2"}, "lapsed"),
+        ({"decision_verdict": "contest"}, "lapsed"),
+        ({"decision_contest": "AC 2"}, "lapsed"),
+        ({}, "lapsed"),
+    ):
+        ledger = _pending_ledger()
+        ledger.apply_review(_keeps_open(**answer), 2)
+        entry = ledger.entries["f-001"]
+        got = {
+            "conceded": entry.decision_conceded,
+            "contested": entry.decision_contested,
+            "lapsed": entry.decision_lapsed,
+        }
+        assert got[expect] is True, (answer, got)
+        assert sum(got.values()) == 1, (answer, got)
+        # only a clean concession leaves a decision for the operator
+        assert bool(ledger.pending_decisions("major")) is (expect == "conceded")

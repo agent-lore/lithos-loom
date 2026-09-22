@@ -1319,6 +1319,42 @@ _CODER_TWO_DECISIONS = (
 )
 
 
+# A self-contradicting answer: it concedes AND cites the acceptance line the
+# finding meets. The validator rejects it once; the correction retry lands
+# unvalidated (one ask per turn), so the APPLY rule has to be total.
+_REVIEW_CONTRADICTS_F001 = _FINDINGS_KEEP_F001.rstrip("\n") + (
+    "\n  decision_verdict: concede"
+    "\n  decision_contest: AC 2 — 'the command prints the resolved config'\n"
+)
+
+
+def test_a_contradictory_answer_repeated_through_the_retry_does_not_escalate(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # correctness/f-007 end to end: a reviewer that concedes while still citing
+    # why the finding is in scope must not arm the early human escalation — a
+    # citation says in-scope, which is the case AC#4 sends to the ordinary
+    # dispute guard. It used to reach `needs_decision` because the retry skips
+    # combination validation and the apply path only looked at the verdict.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[
+            {"text": _FINDINGS_MAJOR},
+            {
+                "text": _REVIEW_CONTRADICTS_F001,
+                "retry_text": _REVIEW_CONTRADICTS_F001,
+            },
+        ],
+        coder_handoffs={2: _CODER_NEEDS_DECISION, 3: _CODER_NEEDS_DECISION},
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "disputed"  # not needs_decision
+    assert result.decisions == ()
+    assert "dispute deadlock" in result.message
+
+
 def test_two_unanswered_decisions_still_cost_only_one_correction(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
