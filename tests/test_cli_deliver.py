@@ -1329,6 +1329,65 @@ def test_a_lost_push_response_over_an_unrelated_ref_is_uncertain_not_refused(
     assert gh["created"] == []
 
 
+def test_containment_is_asked_of_the_observed_tip_not_of_fetch_head(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-006 (r5): `FETCH_HEAD` is a shared, mutable file in the
+    project checkout. Asking the ancestry question of that NAME lets another
+    process's fetch, landing between the two subprocesses, answer this
+    delivery's question about a tip nobody here read — turning "the push did
+    not land" into "it did", and opening a PR on somebody else's revision.
+    The question is asked of the object `ls-remote` actually observed."""
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "clone", str(tmp_path / "origin.git"), str(other)],
+        check=True,
+        capture_output=True,
+    )
+    _git(other, "config", "user.email", "o@example.com")
+    _git(other, "config", "user.name", "O")
+    real_git = cli_repo.run_git
+    ours = _head(repo)
+
+    def _push_fails_then_someone_elses_fetch_wins(
+        repo_path: Path, args: list[str], **kw: Any
+    ):
+        if args[:1] == ["push"]:
+            # our push never lands; a stranger's branch takes the ref instead
+            _git(other, "checkout", "-b", _BRANCH, "origin/main")
+            (other / "theirs.py").write_text("t = 1\n", encoding="utf-8")
+            _git(other, "add", "-A")
+            _git(other, "commit", "-m", "an unrelated tip")
+            _git(other, "push", "origin", _BRANCH)
+            return subprocess.CompletedProcess(args, 1, "", "fatal: the remote hung up")
+        proc = real_git(repo_path, args, **kw)
+        if args[:1] == ["fetch"]:
+            # …and between the fetch and the ancestry test, another process
+            # using this checkout replaces FETCH_HEAD with a tip that DOES
+            # contain our commit
+            (repo_path / ".git" / "FETCH_HEAD").write_text(
+                f"{ours}\t\tbranch 'other' of origin\n", encoding="utf-8"
+            )
+        return proc
+
+    monkeypatch.setattr(cli_repo, "run_git", _push_fails_then_someone_elses_fetch_wins)
+
+    result = _invoke(_RUN)
+
+    # the observed tip does not contain our commit, so nothing is claimed and
+    # nothing downstream runs: no PR, no gate, no story write
+    assert result.exit_code == 2, result.output
+    assert "PUSH UNCERTAIN" in result.output
+    assert gh["created"] == []
+    assert not lithos.calls_to("task_create")
+
+
 def test_a_lost_pr_create_response_survives_the_branch_moving(
     host,
     lithos: FakeLithosClient,

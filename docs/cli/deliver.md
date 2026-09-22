@@ -51,8 +51,10 @@ partial first pass finishes the job and changes nothing else.
    response was lost, not the update), so the delivery carries on; a ref
    exactly where the classification left it is a proven non-landing, and the
    refusal stands; a **third** sha — another actor appended to the same branch
-   — is neither, so its history is read, and our commit being in it means the
-   push landed after all (the head read-back in step 2 then reports what the
+   — is neither, so its history is read (pinned to the object `ls-remote`
+   observed, never to a shared ref name like `FETCH_HEAD`, which another
+   process using the same checkout can replace between the two commands), and
+   our commit being in it means the push landed after all (the head read-back in step 2 then reports what the
    PR delivers). Anything left, a history that cannot be read included, is
    `PUSH UNCERTAIN`: "nothing was written" is the one claim that cannot be
    made there. The local branch's

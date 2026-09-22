@@ -255,7 +255,7 @@ def _refuse_unless_the_push_may_have_landed(
     if landed == state.remote_sha:
         # untouched since the classification: the push really did not land
         raise DeliverRefused(f"git push failed: {stderr}")
-    contained = _remote_contains(repo, branch, state.local_sha)
+    contained = _remote_contains(repo, branch, state.local_sha, observed=landed)
     if contained is True:
         return
     before = state.remote_sha[:12] or "(absent)"
@@ -274,27 +274,58 @@ def _refuse_unless_the_push_may_have_landed(
     )
 
 
-def _remote_contains(repo: Path, branch: str, sha: str) -> bool | None:
-    """Whether ``origin/<branch>`` has *sha* in its history — ``None`` when
-    that cannot be established.
+def _remote_contains(
+    repo: Path, branch: str, sha: str, *, observed: str
+) -> bool | None:
+    """Whether *observed* — the tip the reconciling ``ls-remote`` actually saw
+    — has *sha* in its history. ``None`` when that cannot be established.
 
-    The remote tip may be a commit this checkout has never seen, so the branch
-    is fetched first (a read: it writes only ``FETCH_HEAD`` locally). Every
-    failure answers ``None`` rather than ``False``: "I could not look" must
-    not be reported as "your commit is not there".
+    The answer is pinned to **that object**, never to a ref name. The tip may
+    be a commit this checkout has never seen, so the branch is fetched to get
+    the objects, but the ancestry question is then asked of ``observed``
+    itself: ``FETCH_HEAD`` is a shared, mutable file in the project checkout
+    (which the operator and other loom subprocesses use too), and another
+    fetch landing between these two subprocesses would answer this delivery's
+    question about a tip nobody here read — a `no` becoming a `yes` decides
+    that a push landed, opens a PR on somebody else's revision and gates the
+    story on it. Nothing shared is written either (``--no-write-fetch-head``,
+    with a fallback for a git too old to know the flag), so this probe cannot
+    be the process that breaks someone else's.
+
+    Every failure answers ``None`` rather than ``False`` — "I could not look"
+    must not be reported as "your commit is not there" — including a tip that
+    has already moved on and is therefore not among the objects fetched.
     """
     try:
-        fetch = run_git(repo, ["fetch", "--quiet", "origin", f"refs/heads/{branch}"])
-        if fetch.returncode != 0:
+        fetched = _fetch_branch_objects(repo, branch)
+        if not fetched:
             return None
-        anc = run_git(
-            repo, ["merge-base", "--is-ancestor", sha, "FETCH_HEAD"], timeout=120
-        )
+        # the observed object must be HERE (the tip may have moved again
+        # between the read and the fetch, and then nothing about it is known)
+        have = run_git(repo, ["cat-file", "-e", f"{observed}^{{commit}}"], timeout=120)
+        if have.returncode != 0:
+            return None
+        anc = run_git(repo, ["merge-base", "--is-ancestor", sha, observed], timeout=120)
     except (OSError, subprocess.SubprocessError):
         return None
     if anc.returncode == 0:
         return True
     return False if anc.returncode == 1 else None
+
+
+def _fetch_branch_objects(repo: Path, branch: str) -> bool:
+    """Fetch ``origin/<branch>``'s objects without touching ``FETCH_HEAD``.
+
+    ``--no-write-fetch-head`` is git 2.29+; an older git fails on the unknown
+    option, so the plain form is the fallback (the caller reads no ref name
+    either way, so writing the file is only an unkindness to whoever else is
+    using this checkout, never a correctness problem here).
+    """
+    ref = f"refs/heads/{branch}"
+    quiet = run_git(repo, ["fetch", "--quiet", "--no-write-fetch-head", "origin", ref])
+    if quiet.returncode == 0:
+        return True
+    return run_git(repo, ["fetch", "--quiet", "origin", ref]).returncode == 0
 
 
 def origin_repo_name(repo: Path) -> str:
