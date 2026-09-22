@@ -1395,6 +1395,61 @@ def test_build_result_payload_failed_without_reason_uses_the_message(
     assert payload["escalation"]["summary"] == "the decorated message"
 
 
+def test_build_result_payload_needs_decision_brief_is_the_decision(
+    tmp_path: Path,
+) -> None:
+    """9d5ebca6: the operator's next move on a `needs_decision` stop is an
+    acceptance-criteria edit, so the gate's brief is the QUESTION and its
+    options — not the rounds / cost / findings-by-severity post-mortem every
+    other stop carries."""
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
+
+    decision = PendingDecision(
+        reviewer="correctness",
+        finding_id="f-003",
+        severity="critical",
+        question="Accept an at-most-once marker, or block on a Lithos change?",
+        options="(a) accept the marker; (b) block — this story cannot land",
+        rationale="the finding post is not idempotent",
+        coder_response="Lithos has no compare-and-set on task_update",
+        round_no=3,
+    )
+    payload, exit_code = build_result_payload(
+        _result(
+            "needs_decision",
+            tmp_path,
+            failure_reason="round 3: needs a decision on correctness/f-003",
+            decisions=(decision,),
+        ),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    assert exit_code == EXIT_FAILED
+    assert payload["status"] == "failed"
+    escalation = payload["escalation"]
+    assert escalation["reason"] == "needs_decision"
+    assert escalation["summary"] == "round 3: needs a decision on correctness/f-003"
+    assert escalation["brief"]["decisions"] == [
+        {
+            "finding": "correctness/f-003",
+            "severity": "critical",
+            "question": decision.question,
+            "options": decision.options,
+            "finding_rationale": "the finding post is not idempotent",
+            "coder_response": "Lithos has no compare-and-set on task_update",
+        }
+    ]
+    # the locators the operator needs to carry the branch forward survive; the
+    # run facts that would bury the question do not
+    assert escalation["brief"]["branch"] == "b"
+    assert escalation["brief"]["conversation_log"] == str(tmp_path / "conversation.md")
+    assert "findings_by_severity" not in escalation["brief"]
+    assert "cost_usd" not in escalation["brief"]
+    validate_result_schema(payload)
+
+
 def test_build_result_payload_delivery_failure_escalates_as_delivery(
     tmp_path: Path,
 ) -> None:

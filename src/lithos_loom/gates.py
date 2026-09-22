@@ -134,6 +134,10 @@ ESCALATION_REASONS: frozenset[str] = frozenset(
         "stalled",
         "disputed",
         "cost_exceeded",
+        # a coder `needs-decision` no reviewer contested (9d5ebca6): the story
+        # asks for something out of its own reach, so the gate's brief is the
+        # QUESTION and the operator answers by editing the acceptance criteria
+        "needs_decision",
         # a `failed` DevelopResult, split by which turn died
         "coder_failed",
         "reviewer_failed",
@@ -451,6 +455,22 @@ def human_gate_brief(
         lines.append(f"**Worktree:** `{b['worktree']}`")
     if b.get("conversation_log"):
         lines.append(f"**Conversation log:** `{b['conversation_log']}`")
+    # 9d5ebca6: a `needs_decision` brief IS the question — rendered as prose
+    # rather than falling through to the generic repr below, since this is the
+    # one gate whose description the operator reads to make a product call.
+    if isinstance(b.get("decisions"), list) and b["decisions"]:
+        lines += ["", "**The decision:**"]
+        for raw in b["decisions"]:
+            d = raw if isinstance(raw, Mapping) else {}
+            lines.append(f"- **{d.get('question') or '(no question recorded)'}**")
+            for label, key in (
+                ("options", "options"),
+                ("finding", "finding"),
+                ("the finding", "finding_rationale"),
+                ("the coder", "coder_response"),
+            ):
+                if d.get(key):
+                    lines.append(f"  - {label}: {d[key]}")
     for key, value in b.items():
         if key not in {
             "rounds",
@@ -460,6 +480,7 @@ def human_gate_brief(
             "findings_by_severity",
             "worktree",
             "conversation_log",
+            "decisions",
         }:
             lines.append(f"**{key}:** {value}")
     lines += ["", "**What to do:**"]

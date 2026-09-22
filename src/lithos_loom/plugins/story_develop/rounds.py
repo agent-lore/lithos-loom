@@ -801,6 +801,45 @@ def no_change_verdict_phase(ctx: RoundContext, round_no: int) -> CycleExit | Non
     )
 
 
+def decision_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
+    """The cheap escalation (9d5ebca6): a coder ``needs-decision`` the reviewer
+    just declined to contest stops the run NOW — before another coder turn is
+    paid — because the question is a product decision neither agent can settle
+    by re-reading the code.
+
+    Runs before :func:`deadlock_phase`: the ordinary dispute guard costs two
+    more review rounds to reach the same human, and both observed cases
+    ($26.44 / $89.41) spent them saying the same thing again. A reviewer that
+    DID contest (citing the acceptance line the finding meets) left no pending
+    decision here, and the deadlock guard below applies unchanged.
+
+    Exit: H' ``needs_decision``.
+    """
+    decisions = [
+        d
+        for r in ctx.reviewers
+        for d in r.ledger.pending_decisions(r.spec.block_threshold)
+    ]
+    if not decisions:
+        return None
+    logger.warning(
+        "[ReviewDispute] story-develop %s: round %d needs a product decision on "
+        "%s — stopping before another coder turn",
+        ctx.config.run_id,
+        round_no,
+        ", ".join(d.label for d in decisions),
+    )
+    return CycleExit(
+        status="needs_decision",
+        failure_reason=(
+            f"round {round_no}: needs a decision on "
+            f"{', '.join(d.label for d in decisions)} — "
+            f"{decisions[0].question}"
+        ),
+        resume_after=None,
+    )
+
+
 def deadlock_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """T7 dispute escalation: a coder-disputed finding the reviewer kept blocking
     for 2 consecutive rounds stops the run with a human breadcrumb rather than
@@ -876,6 +915,7 @@ def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
         panel_phase,
         approval_phase,
         no_change_verdict_phase,
+        decision_phase,
         deadlock_phase,
         stall_phase,
         lambda c, r: cost_ceiling_phase(c, r, when="post_review"),

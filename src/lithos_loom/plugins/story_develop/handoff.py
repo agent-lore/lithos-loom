@@ -36,7 +36,14 @@ _SEVERITY_ORDER = {s: i for i, s in enumerate(_SEVERITIES)}
 # not-block, and the stated why is its counterweight. The why lives in its OWN
 # key — never in `rationale`, which keeps describing WHAT the defect is — so
 # the spawned task always carries both texts (PR #342 re-review P1).
-_OPEN_STATES = frozenset({"open", "disputed", "needs-clarification"})
+# `needs-decision` (9d5ebca6) is the CODER's escape for a finding neither side
+# can settle by re-reading the code — the acceptance names something the
+# product does not have, or asks for a guarantee the platform cannot give.
+# It is a dispute PLUS a question for the operator: open (so it still blocks),
+# carrying a `decision_question` / `decision_options` block. A reviewer that
+# can show the finding is in scope contests it with `decision_contest:` (the
+# acceptance line it meets) and it degrades to an ordinary `disputed`.
+_OPEN_STATES = frozenset({"open", "disputed", "needs-clarification", "needs-decision"})
 _RESOLVED_STATES = frozenset(
     {"fixed", "accepted", "superseded", "merged", "out-of-scope"}
 )
@@ -77,6 +84,14 @@ class Finding:
     # A separate key — mandatory for that status — so the disposition text
     # can never overwrite the defect description. Empty for other statuses.
     deferral_reason: str = ""
+    # The coder's `needs-decision` block (9d5ebca6): the product question only
+    # a human can settle, and the options with what each costs. Own keys, like
+    # `deferral_reason` — the question can never overwrite the defect text.
+    decision_question: str = ""
+    decision_options: str = ""
+    # The reviewer's contest of that decision: the acceptance line the finding
+    # already meets, which downgrades it to an ordinary dispute.
+    decision_contest: str = ""
 
     @property
     def is_open(self) -> bool:
@@ -173,6 +188,11 @@ def render_findings(findings: list[Finding]) -> str:
             lines.append(f"  rationale: {f.rationale}")
         if f.deferral_reason:
             lines.append(f"  deferral_reason: {f.deferral_reason}")
+        if f.decision_contest:
+            # 9d5ebca6: the reviewer contested the coder's needs-decision —
+            # the coder must see the acceptance line it was shown, since the
+            # finding is now an ordinary dispute under the usual guard.
+            lines.append(f"  decision_contest: {f.decision_contest}")
     return "\n".join(lines)
 
 
@@ -428,6 +448,9 @@ def _parse_findings(block: str) -> list[Finding]:
                 rationale=raw.get("rationale", ""),
                 coder_response=raw.get("coder_response", ""),
                 deferral_reason=raw.get("deferral_reason", ""),
+                decision_question=raw.get("decision_question", ""),
+                decision_options=raw.get("decision_options", ""),
+                decision_contest=raw.get("decision_contest", ""),
             )
         )
     return findings

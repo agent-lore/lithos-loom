@@ -290,3 +290,127 @@ def test_reviewer_validator_selects_first_sighting_rules_for_artifact_pass() -> 
     )
     err = reviewer_validator(ledger, findings_are_new=True)(bad)
     assert err is not None and "rationale" in err
+
+
+# ── needs-decision: the cheap escalation (9d5ebca6) ────────────────────
+
+
+def _decision(fid: str = "f-001", **kw) -> Finding:
+    """The coder's needs-decision mark, as the a90bb640 handoff wrote it."""
+    base: dict = dict(
+        status="needs-decision",
+        coder_response="Lens has no effective-config display to print",
+        decision_question=(
+            "Does this story add the effective-config display Lens lacks, or "
+            "is the criterion dropped?"
+        ),
+        decision_options=(
+            "(a) build the display — a second story's worth of work; "
+            "(b) drop the criterion — this story lands as reviewed"
+        ),
+    )
+    base.update(kw)
+    return _f(fid, **base)
+
+
+def test_needs_decision_is_recorded_and_escalates_after_one_review() -> None:
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f()), 1)
+    # round 2's coder marks it needs-decision instead of disputing again
+    ledger.record_coder_updates([_decision()], 2)
+    # ... and round 2's reviewer keeps it open without contesting it: that was
+    # its one turn, so the question is the operator's.
+    ledger.apply_review(_review(_f("f-001")), 2)
+
+    (d,) = ledger.pending_decisions("major")
+    assert d.label == "correctness/f-001"
+    assert d.question.startswith("Does this story add")
+    assert "(b) drop the criterion" in d.options
+    assert d.round_no == 2
+    # the ordinary guard has NOT fired yet — one blocked round, not two
+    assert ledger.disputed_deadlocks("major") == []
+
+
+def test_contested_needs_decision_degrades_to_an_ordinary_dispute() -> None:
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f()), 1)
+    ledger.record_coder_updates([_decision()], 2)
+    contest = _f("f-001", decision_contest="AC 2: 'prints the resolved config'")
+    ledger.apply_review(_review(contest), 2)
+
+    assert ledger.pending_decisions("major") == []  # no cheap escalation
+    assert ledger.entries["f-001"].decision_contest.startswith("AC 2")
+    # the existing guard applies unchanged: one more blocked round -> deadlock
+    assert ledger.disputed_deadlocks("major") == []
+    ledger.apply_review(_review(_f("f-001")), 3)
+    assert ledger.disputed_deadlocks("major") == ["f-001"]
+
+
+def test_a_contest_sticks_across_a_re_raise() -> None:
+    # Abuse guard: re-marking the same finding next round must not re-arm the
+    # escalation the reviewer already answered — the dispute guard bounds it.
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f()), 1)
+    ledger.record_coder_updates([_decision()], 2)
+    ledger.apply_review(_review(_f("f-001", decision_contest="AC 2")), 2)
+
+    ledger.record_coder_updates([_decision(decision_question="same question")], 3)
+    ledger.apply_review(_review(_f("f-001")), 3)
+    assert ledger.pending_decisions("major") == []
+    assert ledger.disputed_deadlocks("major") == ["f-001"]
+
+
+def test_a_volunteered_contest_cannot_pre_empt_a_later_decision() -> None:
+    # The mirror abuse: a reviewer writing decision_contest on a finding the
+    # coder never raised a decision on must not disable the escape for it.
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f()), 1)
+    ledger.apply_review(_review(_f("f-001", decision_contest="AC 2")), 2)
+    assert ledger.entries["f-001"].decision_contested is False
+
+    ledger.record_coder_updates([_decision()], 3)
+    ledger.apply_review(_review(_f("f-001")), 3)
+    assert [d.finding_id for d in ledger.pending_decisions("major")] == ["f-001"]
+
+
+def test_resolved_needs_decision_never_escalates() -> None:
+    # The reviewer agreed instead of contesting: nothing blocks, so there is
+    # nothing to ask the operator.
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f()), 1)
+    ledger.record_coder_updates([_decision()], 2)
+    ledger.apply_review(_review(_f("f-001", status="accepted")), 2)
+    assert ledger.pending_decisions("major") == []
+
+
+def test_sub_threshold_needs_decision_never_escalates() -> None:
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f(severity="minor")), 1)
+    ledger.record_coder_updates([_decision(severity="minor")], 2)
+    ledger.apply_review(_review(_f("f-001", severity="minor")), 2)
+    assert ledger.pending_decisions("major") == []
+    assert len(ledger.pending_decisions("minor")) == 1
+
+
+def test_needs_decision_without_a_question_is_an_ordinary_dispute() -> None:
+    # Nothing to ask the operator -> the mark carries only its dispute half.
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f()), 1)
+    ledger.record_coder_updates(
+        [_f("f-001", status="needs-decision", coder_response="cannot be done")], 2
+    )
+    ledger.apply_review(_review(_f("f-001")), 2)
+    assert ledger.pending_decisions("major") == []
+    assert ledger.entries["f-001"].coder_disputed is True
+    ledger.apply_review(_review(_f("f-001")), 3)
+    assert ledger.disputed_deadlocks("major") == ["f-001"]
+
+
+def test_render_open_shows_the_decision_to_the_reviewer() -> None:
+    # The reviewer can only contest what it is shown.
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f(rationale="config display missing")), 1)
+    ledger.record_coder_updates([_decision()], 2)
+    text = ledger.render_open()
+    assert "coder needs-decision question: Does this story add" in text
+    assert "coder needs-decision options: (a) build the display" in text

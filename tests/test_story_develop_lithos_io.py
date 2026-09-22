@@ -275,6 +275,39 @@ def test_post_results_disputed_adds_breadcrumb(fake_client: FakeLithosClient) ->
     assert "human" in fake_client.findings[1]["summary"]
 
 
+def test_post_results_needs_decision_posts_the_question(
+    fake_client: FakeLithosClient,
+) -> None:
+    # 9d5ebca6: the breadcrumb IS the decision — the operator answers by
+    # editing the acceptance criteria, so the question and its options must be
+    # in the finding, not just a pointer to the conversation log.
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
+
+    result = _result(
+        status="needs_decision",
+        decisions=(
+            PendingDecision(
+                reviewer="correctness",
+                finding_id="f-003",
+                severity="critical",
+                question="Accept an at-most-once marker, or block on Lithos?",
+                options="(a) accept the marker; (b) block — this story cannot land",
+                coder_response="Lithos has no compare-and-set on task_update",
+                round_no=3,
+            ),
+        ),
+    )
+    lithos_io.post_results("http://x", "task-1", result)
+
+    assert len(fake_client.findings) == 2
+    body = fake_client.findings[1]["summary"]
+    assert body.startswith("[ReviewDispute]")
+    assert "[correctness/f-003]" in body
+    assert "Accept an at-most-once marker, or block on Lithos?" in body
+    assert "(b) block" in body
+    assert "acceptance criteria" in body  # how the operator answers it
+
+
 def test_post_failure_returns_false_not_raise(fake_client: FakeLithosClient) -> None:
     # Original _FakeClient raised on both finding_post and task_update; mirror
     # both. finding_post is hit first so it is the one that actually trips here.

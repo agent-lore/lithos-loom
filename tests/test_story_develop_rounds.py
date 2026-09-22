@@ -32,6 +32,7 @@ from lithos_loom.plugins.story_develop.config import (
     ReviewerSpec,
 )
 from lithos_loom.plugins.story_develop.gate_findings import GateLedger
+from lithos_loom.plugins.story_develop.handoff import Finding, ReviewHandoff
 from lithos_loom.plugins.story_develop.loop_entry import PostCommitOutcome
 from lithos_loom.plugins.story_develop.panel import (
     PanelRoundResult,
@@ -1172,3 +1173,106 @@ def test_coder_phase_persists_the_wrappers_rebound_session(tmp_path: Path) -> No
     ctx.turn_with_reactions = turn
     assert rounds_mod.coder_phase(ctx, 2) is None
     assert ctx.coder_session == "thread-minted"
+
+
+# ── decision_phase: the cheap escalation (9d5ebca6) ────────────────────
+
+
+def _decision_ctx(tmp_path: Path):
+    """A ctx whose sole reviewer's ledger holds one blocking finding — the
+    coder's mark and the reviewer's answer are applied per test."""
+    ctx, _ = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ledger = ctx.reviewers[0].ledger
+    ledger.apply_review(
+        ReviewHandoff(
+            status="FINDINGS",
+            summary="",
+            findings=[
+                Finding(
+                    finding_id="",
+                    severity="critical",
+                    status="open",
+                    rationale="the finding post is not idempotent",
+                )
+            ],
+        ),
+        1,
+    )
+    return ctx, ledger
+
+
+def _coder_decision(**kw) -> Finding:
+    base: dict = dict(
+        finding_id="f-001",
+        severity="critical",
+        status="needs-decision",
+        coder_response="Lithos has no compare-and-set on task_update",
+        decision_question="Accept an at-most-once marker, or block on Lithos?",
+        decision_options="(a) accept the marker; (b) block — this story cannot land",
+    )
+    base.update(kw)
+    return Finding(**base)
+
+
+def _reviewer_keeps_open(**kw) -> ReviewHandoff:
+    return ReviewHandoff(
+        status="FINDINGS",
+        summary="",
+        findings=[
+            Finding(finding_id="f-001", severity="critical", status="open", **kw)
+        ],
+    )
+
+
+def test_decision_phase_stops_the_run_on_an_uncontested_decision(
+    tmp_path: Path,
+) -> None:
+    ctx, ledger = _decision_ctx(tmp_path)
+    ledger.record_coder_updates([_coder_decision()], 2)
+    ledger.apply_review(_reviewer_keeps_open(), 2)  # the reviewer's one turn
+
+    exit_ = rounds_mod.decision_phase(ctx, 2)
+
+    assert exit_ is not None
+    assert exit_.status == "needs_decision"
+    assert "correctness/f-001" in exit_.failure_reason
+    assert "Accept an at-most-once marker" in exit_.failure_reason
+    # ... and it stops BEFORE the dispute guard would have paid two more rounds
+    assert rounds_mod.deadlock_phase(ctx, 2) is None
+
+
+def test_decision_phase_is_silent_when_the_reviewer_contests(tmp_path: Path) -> None:
+    ctx, ledger = _decision_ctx(tmp_path)
+    ledger.record_coder_updates([_coder_decision()], 2)
+    ledger.apply_review(
+        _reviewer_keeps_open(decision_contest="AC 4: 'exactly once per sweep'"), 2
+    )
+
+    assert rounds_mod.decision_phase(ctx, 2) is None
+    # the ordinary guard takes over unchanged: a second blocked round deadlocks
+    ledger.apply_review(_reviewer_keeps_open(), 3)
+    assert rounds_mod.decision_phase(ctx, 3) is None
+    deadlock = rounds_mod.deadlock_phase(ctx, 3)
+    assert deadlock is not None and deadlock.status == "disputed"
+
+
+def test_decision_phase_is_silent_without_a_decision(tmp_path: Path) -> None:
+    ctx, ledger = _decision_ctx(tmp_path)
+    ledger.record_coder_updates(
+        [Finding(finding_id="f-001", severity="critical", status="disputed")], 2
+    )
+    ledger.apply_review(_reviewer_keeps_open(), 2)
+    assert rounds_mod.decision_phase(ctx, 2) is None
+
+
+def test_decision_phase_runs_before_the_deadlock_and_stall_guards() -> None:
+    # Ordering is the whole point: the decision escalates at once, and a
+    # contested one falls through to the guards that were there before.
+    import inspect
+
+    src = inspect.getsource(rounds_mod.run_round)
+    assert (
+        src.index("decision_phase")
+        < src.index("deadlock_phase")
+        < src.index("stall_phase")
+    )

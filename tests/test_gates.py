@@ -502,6 +502,39 @@ def test_human_gate_brief_renders_the_caller_s_actions() -> None:
     assert "Cancelling the gate" in text
 
 
+def test_human_gate_brief_renders_a_needs_decision_as_prose() -> None:
+    # 9d5ebca6: this gate's brief IS the question the operator must answer —
+    # it must not fall through to the generic `**key:** <python repr>` line.
+    from lithos_loom.gates import human_gate_brief
+
+    text = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="needs_decision",
+        summary="round 3: needs a decision on correctness/f-003",
+        run_id="r1",
+        brief={
+            "decisions": [
+                {
+                    "finding": "correctness/f-003",
+                    "question": "Accept an at-most-once marker, or block?",
+                    "options": "(a) accept the marker; (b) block",
+                    "coder_response": "Lithos has no compare-and-set",
+                }
+            ],
+            "branch": "loom/us7",
+        },
+    )
+    assert "**The decision:**" in text
+    assert "Accept an at-most-once marker, or block?" in text
+    assert "options: (a) accept the marker; (b) block" in text
+    assert "finding: correctness/f-003" in text
+    assert "[{" not in text  # never the raw repr
+    # the default actions already tell the operator to edit the acceptance
+    # criteria before completing the gate — which is how a decision is answered
+    assert "acceptance criteria" in text
+
+
 async def test_create_human_gate_puts_the_actions_in_the_description() -> None:
     from lithos_loom.gates import create_human_gate
     from tests.support import FakeLithosClient

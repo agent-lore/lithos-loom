@@ -1183,6 +1183,75 @@ def test_dispute_deadlock_stops_with_breadcrumb(
     assert reason and "dispute deadlock" in reason
 
 
+# 9d5ebca6: the coder's round-2 handoff marks the finding needs-decision —
+# the a90bb640 shape ("the acceptance names a display Lens does not have").
+_CODER_NEEDS_DECISION = (
+    "## Status: LGTM\n## Summary\nf-001 is out of this story's reach.\n"
+    "## Findings\n- finding_id: f-001\n  severity: major\n"
+    "  status: needs-decision\n"
+    "  coder_response: Lens has no effective-config display to print\n"
+    "  decision_question: Add the effective-config display, or drop the "
+    "criterion?\n"
+    "  decision_options: (a) build it — a second story; (b) drop it — this "
+    "story lands as reviewed\n"
+)
+# The reviewer's contest: it keeps f-001 open AND cites the acceptance line.
+_REVIEW_CONTESTS_F001 = _FINDINGS_KEEP_F001.rstrip("\n") + (
+    "\n  decision_contest: AC 2 — 'the command prints the resolved config'\n"
+)
+
+
+def test_needs_decision_stops_after_the_same_review_round(
+    monkeypatch: pytest.MonkeyPatch,
+    config: DevelopConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # r1: finding raised. r2: the coder marks it needs-decision and the
+    # reviewer keeps it blocking WITHOUT contesting — that was its one turn, so
+    # the run stops there. The dispute-deadlock twin above needs r3 to reach
+    # the same human; this is the round (and coder turn) that is saved.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_KEEP_F001}],
+        coder_handoffs={2: _CODER_NEEDS_DECISION},
+    )
+    with caplog.at_level("WARNING"):
+        result = develop_mod.develop(config)
+
+    assert result.status == "needs_decision"
+    assert result.rounds == 2  # not 3 — no further coder turn is paid
+    assert result.succeeded is False
+    (decision,) = result.decisions
+    assert decision.label == "code-quality/f-001"
+    assert decision.question.startswith("Add the effective-config display")
+    assert "(b) drop it" in decision.options
+    assert "needs a decision" in result.message
+    assert any("[ReviewDispute]" in r.message for r in caplog.records)
+    # needs_decision is reason-bearing: the question reaches state.json.
+    reason = json.loads((config.run_dir / "state.json").read_text())["failure_reason"]
+    assert reason and "Add the effective-config display" in reason
+
+
+def test_contested_needs_decision_falls_back_to_the_dispute_guard(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # The abuse guard end-to-end: the reviewer cites the acceptance line the
+    # finding meets, so nothing escalates early and the existing two-round
+    # dispute guard runs unchanged — the r3 stop the deadlock test pins.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _REVIEW_CONTESTS_F001}],
+        coder_handoffs={2: _CODER_NEEDS_DECISION, 3: _CODER_DISPUTE},
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "disputed"
+    assert result.rounds == 3
+    assert result.decisions == ()
+
+
 def test_cost_ceiling_stops_run(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

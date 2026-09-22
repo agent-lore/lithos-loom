@@ -149,6 +149,35 @@ def _result_summary(result: DevelopResult) -> str:
     return "\n".join(lines)
 
 
+def _decision_breadcrumb(result: DevelopResult) -> str:
+    """The ``[ReviewDispute]`` finding for a ``needs_decision`` stop (9d5ebca6).
+
+    The coder asked something neither agent can settle by re-reading the code,
+    and no reviewer showed otherwise, so the run stopped before paying another
+    round. The body is the QUESTION (and its options) — the operator answers
+    by editing the acceptance criteria, then ticks the needs-human gate to
+    re-dispatch under it (or salvages the branch with `develop deliver` /
+    `converge --ac-file`).
+    """
+    lines = [
+        f"{DISPUTE_PREFIX} story-develop run {result.run_id} stopped for a "
+        f"product decision after {result.rounds} round(s) — the coder holds "
+        "the finding(s) below are out of this story's reach, and the reviewer "
+        "did not show otherwise:",
+        "",
+    ]
+    for d in result.decisions:
+        lines += [d.render(), ""]
+    lines += [
+        "Answer by editing the acceptance criteria (a 'Settled during run "
+        f"{result.run_id}: …' clause), then complete the needs-human gate to "
+        f"re-dispatch under it — or keep the branch {result.branch} with "
+        "`lithos-loom develop deliver` / `develop converge --ac-file`.",
+        f"conversation log: {result.conversation_log}",
+    ]
+    return "\n".join(lines)
+
+
 def _deferred_section(spawns: Sequence[DeferredSpawn]) -> str:
     """The ``[DevelopResult]`` block naming every deferred finding (819370e5).
 
@@ -338,7 +367,12 @@ def post_results(
             elif pr_url:
                 summary += f"\n\npull request: {pr_url}"
             await client.finding_post(task_id=task_id, summary=summary)
-            if result.status == "disputed":
+            if result.status == "needs_decision":
+                await client.finding_post(
+                    task_id=task_id,
+                    summary=_decision_breadcrumb(result),
+                )
+            elif result.status == "disputed":
                 await client.finding_post(
                     task_id=task_id,
                     summary=(

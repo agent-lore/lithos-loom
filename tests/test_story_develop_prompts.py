@@ -277,3 +277,24 @@ def test_resolve_coder_init_tells_the_coder_the_merge_rules() -> None:
     assert "in progress" in text and "<<<<<<<" in raw
     assert "both" in text
     assert "do not commit" in text and "abort" in text
+
+
+def test_needs_decision_is_taught_on_every_surface_that_uses_it() -> None:
+    # 9d5ebca6: the escape only works if the coder knows it exists, the
+    # reviewer knows how to contest it, and FORMAT.md defines the keys both
+    # write. (reviewer_round.md is round 1 — no coder findings exist yet, so
+    # a needs-decision cannot reach it.)
+    fmt = load_prompt("FORMAT.md")
+    assert "needs-decision" in fmt
+    assert "decision_question:" in fmt and "decision_options:" in fmt
+    assert "decision_contest:" in fmt
+
+    coder = load_prompt("coder_fix.md")
+    assert "status: needs-decision" in coder
+    assert "decision_question:" in coder
+
+    reviewer = load_prompt("reviewer_rereview.md")
+    assert "needs-decision" in reviewer
+    assert "decision_contest:" in reviewer
+    # the contest is evidence-bound — that is what keeps the escape honest
+    assert "acceptance-criteria line" in reviewer

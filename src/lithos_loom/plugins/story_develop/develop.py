@@ -25,9 +25,12 @@ Unattended runs are bounded (T7): ``max_rounds``, a ``max_cost_usd`` ceiling,
 a stall guard keyed off finding identity (empty round commit or an unchanged
 blocking set, two rounds running), and a dispute escalation — a coder-disputed
 finding the reviewer keeps blocking for 2 rounds stops the run with a
-``[ReviewDispute]`` breadcrumb instead of grinding to ``max_rounds``. Finding
-identity itself is plugin-enforced via each reviewer's
-:class:`~.findings.FindingLedger`.
+``[ReviewDispute]`` breadcrumb instead of grinding to ``max_rounds``. A coder
+mark of ``needs-decision`` no reviewer contests short-circuits even that
+(9d5ebca6): the run stops ``needs_decision`` at the end of that same review
+round, carrying the question to the operator instead of paying two more rounds
+to reach the same place. Finding identity itself is plugin-enforced via each
+reviewer's :class:`~.findings.FindingLedger`.
 """
 
 from __future__ import annotations
@@ -58,7 +61,7 @@ from .config import (
     ReviewerSpec,
     is_valid_reviewer_name,
 )
-from .findings import DeferredFinding, collect_deferred
+from .findings import DeferredFinding, PendingDecision, collect_deferred
 from .gate_findings import GateFinding
 from .handoff import HandoffError
 from .loop_entry import LoopEntry
@@ -97,6 +100,7 @@ class DevelopResult:
 
     # "approved" | "max_rounds" | "failed" | "interrupted"
     # | "stalled" | "disputed" | "cost_exceeded"  (T7 guards)
+    # | "needs_decision"  (9d5ebca6: an un-contested coder needs-decision)
     # | "infra_failed"  (slice B: an auth / transport / spawn failure persisted)
     status: str
     run_id: str
@@ -134,6 +138,13 @@ class DevelopResult:
     # final round's outcomes (a deferral round earlier than the seal would
     # otherwise vanish from the record).
     deferred_findings: tuple[DeferredFinding, ...] = ()
+    # 9d5ebca6: the coder decisions no reviewer contested — the whole content
+    # of a ``needs_decision`` stop (and empty on every status that resolves or
+    # never reaches one, since only a BLOCKING finding can carry one). Read
+    # off the LEDGERS like `deferred_findings` (the escalating round's review
+    # need not re-list the finding for the question to exist) and carried
+    # structurally so the gate's brief is the DECISION, not the run facts.
+    decisions: tuple[PendingDecision, ...] = ()
     # ``infra_failed`` only (slice B): what to fix on the host before completing
     # the needs-human gate — structured, so the gate's capped summary can never
     # truncate it away
@@ -295,7 +306,15 @@ def _record_coder_disputes(
 # for a max_rounds run. ``state.json`` records the reason only for these, so the
 # offline ``attach`` summary (#188) never shows a stale reason for max_rounds.
 _REASON_BEARING_STATUSES = frozenset(
-    {"failed", "interrupted", "stalled", "disputed", "cost_exceeded", "infra_failed"}
+    {
+        "failed",
+        "interrupted",
+        "stalled",
+        "disputed",
+        "cost_exceeded",
+        "infra_failed",
+        "needs_decision",
+    }
 )
 
 
@@ -610,7 +629,7 @@ def develop(
             f"sessions + handoffs preserved in {config.run_dir} (re-run to retry); "
             f"cost ${total:.4f}"
         )
-    elif status in ("stalled", "disputed", "cost_exceeded"):
+    elif status in ("stalled", "disputed", "cost_exceeded", "needs_decision"):
         message = (
             f"STOPPED ({status}): {failure_reason}; "
             f"last reviews: {_reviews_part(final_reviews)}{gate_part}; "
@@ -689,6 +708,11 @@ def develop(
         review_profile=config.review_profile,
         resume_after=resume_after,
         deferred_findings=collect_deferred(r.ledger for r in reviewers),
+        decisions=tuple(
+            d
+            for r in reviewers
+            for d in r.ledger.pending_decisions(r.spec.block_threshold)
+        ),
         failure_reason=failure_reason if status in _REASON_BEARING_STATUSES else "",
         host_action=host_action,
     )

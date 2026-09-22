@@ -1,7 +1,7 @@
 """``lithos-loom develop deliver`` — deliver a stopped run's branch by hand.
 
-A story-develop run that stops without delivering (`disputed`, `stalled`,
-`max_rounds`, `cost_exceeded`, a coder / reviewer death) leaves a committable
+A story-develop run that stops without delivering (`disputed`, `needs_decision`,
+`stalled`, `max_rounds`, `cost_exceeded`, a coder / reviewer death) leaves a committable
 branch behind and raises a loom ``human`` gate on the story. Every surface that
 could carry that work forward wants a **PR**: ``develop converge`` refuses a
 bare branch, the github-watcher's dispatchers key on a ``pr`` gate, and the one

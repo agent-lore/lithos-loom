@@ -39,6 +39,18 @@ it finishes**. The run fails if you stop before writing the handoff.
    `status: disputed`, and your reasoning in `coder_response:`. The reviewer will
    weigh it next round; a dispute that persists is escalated to the human operator
    rather than ground forever.
+
+   If the finding is not something either of you can settle by re-reading the
+   code — the acceptance names a capability this product does not have, or
+   asks for a guarantee the platform cannot give — mark it
+   `status: needs-decision` instead, and state the decision itself in
+   `decision_question:` (the one question a human must answer) and
+   `decision_options:` (the options and what each costs), with your reasoning
+   in `coder_response:`. That puts the question to the operator **after this
+   round's review** instead of spending further rounds restating it. It is for
+   a product or platform decision only: a reviewer that can cite the
+   acceptance line the finding already meets contests it, and it reverts to an
+   ordinary dispute.
 2. You do **not** need to run the full test suite — the orchestrator runs an
    objective test gate after your turn. Do run the **targeted fast test(s)** for
    the findings you fixed to confirm red→green, but never run the full suite and

@@ -721,12 +721,21 @@ def escalation_block(
     August rescue needed by hand — branch, rounds, cost, gate verdict, open
     findings by severity, the worktree and conversation log. ``None`` for a
     delivered or ``interrupted`` run (interrupted has its own resume path).
+
+    A ``needs_decision`` stop (9d5ebca6) is the one shape whose brief is NOT
+    the run facts: the operator's next move is an acceptance-criteria edit, so
+    the brief is the DECISION — each un-contested question with its options,
+    the finding it answers, and the locators needed to carry the branch
+    forward (``develop deliver`` / ``converge --ac-file``). Rounds, cost and
+    findings-by-severity would only bury it.
     """
     if delivery_error is not None:
         reason = "delivery"
         summary = f"PR delivery failed: {delivery_error}"
     elif result.approved or result.status == "interrupted":
         return None
+    elif result.status == "needs_decision":
+        return _decision_escalation(result)
     else:
         summary = result.failure_reason or result.message
         if result.status in _STOP_STATUS_REASONS:
@@ -757,6 +766,32 @@ def escalation_block(
     if result.host_action:
         brief["host_action"] = result.host_action  # slice B: never truncated
     return {"reason": reason, "summary": summary, "brief": brief}
+
+
+def _decision_escalation(result: DevelopResult) -> dict[str, Any]:
+    """The ``needs_decision`` escalation: the decision, not the run facts."""
+    brief: dict[str, Any] = {
+        "decisions": [
+            {
+                "finding": d.label,
+                "severity": d.severity,
+                "question": d.question,
+                "options": d.options,
+                "finding_rationale": d.rationale,
+                "coder_response": d.coder_response,
+            }
+            for d in result.decisions
+        ],
+        "branch": result.branch,
+        "worktree": str(result.worktree),
+    }
+    if result.conversation_log is not None:
+        brief["conversation_log"] = str(result.conversation_log)
+    return {
+        "reason": "needs_decision",
+        "summary": result.failure_reason or result.message,
+        "brief": brief,
+    }
 
 
 def build_result_payload(

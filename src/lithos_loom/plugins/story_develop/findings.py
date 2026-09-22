@@ -12,6 +12,15 @@ The reviewer's verdict statuses stay canonical for blocking; the coder's
 handoff may mark a finding ``disputed`` (with ``coder_response``), which the
 ledger records separately — a coder-disputed finding the reviewer keeps
 blocking feeds the dispute guard in :mod:`develop`.
+
+``needs-decision`` (9d5ebca6) is that dispute plus the question behind it:
+"this is a product decision, not something either of us can settle by
+re-reading the code". It records the ordinary dispute mark AND a
+:class:`PendingDecision` (question + options), which
+:func:`~.rounds.decision_phase` escalates after the SAME round's review —
+the reviewer's one turn to contest it by citing the acceptance line the
+finding already meets (``decision_contest:``), which degrades it back to a
+plain dispute under the existing two-round guard.
 """
 
 from __future__ import annotations
@@ -28,7 +37,7 @@ from .handoff import (
 
 # Open (= potentially blocking) states; mirrors handoff._OPEN_STATES.
 # (`out-of-scope` — 819370e5 — is a RESOLVED state: it never appears here.)
-_OPEN_STATES = frozenset({"open", "disputed", "needs-clarification"})
+_OPEN_STATES = frozenset({"open", "disputed", "needs-clarification", "needs-decision"})
 
 
 @dataclass
@@ -53,6 +62,24 @@ class LedgerEntry:
     # consecutive rounds the reviewer kept this blocking AFTER the coder
     # disputed it; >= 2 triggers the dispute guard.
     blocked_while_disputed: int = 0
+    # 9d5ebca6: the coder marked this `needs-decision` — a dispute PLUS the
+    # product question behind it. A question is what makes the mark a
+    # decision: a `needs-decision` without one is recorded as an ordinary
+    # dispute (the escalation would have nothing to ask the operator).
+    decision_question: str = ""
+    decision_options: str = ""
+    decision_round: int = 0
+    # The reviewer showed the finding is in scope (the acceptance line it
+    # meets), so the decision degrades to that ordinary dispute. STICKY — a
+    # coder re-raising the same question next round cannot re-arm the cheap
+    # escalation; the dispute guard is what bounds it from there.
+    decision_contested: bool = False
+    decision_contest: str = ""
+
+    @property
+    def decision_pending(self) -> bool:
+        """A recorded, un-contested decision the operator has not seen yet."""
+        return bool(self.decision_question) and not self.decision_contested
 
     @property
     def is_open(self) -> bool:
@@ -179,6 +206,16 @@ class FindingLedger:
                     entry.deferral_reason = f.deferral_reason
                 if f.rationale:
                     entry.rationale = f.rationale
+                if f.decision_contest.strip() and entry.decision_pending:
+                    # 9d5ebca6: the reviewer showed the finding is in scope
+                    # (citing the acceptance line it meets), so the coder's
+                    # decision degrades to an ordinary dispute and the
+                    # existing guard applies unchanged. Only a PENDING
+                    # decision can be contested — a contest volunteered on a
+                    # finding the coder never raised one on would otherwise
+                    # pre-emptively disable the escape.
+                    entry.decision_contested = True
+                    entry.decision_contest = f.decision_contest
                 entry.last_updated_round = round_no
             else:
                 fid = f"f-{self._next:03d}"
@@ -204,6 +241,9 @@ class FindingLedger:
                     rationale=entry.rationale,
                     coder_response=entry.coder_response,
                     deferral_reason=entry.deferral_reason,
+                    decision_question=entry.decision_question,
+                    decision_options=entry.decision_options,
+                    decision_contest=entry.decision_contest,
                 )
             )
         # Track dispute persistence: a coder-disputed entry the reviewer just
@@ -221,6 +261,14 @@ class FindingLedger:
         The coder cannot change reviewer-owned statuses; only its dispute flag
         and ``coder_response`` are recorded. Unknown ids are ignored (the
         coder mis-typing an id must not crash the run).
+
+        ``needs-decision`` (9d5ebca6) is a dispute PLUS the product question
+        behind it: it records the same dispute mark — so a contested one lands
+        on the existing guard with nothing extra to do — and, when the handoff
+        carries a ``decision_question``, the decision the run escalates at once
+        (:meth:`pending_decisions`). Without a question there is nothing to
+        ask the operator, so it stays an ordinary dispute. A re-raise after a
+        contest refreshes the text but never re-arms the escalation.
         """
         for f in findings:
             entry = self.entries.get(f.finding_id)
@@ -228,10 +276,14 @@ class FindingLedger:
                 continue
             if f.coder_response:
                 entry.coder_response = f.coder_response
-            if f.status == "disputed":
+            if f.status in ("disputed", "needs-decision"):
                 if not entry.coder_disputed:
                     entry.coder_disputed = True
                     entry.blocked_while_disputed = 0
+                if f.status == "needs-decision" and f.decision_question.strip():
+                    entry.decision_question = f.decision_question
+                    entry.decision_options = f.decision_options
+                    entry.decision_round = round_no
                 entry.last_updated_round = round_no
 
     # --- queries ------------------------------------------------------------
@@ -255,6 +307,29 @@ class FindingLedger:
             if e.blocks(threshold) and e.blocked_while_disputed >= rounds
         )
 
+    def pending_decisions(self, threshold: str) -> list[PendingDecision]:
+        """Blocking findings the coder marked ``needs-decision``, un-contested.
+
+        The cheap-escalation key (9d5ebca6): the reviewer that just reviewed
+        had its one turn to show the finding is in scope, and did not — so the
+        question is genuinely the operator's and no further coder turn is
+        worth paying for.
+        """
+        return [
+            PendingDecision(
+                reviewer=self.reviewer,
+                finding_id=e.finding_id,
+                severity=e.severity,
+                question=e.decision_question,
+                options=e.decision_options,
+                rationale=e.rationale,
+                coder_response=e.coder_response,
+                round_no=e.decision_round,
+            )
+            for e in sorted(self.entries.values(), key=lambda x: x.finding_id)
+            if e.blocks(threshold) and e.decision_pending
+        ]
+
     def render_open(self) -> str:
         """The open findings as a prompt block (ids the reviewer must address)."""
         entries = self.open_entries()
@@ -270,6 +345,15 @@ class FindingLedger:
                 lines.append(f"  your rationale: {e.rationale}")
             if e.coder_response:
                 lines.append(f"  coder response: {e.coder_response}")
+            if e.decision_pending:
+                # 9d5ebca6: the reviewer must SEE the decision to contest it —
+                # this round is its one turn to cite the acceptance line the
+                # finding meets before the run escalates.
+                lines.append(f"  coder needs-decision question: {e.decision_question}")
+                if e.decision_options:
+                    lines.append(
+                        f"  coder needs-decision options: {e.decision_options}"
+                    )
         return "\n".join(lines)
 
 
@@ -289,6 +373,43 @@ def reviewer_validator(
     defect it defers, or the spawned follow-up task has no defect text).
     """
     return check_findings_as_new if findings_are_new else ledger.check
+
+
+@dataclass(frozen=True)
+class PendingDecision:
+    """A coder ``needs-decision`` mark the reviewer did not contest (9d5ebca6).
+
+    The unit of the cheap escalation: read off the ledgers by
+    :meth:`FindingLedger.pending_decisions`, it becomes the run's stop reason,
+    the ``[ReviewDispute]`` finding's body, and the needs-human gate's brief —
+    which is the DECISION (question + options), not the run facts, because the
+    operator's next move is an acceptance-criteria edit, not a post-mortem.
+    """
+
+    reviewer: str
+    finding_id: str
+    severity: str
+    question: str
+    options: str = ""
+    rationale: str = ""  # WHAT the reviewer asked for
+    coder_response: str = ""  # WHY the coder says it is out of reach
+    round_no: int = 0
+
+    @property
+    def label(self) -> str:
+        """``<reviewer>/<finding_id>`` — how every surface names a finding."""
+        return f"{self.reviewer}/{self.finding_id}"
+
+    def render(self) -> str:
+        """The decision as operator-facing prose (finding, question, options)."""
+        lines = [f"[{self.label}] {self.severity}: {self.question}"]
+        if self.options:
+            lines.append(f"  options: {self.options}")
+        if self.rationale:
+            lines.append(f"  finding: {self.rationale}")
+        if self.coder_response:
+            lines.append(f"  coder: {self.coder_response}")
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)

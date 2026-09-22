@@ -320,3 +320,67 @@ def test_out_of_scope_parses_both_texts_separately() -> None:
     (f,) = parse_review_handoff(text).findings
     assert f.rationale == "Button text overlaps the icon"
     assert f.deferral_reason == "pre-existing on the base"
+
+
+# ── needs-decision (9d5ebca6) ──────────────────────────────────────────
+
+# The d9287814 shape: the coder wrote exactly this prose in its round-3
+# handoff, but only `disputed` existed to carry it, so it reached a human as
+# the run's epitaph three review rounds (and $89.41) later.
+_NEEDS_DECISION = (
+    "## Status: LGTM\n"
+    "## Summary\n"
+    "Addressed f-001 and f-002; f-003 is not implementable here.\n"
+    "## Findings\n"
+    "- finding_id: correctness/f-003\n"
+    "  severity: critical\n"
+    "  status: needs-decision\n"
+    '  files: ["src/lithos_loom/subscriptions/pr_gate.py:210"]\n'
+    "  coder_response: >\n"
+    "    Lithos has no compare-and-set on task_update and no idempotency key\n"
+    "    on finding_post, so an atomically persisted key cannot be built from\n"
+    "    its primitives.\n"
+    "  decision_question: >\n"
+    "    Does this story accept an at-most-once-per-sweep marker (a duplicate\n"
+    "    finding is possible after a crash), or is the idempotency key a\n"
+    "    Lithos change this story now blocks on?\n"
+    "  decision_options: >\n"
+    "    (a) accept the marker — ~0 extra rounds, a rare duplicate finding;\n"
+    "    (b) block on a Lithos compare-and-set — this story cannot land.\n"
+)
+
+
+def test_needs_decision_parses_the_decision_block() -> None:
+    (f,) = parse_review_handoff(_NEEDS_DECISION).findings
+    assert f.status == "needs-decision"
+    assert f.is_open  # still blocking until the reviewer or operator resolves it
+    assert "compare-and-set on task_update" in f.coder_response
+    assert f.decision_question.startswith("Does this story accept")
+    assert "(b) block on a Lithos compare-and-set" in f.decision_options
+    # the two texts stay in their own keys — the question never displaces the
+    # coder's reasoning, as deferral_reason never displaces a rationale
+    assert "decision" not in f.coder_response
+
+
+def test_needs_decision_without_a_question_still_parses() -> None:
+    # Deliberately tolerant: the coder handoff is parsed leniently (a raise
+    # would drop every dispute in the file), so a question-less mark is a
+    # well-formed finding that the LEDGER records as an ordinary dispute.
+    text = (
+        "## Status: LGTM\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-1\n  severity: major\n  status: needs-decision\n"
+        "  coder_response: the acceptance asks for a display Lens lacks\n"
+    )
+    (f,) = parse_review_handoff(text).findings
+    assert f.status == "needs-decision" and f.decision_question == ""
+
+
+def test_reviewer_contest_parses() -> None:
+    text = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-1\n  severity: major\n  status: open\n"
+        "  rationale: the effective-config view is unimplemented\n"
+        "  decision_contest: AC 3 — 'the command prints the resolved config'\n"
+    )
+    (f,) = parse_review_handoff(text).findings
+    assert f.decision_contest.startswith("AC 3")

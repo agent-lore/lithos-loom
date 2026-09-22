@@ -61,6 +61,17 @@ changed — and any points it disputes.
      `## Findings` block listing only the issues that remain open (plus any
      genuinely new ones), each with `severity:` (critical | major | minor),
      `status: open`, `files:`, and `rationale:`.
+   - A finding the coder marked **`needs-decision`** (its question is shown
+     with the finding above) is a claim that your finding is out of this
+     story's reach — a product or platform decision, not a code disagreement.
+     The run stops after THIS round and puts that question to the human
+     operator unless you **contest** it: keep the finding open and add
+     `decision_contest:` quoting the acceptance-criteria line it already
+     meets (or the in-scope code path that satisfies it). Contest only when
+     you can point at that line — it downgrades the finding to an ordinary
+     dispute, which then costs further rounds. If the coder is right, resolve
+     the finding (`accepted`, or `out-of-scope` with a `deferral_reason:`)
+     rather than leaving it to escalate.
    - A finding that is REAL but **not this change's to fix** — pre-existing on
      the base, a harness or pipeline fault, another story's agreed work — gets
      `status: out-of-scope`, keeping `rationale:` as the defect description
