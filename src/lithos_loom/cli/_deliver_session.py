@@ -103,12 +103,12 @@ async def _post_coro(
             )
 
 
-async def _claim_coro(url: str, agent: str, story_id: str) -> bool:
+async def _claim_coro(url: str, agent: str, story_id: str, aspect: str) -> bool:
     async with LithosClient(url, agent_id=agent) as client:
         try:
             await client.task_claim(
                 task_id=story_id,
-                aspect=DELIVER_ASPECT,
+                aspect=aspect,
                 agent=agent,
                 ttl_minutes=DELIVER_CLAIM_TTL_MINUTES,
             )
@@ -129,9 +129,9 @@ async def _renew_coro(url: str, agent: str, story_id: str) -> None:
         )
 
 
-async def _release_coro(url: str, agent: str, story_id: str) -> None:
+async def _release_coro(url: str, agent: str, story_id: str, aspect: str) -> None:
     async with LithosClient(url, agent_id=agent) as client:
-        await client.task_release(task_id=story_id, aspect=DELIVER_ASPECT, agent=agent)
+        await client.task_release(task_id=story_id, aspect=aspect, agent=agent)
 
 
 def read_story_sync(url: str, agent: str, story_id: str) -> StoryState:
@@ -194,10 +194,17 @@ def post_finding(
     )
 
 
-def claim_story(url: str, agent: str, story_id: str) -> bool:
-    """Take the ``deliver`` claim on the story; ``False`` when another process
-    holds it (two deliveries of one story must not interleave)."""
-    return run_lithos(_claim_coro(url, agent, story_id))
+def claim_story(
+    url: str, agent: str, story_id: str, *, aspect: str = DELIVER_ASPECT
+) -> bool:
+    """Claim *aspect* of the story; ``False`` when another agent holds it.
+
+    Two aspects are claimed by this command: its own ``deliver`` lease (two
+    deliveries of one story must not interleave), and — under the dispatch
+    hold's own identity — each configured route, so no dispatch can start
+    while the delivery runs (:class:`~lithos_loom.cli.deliver._DispatchHold`).
+    """
+    return run_lithos(_claim_coro(url, agent, story_id, aspect))
 
 
 def renew_story(url: str, agent: str, story_id: str) -> bool:
@@ -215,8 +222,12 @@ def renew_story(url: str, agent: str, story_id: str) -> bool:
     return True
 
 
-def release_story(url: str, agent: str, story_id: str) -> None:
-    """Release the ``deliver`` claim. Best-effort: a lingering claim only
-    expires with its short TTL."""
+def release_story(
+    url: str, agent: str, story_id: str, *, aspect: str = DELIVER_ASPECT
+) -> None:
+    """Release *aspect*. Best-effort: a lingering claim only expires with its
+    TTL — and a released route claim is itself the signal that re-triggers
+    the runner's readiness check (``task.released``), which then defers the
+    story behind the ``pr`` gate this delivery just raised."""
     with contextlib.suppress(DeliverRefused):
-        run_lithos(_release_coro(url, agent, story_id))
+        run_lithos(_release_coro(url, agent, story_id, aspect))

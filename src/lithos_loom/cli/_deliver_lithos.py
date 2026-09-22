@@ -70,6 +70,7 @@ from lithos_loom.subscriptions.dispatch_guards import LAST_ATTEMPT_KEY_PREFIX
 __all__ = [
     "DELIVERY_MARKER_KEY",
     "DELIVER_ASPECT",
+    "dispatch_hold_agent",
     "DELIVER_CLAIM_TTL_MINUTES",
     "DeliverRefused",
     "DeliverUncertain",
@@ -105,6 +106,22 @@ AFTER the finding (the finding-then-mark ordering the subscriptions use), so a
 crash in between costs at most one duplicate finding rather than losing the
 audit trail entirely — and only when the delivery **finished**, so a partial
 pass stays re-postable and the run that completes it records the truth."""
+
+
+def dispatch_hold_agent(agent: str) -> str:
+    """The identity the **dispatch hold** is taken under — deliberately NOT
+    the host's own agent id.
+
+    A claim only excludes *another agent*: ``LithosClient.task_claim`` reports
+    ``claim_failed`` when the aspect is held by someone else, and a same-agent
+    claim is a re-claim that succeeds (its own docstring recommends
+    process-unique ids for exactly this reason). The daemon runs under the
+    configured id, so a hold taken under that id would exclude nothing — the
+    route would claim straight through it and dispatch the story this delivery
+    is gating.
+    """
+    return f"{agent}-deliver"
+
 
 DELIVER_ASPECT = "deliver"
 """Claim aspect serialising concurrent deliveries of the same story. Two
@@ -371,6 +388,26 @@ class StoryState:
             if key.startswith(LAST_ATTEMPT_KEY_PREFIX)
         )
 
+    def unretired_run_gates(self, run_id: str) -> tuple[HumanGateRef, ...]:
+        """Open loom ``human`` gates that could still be THIS run's escalation.
+
+        A gate naming another run is certainly not; one naming this run
+        certainly is; one naming no run might be. Nothing here depends on the
+        *entitlement* :meth:`retirement` computes — that is this invocation's
+        authority to complete a gate, and it moves with the host's configured
+        routes and with how many unattributed candidates are open. Measuring
+        "the swap is done" against the authority would call an empty
+        entitlement a finished swap: the next invocation, under a config that
+        does name the route, would retire the gate for real and find itself
+        silenced by the record the first one wrote. Measured against the gates
+        themselves, the answer only ever improves as gates are retired.
+        """
+        return tuple(
+            gate
+            for gate in self.human_gates
+            if not gate.run_id or gate.run_id == run_id
+        )
+
     def delivery_visible(self, run_id: str) -> bool:
         """Whether this story already carries a delivery of its own — an open
         ``pr`` gate, or a ``[ManualDelivery]`` marker naming this run.
@@ -544,9 +581,12 @@ class GateOutcome:
     """The adopted gate already records this delivery's ``[ManualDelivery]``
     finding, so it must not be posted twice."""
     swap_complete: bool = False
-    """No human gate this delivery was entitled to retire is still open — the
-    swap this command exists for has finished. False on every path that ends
-    early (a terminal story, a foreign ``pr`` gate, a gate that could not be
+    """No open ``human`` gate that could be this run's escalation is left —
+    the swap this command exists for has finished. Measured against the story's
+    gates, never against this invocation's entitlement to retire them
+    (:meth:`StoryState.unretired_run_gates`), so it cannot be made true by a
+    config that simply declines to look. False on every path that ends early
+    (a terminal story, a foreign ``pr`` gate, a gate that could not be
     raised), which is the direction that keeps the record re-postable."""
     human_gates_completed: list[str] = field(default_factory=list)
     human_gates_retained: list[str] = field(default_factory=list)
@@ -688,12 +728,15 @@ async def gate_delivery(
                 )
             else:
                 outcome.human_gates_completed.append(human_gate_id)
-    # What the swap reached: every gate this delivery was entitled to retire
-    # is now completed. (An empty entitlement is a finished swap — there was
-    # nothing left to retire.)
+    # What the swap reached: no gate that could be this run's escalation is
+    # still open. Read off the STORY's gates minus the ones just completed —
+    # not off `retirement.superseded`, which is only this invocation's
+    # authority and shrinks with the host's route config (a gate left open
+    # because its route is not configured here is emphatically not a finished
+    # swap; the invocation that can retire it must still be able to say so).
     outcome.swap_complete = not [
         gate
-        for gate in retirement.superseded
+        for gate in live.unretired_run_gates(run_id)
         if gate.gate_id not in outcome.human_gates_completed
     ]
     # Read LAST: whether this delivery's provenance is already recorded

@@ -137,10 +137,22 @@ def _daemon_running(work_dir: Path) -> bool:
     a Lithos outage longer than the TTL expires it while the run that owns it
     keeps going. The pidfile is the local, durable answer to "is there still a
     producer here", and it is the same one ``lithos-loom drain`` trusts.
+
+    **Fails closed on a file it cannot read.** ``claim_pidfile`` truncates and
+    rewrites the file *under its lock*, so a daemon booting right now shows a
+    pidfile with no well-formed identity in it — and reading that as "nobody
+    here" is exactly the wrong answer at exactly the wrong moment. So when the
+    identity will not parse, the **lock** answers instead, and a file that
+    exists while even the lock is unknowable counts as a daemon.
     """
     path = pidfile.pidfile_path(work_dir)
     identity = pidfile.read_pidfile(path)
-    return identity is not None and pidfile.daemon_alive(path, identity)
+    if identity is not None:
+        return pidfile.daemon_alive(path, identity)
+    held = pidfile.holder_alive(path)
+    if held is not None:
+        return held
+    return path.exists()
 
 
 def refuse_if_the_run_is_still_the_daemons(

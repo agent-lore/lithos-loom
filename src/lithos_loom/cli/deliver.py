@@ -73,7 +73,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +90,7 @@ from lithos_loom.cli._deliver_lithos import (
     DeliverUncertain,
     GateOutcome,
     StoryState,
+    dispatch_hold_agent,
 )
 from lithos_loom.cli._deliver_output import (
     MANUAL_DELIVERY,
@@ -302,7 +303,32 @@ def _deliver(
             f"{story.story_id} — it is delivering this story right now. Wait "
             "for it to finish (the claim's TTL is short) and re-run if needed"
         )
+    # …and the DISPATCH HOLD: this story's route claims, under an identity of
+    # our own, held until the `pr` gate exists. The preflight reads above are
+    # point-in-time — a daemon can boot, bootstrap the story and pass its
+    # readiness check a moment later, and the runner's own gap between
+    # "ready" and "claimed" spans several awaits. Only a claim closes that:
+    # whoever holds the route aspect owns the story, and the server decides
+    # which of us got there first. Released in the `finally` — and that
+    # release is itself the event that re-triggers the runner's readiness
+    # check, which then defers the story behind the gate we raised.
+    hold = _DispatchHold(
+        url=url,
+        agent=dispatch_hold_agent(agent),
+        story_id=story.story_id,
+        routes=routes if story.status == "open" else (),
+    )
     try:
+        refused = hold.take()
+        if refused is not None:
+            raise DeliverRefused(
+                f"route {refused!r} is dispatching {story.story_id} right now "
+                "(its claim was taken before this delivery could hold it) — "
+                "the run it starts would develop the story from scratch over "
+                "the branch being delivered. Watch it with `lithos-loom "
+                f"develop attach {facts.run_id or facts.branch}` and re-run "
+                "once it has finished"
+            )
         return _deliver_claimed(
             host,
             facts=facts,
@@ -317,7 +343,46 @@ def _deliver(
             routes=routes,
         )
     finally:
+        hold.release()
         claim.release()
+
+
+@dataclass
+class _DispatchHold:
+    """The story's route claims, held for the length of one delivery.
+
+    The exclusion against a **dispatch**, as opposed to :class:`_Claim`'s
+    exclusion against another delivery. Every configured dispatch route is
+    claimed before the push and released after the gate work, so a daemon
+    that boots (or bootstraps this story) mid-delivery cannot take the story
+    into a fresh run behind our back: the route-runner claims the same aspect
+    before it dispatches, finds it held by another agent, logs the lost race
+    and defers. The identity is :func:`dispatch_hold_agent`'s, not the host's
+    — a claim only excludes another *agent*.
+
+    Taken route by route and released the same way, so a refusal leaves
+    nothing behind (the caller releases in its ``finally``).
+    """
+
+    url: str
+    agent: str
+    story_id: str
+    routes: Sequence[str]
+    held: list[str] = field(default_factory=list)
+
+    def take(self) -> str | None:
+        """Claim every route. Returns the first route already held by someone
+        else (nothing was written), or ``None`` when the story is ours."""
+        for route in self.routes:
+            if not claim_story(self.url, self.agent, self.story_id, aspect=route):
+                return route
+            self.held.append(route)
+        return None
+
+    def release(self) -> None:
+        for route in self.held:
+            release_story(self.url, self.agent, self.story_id, aspect=route)
+        self.held.clear()
 
 
 @dataclass
@@ -550,16 +615,15 @@ def _deliver_claimed(
     if record["pr_gate_id"] is None:
         record["pr_gate_id"] = live_gate_id
     # …and whether the SWAP is finished, which is the other half of what step 5
-    # promises to name. A pass that leaves the stop's human gate open must not
-    # mark the delivery as told: the run that finally retires that gate is the
-    # one whose record says so. With no gate phase (`--no-gate`), the answer
-    # comes from the story this delivery read.
+    # promises to name. A pass that leaves an open gate that could be this
+    # run's escalation must not mark the delivery as told — whether it left it
+    # deliberately (`--no-gate`), because its gate phase failed, or because
+    # this host's config gave it no authority to retire it: the run that
+    # finally retires that gate is the one whose record says so.
     swapped = (
         outcome.swap_complete
         if outcome is not None
-        else not story.retirement(
-            run_id=facts.run_id, dispatch_routes=routes
-        ).superseded
+        else not story.unretired_run_gates(facts.run_id)
     )
     marked = (
         outcome.finding_marked

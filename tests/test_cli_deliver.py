@@ -445,7 +445,9 @@ def test_a_diverged_remote_is_refused_and_nothing_is_written(
     )
     assert gh["created"] == []
     # nothing but the claim it took and gave straight back
-    assert lithos.mutating_calls == ["task_claim", "task_release"]
+    # the delivery's own leases (its `deliver` claim and the dispatch hold)
+    # and nothing else — no push, no gate, no write on the story
+    assert set(lithos.mutating_calls) == {"task_claim", "task_release"}
 
 
 # ── refusals + flags ───────────────────────────────────────────────────
@@ -760,7 +762,9 @@ def test_a_gh_failure_with_nothing_pushed_is_still_a_plain_refusal(
     result = _invoke(_RUN)
 
     assert result.exit_code == 1, result.output
-    assert lithos.mutating_calls == ["task_claim", "task_release"]
+    # the delivery's own leases (its `deliver` claim and the dispatch hold)
+    # and nothing else — no push, no gate, no write on the story
+    assert set(lithos.mutating_calls) == {"task_claim", "task_release"}
 
 
 def test_an_unwritable_json_record_is_a_partial_delivery(
@@ -1083,7 +1087,13 @@ def test_a_failed_renewal_skips_every_gate_mutation(
     assert "SKIPPED" in result.output
     assert not lithos.calls_to("task_create")  # no gate
     assert (_get(lithos, "gate-human")).status == "open"  # escalation kept
-    assert not lithos.calls_to("task_release")  # not ours to hand back
+    # the `deliver` lease is not ours to hand back (the dispatch hold, which
+    # this process demonstrably still owns, is released as usual)
+    assert not [
+        call
+        for call in lithos.calls_to("task_release")
+        if call["aspect"] == cli_lithos.DELIVER_ASPECT
+    ]
     assert _PR_URL in result.output  # the PR stands
 
 
@@ -2349,6 +2359,155 @@ def test_a_huge_handoff_is_still_read_bounded_and_redacted(tmp_path: Path) -> No
     assert time.monotonic() - started < 5.0
     assert len(summary) <= 600
     assert "/home/dave" not in summary and "(path redacted)" in summary
+
+
+# ── round-7 (review round 4) regressions ───────────────────────────────
+
+
+def _claim_spy(client: FakeLithosClient, order: list[str]) -> None:
+    """Record every claim as it happens, so the ordering can be asserted."""
+    real = client.task_claim
+
+    async def _spy(**kwargs: Any) -> Any:
+        order.append(f"claim:{kwargs['aspect']}")
+        return await real(**kwargs)
+
+    client.task_claim = _spy  # type: ignore[method-assign]
+
+
+def test_the_dispatch_hold_excludes_a_route_for_the_whole_delivery(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001: the preflight reads are point-in-time — a daemon can
+    boot, bootstrap the story and pass its readiness check a moment later, and
+    the runner's own gap between "ready" and "claimed" spans several awaits.
+    So the delivery CLAIMS every configured route before it pushes and holds
+    it until the gate exists: the route-runner claims the same aspect before
+    dispatching, and the server decides which of us got there first."""
+    order: list[str] = []
+    _claim_spy(lithos, order)
+    real_create = gh["created"]
+
+    def _note_the_push(repo_path: Path, branch: str, state: Any):
+        order.append("push")
+        return cli_repo.push_branch(repo_path, branch, state)
+
+    monkeypatch.setattr(cli, "push_branch", _note_the_push)
+
+    assert _invoke(_RUN).exit_code == 0
+    assert len(real_create) == 1
+
+    # taken under an identity of our OWN: a claim only excludes another agent,
+    # so a hold under the daemon's id would exclude nothing
+    held = [c for c in lithos.calls_to("task_claim") if c["aspect"] == "story-develop"]
+    assert held and held[0]["agent"] == cli_lithos.dispatch_hold_agent("loom")
+    assert held[0]["agent"] != "loom"
+    # …before the push, and handed back afterwards (the release is what
+    # re-triggers the runner's readiness check, which now defers)
+    assert order.index("claim:story-develop") < order.index("push")
+    assert [
+        c for c in lithos.calls_to("task_release") if c["aspect"] == "story-develop"
+    ]
+
+
+def test_a_route_that_claims_first_stops_the_delivery_dead(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001, the interleaving: a daemon boots after the preflight
+    reads and its route claims the story first. The hold is the atomic test —
+    it fails, and the delivery stops before anything is written rather than
+    gating a story a fresh run is about to develop from scratch."""
+    _drop_the_human_gate(lithos)
+    _daemon(monkeypatch, alive=False)  # nothing to see at preflight…
+    real = lithos.task_claim
+
+    async def _route_got_there_first(**kwargs: Any) -> Any:
+        if kwargs["aspect"] == "story-develop":  # …the daemon booted since
+            raise LithosClientError("claim_failed", "held by the route")
+        return await real(**kwargs)
+
+    lithos.task_claim = _route_got_there_first  # type: ignore[method-assign]
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert "is dispatching" in result.output
+    assert gh["created"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+    assert not lithos.calls_to("task_create")
+
+
+def test_a_pidfile_being_written_counts_as_a_live_daemon(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001: `claim_pidfile` truncates and rewrites the file under
+    its lock, so a daemon booting right now shows a pidfile with no well-formed
+    identity in it. Reading that as "nobody here" is the wrong answer at the
+    worst moment — the lock answers instead."""
+    _drop_the_human_gate(lithos)
+    monkeypatch.setattr(pidfile, "read_pidfile", lambda path: None)
+    monkeypatch.setattr(pidfile, "holder_alive", lambda path: True)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert "records its escalation yet" in result.output
+    assert gh["created"] == []
+
+
+def test_the_swap_is_never_called_done_over_a_gate_this_host_cannot_retire(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-003: "the swap is finished" must not mean "this config
+    gave me nothing to retire". A gate whose route this host does not
+    configure is left OPEN — so the record must stay re-postable, and the
+    invocation that can retire it (a config that names the route) must still
+    be able to say so."""
+    gate = _get(lithos, "gate-human")
+    lithos.add_task(
+        make_task(
+            "gate-human",
+            title=gate.title,
+            task_type="gate",
+            metadata={**gate.metadata, "route": "docs-develop", "run_id": _RUN},
+        )
+    )
+
+    assert _invoke(_RUN).exit_code == 0  # host.routes names story-develop only
+    assert (_get(lithos, "gate-human")).status == "open"
+    findings_before = len(lithos.findings)
+
+    # the eligibility changes: the route is configured now, so the gate is
+    # this delivery's to retire — and the corrected record must land
+    host.routes = (
+        SimpleNamespace(name="story-develop"),
+        SimpleNamespace(name="docs-develop"),
+    )
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+
+    assert _invoke(_RUN).exit_code == 0
+    assert (_get(lithos, "gate-human")).status == "completed"
+    assert len(lithos.findings) == findings_before + 1
+    assert "needs-human gate gate-human completed" in lithos.findings[-1]["summary"]
+    assert _get(lithos, _STORY).metadata["manual_delivery"]["swapped"] is True
+    # …and a third pass, with nothing left to retire, says nothing more
+    assert _invoke(_RUN).exit_code == 0
+    assert len(lithos.findings) == findings_before + 1
 
 
 # ── pure helpers ───────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
 | `lithos_loom.cli._deliver_facts` | M | 1 | 8 |
-| `lithos_loom.cli._deliver_lithos` | L | 7 | 3 |
+| `lithos_loom.cli._deliver_lithos` | L | 7 | 4 |
 | `lithos_loom.cli._deliver_output` | S | 0 | 3 |
 | `lithos_loom.cli._deliver_preflight` | S | 0 | 4 |
 | `lithos_loom.cli._deliver_repo` | M | 1 | 8 |
@@ -23,7 +23,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
-| `lithos_loom.cli.deliver` | M | 0 | 1 |
+| `lithos_loom.cli.deliver` | L | 0 | 1 |
 | `lithos_loom.cli.develop` | L | 2 | 4 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
@@ -47,6 +47,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `pr_body` — The generated body for a newly opened PR — the shared builder plus this delivery's provenance. Built lazily: an adopted PR needs none.
 
 ### `lithos_loom.cli._deliver_lithos`
+- def `dispatch_hold_agent` — The identity the **dispatch hold** is taken under — deliberately NOT the host's own agent id.
 - class `DeliverRefused` — A precondition failed and nothing was written. Exits ``1``.
 - class `DeliverUncertain` — An external write may or may not have landed, and the read that would have settled it failed too. Never exit 1: "nothing was written" is exactly what this cannot be asserted. Exits ``2`` with what to re-run.
 - class `PrGateRef` — An open ``pr`` gate holding the story, and what it watches.
@@ -85,9 +86,9 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `read_story_sync` — Step 0: the live story + the gates holding it.
 - def `run_gate_delivery` — Steps 3 + 4, in one client session.
 - def `post_finding` — Step 5: post ``[ManualDelivery]``, then mark the story (in that order).
-- def `claim_story` — Take the ``deliver`` claim on the story; ``False`` when another process holds it (two deliveries of one story must not interleave).
+- def `claim_story` — Claim *aspect* of the story; ``False`` when another agent holds it.
 - def `renew_story` — Re-up the ``deliver`` lease before the gate work — the phase that must be exclusive — so it never runs on a lease the git / gh phases spent. ``False`` when the renewal did not land, and the caller then **skips the whole gate phase**: a lease that would not renew may already belong to another delivery, and a gate raised under it is the duplicate the claim exists to prevent. The PR stands and the story keeps the gate it had — a partial a later invocation finishes.
-- def `release_story` — Release the ``deliver`` claim. Best-effort: a lingering claim only expires with its short TTL.
+- def `release_story` — Release *aspect*. Best-effort: a lingering claim only expires with its TTL — and a released route claim is itself the signal that re-triggers the runner's readiness check (``task.released``), which then defers the story behind the ``pr`` gate this delivery just raised.
 
 ### `lithos_loom.cli._github_metadata`
 - class `GithubMetadataError` — Raised when the CLI cannot complete a project-context mutation.
