@@ -254,7 +254,11 @@ def origin_repo_name(repo: Path) -> str:
 
 
 def adoptable(
-    candidates: Sequence[OpenPullRequest], *, head_sha: str, base: str
+    candidates: Sequence[OpenPullRequest],
+    *,
+    head_sha: str,
+    base: str,
+    moves_to_ours: str = "",
 ) -> tuple[OpenPullRequest | None, str]:
     """Pick the open PR that is *ours* to adopt, or say why none is (pure).
 
@@ -275,11 +279,21 @@ def adoptable(
     let an adopted PR merge into a branch ``deliver`` would never have opened
     onto, with the `pr` gate tracking that merge. Returns ``(pr, "")`` or
     ``(None, reason)``.
+
+    *moves_to_ours* is the PREVIEW's extra: a PR's head is whatever
+    ``origin/<branch>`` points at, so a delivery that will fast-forward that
+    ref carries the PR's head with it. Asked before the push (``--dry-run``),
+    a candidate sitting at the CURRENT remote sha is therefore ours the moment
+    step 1 lands — refusing it would make the preview disagree with the real
+    invocation by construction. The real step 2 asks *after* the push and
+    passes ``""``, so nothing is ever adopted on a projection that has not
+    happened.
     """
+    ours = {head_sha, *([moves_to_ours] if moves_to_ours else [])}
     for pr in candidates:
         if pr.cross_repository:
             continue
-        if pr.head_sha != head_sha:
+        if pr.head_sha not in ours:
             continue
         if pr.base_ref != base:
             continue
@@ -292,10 +306,13 @@ def adoptable(
         f" → {pr.base_ref or '(not reported)'}"
         for pr in candidates
     )
+    expected = f"{head_sha[:12]}"
+    if moves_to_ours:
+        expected += f" (or {moves_to_ours[:12]}, which the push would advance)"
     return None, (
         f"an open PR already claims this branch name but is not this delivery "
         f"({described}); expected a same-repository PR whose head is "
-        f"{head_sha[:12]} and whose base is {base}. Refusing to adopt a PR "
+        f"{expected} and whose base is {base}. Refusing to adopt a PR "
         "that is not this branch's — nothing was gated. Close or rename the "
         "other PR, or deliver from a branch name it does not claim"
     )
@@ -313,10 +330,20 @@ class PRPlan:
     base: str
     existing: OpenPullRequest | None
     refusal: str
+    projected: bool = False
+    """The adoption depends on a push that has not happened yet — the PR is at
+    ``origin``'s current sha and this delivery's fast-forward will carry it to
+    the delivered one. Only ever set for the ``--dry-run`` preview."""
 
 
 def pr_plan(
-    repo: Path, *, branch: str, repo_name: str, base: str | None, head_sha: str
+    repo: Path,
+    *,
+    branch: str,
+    repo_name: str,
+    base: str | None,
+    head_sha: str,
+    moves_to_ours: str = "",
 ) -> PRPlan:
     """The READ-ONLY half of step 2: resolve the base and the adoption
     decision, writing nothing.
@@ -327,6 +354,13 @@ def pr_plan(
     outright at the second. One function, the same three reads in the same
     order, so the plan the operator approves is the decision the delivery
     takes (`feedback-extract-shared-no-duplicate-impl`).
+
+    Sharing the function is not enough on its own, because the preview asks
+    **before** step 1 and the real step 2 asks after it: an open PR for a
+    branch whose remote ref this delivery is about to fast-forward is reported
+    at the OLD sha now and at the delivered one then. *moves_to_ours* carries
+    that push into the decision (see :func:`adoptable`), so the two agree
+    without a race being involved at all.
     """
     try:
         # Resolved BEFORE the adoption decision: the base a candidate must
@@ -336,8 +370,18 @@ def pr_plan(
         candidates = list_open_prs_for_branch(repo, branch, repo_name=repo_name)
     except RuntimeError as exc:
         raise DeliverRefused(str(exc)) from exc
-    existing, refusal = adoptable(candidates, head_sha=head_sha, base=resolved_base)
-    return PRPlan(base=resolved_base, existing=existing, refusal=refusal)
+    existing, refusal = adoptable(
+        candidates,
+        head_sha=head_sha,
+        base=resolved_base,
+        moves_to_ours=moves_to_ours,
+    )
+    return PRPlan(
+        base=resolved_base,
+        existing=existing,
+        refusal=refusal,
+        projected=existing is not None and existing.head_sha != head_sha,
+    )
 
 
 def open_or_adopt(

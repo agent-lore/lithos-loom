@@ -479,12 +479,18 @@ STORY_REASON_MAX_CHARS = 2000
 
 
 class StoredReason(NamedTuple):
-    """The stop reason as the story will carry it, and whether that copy is
-    the whole of it — the PR body's pointer is worded from *whole*, never
-    from the hope that no reason is ever long."""
+    """The stop reason as the story will carry it, plus what had to be done to
+    it to get it there.
+
+    The PR body's pointer is worded from *whole* and *edits*, never from the
+    hope that no reason is ever long or oddly shaped: ``whole`` is ``True``
+    only when ``text`` is the reason **byte for byte**, and ``edits`` names
+    every change when it is not, so the pointer can say which.
+    """
 
     text: str
     whole: bool
+    edits: str = ""
 
 
 def story_reason(facts: RunFacts) -> StoredReason:
@@ -500,19 +506,28 @@ def story_reason(facts: RunFacts) -> StoredReason:
     carries the reason itself, and the promise is kept by this delivery rather
     than by a finding that may never have been written.
 
-    The copy is **verbatim** but for two things, and both are declared rather
-    than assumed away: terminal control / bidi / zero-width bytes are stripped
-    (a finding is a rendered surface too, and none of them are content), and a
-    reason longer than :data:`STORY_REASON_MAX_CHARS` is capped so a
-    pathological one cannot make the finding unpostable — which is exactly
-    when ``whole`` is ``False`` and the PR body stops calling it full. Line
-    structure is kept: collapsing it would be another silent edit.
+    Three things can change it on the way, and each is **measured** rather
+    than assumed harmless — the caller publishes a claim about this copy, so
+    "verbatim" has to mean it: terminal control / bidi / zero-width bytes are
+    stripped (a finding is a rendered surface too), trailing whitespace goes
+    (it survives no rendering anyway), and a reason longer than
+    :data:`STORY_REASON_MAX_CHARS` is capped so a pathological one cannot make
+    the finding unpostable. Line structure is kept — collapsing it would be
+    another silent edit. Whichever of the three actually fired is named in
+    ``edits``, and ``whole`` is ``True`` only when none did.
     """
-    reason = sanitize_for_terminal(facts.failure_reason or facts.delivery_failure)
-    reason = "\n".join(line.rstrip() for line in reason.splitlines()).strip()
-    if len(reason) > STORY_REASON_MAX_CHARS:
-        return StoredReason(reason[: STORY_REASON_MAX_CHARS - 1].rstrip() + "…", False)
-    return StoredReason(reason, True)
+    raw = facts.failure_reason or facts.delivery_failure
+    edits: list[str] = []
+    reason = sanitize_for_terminal(raw)
+    if reason != raw:
+        edits.append("control bytes stripped")
+    trimmed = "\n".join(line.rstrip() for line in reason.splitlines()).strip()
+    if trimmed != reason:
+        edits.append("trailing whitespace trimmed")
+    if len(trimmed) > STORY_REASON_MAX_CHARS:
+        trimmed = trimmed[: STORY_REASON_MAX_CHARS - 1].rstrip() + "…"
+        edits.append(f"capped at {STORY_REASON_MAX_CHARS} characters")
+    return StoredReason(trimmed, not edits, ", ".join(edits))
 
 
 def provenance_lines(facts: RunFacts) -> list[str]:
@@ -555,8 +570,7 @@ def provenance_lines(facts: RunFacts) -> list[str]:
             carried = (
                 "the story carries the full, unredacted reason"
                 if stored.whole
-                else "the story carries the unredacted reason, itself capped "
-                f"at {STORY_REASON_MAX_CHARS} characters"
+                else f"the story carries the unredacted reason, {stored.edits}"
             )
             stop += f": {reason} ({carried})"
         lines.append(stop)

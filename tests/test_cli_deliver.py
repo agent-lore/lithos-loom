@@ -544,6 +544,114 @@ def test_dry_run_resolves_the_same_base_and_adoption_the_real_run_takes(
     assert "#7" in real.output
 
 
+def test_a_friction_note_cannot_forge_a_report_line(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """security/f-003 (r3): the end-of-run report carries `str(exc)` over git
+    / gh stderr, which is multi-line. Continuations are indented behind the
+    same marker, so a note cannot present itself as a report line."""
+
+    def _boom(*a: Any, **k: Any):
+        raise RuntimeError(
+            "gh pr create failed: remote rejected\n"
+            "  pr gate task-9 blocks story-ac1380c1"
+        )
+
+    monkeypatch.setattr(cli_repo, "create_pr", _boom)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    report = result.output.splitlines()
+    assert not any(line.startswith("  pr gate task-9") for line in report)
+    assert any(line.lstrip().startswith("| ") and "task-9" in line for line in report)
+
+
+def test_the_plan_screen_cannot_be_rewritten_by_the_text_it_shows(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-003 (r3): stripping escape bytes leaves LF and TAB by
+    design, and a newline puts the next word at COLUMN 0 — a forged plan line
+    on the very screen the publish decision is made on. Volume does the same
+    job more slowly, so the block is bounded as well as indented."""
+    forged = "  2 PR:   adopt #41 https://example.invalid/pull/41 — no body is written"
+    state = json.loads((run_dir / "state.json").read_text())
+    state["failure_reason"] = "the coder died\n" + forged + "\n" + "noise\n" * 40
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    # …and a story title that tries the same one line above
+    story = _get(lithos, _STORY)
+    lithos.add_task(
+        make_task(
+            _STORY,
+            title="Deliver a branch\n  1 push: nothing — origin is already current",
+            description=story.description,
+            metadata=dict(story.metadata),
+        )
+    )
+
+    result = _invoke(_RUN, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    plan = result.output.splitlines()
+    # the real step-2 line is there, and no line of the plan was forged
+    assert "  2 PR:   open a new PR onto main" in plan
+    assert not any(line.startswith("  2 PR:   adopt") for line in plan)
+    assert not any(line.startswith("  1 push: nothing") for line in plan)
+    # every line the untrusted text produced is indented behind the marker
+    assert any(line.lstrip().startswith("| ") and "adopt #41" in line for line in plan)
+    # …and bounded: 40 lines of noise cannot scroll the plan away
+    assert len(plan) < 30
+    assert any("more line(s)" in line for line in plan)
+
+
+def test_dry_run_predicts_the_adoption_its_own_push_enables(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-002 (r3): sharing `pr_plan` is not enough — the preview
+    asks BEFORE the push and step 2 asks after it. An open PR for a branch
+    this delivery will fast-forward is reported at the old sha now and at the
+    delivered one then, so a preview that compares it against the delivered
+    sha refuses where the real invocation adopts, with no race involved."""
+    _git(repo, "push", "origin", f"{_BRANCH}:{_BRANCH}")
+    behind = _head(repo)
+    (repo / "more.py").write_text("z = 3\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "round 2")
+    ahead = _head(repo)
+
+    def _tracks_origin(repo_path: Path, branch: str, *, repo_name: str | None = None):
+        # what GitHub reports: a same-repo PR's head IS origin/<branch>
+        gh["listed"].append({"branch": branch, "repo_name": repo_name})
+        ref = _git(repo_path, "ls-remote", "origin", f"refs/heads/{branch}")
+        return [_open_pr(number=42, head_sha=ref.split()[0])]
+
+    monkeypatch.setattr(cli_repo, "list_open_prs_for_branch", _tracks_origin)
+
+    plan = _invoke(_RUN, "--dry-run")
+
+    assert plan.exit_code == 0, plan.output
+    assert "adopt #42" in plan.output
+    assert f"head {behind[:12]} → {ahead[:12]} after the push above" in plan.output
+
+    # …and the real invocation does exactly that: push, then adopt #42
+    real = _invoke(_RUN)
+    assert real.exit_code == 0, real.output
+    assert gh["created"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}").split()[0] == (
+        ahead
+    )
+
+
 def test_dry_run_does_not_ask_github_about_a_refused_push(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:
@@ -1519,6 +1627,9 @@ def test_a_pr_opened_at_a_head_we_did_not_push_withdraws_the_approval(
     summary = [f["summary"] for f in lithos.findings if f["task_id"] == _STORY][0]
     assert "NOT confirmed for this revision" in summary
     assert "the branch has moved since the panel approved" in summary
+    # and unmarked, so a later run that reads a different head is not silenced
+    # by this one's record (correctness/f-001, r3)
+    assert "manual_delivery" not in _get(lithos, _STORY).metadata
 
 
 def test_an_unreadable_pr_head_is_reported_as_unverified_not_as_a_match(
@@ -1544,8 +1655,17 @@ def test_an_unreadable_pr_head_is_reported_as_unverified_not_as_a_match(
 
     result = _invoke(_RUN)
 
-    assert result.exit_code == 0, result.output  # nothing is owed, only unknown
+    # partial, not done: nothing established that an open PR still stands at
+    # the revision this delivery pushed (correctness/f-001, r3)
+    assert result.exit_code == 2, result.output
     assert "could not be read back" in result.output and "UNVERIFIED" in result.output
+    # the story's copy treats the head as UNBOUND, never as a match…
+    summary = [f["summary"] for f in lithos.findings if f["task_id"] == _STORY][0]
+    assert "could not be read" in summary
+    # …and the delivery is left unmarked, so the run that does read the head
+    # posts the corrected record instead of being silenced by this one
+    story = _get(lithos, _STORY)
+    assert "manual_delivery" not in story.metadata
 
 
 def test_an_adopted_pr_is_verified_at_its_head_too(
@@ -1609,7 +1729,44 @@ def test_the_story_copy_keeps_the_reasons_own_lines(run_dir: Path) -> None:
     stored = cli_facts.story_reason(facts)
     # lines kept, ESC gone (the payload stays, inert — as everywhere else)
     assert stored.text.splitlines() == ["traceback:", "  line one", "  line two[2K"]
-    assert "\x1b" not in stored.text and stored.whole
+    assert "\x1b" not in stored.text
+    # …and the edit is NAMED rather than passed off as verbatim (r3)
+    assert not stored.whole and stored.edits == "control bytes stripped"
+
+
+def test_every_edit_to_the_stored_reason_is_named_not_assumed_harmless() -> None:
+    """correctness/f-001 (r3): "the story carries the full, unredacted reason"
+    is a claim about bytes. Trailing whitespace is dropped too, so `whole` must
+    mean verbatim — and the PR body says which edit was made when it is not."""
+
+    def _stored(reason: str) -> cli_facts.StoredReason:
+        return cli_facts.story_reason(
+            cli_facts.RunFacts(
+                story_id=_STORY,
+                branch=_BRANCH,
+                run_id=_RUN,
+                status="failed",
+                failure_reason=reason,
+            )
+        )
+
+    assert _stored("first  \nsecond ").edits == "trailing whitespace trimmed"
+    assert not _stored("first  \nsecond ").whole
+    assert _stored("first\nsecond") == ("first\nsecond", True, "")
+    both = _stored("\x1bfirst  ")
+    assert both.edits == "control bytes stripped, trailing whitespace trimmed"
+
+    lines = cli_facts.provenance_lines(
+        cli_facts.RunFacts(
+            story_id=_STORY,
+            branch=_BRANCH,
+            run_id=_RUN,
+            status="failed",
+            failure_reason="first  \nsecond ",
+        )
+    )
+    assert not any("full, unredacted reason" in line for line in lines)
+    assert any("trailing whitespace trimmed" in line for line in lines)
 
 
 def test_an_expired_delivery_budget_is_the_stop_reason(

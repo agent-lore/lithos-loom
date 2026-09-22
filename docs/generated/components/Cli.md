@@ -14,7 +14,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli` | XS | 0 | 0 |
 | `lithos_loom.cli._deliver_facts` | M | 2 | 10 |
 | `lithos_loom.cli._deliver_lithos` | L | 7 | 4 |
-| `lithos_loom.cli._deliver_output` | M | 0 | 3 |
+| `lithos_loom.cli._deliver_output` | M | 0 | 4 |
 | `lithos_loom.cli._deliver_preflight` | S | 0 | 4 |
 | `lithos_loom.cli._deliver_repo` | M | 2 | 10 |
 | `lithos_loom.cli._deliver_session` | S | 0 | 7 |
@@ -42,7 +42,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
 - def `run_facts` — Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
 - def `redact_for_publication` — A bounded, markup-inert rendering of host text that is about to be published.
-- class `StoredReason` — The stop reason as the story will carry it, and whether that copy is the whole of it — the PR body's pointer is worded from *whole*, never from the hope that no reason is ever long.
+- class `StoredReason` — The stop reason as the story will carry it, plus what had to be done to it to get it there.
 - def `story_reason` — The stop reason as the STORY carries it: control-stripped, bounded, and honest about which of those it had to do.
 - def `provenance_lines` — The PR body's ``## Provenance`` block: where this branch came from.
 - def `approval_unbound` — Why a recorded approval does NOT describe what this PR delivers, or ``""`` when it does.
@@ -64,6 +64,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 ### `lithos_loom.cli._deliver_output`
 - def `delivery_finding` — The ``[ManualDelivery]`` summary posted on the story (pure).
+- def `quoted_block` — *text* as bounded display lines, each safe to print behind an indent.
 - def `echo_plan`
 - def `render`
 

@@ -99,7 +99,12 @@ partial first pass finishes the job and changes nothing else.
    sha this delivery pushed is a `[Friction]` naming both, the delivery reports
    partial (exit 2), and every later claim about the delivered revision — the
    approval above all — is made against the **PR's** head, not the pushed one.
-   A head that could not be read is reported as unverified, never as a match.
+   A head that could not be read is neither: nothing then establishes that an
+   open PR still stands at the delivered revision, so the run reports partial
+   too, the approval is left **unbound** (never quietly re-bound to the sha
+   that was pushed), and the delivery is left **unmarked** — the run that does
+   read the head posts the record, corrected if the head turns out to have
+   moved.
 
 3. **Raise the `pr` gate** on the story and record it: `pr_gate_id`, and — on
    the same write — a per-key delete of the stop's failed-attempt marker and
@@ -360,7 +365,7 @@ unreviewed code merges on a reviewed PR's reputation.
 | `--story TASK_ID` | The story this branch implements (default: the run dir's task id). Read live from Lithos: title, description, `acceptance_criteria`, `project`, `github_issue_url`. |
 | `--base REF` | Base branch for the PR (default: the repo's default branch, via `gh repo view`). It constrains **adoption** as well as opening: a candidate PR whose base is not this one is not this delivery's, so it is refused rather than adopted (an adopted PR merges somewhere `deliver` would never have opened onto, with the `pr` gate tracking that merge). |
 | `--no-gate` | Open the PR only. No `pr` gate is raised and the needs-human gate is left open, so the PR is **UNMONITORED** — nothing tracks its merge, ingests reviews on it, or re-gates it when the base moves. The finding says so. |
-| `--dry-run` | Print the five steps with every fact **resolved** and write nothing. Resolved means asked: remote state from git, and — through the same `pr_plan` reads step 2 makes — the repository's **default base** and the concrete step-2 decision (`adopt #N`, `open a new PR onto <base>`, or the `REFUSE` a same-name PR that is not this branch's would produce), plus the would-be title, the gates that would be completed and the ones that would be kept. The two `gh` reads are read-only; nothing is pushed, created or written to Lithos. A push the plan refuses stops there — step 2 reads nothing, because the real invocation never reaches it. When a new PR would be opened, the plan also prints the coder's handoff quote **as it would be published**. Text loom did not author — the stop reason, the story title, the quote — is stripped of terminal control bytes before it is echoed: this is the screen the decision is made on. |
+| `--dry-run` | Print the five steps with every fact **resolved** and write nothing. Resolved means asked: remote state from git, and — through the same `pr_plan` reads step 2 makes — the repository's **default base** and the concrete step-2 decision (`adopt #N`, `open a new PR onto <base>`, or the `REFUSE` a same-name PR that is not this branch's would produce), plus the would-be title, the gates that would be completed and the ones that would be kept. The preview asks *before* step 1 and the real step 2 asks after it, so the push is **projected into the decision**: an open PR for a branch this delivery will fast-forward sits at `origin`'s current sha now and at the delivered one then, and the plan reads it as the adoption it will be (`adopt #N (head <old> → <new> after the push above)`) instead of refusing something that cannot refuse. The two `gh` reads are read-only; nothing is pushed, created or written to Lithos. A push the plan refuses stops there — step 2 reads nothing, because the real invocation never reaches it. When a new PR would be opened, the plan also prints the coder's handoff quote **as it would be published**. Text loom did not author — the stop reason, the story title, the quote, a `gh` refusal — is stripped of terminal control bytes, **bounded**, and emitted with every continuation line indented behind a `|` marker before it is echoed. Stripping escapes is only half of it: LF survives by design, and a newline would land the next word at column 0 as a forged plan line, while sheer volume would scroll the real plan away. The story line takes the title's first line only, as the PR title already does. This is the screen the decision is made on. |
 | `--json PATH` | Write the structured record. |
 | `--config` | Host config path. |
 

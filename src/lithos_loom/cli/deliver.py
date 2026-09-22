@@ -308,6 +308,13 @@ def _deliver(
                 repo_name=repo_name,
                 base=base,
                 head_sha=state.local_sha,
+                # the preview runs BEFORE the push, and a PR's head is
+                # whatever origin/<branch> points at: a fast-forward carries
+                # an open PR at the current remote sha to the delivered one,
+                # so the plan reads it as the adoption the real step 2 makes
+                moves_to_ours=(
+                    state.remote_sha if state.action == PUSH_FAST_FORWARD else ""
+                ),
             )
         )
         echo_plan(
@@ -585,16 +592,27 @@ def _deliver_claimed(
         repo, branch=facts.branch, repo_name=repo_name, pr_url=pr_url
     )
     if not record["pr_head_sha"]:
+        # "Could not ask" is not "it matches": nothing establishes that an open
+        # PR still stands at the revision this delivery pushed, so the delivery
+        # is PARTIAL (exit 2) and stays unmarked — the run that does read the
+        # head posts the record, corrected if the head turns out to have moved.
+        record["gate_complete"] = False
+        record["complete"] = False
         notes.append(
             f"the head behind {pr_url} could not be read back, so the revision "
             f"it delivers is UNVERIFIED — this delivery pushed "
-            f"{state.local_sha[:12]}; check the PR before merging"
+            f"{state.local_sha[:12]}, and nothing here confirms the PR is still "
+            "open at it. Re-run to settle it; check the PR before merging"
         )
     elif record["pr_head_sha"] != state.local_sha:
         # Not a refusal: the PR exists and must be gated and reported. But it
         # is not the revision this delivery pushed, so nothing said about it
         # may rest on that — including a recorded panel approval.
         record["pr_head_moved"] = True
+        # unmarked as well as partial: the story must stay re-postable, so a
+        # later run that finds the PR back at the delivered revision (or at
+        # another one) records that rather than being silenced by this pass
+        record["gate_complete"] = False
         record["complete"] = False
         notes.append(
             f"{pr_url} is at {record['pr_head_sha'][:12]}, NOT the "
@@ -653,7 +671,11 @@ def _deliver_claimed(
             record["pr_gate_id"] = outcome.pr_gate_id
             record["human_gates_completed"] = list(outcome.human_gates_completed)
             record["human_gates_retained"] = list(outcome.human_gates_retained)
-            record["gate_complete"] = not outcome.problems
+            # AND-ed, never assigned: an earlier step may already have found
+            # this delivery unfinished (a PR head that could not be read, or
+            # one that is not the revision pushed), and a clean gate phase
+            # does not settle that — the marker must not be written over it.
+            record["gate_complete"] = record["gate_complete"] and not outcome.problems
             record["complete"] = record["complete"] and record["gate_complete"]
             notes.extend(outcome.problems)
     # --no-gate needs no note here: it is a choice, not friction, and

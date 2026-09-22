@@ -42,7 +42,13 @@ from lithos_loom.cli._deliver_repo import (
 )
 from lithos_loom.plugins.story_develop import run_outcome
 
-__all__ = ["MANUAL_DELIVERY", "delivery_finding", "echo_plan", "render"]
+__all__ = [
+    "MANUAL_DELIVERY",
+    "delivery_finding",
+    "echo_plan",
+    "quoted_block",
+    "render",
+]
 
 
 # Stable, machine-parseable finding prefix (see AGENTS.md): a stopped run's
@@ -101,14 +107,13 @@ def delivery_finding(
         # …but the approval was given on a revision and a story, and the audit
         # copy says so whenever this delivery is not that pair (f-004): the
         # story's record must not read as a review of what was delivered here.
-        # against the head GitHub reports for the PR when it could be read,
-        # and only otherwise against the sha this delivery pushed: the claim
-        # is about the revision the PR actually delivers (deliver.py step 2b).
+        # Against the head GitHub reports for the PR — never against the sha
+        # this delivery pushed. The claim is about the revision the PR
+        # actually delivers (deliver.py step 2b), so a head that could not be
+        # read leaves it UNBOUND ("") and the approval is downgraded; falling
+        # back to what we pushed would turn "could not ask" into a match.
         unbound = approval_unbound(
-            facts,
-            delivered_head=str(
-                record.get("pr_head_sha") or record.get("pushed_sha") or ""
-            ),
+            facts, delivered_head=str(record.get("pr_head_sha") or "")
         )
         if unbound:
             said += f" — but it is NOT confirmed for this revision: {unbound}"
@@ -165,6 +170,44 @@ def delivery_finding(
     return summary
 
 
+# How untrusted text is rendered on a terminal line loom owns. Stripping the
+# escape bytes (`sanitize_for_terminal`) is only half of it: LF and TAB survive
+# by design, and a newline lands the next word at COLUMN 0 — a line the
+# operator reads as loom's own. `--dry-run` is the screen the publish decision
+# is made on (and, since the handoff quote ships in the body, the control that
+# stands in for a confidentiality boundary), so nothing it displays may be able
+# to forge a line of it. Every continuation is therefore indented behind a
+# marker, and the whole block is bounded: volume scrolls a plan off a terminal
+# as surely as a forged line replaces one.
+_BLOCK_WIDTH = 72
+_BLOCK_MAX_LINES = 8
+_BLOCK_MARKER = "| "
+
+
+def quoted_block(
+    text: str, *, width: int | None = _BLOCK_WIDTH, limit: int = _BLOCK_MAX_LINES
+) -> list[str]:
+    """*text* as bounded display lines, each safe to print behind an indent.
+
+    No line reaches the caller carrying its own break, and the result is capped
+    at *limit* lines with a tail saying how many were dropped — the caller
+    prefixes each one, so the block can only occupy the space it is given.
+
+    *width* wraps long lines too, which is what the ``--dry-run`` screen wants:
+    it is read as a fixed-shape plan, so a line long enough to soft-wrap at the
+    terminal's own column 0 is the same forgery in slower motion. The
+    end-of-run report passes ``None`` — its notes are sentences the operator
+    greps, and only their embedded breaks are a hazard there.
+    """
+    out: list[str] = []
+    for line in text.splitlines() or [""]:
+        out.extend((textwrap.wrap(line, width=width) or [""]) if width else [line])
+    if len(out) > limit:
+        dropped = len(out) - limit
+        out = out[:limit] + [f"… {dropped} more line(s) — see the story's record"]
+    return out
+
+
 def echo_plan(
     *,
     facts: RunFacts,
@@ -196,12 +239,24 @@ def echo_plan(
 
     echo(f"deliver {facts.run_id or facts.branch}: dry run, nothing written")
     echo(f"  repo:   {repo} → {repo_name}")
-    echo(f"  story:  {story.story_id} [{story.status}] — {story.title}")
-    # the raw failure reason stays on the operator's terminal; the PR body
-    # carries only the classification (see `provenance_lines`). An approved run
-    # has no `failure_reason` — its reason is why its own delivery never landed.
-    reason = facts.failure_reason or facts.delivery_failure
-    echo(f"  run:    {facts.status or '?'} — {reason or '—'}")
+    # the title's FIRST line only — the PR title three steps down is
+    # `heading.splitlines()[0][:90]`, so a multi-line title is already known
+    # to be possible; here it would forge plan lines
+    heading = story.title.splitlines()[0] if story.title.splitlines() else ""
+    echo(f"  story:  {story.story_id} [{story.status}] — {heading}")
+    # The unredacted reason stays on the operator's terminal (the PR body
+    # carries only the redacted classification — see `provenance_lines`), but
+    # it is `gh` / `git` stderr and arrives multi-line and unbounded: it gets
+    # the story copy's own bound (`story_reason`) and this screen's line
+    # shaping. An approved run has no `failure_reason` — its reason is why its
+    # own delivery never landed.
+    reason = quoted_block(story_reason(facts).text)
+    if len(reason) <= 1:
+        echo(f"  run:    {facts.status or '?'} — {reason[0] if reason else '—'}")
+    else:
+        echo(f"  run:    {facts.status or '?'} —")
+        for line in reason:
+            echo(f"          {_BLOCK_MARKER}{line}")
     unbound = (
         approval_unbound(facts, delivered_head=state.local_sha)
         if facts.status == run_outcome.APPROVED
@@ -218,13 +273,24 @@ def echo_plan(
         # adoption decision here would describe a delivery that cannot happen
         echo("  2 PR:   not reached — the push above is refused")
     elif plan.existing is not None:
+        # a projected adoption names BOTH shas: the PR is at origin's current
+        # tip and step 1 above is what carries it to the delivered revision
+        at = (
+            f"head {plan.existing.head_sha[:12]} → {state.local_sha[:12]} "
+            "after the push above"
+            if plan.projected
+            else f"head {plan.existing.head_sha[:12]}"
+        )
         echo(
             f"  2 PR:   adopt #{plan.existing.number} {plan.existing.url} "
-            f"(head {plan.existing.head_sha[:12]} → {plan.base}) — no body is "
-            "written"
+            f"({at}, base {plan.base}) — no body is written"
         )
     elif plan.refusal:
-        echo(f"  2 PR:   REFUSE — {plan.refusal}")
+        # the refusal quotes GitHub's own fields back (PR titles, base refs)
+        refusal = quoted_block(plan.refusal)
+        echo(f"  2 PR:   REFUSE — {refusal[0] if refusal else ''}")
+        for line in refusal[1:]:
+            echo(f"          {_BLOCK_MARKER}{line}")
     else:
         echo(f"  2 PR:   open a new PR onto {plan.base}")
         echo(f"          title {title!r}")
@@ -236,10 +302,8 @@ def echo_plan(
             # text and the encoding it is in — so the operator's read of it
             # here is the last check before it is world-readable for good.
             echo("          it quotes the coder's handoff summary, as published:")
-            for line in textwrap.wrap(
-                facts.coder_summary, width=72, initial_indent="", subsequent_indent=""
-            ):
-                echo(f"            | {line}")
+            for line in quoted_block(facts.coder_summary):
+                echo(f"            {_BLOCK_MARKER}{line}")
     if no_gate:
         echo("  3 gate: skipped (--no-gate) — the PR would be UNMONITORED")
         echo("  4 human gates: left open (no pr gate would hold the story)")
@@ -306,5 +370,9 @@ def render(record: Mapping[str, Any]) -> list[str]:
     if not record["changed"]:
         lines.append("  nothing changed — this branch was already delivered")
     for note in record["notes"]:
-        lines.append(f"  [Friction] {note}")
+        # `notes` carry `str(exc)` over git / gh stderr: same treatment, so a
+        # continuation line cannot present itself as a report line of its own
+        shaped = quoted_block(note, width=None)
+        lines.append(f"  [Friction] {shaped[0] if shaped else ''}")
+        lines.extend(f"    {_BLOCK_MARKER}{line}" for line in shaped[1:])
     return lines
