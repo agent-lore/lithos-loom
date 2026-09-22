@@ -85,14 +85,17 @@ __all__ = [
 
 DELIVERY_MARKER_KEY = "manual_delivery"
 """Story-metadata key recording that this delivery's ``[ManualDelivery]``
-finding was posted: ``{"run_id": …, "pr_url": …, "gated": bool}``.
+finding was posted:
+``{"run_id": …, "pr_url": …, "gated": bool, "swapped": bool}``.
 
-All three fields are contractual. ``gated`` says whether a ``pr`` gate was
-holding this PR when the finding was written, and :meth:`StoryState
-.delivery_marked` reads it as a **floor** — a later run that actually gates
-the PR posts the corrected record, while a later ungated pass over a gated
-record stays silent (it corrects nothing). A marker without the key reads as
-ungated, the direction that re-posts.
+Every field is contractual. ``gated`` says whether a ``pr`` gate was holding
+this PR when the finding was written; ``swapped`` says whether the gate SWAP
+had finished — no human gate this delivery would retire was left open. Both
+are read as **floors** by :meth:`StoryState.delivery_marked`: a later run that
+gates the PR, or that completes the human gate an earlier pass could not,
+posts the corrected record, while a pass that achieves less than the record
+already says stays silent (it corrects nothing). A marker without a key reads
+as ``False``, the direction that re-posts.
 
 On the **story**, not the gate: the story is the one object every mode reads
 (``--no-gate`` raises no gate at all) and the one that outlives the gate — a
@@ -325,23 +328,45 @@ class StoryState:
         )
 
     def escalation_landed(self, *, run_id: str, dispatch_routes: Sequence[str]) -> bool:
-        """Whether the daemon has already handed THIS run's stop over.
+        """Whether the daemon has handed THIS run's stop over **and the story
+        is still holding it** — the signal that no dispatch can be under way.
 
-        The durable end of the handoff, read off the story: a ``human`` gate
-        this delivery would retire (:meth:`retirement`), or a failed-attempt
-        marker naming the run — which the runner writes on the same path,
-        including the marker-only ``[BlockerFailed]`` fallback where no gate
-        could be raised. Either one proves the runner applied the run's
-        result; neither depends on a claim, which can expire under a producer
-        that is still alive (an unreachable Lithos outlives the TTL while the
-        plugin keeps running).
+        Not just "the runner wrote something once": the handoff has to be
+        something that is *still* keeping the story off the ready frontier,
+        or the same interleaving comes back from the other end. Three shapes
+        qualify, all read off the story and none of them a claim (a claim
+        expires under a producer that is still alive — an unreachable Lithos
+        outlives the TTL while the plugin keeps running):
+
+        * an **open** loom ``human`` gate naming this run — the escalation
+          itself, and it blocks the frontier;
+        * an open gate this delivery would retire (:meth:`retirement`), which
+          is how an escalation raised without a run id is recognised;
+        * a failed-attempt marker naming this run **and naming no gate** —
+          the marker-only ``[BlockerFailed]`` fallback, the one marker shape
+          that suppresses dispatch on its own
+          (:func:`~lithos_loom.subscriptions.dispatch_guards
+          .declines_bootstrap_replay` declines a replay only while no
+          ``gate_id`` is recorded).
+
+        A marker that NAMES a gate is deliberately not enough: there the gate
+        decides, and once the operator completes it the marker stays behind as
+        pure history while the story goes back on the frontier. Reading it as
+        a handoff would let a delivery run in exactly the window the route is
+        walking from "ready" to "claimed" — and the run it dispatches would
+        raise its own gate afterwards, over a story this command had just
+        reported as delivered.
         """
+        if run_id and any(gate.run_id == run_id for gate in self.human_gates):
+            return True
         if self.retirement(run_id=run_id, dispatch_routes=dispatch_routes).superseded:
             return True
         if not run_id:
             return False
         return any(
-            isinstance(marker, Mapping) and str(marker.get("run_id") or "") == run_id
+            isinstance(marker, Mapping)
+            and str(marker.get("run_id") or "") == run_id
+            and not marker.get("gate_id")
             for key, marker in self.metadata.items()
             if key.startswith(LAST_ATTEMPT_KEY_PREFIX)
         )
@@ -370,18 +395,24 @@ class StoryState:
         body = self.description.strip()
         return f"{self.title}\n\n{body}" if body else self.title
 
-    def delivery_marked(self, *, pr_url: str, run_id: str, gated: bool) -> bool:
+    def delivery_marked(
+        self, *, pr_url: str, run_id: str, gated: bool, swapped: bool
+    ) -> bool:
         """Whether the story already records a ``[ManualDelivery]`` finding for
         this delivery **in this state** (:data:`DELIVERY_MARKER_KEY`).
 
-        *gated* is part of the identity, not decoration — but as a **floor**,
-        not an equality. A ``--no-gate`` delivery's finding says the PR is
-        UNMONITORED, so a later run that actually gates the same PR must post
-        the corrected record rather than read that marker as "already said".
-        The other direction is not a correction: a later ``--no-gate`` pass
-        over an already-recorded gated delivery achieved nothing the story
-        does not carry, and stays silent. An old marker without the key reads
-        as ungated — the direction that re-posts.
+        *gated* and *swapped* are part of the identity, not decoration — but
+        as **floors**, not equalities. A ``--no-gate`` delivery's finding says
+        the PR is UNMONITORED, so a later run that actually gates the same PR
+        must post the corrected record rather than read that marker as
+        "already said"; and a record written while the stop's human gate was
+        still open does not describe the pass that finally completed it —
+        step 5's contract is that the finding names the gates retired, so the
+        run that retires them speaks. Neither floor runs the other way: a pass
+        that achieves less than the record already carries (a later
+        ``--no-gate`` over a gated delivery, a pass with nothing left to
+        retire) corrects nothing and stays silent. An old marker without a key
+        reads as ``False`` — the direction that re-posts.
         """
         marker = self.metadata.get(DELIVERY_MARKER_KEY)
         if not isinstance(marker, Mapping):
@@ -390,6 +421,7 @@ class StoryState:
             marker.get("pr_url") == pr_url
             and str(marker.get("run_id") or "") == run_id
             and (bool(marker.get("gated")) or not gated)
+            and (bool(marker.get("swapped")) or not swapped)
         )
 
     def delivery_recorded(self, gate_id: str, retirement: GateRetirement) -> bool:
@@ -511,6 +543,11 @@ class GateOutcome:
     finding_marked: bool = False
     """The adopted gate already records this delivery's ``[ManualDelivery]``
     finding, so it must not be posted twice."""
+    swap_complete: bool = False
+    """No human gate this delivery was entitled to retire is still open — the
+    swap this command exists for has finished. False on every path that ends
+    early (a terminal story, a foreign ``pr`` gate, a gate that could not be
+    raised), which is the direction that keeps the record re-postable."""
     human_gates_completed: list[str] = field(default_factory=list)
     human_gates_retained: list[str] = field(default_factory=list)
     """Open loom ``human`` gates another subsystem raised (described with their
@@ -651,17 +688,37 @@ async def gate_delivery(
                 )
             else:
                 outcome.human_gates_completed.append(human_gate_id)
+    # What the swap reached: every gate this delivery was entitled to retire
+    # is now completed. (An empty entitlement is a finished swap — there was
+    # nothing left to retire.)
+    outcome.swap_complete = not [
+        gate
+        for gate in retirement.superseded
+        if gate.gate_id not in outcome.human_gates_completed
+    ]
     # Read LAST: whether this delivery's provenance is already recorded
     # depends on the state it reached — a marker written by a `--no-gate` pass
-    # does not describe the gated one that just completed.
+    # does not describe the gated one that just completed, and one written
+    # while the human gate was still open does not describe the pass that
+    # completed it.
     outcome.finding_marked = live.delivery_marked(
-        pr_url=pr_url, run_id=run_id, gated=outcome.pr_gate_id is not None
+        pr_url=pr_url,
+        run_id=run_id,
+        gated=outcome.pr_gate_id is not None,
+        swapped=outcome.swap_complete,
     )
     return outcome
 
 
 async def mark_delivery_finding(
-    client: Any, *, story_id: str, pr_url: str, run_id: str, gated: bool, agent: str
+    client: Any,
+    *,
+    story_id: str,
+    pr_url: str,
+    run_id: str,
+    gated: bool,
+    swapped: bool,
+    agent: str,
 ) -> None:
     """Record on the **story** that this delivery's finding was posted.
 
@@ -678,9 +735,11 @@ async def mark_delivery_finding(
             DELIVERY_MARKER_KEY: {
                 "run_id": run_id,
                 "pr_url": pr_url,
-                # part of the identity: a later run that GATES this PR must
-                # post the corrected record, not read this one as "said"
+                # part of the identity: a later run that GATES this PR, or
+                # that completes the human gate this pass left open, must post
+                # the corrected record rather than read this one as "said"
                 "gated": gated,
+                "swapped": swapped,
             }
         },
     )

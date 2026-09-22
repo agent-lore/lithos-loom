@@ -170,15 +170,19 @@ partial first pass finishes the job and changes nothing else.
 
    The marker lives on the story, not the gate, so `--no-gate` gets the same
    guarantee and a gate the merge sweep completes cannot take the record with
-   it. It records whether the PR ended up **gated** — the state the delivery
-   LEAVES BEHIND, which includes a `pr` gate the story already carries for
-   this PR, not only one this invocation raised. That is a floor: a later run
-   that actually gates a PR delivered `--no-gate` posts the corrected record
-   (the story's only durable provenance would otherwise still call a monitored
-   PR unmonitored), while a later `--no-gate` pass over an already-recorded
-   gated delivery achieves nothing new and stays silent. A `--no-gate` pass
-   over a PR that *is* already gated names the gate that holds it, never
-   "UNMONITORED" — the story must not contradict its own open gate. **Known boundary:** if the process dies before the finding *and* the PR
+   it. It records the state the delivery LEAVES BEHIND, on two axes: whether
+   the PR ended up **gated** (a `pr` gate the story already carries for this
+   PR counts, not only one this invocation raised) and whether the gate
+   **swap** finished (no needs-human gate this delivery was entitled to retire
+   left open). Both are floors: a run that actually gates a PR delivered
+   `--no-gate`, or that completes the human gate an earlier pass could not,
+   posts the corrected record — step 5 promises the finding names the gates
+   retired, so the run that retires them is the one that speaks — while a pass
+   that achieves less than the record already carries (a later `--no-gate`
+   over a gated delivery, a pass with nothing left to retire) corrects nothing
+   and stays silent. A `--no-gate` pass over a PR that *is* already gated
+   names the gate that holds it, never "UNMONITORED" — the story must not
+   contradict its own open gate. **Known boundary:** if the process dies before the finding *and* the PR
    is merged before any re-run, the story is terminal and its PR is closed —
    `deliver` will not find it, and the merge's own `[GateResolved]` finding is
    the record that survives.
@@ -204,10 +208,19 @@ the swap was made. Two guards close it, before anything is written:
   the route-runner's renew loop swallows every renewal failure, so a Lithos
   outage longer than the claim TTL leaves the claim expired *and invisible*
   while the plugin writes its terminal state and the runner waits to apply the
-  result. So the command also requires the handoff to be durably visible on the
-  story: a needs-human gate this delivery would retire, or a failed-attempt
-  marker naming the run (the marker-only `[BlockerFailed]` fallback). Three
-  things let a delivery past it, each meaning there is no producer to race: the
+  result. So the command also requires the handoff to be durably visible on
+  the story — and *still holding it*, or the same interleaving arrives from
+  the other end: an **open** needs-human gate naming this run, an open gate
+  this delivery would retire, or a failed-attempt marker naming the run **and
+  naming no gate** (the marker-only `[BlockerFailed]` fallback, the one marker
+  shape that suppresses dispatch by itself). A marker that names a gate is
+  deliberately not enough: there the gate decides, and once the operator
+  completes it the marker stays behind as history while the story goes back on
+  the ready frontier — reading it as a handoff would deliver the old run in
+  exactly the window the route walks from *ready* to *claimed*, and the run it
+  dispatches would raise its own gate over a story this command had just
+  reported as delivered. Three things let a delivery past it, each meaning
+  there is no producer to race: the
   story already carries a delivery of its own (an idempotent re-run behind its
   own open `pr` gate), **no loom daemon is running on this work dir** (the
   pidfile `drain` uses — the salvage this command exists for), or the

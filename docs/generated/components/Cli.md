@@ -13,7 +13,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, â€
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
 | `lithos_loom.cli._deliver_facts` | M | 1 | 8 |
-| `lithos_loom.cli._deliver_lithos` | M | 7 | 3 |
+| `lithos_loom.cli._deliver_lithos` | L | 7 | 3 |
 | `lithos_loom.cli._deliver_output` | S | 0 | 3 |
 | `lithos_loom.cli._deliver_preflight` | S | 0 | 4 |
 | `lithos_loom.cli._deliver_repo` | M | 1 | 8 |

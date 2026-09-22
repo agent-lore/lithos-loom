@@ -86,6 +86,7 @@ async def _post_coro(
     pr_url: str,
     run_id: str,
     gated: bool,
+    swapped: bool,
     mark: bool,
 ) -> None:
     async with LithosClient(url, agent_id=agent) as client:
@@ -97,6 +98,7 @@ async def _post_coro(
                 pr_url=pr_url,
                 run_id=run_id,
                 gated=gated,
+                swapped=swapped,
                 agent=agent,
             )
 
@@ -168,6 +170,7 @@ def post_finding(
     pr_url: str = "",
     run_id: str = "",
     gated: bool = False,
+    swapped: bool = False,
     mark: bool = True,
 ) -> None:
     """Step 5: post ``[ManualDelivery]``, then mark the story (in that order).
@@ -185,6 +188,7 @@ def post_finding(
             pr_url=pr_url,
             run_id=run_id,
             gated=gated,
+            swapped=swapped,
             mark=mark,
         )
     )

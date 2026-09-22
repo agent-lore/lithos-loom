@@ -549,10 +549,24 @@ def _deliver_claimed(
     gated = gate_id is not None
     if record["pr_gate_id"] is None:
         record["pr_gate_id"] = live_gate_id
+    # …and whether the SWAP is finished, which is the other half of what step 5
+    # promises to name. A pass that leaves the stop's human gate open must not
+    # mark the delivery as told: the run that finally retires that gate is the
+    # one whose record says so. With no gate phase (`--no-gate`), the answer
+    # comes from the story this delivery read.
+    swapped = (
+        outcome.swap_complete
+        if outcome is not None
+        else not story.retirement(
+            run_id=facts.run_id, dispatch_routes=routes
+        ).superseded
+    )
     marked = (
         outcome.finding_marked
         if outcome is not None
-        else story.delivery_marked(pr_url=pr_url, run_id=facts.run_id, gated=gated)
+        else story.delivery_marked(
+            pr_url=pr_url, run_id=facts.run_id, gated=gated, swapped=swapped
+        )
     )
     record["changed"] = bool(
         record["pushed"]
@@ -584,6 +598,7 @@ def _deliver_claimed(
                 pr_url=pr_url,
                 run_id=facts.run_id,
                 gated=gated,
+                swapped=swapped,
                 # mark only a delivery that finished: a partial one must stay
                 # re-postable, so the run that completes it records the truth
                 mark=bool(record["gate_complete"]),

@@ -2105,8 +2105,10 @@ def test_a_failed_attempt_marker_is_handoff_enough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """correctness/f-001: the marker-only `[BlockerFailed]` fallback raises no
-    gate, but the runner wrote the marker on the same path — the run's result
-    HAS been applied, so there is nothing left to race."""
+    gate, but the runner wrote the marker on the same path — and a marker that
+    names NO gate is the one shape that suppresses dispatch by itself
+    (`declines_bootstrap_replay`), so the run's result has been applied and
+    nothing can be re-dispatching it."""
     _drop_the_human_gate(lithos)
     asyncio.run(
         lithos.task_update(
@@ -2119,6 +2121,50 @@ def test_a_failed_attempt_marker_is_handoff_enough(
 
     assert _invoke(_RUN).exit_code == 0
     assert len(gh["created"]) == 1
+
+
+def test_a_completed_gates_marker_is_not_a_handoff(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001: a failed-attempt marker that NAMES a gate stops
+    deciding anything the moment that gate is completed — the gate is the
+    guard, and completing it is the operator's authorisation to re-dispatch
+    (`declines_bootstrap_replay` returns False whenever `gate_id` is set). So
+    between the tick and the route's claim the story is on the frontier with
+    the marker still on it: reading that as the handoff would deliver the old
+    run while the route walks from ready to claimed, and the run it dispatches
+    would raise its own gate over a story this command just called delivered.
+    """
+    # the runner's real shape: the marker names the gate it raised…
+    asyncio.run(
+        lithos.task_update(
+            task_id=_STORY,
+            agent="op",
+            metadata={
+                "loom_last_attempt:story-develop": {
+                    "run_id": _RUN,
+                    "gate_id": "gate-human",
+                }
+            },
+        )
+    )
+    # …and the operator has just ticked that gate (re-dispatch authorised)
+    asyncio.run(lithos.task_complete(task_id="gate-human", agent="op"))
+    _daemon(monkeypatch, alive=True)
+    before = len(lithos.mutating_calls)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert "records its escalation yet" in result.output
+    assert gh["created"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+    assert lithos.mutating_calls[before:] == []
 
 
 def test_a_landed_escalation_delivers_under_a_live_daemon_and_re_runs_cleanly(
@@ -2200,6 +2246,39 @@ def test_no_gate_over_an_already_gated_pr_never_calls_it_unmonitored(
     assert json.loads(out.read_text())["pr_gate_id"] == gate_id
     story = _get(lithos, _STORY)
     assert story.metadata["manual_delivery"]["gated"] is True
+
+
+def test_the_completed_gate_swap_is_always_recorded_somewhere(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-003: the marker records what the delivery ACHIEVED, and
+    the gate swap is half of that. A pass that gated the PR but could not
+    complete the human gate, then a `--no-gate` pass over that state, must not
+    between them silence the run that finally completes the swap — step 5
+    promises the finding names the gates retired, so the run that retires them
+    is the one that speaks."""
+    lithos.raise_on["task_complete"] = LithosClientError("boom", "gate stuck")
+    assert _invoke(_RUN).exit_code == 2  # pr gate raised, human gate not
+    lithos.raise_on.pop("task_complete")
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+
+    # …an intermediate `--no-gate` pass sees the pr gate and records THAT
+    assert _invoke(_RUN, "--no-gate").exit_code == 0
+    assert (_get(lithos, "gate-human")).status == "open"
+    findings_before = len(lithos.findings)
+
+    result = _invoke(_RUN)  # …and now the swap actually completes
+
+    assert result.exit_code == 0, result.output
+    assert (_get(lithos, "gate-human")).status == "completed"
+    assert len(lithos.findings) == findings_before + 1
+    corrected = lithos.findings[-1]["summary"]
+    assert "needs-human gate gate-human completed" in corrected
+    marker = _get(lithos, _STORY).metadata["manual_delivery"]
+    assert marker["gated"] is True and marker["swapped"] is True
+    # …and with nothing left to achieve, a fourth pass says nothing more
+    assert _invoke(_RUN).exit_code == 0
+    assert len(lithos.findings) == findings_before + 1
 
 
 def test_an_unverifiable_pr_create_never_asserts_there_is_no_pr(
