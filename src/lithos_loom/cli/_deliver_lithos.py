@@ -48,7 +48,7 @@ unreadable story — and the command maps it onto one exit code.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -477,7 +477,9 @@ class StoryState:
         )
 
 
-async def read_story(client: Any, story_id: str) -> StoryState:
+async def read_story(
+    client: Any, story_id: str, *, own_agents: Collection[str] = ()
+) -> StoryState:
     """Read the story plus the open gates blocking it.
 
     The gates come from the story's incoming ``waits_on_gate`` **edges**, never
@@ -532,12 +534,24 @@ async def read_story(client: Any, story_id: str) -> StoryState:
         metadata=metadata,
         human_gates=tuple(human_gates),
         pr_gates=tuple(pr_gates),
-        route_claims=_live_claims(getattr(story, "claims", ()) or ()),
+        route_claims=_live_claims(
+            getattr(story, "claims", ()) or (), own_agents=own_agents
+        ),
     )
 
 
-def _live_claims(claims: Any) -> tuple[str, ...]:
+def _live_claims(claims: Any, *, own_agents: Collection[str] = ()) -> tuple[str, ...]:
     """Describe the claims on the story that are NOT this command's own.
+
+    Two of the claims on a story mid-delivery are ours: the ``deliver`` lease
+    (excluded by aspect) and the **dispatch hold** — every configured route's
+    aspect, claimed under :func:`dispatch_hold_agent`'s identity so that a
+    daemon cannot dispatch the story behind the delivery. The hold sits on
+    exactly the aspects a real dispatch would, so it can only be told apart by
+    its *agent*: ``own_agents`` names this invocation's identities, and a
+    claim under one of them is never a foreign dispatch (converge f6babfd8,
+    correctness/f-001 — without it the command read its own hold back as a
+    live run and never completed the human gate).
 
     A claim whose ``expires_at`` is in the past is spent and ignored; one that
     cannot be parsed counts as live (fail closed — a dispatch that may be
@@ -545,11 +559,14 @@ def _live_claims(claims: Any) -> tuple[str, ...]:
     """
     now = datetime.now(UTC)
     live: list[str] = []
+    own = set(own_agents)
     for claim in claims:
         if not isinstance(claim, Mapping):
             continue
         aspect = str(claim.get("aspect") or "")
         if not aspect or aspect == DELIVER_ASPECT:
+            continue
+        if str(claim.get("agent") or "") in own:
             continue
         raw = claim.get("expires_at")
         if isinstance(raw, str) and raw:
@@ -621,7 +638,11 @@ async def gate_delivery(
     # Re-read under THIS client: the caller's snapshot predates the push and
     # the PR open, so a gate raised in between (a concurrent deliver, the
     # daemon) must be seen — adopting beats duplicating.
-    live = await read_story(client, story.story_id)
+    # The dispatch hold is live on the story right now, under our hold
+    # identity — name it, or this read mistakes it for a foreign run.
+    live = await read_story(
+        client, story.story_id, own_agents=(dispatch_hold_agent(agent),)
+    )
     if live.status != "open":
         # The story went terminal while this delivery pushed and opened its PR
         # (the operator completed it, or the issue mirror did). A terminal

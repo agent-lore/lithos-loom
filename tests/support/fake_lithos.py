@@ -481,6 +481,22 @@ class FakeLithosClient:
             ttl_minutes=ttl_minutes,
             agent=agent,
         )
+        # The real server lists an active claim on the task's ``claims`` from
+        # the moment it is taken (``task_status(with_claims)``), which is how a
+        # command reading the story back sees ITS OWN holds beside everyone
+        # else's — the shape converge f6babfd8's correctness/f-001 caught this
+        # fake hiding. Mirror it, so a self-detection cannot pass here.
+        task = self._tasks.get(task_id)
+        if task is not None:
+            expires = datetime.now(UTC) + timedelta(minutes=ttl_minutes)
+            claim = {
+                "agent": agent,
+                "aspect": aspect,
+                "expires_at": expires.isoformat(),
+            }
+            self._tasks[task_id] = dataclasses.replace(
+                task, claims=(*task.claims, claim)
+            )
         return self._mint("receipt")
 
     async def task_renew(
@@ -504,6 +520,14 @@ class FakeLithosClient:
         self, *, task_id: str, aspect: str, agent: str | None = None
     ) -> None:
         self._record("task_release", task_id=task_id, aspect=aspect, agent=agent)
+        task = self._tasks.get(task_id)
+        if task is not None:
+            kept = tuple(
+                c
+                for c in task.claims
+                if not (c.get("aspect") == aspect and c.get("agent") == agent)
+            )
+            self._tasks[task_id] = dataclasses.replace(task, claims=kept)
 
     # ── task-graph surface (Epic G) ────────────────────────────────────
     async def task_edge_upsert(

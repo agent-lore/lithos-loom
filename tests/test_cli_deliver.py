@@ -2599,3 +2599,27 @@ def test_provenance_names_the_run_and_why_it_stopped(run_dir: Path) -> None:
     assert any("develop deliver" in line for line in lines)
     assert any(_RUN in line and "disputed" in line for line in lines)
     assert any(_BRANCH in line for line in lines)
+
+
+def test_the_delivery_does_not_mistake_its_own_dispatch_hold_for_a_live_run(
+    lithos: FakeLithosClient,
+) -> None:
+    """converge f6babfd8, correctness/f-001. The dispatch hold claims every
+    configured route's aspect — exactly what a real dispatch claims — under the
+    hold identity, and the story is read back while it is held. Told apart by
+    AGENT, not aspect: named as ours it is invisible; a claim on the same aspect
+    under any other agent is the live run it looks like. (The end-to-end test
+    covers the integration since the fake started recording claims; this pins
+    the rule itself, through the public read.)"""
+    hold = cli_lithos.dispatch_hold_agent("loom")
+    asyncio.run(lithos.task_claim(task_id=_STORY, aspect="story-develop", agent=hold))
+    asyncio.run(lithos.task_claim(task_id=_STORY, aspect="deliver", agent="loom"))
+
+    ours = asyncio.run(cli_lithos.read_story(lithos, _STORY, own_agents=(hold,)))
+    assert ours.route_claims == ()
+    unnamed = asyncio.run(cli_lithos.read_story(lithos, _STORY))
+    assert unnamed.route_claims == (f"story-develop (agent {hold})",)
+
+    asyncio.run(lithos.task_claim(task_id=_STORY, aspect="story-develop", agent="loom"))
+    foreign = asyncio.run(cli_lithos.read_story(lithos, _STORY, own_agents=(hold,)))
+    assert foreign.route_claims == ("story-develop (agent loom)",)

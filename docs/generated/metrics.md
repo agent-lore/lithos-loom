@@ -16,7 +16,7 @@ lower a budget after improving the code to lock in the gain.
 | `cross_module_private_refs` | 8 | 8 | 0 |
 | `max_module_lines` | 2030 | 2100 | 70 |
 | `module_cycles` | 1 | 1 | 0 |
-| `modules_over_800_lines` | 9 | 9 | 0 |
+| `modules_over_800_lines` | 10 | 10 | 0 |
 | `tests_private_imports` | 94 | 94 | 0 |
 
 ## Import graph
@@ -36,7 +36,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 |---|---:|---:|---:|---:|---:|---:|---|---:|
 | Bus | 1 | 207 | 168 | 4 | 0 | 0.00 | 11 (`lithos_loom.bus._matches_struct`) | 1 |
 | Children | 6 | 1626 | 1229 | 0 | 8 | 1.00 | 44 (`lithos_loom.children.obsidian_sync._amain`) | 2 |
-| Cli | 21 | 9334 | 7765 | 2 | 9 | 0.82 | 60 (`lithos_loom.cli.converge.converge_command`) | 33 |
+| Cli | 21 | 9355 | 7783 | 2 | 9 | 0.82 | 60 (`lithos_loom.cli.converge.converge_command`) | 33 |
 | Config | 1 | 1262 | 1075 | 8 | 1 | 0.11 | 28 (`lithos_loom.config._parse_obsidian_sync`) | 4 |
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
 | Entrypoint | 2 | 720 | 575 | 0 | 10 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
@@ -57,9 +57,10 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **187**, lines: **67319**, SLOC: **54606**
+- Modules: **187**, lines: **67340**, SLOC: **54624**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
-- Modules over 800 lines: **9**
+- Modules over 800 lines: **10**
+  - `lithos_loom.cli._deliver_lithos`
   - `lithos_loom.cli.develop`
   - `lithos_loom.cli.project`
   - `lithos_loom.config`
@@ -139,4 +140,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.57** (105373 test lines / 67319 source lines)
+- Test-to-source line ratio: **1.57** (105421 test lines / 67340 source lines)
