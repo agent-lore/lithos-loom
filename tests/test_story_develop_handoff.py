@@ -438,3 +438,35 @@ def test_decision_verdict_parses_and_is_validated() -> None:
     assert _parse("Contest").decision_verdict == "contest"  # normalised
     with pytest.raises(HandoffError, match="invalid decision_verdict"):
         _parse("maybe")
+
+
+def test_control_only_mandatory_fields_are_rejected_not_emptied() -> None:
+    # correctness/f-004: a rationale that is only U+200B and a deferral_reason
+    # that is only U+202E pass a bare `.strip()` test and then sanitize to "",
+    # so the parse would admit a deferral whose spawned follow-up task carries
+    # neither the defect nor the why. Validation now runs on the CLEANED text.
+    zero_width_only = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id:\n  severity: major\n  status: out-of-scope\n"
+        "  rationale: ​​\n"
+        "  deferral_reason: pre-existing on the base\n"
+    )
+    with pytest.raises(HandoffError, match="NEW finding.*rationale"):
+        parse_review_handoff(zero_width_only)
+
+    bidi_only_reason = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-1\n  severity: major\n  status: out-of-scope\n"
+        "  rationale: the retry loop never terminates\n"
+        "  deferral_reason: ‮‬\n"
+    )
+    with pytest.raises(HandoffError, match="deferral_reason.*WHY"):
+        parse_review_handoff(bidi_only_reason)
+
+    mixed = (
+        "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-1\n  severity: major\n  status: out-of-scope\n"
+        "  rationale: r\n  deferral_reason: ​ \t ‮\n"
+    )
+    with pytest.raises(HandoffError, match="deferral_reason.*WHY"):
+        parse_review_handoff(mixed)

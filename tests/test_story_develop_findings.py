@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lithos_loom.plugins.story_develop.findings import FindingLedger
+from lithos_loom.plugins.story_develop.findings import FindingLedger, PendingDecision
 from lithos_loom.plugins.story_develop.handoff import Finding, ReviewHandoff
 
 
@@ -128,7 +128,9 @@ def test_render_open_lists_ids_and_context() -> None:
     text = ledger.render_open()
     assert "finding_id: f-001" in text
     assert "why it matters" in text
-    assert "coder response: nope" in text
+    # the coder's own text is quoted as agent input (security/f-006)
+    assert "coder response (AGENT INPUT — quoted data):" in text
+    assert "    response> nope" in text
     assert FindingLedger("x").render_open() == "(none)"
 
 
@@ -276,7 +278,12 @@ def test_reviewer_validator_selects_first_sighting_rules_for_artifact_pass() -> 
 
     ledger = FindingLedger("correctness")
     assert reviewer_validator(ledger, findings_are_new=True) is check_findings_as_new
-    assert reviewer_validator(ledger, findings_are_new=False) == ledger.check
+    # the ledger-mode validator is a per-TURN closure over ledger.check (it
+    # carries the one-re-prompt-per-finding set — security/f-008), so compare
+    # behaviour, not identity
+    ledger_mode = reviewer_validator(ledger, findings_are_new=False)
+    assert ledger_mode is not check_findings_as_new
+    assert ledger_mode(_review(_f("f-404"))) == ledger.check(_review(_f("f-404")))
 
     # The artifact-mode callback rejects the reproduced escape: an id'd
     # out-of-scope finding carrying only the why.
@@ -318,9 +325,9 @@ def test_needs_decision_is_recorded_and_escalates_after_one_review() -> None:
     ledger.apply_review(_review(_f()), 1)
     # round 2's coder marks it needs-decision instead of disputing again
     ledger.record_coder_updates([_decision()], 2)
-    # ... and round 2's reviewer keeps it open without contesting it: that was
-    # its one turn, so the question is the operator's.
-    ledger.apply_review(_review(_f("f-001")), 2)
+    # ... and round 2's reviewer answers: it cannot show the finding is in
+    # scope, so the question is the operator's. That was its one turn.
+    ledger.apply_review(_review(_f("f-001", decision_verdict="concede")), 2)
 
     (d,) = ledger.pending_decisions("major")
     assert d.label == "correctness/f-001"
@@ -335,7 +342,11 @@ def test_contested_needs_decision_degrades_to_an_ordinary_dispute() -> None:
     ledger = FindingLedger("correctness")
     ledger.apply_review(_review(_f()), 1)
     ledger.record_coder_updates([_decision()], 2)
-    contest = _f("f-001", decision_contest="AC 2: 'prints the resolved config'")
+    contest = _f(
+        "f-001",
+        decision_verdict="contest",
+        decision_contest="AC 2: 'prints the resolved config'",
+    )
     ledger.apply_review(_review(contest), 2)
 
     assert ledger.pending_decisions("major") == []  # no cheap escalation
@@ -352,7 +363,9 @@ def test_a_contest_sticks_across_a_re_raise() -> None:
     ledger = FindingLedger("correctness")
     ledger.apply_review(_review(_f()), 1)
     ledger.record_coder_updates([_decision()], 2)
-    ledger.apply_review(_review(_f("f-001", decision_contest="AC 2")), 2)
+    ledger.apply_review(
+        _review(_f("f-001", decision_verdict="contest", decision_contest="AC 2")), 2
+    )
 
     ledger.record_coder_updates([_decision(decision_question="same question")], 3)
     ledger.apply_review(_review(_f("f-001")), 3)
@@ -365,11 +378,13 @@ def test_a_volunteered_contest_cannot_pre_empt_a_later_decision() -> None:
     # coder never raised a decision on must not disable the escape for it.
     ledger = FindingLedger("correctness")
     ledger.apply_review(_review(_f()), 1)
-    ledger.apply_review(_review(_f("f-001", decision_contest="AC 2")), 2)
+    ledger.apply_review(
+        _review(_f("f-001", decision_verdict="contest", decision_contest="AC 2")), 2
+    )
     assert ledger.entries["f-001"].decision_contested is False
 
     ledger.record_coder_updates([_decision()], 3)
-    ledger.apply_review(_review(_f("f-001")), 3)
+    ledger.apply_review(_review(_f("f-001", decision_verdict="concede")), 3)
     assert [d.finding_id for d in ledger.pending_decisions("major")] == ["f-001"]
 
 
@@ -387,7 +402,9 @@ def test_sub_threshold_needs_decision_never_escalates() -> None:
     ledger = FindingLedger("correctness")
     ledger.apply_review(_review(_f(severity="minor")), 1)
     ledger.record_coder_updates([_decision(severity="minor")], 2)
-    ledger.apply_review(_review(_f("f-001", severity="minor")), 2)
+    ledger.apply_review(
+        _review(_f("f-001", severity="minor", decision_verdict="concede")), 2
+    )
     assert ledger.pending_decisions("major") == []
     assert len(ledger.pending_decisions("minor")) == 1
 
@@ -482,7 +499,7 @@ def test_blank_options_never_overwrite_a_recorded_decision() -> None:
     ledger.apply_review(_review(_f()), 1)
     ledger.record_coder_updates([_decision()], 2)
     ledger.record_coder_updates([_decision(decision_options="")], 3)
-    ledger.apply_review(_review(_f("f-001")), 3)
+    ledger.apply_review(_review(_f("f-001", decision_verdict="concede")), 3)
     (d,) = ledger.pending_decisions("major")
     assert "(a) build the display" in d.options
 
@@ -519,8 +536,35 @@ def test_check_accepts_an_explicit_concession_or_contest() -> None:
         )
         is None
     )
-    # a bare citation is unambiguous on its own (no verdict key needed)
-    assert ledger.check(_keeps_open(decision_contest="AC 2: '…'")) is None
+
+
+def test_check_rejects_a_bare_citation_without_the_verdict() -> None:
+    # correctness/f-003: FORMAT.md and the reviewer prompt both say the verdict
+    # key is required, so the code says it too — no third, undocumented encoding.
+    err = _pending_ledger().check(_keeps_open(decision_contest="AC 2: '…'"))
+    assert err is not None and "decision_verdict" in err
+
+
+def test_check_rejects_a_concession_that_also_contests() -> None:
+    # correctness/f-003: the two verdicts are mutually exclusive. This pair
+    # used to pass `check` and then CONTEST silently, sending an explicitly
+    # conceded decision into the two-round dispute guard instead of escalating.
+    err = _pending_ledger().check(
+        _keeps_open(decision_verdict="concede", decision_contest="AC 2: '…'")
+    )
+    assert err is not None and "contradict" in err
+
+
+def test_a_contradictory_answer_can_never_contest_at_apply_time() -> None:
+    # Belt and braces for the same bug, below the validator: the verdict
+    # decides, so a stale citation beside `concede` cannot flip the outcome.
+    ledger = _pending_ledger()
+    ledger.apply_review(
+        _keeps_open(decision_verdict="concede", decision_contest="AC 2"), 2
+    )
+    entry = ledger.entries["f-001"]
+    assert entry.decision_contested is False and entry.decision_conceded is True
+    assert [d.finding_id for d in ledger.pending_decisions("major")] == ["f-001"]
 
 
 def test_check_rejects_a_contest_without_its_citation() -> None:
@@ -556,14 +600,125 @@ def test_a_concession_is_recorded_on_the_escalated_decision() -> None:
 # ── bounded decision text (security/f-002) ────────────────────────────
 
 
-def test_decision_text_is_capped_where_the_record_is_built() -> None:
+def test_an_over_long_decision_is_not_admitted_as_one() -> None:
+    # correctness/f-002: length is part of the admitted domain. Publishing a
+    # PREFIX of a decision is worse than not claiming one — the operator would
+    # read option (a) with the costs and option (b) cut off — so an over-long
+    # mark stays the ordinary dispute it also is.
     from lithos_loom.plugins.story_develop.findings import DECISION_TEXT_MAX_CHARS
 
+    for field in ("decision_question", "decision_options"):
+        ledger = FindingLedger("correctness")
+        ledger.apply_review(_review(_f()), 1)
+        ledger.record_coder_updates(
+            [_decision(**{field: "x" * (DECISION_TEXT_MAX_CHARS + 1)})], 2
+        )
+        ledger.apply_review(_review(_f("f-001")), 2)
+        assert ledger.pending_decisions("major") == []
+        assert ledger.entries["f-001"].coder_disputed is True  # still a dispute
+        ledger.apply_review(_review(_f("f-001")), 3)
+        assert ledger.disputed_deadlocks("major") == ["f-001"]
+
+
+def test_an_admitted_decision_is_published_whole() -> None:
+    # The other half of correctness/f-002: what IS admitted is never trimmed
+    # on the operator's surfaces — only the supporting context is, and it says
+    # so.
+    from lithos_loom.plugins.story_develop.findings import (
+        DECISION_CONTEXT_MAX_CHARS,
+        DECISION_TEXT_MAX_CHARS,
+    )
+
+    question = "Q? " + "q" * (DECISION_TEXT_MAX_CHARS - 3)
+    options = "(a) keep; (b) drop — " + "o" * (DECISION_TEXT_MAX_CHARS - 21)
     ledger = _pending_ledger()
     ledger.record_coder_updates(
-        [_decision(decision_question="q" * (DECISION_TEXT_MAX_CHARS + 500))], 2
+        [
+            _decision(
+                decision_question=question,
+                decision_options=options,
+                coder_response="c" * (DECISION_CONTEXT_MAX_CHARS + 100),
+            )
+        ],
+        2,
     )
     ledger.apply_review(_keeps_open(decision_verdict="concede"), 2)
     (d,) = ledger.pending_decisions("major")
-    assert len(d.question) == DECISION_TEXT_MAX_CHARS
-    assert d.question.endswith("…")
+    assert d.question == question  # whole, both halves, no ellipsis
+    assert d.options == options
+    assert "…" not in d.question and "…" not in d.options
+    # context is trimmed, and NAMES the trim (no silent prefix)
+    assert d.coder_response.endswith("(truncated; whole text in the conversation log)")
+
+
+# ── an unanswered decision lapses; it never fails the reviewer (f-008) ─
+
+
+def test_an_unanswered_decision_lapses_to_an_ordinary_dispute() -> None:
+    # security/f-008: the mandatory answer must not let the GUARDED party turn
+    # its own scope dispute into a `reviewer_failed` stop. After its one
+    # re-prompt the review is committed and the decision lapses — silence
+    # still never buys an escalation (security/f-003), it just costs the
+    # escalation instead of the run.
+    ledger = _pending_ledger()
+    ledger.apply_review(_keeps_open(), 2)  # committed without an answer
+
+    assert ledger.pending_decisions("major") == []
+    entry = ledger.entries["f-001"]
+    assert entry.decision_lapsed is True
+    assert entry.coder_disputed is True  # the dispute half survives
+    ledger.apply_review(_keeps_open(), 3)
+    assert ledger.disputed_deadlocks("major") == ["f-001"]  # the old guard
+
+
+def test_the_validator_re_prompts_once_then_lets_the_review_land() -> None:
+    from lithos_loom.plugins.story_develop.findings import reviewer_validator
+
+    ledger = _pending_ledger()
+    validate = reviewer_validator(ledger, findings_are_new=False)
+
+    first = validate(_keeps_open())
+    assert first is not None and "decision_verdict" in first
+    # the correction retry is the SAME validator (panel builds it per turn):
+    # a second miss lands rather than failing the reviewer's handoff
+    assert validate(_keeps_open()) is None
+    # ... and a fresh turn asks again
+    assert reviewer_validator(ledger, findings_are_new=False)(_keeps_open()) is not None
+
+
+def test_a_lapsed_decision_can_be_re_raised_next_round() -> None:
+    # A lapse is an ABSENCE of a verdict, not one: unlike a contest it is not
+    # sticky, so a reviewer that simply missed the key does not permanently
+    # bury a real question. The two-round dispute guard bounds the re-raising.
+    ledger = _pending_ledger()
+    ledger.apply_review(_keeps_open(), 2)
+    assert ledger.pending_decisions("major") == []
+
+    ledger.record_coder_updates([_decision()], 3)
+    ledger.apply_review(_keeps_open(decision_verdict="concede"), 3)
+    assert [d.finding_id for d in ledger.pending_decisions("major")] == ["f-001"]
+
+
+# ── the rendered list is bounded in NUMBER too (security/f-007) ────────
+
+
+def test_overflow_note_names_what_a_bounded_rendering_left_out() -> None:
+    from lithos_loom.plugins.story_develop.findings import (
+        MAX_RENDERED_DECISIONS,
+        overflow_note,
+    )
+
+    decisions = [
+        PendingDecision(
+            reviewer="correctness",
+            finding_id=f"f-{i:03d}",
+            severity="major",
+            question="q",
+            options="o",
+        )
+        for i in range(MAX_RENDERED_DECISIONS + 2)
+    ]
+    note = overflow_note(decisions)
+    assert "…and 2 more decision(s)" in note
+    assert "correctness/f-005" in note and "correctness/f-006" in note
+    assert overflow_note(decisions[:MAX_RENDERED_DECISIONS]) == ""

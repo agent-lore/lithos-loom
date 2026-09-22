@@ -1451,45 +1451,51 @@ def test_build_result_payload_needs_decision_brief_is_the_decision(
     validate_result_schema(payload)
 
 
-def test_needs_decision_brief_bounds_every_agent_written_field(
+def test_needs_decision_brief_carries_each_decision_whole_but_bounds_the_list(
     tmp_path: Path,
 ) -> None:
-    """security/f-002: the brief becomes task METADATA on an unbounded write
-    and its head is echoed by `lithos-loom gates`, so each agent-written field
-    is capped where the escalation is built. The operator's whole copy is the
-    `[ReviewDispute]` finding, the conversation log and the raw handoff."""
-    from lithos_loom.plugins.story_develop.daemon_io import BRIEF_TEXT_MAX_CHARS
-    from lithos_loom.plugins.story_develop.findings import PendingDecision
+    """The brief becomes task METADATA in one unbounded write, so the list is
+    bounded (security/f-007) — but each decision it carries is WHOLE, because
+    its length was checked on admission (correctness/f-002): the gate must
+    never show a prefix of the question it exists to put to the operator."""
+    from lithos_loom.plugins.story_develop.findings import (
+        DECISION_TEXT_MAX_CHARS,
+        MAX_RENDERED_DECISIONS,
+        PendingDecision,
+    )
 
-    huge = "q" * (BRIEF_TEXT_MAX_CHARS * 4)
+    long_question = "Q? " + "q" * (DECISION_TEXT_MAX_CHARS - 3)
+    decisions = tuple(
+        PendingDecision(
+            reviewer="correctness",
+            finding_id=f"f-{i:03d}",
+            severity="critical",
+            question=long_question,
+            options="(a) accept; (b) block",
+            coder_response="no compare-and-set",
+            conceded=True,
+        )
+        for i in range(MAX_RENDERED_DECISIONS + 3)
+    )
     payload, _ = build_result_payload(
         _result(
             "needs_decision",
             tmp_path,
-            failure_reason="round 3: needs a decision on correctness/f-003",
-            decisions=(
-                PendingDecision(
-                    reviewer="correctness",
-                    finding_id="f-003",
-                    severity="critical",
-                    question=huge,
-                    options=huge,
-                    rationale=huge,
-                    coder_response=huge,
-                    conceded=True,
-                ),
-            ),
+            failure_reason="round 3: needs a decision",
+            decisions=decisions,
         ),
         task_id="t-1",
         started_at=_NOW,
         finished_at=_NOW,
         run_dir=tmp_path,
     )
-    (d,) = payload["escalation"]["brief"]["decisions"]
-    for key in ("question", "options", "finding_rationale", "coder_response"):
-        assert len(d[key]) == BRIEF_TEXT_MAX_CHARS
-        assert d[key].endswith("…")
-    assert d["reviewer_verdict"] == "conceded"
+    brief = payload["escalation"]["brief"]
+    assert len(brief["decisions"]) == MAX_RENDERED_DECISIONS
+    assert brief["decisions"][0]["question"] == long_question  # whole, no "…"
+    assert brief["decisions"][0]["reviewer_verdict"] == "conceded"
+    # the ones left out are named, not dropped in silence
+    assert "…and 3 more decision(s)" in brief["decisions_omitted"]
+    assert "correctness/f-007" in brief["decisions_omitted"]
     validate_result_schema(payload)
 
 

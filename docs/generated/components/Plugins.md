@@ -35,7 +35,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.external_reviews` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.external_triage` | M | 1 | 4 |
-| `lithos_loom.plugins.story_develop.findings` | M | 4 | 2 |
+| `lithos_loom.plugins.story_develop.findings` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
@@ -235,6 +235,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `triage_external_findings` — Run the one-turn read-only triage pass over *outcome*'s findings.
 
 ### `lithos_loom.plugins.story_develop.findings`
+- def `truncate_context` — Supporting text bounded to *limit*, saying so when it overran.
+- def `overflow_note` — The line naming the decisions a bounded rendering left out, or ``""``.
 - class `LedgerEntry` — One finding's life across rounds (mutable; owned by the ledger).
 - class `FindingLedger` — Per-reviewer finding registry with plugin-assigned monotonic ids.
 - def `reviewer_validator` — The lifecycle-validate callback for one reviewer turn.

@@ -43,6 +43,7 @@ from .config import (
     parse_model,
     parse_reviewer_entry,
 )
+from .findings import MAX_RENDERED_DECISIONS, overflow_note
 from .lithos_io import AGENT_ID, TaskContext
 from .model_policy import apply_panel_default_models
 from .panel import findings_by_severity
@@ -768,50 +769,42 @@ def escalation_block(
     return {"reason": reason, "summary": summary, "brief": brief}
 
 
-# The gate's brief is agent-written text becoming task METADATA on an
-# unbounded write (`gates.create_human_gate`), and its first lines are echoed
-# by `lithos-loom gates`. Bound every field here — the same 600-char shape
-# `_deliver_facts._MAX_SUMMARY_CHARS` uses for the other text loom publishes
-# on someone else's behalf (security/f-002). The operator's whole copy is the
-# `[ReviewDispute]` finding on the story, the conversation log and the raw
-# handoff; nothing is lost, it just is not all in the gate's metadata.
-BRIEF_TEXT_MAX_CHARS = 600
-"""Per-field cap on the agent-written decision text the gate brief carries
-(security/f-002). Public so the contract is assertable without reaching for a
-private name."""
-
-
-def _brief_text(text: str) -> str:
-    text = text.strip()
-    if len(text) <= BRIEF_TEXT_MAX_CHARS:
-        return text
-    return text[: BRIEF_TEXT_MAX_CHARS - 1].rstrip() + "…"
-
-
 def _decision_escalation(result: DevelopResult) -> dict[str, Any]:
     """The ``needs_decision`` escalation: the decision, not the run facts.
 
     ``summary`` is the run's own loom-authored reason line (the coder's prose
     is deliberately NOT on this channel — it is published verbatim as an
-    `@operator` GitHub comment, security/f-002); the bounded question and
-    options ride in the brief, which stays inside Lithos.
+    `@operator` GitHub comment, security/f-002); the question and options ride
+    in the brief, which stays inside Lithos.
+
+    Each is carried **whole**: its length was checked on ADMISSION
+    (`findings._admits_decision`), so the gate never shows the operator a
+    prefix of the decision it exists to put to them (correctness/f-002). The
+    supporting context beside it is trimmed at the record, saying so. What is
+    bounded here is the NUMBER of decisions (security/f-007) — the brief
+    becomes task metadata in one unbounded write, and a handoff may mark every
+    open finding; the overflow is named by id.
     """
+    rendered = result.decisions[:MAX_RENDERED_DECISIONS]
     brief: dict[str, Any] = {
         "decisions": [
             {
                 "finding": d.label,
                 "severity": d.severity,
-                "question": _brief_text(d.question),
-                "options": _brief_text(d.options),
-                "finding_rationale": _brief_text(d.rationale),
-                "coder_response": _brief_text(d.coder_response),
+                "question": d.question,
+                "options": d.options,
+                "finding_rationale": d.rationale,
+                "coder_response": d.coder_response,
                 "reviewer_verdict": "conceded" if d.conceded else "unanswered",
             }
-            for d in result.decisions
+            for d in rendered
         ],
         "branch": result.branch,
         "worktree": str(result.worktree),
     }
+    note = overflow_note(result.decisions)
+    if note:
+        brief["decisions_omitted"] = note
     if result.conversation_log is not None:
         brief["conversation_log"] = str(result.conversation_log)
     return {

@@ -46,9 +46,10 @@ it finishes**. The run fails if you stop before writing the handoff.
    `status: needs-decision` instead, and state the decision itself in
    `decision_question:` (the one question a human must answer) and
    `decision_options:` (the options and what each costs) — **both keys are
-   required**: a question with no choices and costs is recorded as an ordinary
-   dispute, since that is all it is — with your reasoning in
-   `coder_response:`. That puts the question to the operator **after this
+   required, each under 2000 characters**: a question with no choices and
+   costs is recorded as an ordinary dispute, since that is all it is, and so
+   is one too long to put in front of the operator whole — with your reasoning
+   in `coder_response:`. That puts the question to the operator **after this
    round's review** instead of spending further rounds restating it. It is for
    a product or platform decision only: a reviewer that can cite the
    acceptance line the finding already meets contests it, and it reverts to an

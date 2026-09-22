@@ -453,3 +453,35 @@ def test_spawn_description_carries_defect_and_deferral_reason(
     assert "Button text overlaps the icon" in call["description"]
     assert "pre-existing on the base" in call["description"]
     assert "Button text overlaps the icon" in call["title"]
+
+
+def test_post_results_needs_decision_bounds_the_number_of_decisions(
+    fake_client: FakeLithosClient,
+) -> None:
+    # security/f-007: the per-field caps bound ONE decision, but a coder may
+    # mark every open finding — and the quantity that has to stay postable is
+    # this finding body. The overflow is named by id, not dropped in silence.
+    from lithos_loom.plugins.story_develop.findings import (
+        MAX_RENDERED_DECISIONS,
+        PendingDecision,
+    )
+
+    decisions = tuple(
+        PendingDecision(
+            reviewer="correctness",
+            finding_id=f"f-{i:03d}",
+            severity="critical",
+            question=f"question {i}?",
+            options="(a) accept; (b) block",
+        )
+        for i in range(MAX_RENDERED_DECISIONS + 2)
+    )
+    lithos_io.post_results(
+        "http://x", "task-1", _result(status="needs_decision", decisions=decisions)
+    )
+
+    body = fake_client.findings[1]["summary"]
+    assert "question 0?" in body
+    assert f"question {MAX_RENDERED_DECISIONS}?" not in body  # past the bound
+    assert "…and 2 more decision(s)" in body
+    assert f"correctness/f-{MAX_RENDERED_DECISIONS:03d}" in body  # named anyway

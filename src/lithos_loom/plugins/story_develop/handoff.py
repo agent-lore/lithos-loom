@@ -444,7 +444,15 @@ def _parse_findings(block: str) -> list[Finding]:
     _flush_fold()
 
     findings: list[Finding] = []
-    for idx, raw in enumerate(items, start=1):
+    for idx, item in enumerate(items, start=1):
+        # Sanitize BEFORE any mandatory-field check (correctness/f-004): a
+        # `rationale` that is only U+200B and a `deferral_reason` that is only
+        # U+202E both pass a `.strip()` non-blank test and then sanitize to the
+        # empty string — the parse would admit a deferral that spawns a
+        # follow-up task carrying neither the defect nor the why. Validating
+        # the CLEANED values is the same rule the fields already state, applied
+        # to the text that will actually exist.
+        raw = {k: sanitize_agent_text(v) for k, v in item.items()}
         severity = raw.get("severity", "").strip().lower()
         if severity not in _SEVERITY_ORDER:
             raise HandoffError(
@@ -485,22 +493,18 @@ def _parse_findings(block: str) -> list[Finding]:
                 f"finding {idx}: invalid decision_verdict {verdict!r} "
                 f"(allowed: {', '.join(sorted(_DECISION_VERDICTS))})"
             )
-        # Every free-text field is agent-written: strip at the boundary where
-        # it becomes a domain object, so no sink can be forgotten.
         findings.append(
             Finding(
                 finding_id=(raw.get("finding_id") or raw.get("id") or "").strip(),
                 severity=severity,
                 status=status,
-                files=[
-                    sanitize_agent_text(f) for f in _split_files(raw.get("files", ""))
-                ],
-                rationale=sanitize_agent_text(raw.get("rationale", "")),
-                coder_response=sanitize_agent_text(raw.get("coder_response", "")),
-                deferral_reason=sanitize_agent_text(raw.get("deferral_reason", "")),
-                decision_question=sanitize_agent_text(raw.get("decision_question", "")),
-                decision_options=sanitize_agent_text(raw.get("decision_options", "")),
-                decision_contest=sanitize_agent_text(raw.get("decision_contest", "")),
+                files=_split_files(raw.get("files", "")),
+                rationale=raw.get("rationale", ""),
+                coder_response=raw.get("coder_response", ""),
+                deferral_reason=raw.get("deferral_reason", ""),
+                decision_question=raw.get("decision_question", ""),
+                decision_options=raw.get("decision_options", ""),
+                decision_contest=raw.get("decision_contest", ""),
                 decision_verdict=verdict,
             )
         )

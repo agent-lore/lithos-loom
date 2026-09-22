@@ -1287,6 +1287,30 @@ def test_contested_needs_decision_falls_back_to_the_dispute_guard(
     assert result.decisions == ()
 
 
+def test_a_never_answered_decision_lapses_instead_of_failing_the_reviewer(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # security/f-008: the mandatory answer must not let the coder — the party
+    # the guard adjudicates — convert its own scope dispute into a
+    # `reviewer_failed` stop. The reviewer is re-prompted once; if it still
+    # does not answer, its review LANDS and the decision lapses to the
+    # ordinary dispute it also is, which the two-round guard then stops.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[
+            {"text": _FINDINGS_MAJOR},
+            {"text": _FINDINGS_KEEP_F001, "retry_text": _FINDINGS_KEEP_F001},
+        ],
+        coder_handoffs={2: _CODER_NEEDS_DECISION, 3: _CODER_NEEDS_DECISION},
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "disputed"  # NOT failed/reviewer_failed
+    assert result.decisions == ()  # and silence bought no escalation either
+    assert "dispute deadlock" in result.message
+
+
 def test_cost_ceiling_stops_run(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

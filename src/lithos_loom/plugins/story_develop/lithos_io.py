@@ -158,7 +158,18 @@ def _decision_breadcrumb(result: DevelopResult) -> str:
     by editing the acceptance criteria, then ticks the needs-human gate to
     re-dispatch under it (or salvages the branch with `develop deliver` /
     `converge --ac-file`).
+
+    Each decision is carried WHOLE — its length was checked on admission
+    (`findings._admits_decision`), so the body is never a prefix of the
+    question the operator must answer. The NUMBER of them is what is bounded
+    here (security/f-007): a handoff may mark every open finding, and the
+    quantity that has to stay postable is this body, not the field. The
+    overflow is named by id and read from the conversation log.
     """
+    # Local import, like `develop.findings_by_severity` below: this module
+    # keeps the plugin's domain modules out of its runtime import surface.
+    from .findings import MAX_RENDERED_DECISIONS, overflow_note
+
     lines = [
         f"{DISPUTE_PREFIX} story-develop run {result.run_id} stopped for a "
         f"product decision after {result.rounds} round(s) — the coder holds "
@@ -166,8 +177,11 @@ def _decision_breadcrumb(result: DevelopResult) -> str:
         "did not show otherwise:",
         "",
     ]
-    for d in result.decisions:
+    for d in result.decisions[:MAX_RENDERED_DECISIONS]:
         lines += [d.render(), ""]
+    note = overflow_note(result.decisions)
+    if note:
+        lines += [note, ""]
     lines += [
         "Answer by editing the acceptance criteria (a 'Settled during run "
         f"{result.run_id}: …' clause), then complete the needs-human gate to "
