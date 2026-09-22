@@ -70,6 +70,42 @@ DELIVERY_FALLBACK_SECONDS = 9000.0  # 2.5 h
 RunPhase = Literal["running", "delivering", "terminal", "vanished"]
 
 
+def is_run_dir(path: Path) -> bool:
+    """A run dir is recognised by its seeded ``handoff/`` subdir.
+
+    Part of the on-disk contract: the plugin seeds ``handoff/`` before the
+    first round, so the directory is identifiable from the moment a run
+    exists — before any marker file lands.
+    """
+    return path.is_dir() and (path / "handoff").is_dir()
+
+
+def resolve_run_dir(work_dir: Path, key: str) -> Path | None:
+    """Resolve *key* (a run_id or task_id) to a run dir, newest run if a task.
+
+    The ``<work_dir>/<task_id>/<run_id>/`` layout is the contract, so the
+    lookup lives here with the rest of it: ``develop attach`` / ``dump`` /
+    ``prune`` and ``develop deliver`` all take the same operator-typed key.
+    """
+    # run_id: <work_dir>/<any task>/<key>
+    matches = [
+        run_dir
+        for task_dir in (work_dir.iterdir() if work_dir.is_dir() else [])
+        if task_dir.is_dir()
+        for run_dir in [task_dir / key]
+        if is_run_dir(run_dir)
+    ]
+    if matches:
+        return max(matches, key=lambda p: p.stat().st_mtime)
+    # task_id: <work_dir>/<key>/<newest run>
+    task_dir = work_dir / key
+    if task_dir.is_dir():
+        runs = [r for r in task_dir.iterdir() if is_run_dir(r)]
+        if runs:
+            return max(runs, key=lambda p: p.stat().st_mtime)
+    return None
+
+
 def read_state(run_dir: Path) -> dict | None:
     """The run's terminal ``state.json`` (status + rounds + branch), or ``None``.
 
@@ -167,6 +203,20 @@ def delivery_deadline(run_dir: Path) -> datetime | None:
     except ValueError:
         return None
     return deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
+
+
+def delivery_budget_expired(run_dir: Path) -> bool:
+    """Whether the recorded delivery deadline has already PASSED (#189).
+
+    The "this delivery is not coming back" half of :func:`delivery_deadline`,
+    shared by every caller that must tell a delivery still inside its budget
+    from one that outlived it: `develop deliver`'s salvage guard, and the
+    provenance it publishes for the run it salvages. ``False`` when no deadline
+    was recorded — an unbounded delivery is not an expired one (callers that
+    need a bound without a deadline use :func:`delivery_timed_out`'s grace).
+    """
+    deadline = delivery_deadline(run_dir)
+    return deadline is not None and datetime.now(UTC) >= deadline
 
 
 def delivery_timed_out(run_dir: Path, *, delivering_seconds: float) -> bool:

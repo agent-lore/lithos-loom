@@ -14,9 +14,13 @@ commands:
   for the outcome (exit non-zero unless approved); ``--stream`` emits JSONL events.
 * ``develop dump <run-id|task-id>`` — print the assembled conversation log so
   far.
-* ``develop prune`` — delete the on-disk run-state dirs of finished runs (the
-  one mutating command; ``--dry-run`` previews). Finished = no longer in flight,
-  so an in-flight run is never removed out from under a live daemon.
+* ``develop prune`` — delete the on-disk run-state dirs of finished runs
+  (``--dry-run`` previews). Finished = no longer in flight, so an in-flight run
+  is never removed out from under a live daemon.
+
+The mutating commands registered in this namespace live in their own modules:
+``review`` / ``converge`` / ``merge-gate`` / ``deliver`` (the last turns a
+stopped run's branch into a delivered, gated PR — see :mod:`cli.deliver`).
 
 **Discovery is zero-state.** It scans the orchestrator ``work_dir`` for
 the ``<work_dir>/<task_id>/<run_id>/`` layout the route-runner + plugin produce,
@@ -50,6 +54,7 @@ from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.plugins.story_develop import engines, handoff, run_outcome
 from lithos_loom.plugins.story_develop.idempotency import lookup_completed
+from lithos_loom.plugins.story_develop.run_outcome import is_run_dir, resolve_run_dir
 from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_exit
 
 develop_app = typer.Typer(
@@ -91,6 +96,14 @@ develop_app.command("converge")(converge_command)
 from lithos_loom.cli.merge_gate import merge_gate_command  # noqa: E402
 
 develop_app.command("merge-gate")(merge_gate_command)
+
+# `develop deliver`: push a stopped run's branch, open (or adopt) its PR, and
+# swap the needs-human gate the stop raised for a `pr` gate — the operator's
+# third choice on a stopped run, beside re-dispatch and abandon. Impl in
+# `cli/deliver.py`.
+from lithos_loom.cli.deliver import deliver_command  # noqa: E402
+
+develop_app.command("deliver")(deliver_command)
 
 _FORMAT_TEXT = "text"
 _FORMAT_JSON = "json"
@@ -156,11 +169,6 @@ class RunInfo:
     run_dir: str
 
 
-def _is_run_dir(path: Path) -> bool:
-    """A run dir is recognised by its seeded ``handoff/`` subdir."""
-    return path.is_dir() and (path / "handoff").is_dir()
-
-
 def _latest_mtime(run_dir: Path) -> float:
     """Newest mtime under *run_dir* — its last on-disk activity (``0.0`` if none).
 
@@ -192,7 +200,7 @@ def _iter_run_dirs(work_dir: Path) -> list[Path]:
         for task_dir in work_dir.iterdir()
         if task_dir.is_dir()
         for run_dir in task_dir.iterdir()
-        if _is_run_dir(run_dir)
+        if is_run_dir(run_dir)
     ]
     # newest first by last on-disk activity (handoff writes included), so the
     # ordering matches the `updated` column `develop list` renders.
@@ -249,27 +257,6 @@ def _run_info(run_dir: Path) -> RunInfo:
         reviewers=reviewers,
         run_dir=str(run_dir),
     )
-
-
-def _resolve(work_dir: Path, key: str) -> Path | None:
-    """Resolve *key* (a run_id or task_id) to a run dir, newest run if a task."""
-    # run_id: <work_dir>/<any task>/<key>
-    matches = [
-        run_dir
-        for task_dir in (work_dir.iterdir() if work_dir.is_dir() else [])
-        if task_dir.is_dir()
-        for run_dir in [task_dir / key]
-        if _is_run_dir(run_dir)
-    ]
-    if matches:
-        return max(matches, key=lambda p: p.stat().st_mtime)
-    # task_id: <work_dir>/<key>/<newest run>
-    task_dir = work_dir / key
-    if task_dir.is_dir():
-        runs = [r for r in task_dir.iterdir() if _is_run_dir(r)]
-        if runs:
-            return max(runs, key=lambda p: p.stat().st_mtime)
-    return None
 
 
 # ── docker layer (thin seam; monkeypatched in tests) ───────────────────
@@ -384,7 +371,7 @@ def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
     loop.
     """
     while True:
-        run_dir = _resolve(work_dir, key)
+        run_dir = resolve_run_dir(work_dir, key)
         if run_dir is not None:
             return run_dir, None
         record = lookup_completed(key, expected_task_id=key)
@@ -422,11 +409,12 @@ def _reap_empty_task_dir(task_dir: Path) -> None:
     dir keeps ``work_dir`` as clean as the route-runner leaves it on success.
 
     We gate on *any* remaining child directory, not just one matching
-    :func:`_is_run_dir`: a brand-new dispatch creates ``<work_dir>/<task>/<run>/``
-    before ``develop()`` seeds its ``handoff/`` subdir, so an in-flight startup
-    run is a directory that doesn't yet look like a run dir. Treating any
-    subdirectory as a live run keeps that window safe — only a task dir down to
-    plain files (the stale ``task.json``) is reaped.
+    :func:`~story_develop.run_outcome.is_run_dir`: a brand-new dispatch creates
+    ``<work_dir>/<task>/<run>/`` before ``develop()`` seeds its ``handoff/``
+    subdir, so an in-flight startup run is a directory that doesn't yet look
+    like a run dir. Treating any subdirectory as a live run keeps that window
+    safe — only a task dir down to plain files (the stale ``task.json``) is
+    reaped.
     """
     try:
         if any(child.is_dir() for child in task_dir.iterdir()):
@@ -723,7 +711,7 @@ def develop_dump(
         cfg = load_config(config)
     except LithosLoomError as exc:
         _fail(str(exc))
-    run_dir = _resolve(cfg.orchestrator.work_dir, key)
+    run_dir = resolve_run_dir(cfg.orchestrator.work_dir, key)
     if run_dir is None:
         _fail(f"no run found for {key!r} under {cfg.orchestrator.work_dir}")
 
@@ -793,7 +781,7 @@ def develop_attach(
         cfg = load_config(config)
     except LithosLoomError as exc:
         _fail(str(exc))
-    run_dir = _resolve(cfg.orchestrator.work_dir, key)
+    run_dir = resolve_run_dir(cfg.orchestrator.work_dir, key)
     if run_dir is None:
         if not wait:
             _fail(f"no run found for {key!r} under {cfg.orchestrator.work_dir}")

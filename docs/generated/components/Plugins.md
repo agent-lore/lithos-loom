@@ -39,7 +39,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
-| `lithos_loom.plugins.story_develop.github_access` | XS | 0 | 2 |
+| `lithos_loom.plugins.story_develop.github_access` | S | 1 | 4 |
 | `lithos_loom.plugins.story_develop.handoff` | M | 3 | 13 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
@@ -50,14 +50,14 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.panel_prompts` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
-| `lithos_loom.plugins.story_develop.pr_delivery` | M | 3 | 15 |
+| `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 15 |
-| `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 14 |
+| `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 17 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
@@ -264,6 +264,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.github_access`
 - def `github_call` — Run one GitHub REST operation against a typed client, synchronously.
 - def `repo_name_with_owner` — ``owner/repo`` of the local checkout's ``origin`` remote, via ``gh``.
+- def `default_base_branch` — The default branch of the checkout's ``origin`` repository, via ``gh``.
+- class `OpenPullRequest` — An open PR ``gh`` reports for a head branch, with the fields an adopter must verify before treating it as ours.
+- def `list_open_prs_for_branch` — Every open PR whose head branch is *branch*, with its identity fields.
 
 ### `lithos_loom.plugins.story_develop.handoff`
 - def `severity_at_or_above` — True if *severity* meets or exceeds *threshold* (minor < major < critical).
@@ -414,11 +417,14 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `run_round` — Sequence one develop round's phases. Returns the first phase's :class:`CycleExit` (terminating the loop), or ``None`` to continue to the next round. The order — and the TWO ``cost_ceiling_phase`` calls straddling approval — is load-bearing (see :func:`cost_ceiling_phase`).
 
 ### `lithos_loom.plugins.story_develop.run_outcome`
+- def `is_run_dir` — A run dir is recognised by its seeded ``handoff/`` subdir.
+- def `resolve_run_dir` — Resolve *key* (a run_id or task_id) to a run dir, newest run if a task.
 - def `read_state` — The run's terminal ``state.json`` (status + rounds + branch), or ``None``.
 - def `result_for_run` — THIS run's ``result.json`` (the plugin's final contract output), or ``None``.
 - def `delivery_complete` — Whether THIS approved run's post-dialogue PR delivery succeeded.
 - def `delivery_failed` — The reason THIS run's PR delivery FAILED (#194), or ``None``.
 - def `delivery_deadline` — The instant this run's delivery budget expires (#189), or ``None``.
+- def `delivery_budget_expired` — Whether the recorded delivery deadline has already PASSED (#189).
 - def `delivery_timed_out` — Whether an in-flight delivery has exceeded its bound (#189).
 - def `record_delivery_deadline` — Record when this run's PR delivery budget expires, for `develop attach` (#189).
 - def `record_delivery_failure` — Mark this run's PR delivery as FAILED in its private delivery.json (#194).

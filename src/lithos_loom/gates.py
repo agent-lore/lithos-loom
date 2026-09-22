@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ESCALATION_REASONS",
     "ESCALATION_SUMMARY_MAX_CHARS",
+    "ROUTE_CONFLICT_RESOLVE",
+    "ROUTE_EXTERNAL_REMEDIATION",
+    "ROUTE_PR_GATE",
     "GATE_TYPE_HUMAN",
     "GATE_TYPE_PR",
     "NEEDS_HUMAN_TAG",
@@ -102,6 +105,27 @@ runner clears this key when it dispatches the story again."""
 
 ESCALATION_SUMMARY_MAX_CHARS = 200
 """Cap on ``escalation_summary`` so the flat key stays one list-view line."""
+
+ROUTE_EXTERNAL_REMEDIATION = "external-remediation"
+"""``metadata.route`` of the external-remediation **decision** gate (an
+exhausted S5b budget, or a reverted external fix). Completing it is the
+operator's CONSENT to spend another budget, not a formality."""
+
+ROUTE_CONFLICT_RESOLVE = "conflict-resolve"
+"""``metadata.route`` of the conflict-resolver's unresolved-conflict gate."""
+
+ROUTE_PR_GATE = "pr-gate"
+"""``metadata.route`` of the `pr`-gate resolver's stranded-PR gate (a delivered
+PR closed unmerged / deleted)."""
+
+# A gate's ``route`` is what says whose escalation it is: a **dispatch**
+# route's gate says "this story's run stopped", while each of the three above
+# says something else entirely — and for `external-remediation` completion is
+# a decision token that re-arms autonomous, paid remediation. So anything
+# acting on "the gates holding this story" discriminates on the route, and it
+# does so by ALLOWLIST (the host's configured `[[routes]]`): a route nobody
+# configured is never a stopped run's, and a denylist of the subsystems we
+# happen to remember silently admits the next one that is added.
 
 ESCALATION_REASONS: frozenset[str] = frozenset(
     {

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -100,13 +101,29 @@ def build_pr_body(
     description: str,
     acceptance_criteria: str | None,
     reviews_summary: str,
-    rounds: int,
+    rounds: int | None,
     gate_verdict: str | None,
-    cost_usd: float,
+    cost_usd: float | None,
     task_id: str | None,
     issue_closes: str = "",
+    provenance: Sequence[str] = (),
+    provenance_quote: str = "",
 ) -> str:
-    """The generated PR body: provenance + verdicts, not the whole log."""
+    """The generated PR body: provenance + verdicts, not the whole log.
+
+    ``rounds`` / ``cost_usd`` are ``None`` when nothing recorded them (a hand
+    delivery whose run dir was reaped) and render as ``unknown`` — never as a
+    confident zero.
+
+    *provenance_quote* is untrusted text (an agent's handoff) rendered as a
+    fenced block so none of it is active markup.
+
+    *provenance* is an optional block of extra lines about where the branch
+    came from — empty for a run that delivered itself (the Review section
+    already says), one section for a branch delivered by hand afterwards
+    (``lithos-loom develop deliver``: the run id and why that run stopped).
+    One body builder, so a hand delivery's PR reads like every other.
+    """
     parts = ["## What", "", description.strip(), ""]
     if issue_closes:
         parts += [issue_closes, ""]
@@ -116,13 +133,37 @@ def build_pr_body(
         "## Review",
         "",
         f"- verdicts: {reviews_summary}",
-        f"- rounds: {rounds}",
+        # `None` is "nobody recorded this", which a hand delivery of a reaped
+        # run genuinely hits — and "0 rounds / $0.00" would assert something
+        # false about the branch rather than admit the gap.
+        f"- rounds: {rounds if rounds is not None else 'unknown'}",
     ]
     if gate_verdict:
         parts.append(f"- test gate: {gate_verdict}")
-    parts.append(f"- agent cost: ${cost_usd:.2f}")
+    parts.append(
+        f"- agent cost: ${cost_usd:.2f}"
+        if cost_usd is not None
+        else "- agent cost: unknown"
+    )
     if task_id:
         parts.append(f"- Lithos task: `{task_id}`")
+    if provenance or provenance_quote:
+        parts += ["", "## Provenance", ""]
+        parts += [f"- {line}" for line in provenance]
+    if provenance_quote:
+        # FENCED, deliberately: *provenance_quote* is text an agent wrote (the
+        # coder's handoff), and a PR description is live markup — GitHub
+        # honours closing keywords and @-mentions anywhere in it. Inside a code
+        # block neither fires, and the operator still sees exactly what was
+        # written.
+        parts += [
+            "",
+            "Coder's final handoff, verbatim:",
+            "",
+            "```text",
+            provenance_quote,
+            "```",
+        ]
     parts += [
         "",
         "Per-round commits are intentional (the dialogue history); "
@@ -183,8 +224,18 @@ def _run(
 
 
 def push_branch(wt: Path, branch: str) -> None:
-    """Host-side push of the worktree branch to origin. Raises on failure."""
-    proc = _run(["git", "push", "-u", "origin", branch], cwd=wt, timeout=300)
+    """Host-side push of the worktree branch to origin. Raises on failure.
+
+    The branch travels as a fully-qualified **refspec**, never as a bare
+    positional: a ref legitimately named ``--receive-pack=…`` would otherwise
+    be parsed by git as an option naming a program to execute (CWE-88). The
+    same hardening the ``ls-remote`` / ``rev-parse`` reads already carry.
+    """
+    proc = _run(
+        ["git", "push", "-u", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
+        cwd=wt,
+        timeout=300,
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"git push failed: {proc.stderr.strip()}")
 
@@ -343,13 +394,27 @@ def push_to_pr_ref(
     return head_sha  # the exact sha pushed (== the reviewed HEAD)
 
 
-def create_pr(wt: Path, *, branch: str, base: str, title: str, body: str) -> str:
-    """Open the PR; returns its URL. Raises on failure."""
+def create_pr(
+    wt: Path,
+    *,
+    branch: str,
+    base: str,
+    title: str,
+    body: str,
+    repo_name: str | None = None,
+) -> str:
+    """Open the PR; returns its URL. Raises on failure.
+
+    *repo_name* pins the target repository (``--repo owner/name``) rather
+    than letting ``gh`` infer it — for a fork checkout gh's default is the
+    *parent*, which is not where the branch was pushed.
+    """
     proc = _run(
         [
             "gh",
             "pr",
             "create",
+            *(["--repo", repo_name] if repo_name else []),
             "--head",
             branch,
             "--base",

@@ -136,11 +136,11 @@ def test_round_zero_when_no_handoffs_yet(tmp_path: Path) -> None:
 
 def test_resolve_by_run_id_task_id_and_miss(tmp_path: Path) -> None:
     _make_run(tmp_path, task_id="t-1", run_id="run-aaa", rounds={1: ["cq"]})
-    by_run = develop._resolve(tmp_path, "run-aaa")
-    by_task = develop._resolve(tmp_path, "t-1")
+    by_run = develop.resolve_run_dir(tmp_path, "run-aaa")
+    by_task = develop.resolve_run_dir(tmp_path, "t-1")
     assert by_run is not None and by_run.name == "run-aaa"  # by run id
     assert by_task is not None and by_task.name == "run-aaa"  # by task id
-    assert develop._resolve(tmp_path, "nope") is None
+    assert develop.resolve_run_dir(tmp_path, "nope") is None
 
 
 def test_task_title_missing_json_is_blank(tmp_path: Path) -> None:
@@ -978,14 +978,14 @@ def test_attach_wait_blocks_until_run_appears(
     _make_run(
         patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]}, status="approved"
     )
-    real_resolve = develop._resolve
+    real_resolve = develop.resolve_run_dir
     calls = {"n": 0}
 
     def slow_resolve(work_dir: Path, key: str) -> Path | None:
         calls["n"] += 1
         return None if calls["n"] < 3 else real_resolve(work_dir, key)
 
-    monkeypatch.setattr(develop, "_resolve", slow_resolve)
+    monkeypatch.setattr(develop, "resolve_run_dir", slow_resolve)
     monkeypatch.setattr(develop.time, "sleep", lambda s: None)
     develop.develop_attach(key="r1", config=None, once=False, wait=True, stream=False)
     out = capsys.readouterr().out
@@ -1121,7 +1121,8 @@ def test_wait_for_run_recovers_completed_run_without_a_dir(
     # #196 (Gap B): a run can complete (idempotency replay / fast reap) WITHOUT any
     # run dir ever being observable. _wait_for_run must NOT loop forever: when the
     # completion store has a record for the key, it returns (None, recovered).
-    monkeypatch.setattr(develop, "_resolve", lambda wd, key: None)  # dir never appears
+    # the dir never appears
+    monkeypatch.setattr(develop, "resolve_run_dir", lambda wd, key: None)
     monkeypatch.setattr(
         develop,
         "lookup_completed",
@@ -1147,7 +1148,8 @@ def test_attach_wait_recovers_replayed_run_with_no_run_dir(
     # #196 (Gap B): `attach --wait <task>` invoked when the run was
     # idempotency-replayed (no run dir is ever created) reports the recovered
     # outcome and exits 0, instead of hanging forever in _wait_for_run.
-    monkeypatch.setattr(develop, "_resolve", lambda wd, key: None)  # no dir, ever
+    # no dir, ever
+    monkeypatch.setattr(develop, "resolve_run_dir", lambda wd, key: None)
     monkeypatch.setattr(
         develop,
         "lookup_completed",
