@@ -294,7 +294,21 @@ included).
 
 Provenance the run never recorded (a reaped run's rounds or cost) renders as
 `unknown`, never as a confident zero — and so does provenance that cannot be
-true (a negative round count, a negative / `NaN` / infinite cost).
+true (a negative round count, a negative / `NaN` / infinite cost). And the
+claim that the story carries the full, unredacted reason is made only when a
+reason was rendered here to be the redacted half of it.
+
+**The approved run reads as approved.** On the salvage path where the panel
+*did* approve and the run's own automated delivery failed (#194) or outlived
+its budget (#189), the branch is not an unreviewed one: the Review section
+says **approved** rather than "not recorded", and the provenance says the run
+was approved and its delivery never completed rather than that it "stopped
+`approved`". Its stop reason is the delivery failure — the recorded reason
+from the run's `delivery.json` / its `result.json` delivery error, else the
+budget it never came back inside — since `state.json` carries a
+`failure_reason` only for the statuses whose *dialogue* failed. It is redacted
+and bounded like any other (`gh` stderr is host text too), and `--dry-run`
+shows the operator the untouched original.
 
 ## Flags
 

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import UTC, datetime
 from pathlib import Path
 
 from lithos_loom.cli._deliver_facts import RunFacts, run_facts
@@ -116,8 +115,7 @@ def _refuse_if_run_may_be_live(run_dir: Path, facts: RunFacts) -> None:
         return
     if run_outcome.delivery_failed(run_dir):
         return  # a recorded failure: exactly the salvage case
-    deadline = run_outcome.delivery_deadline(run_dir)
-    if deadline is not None and datetime.now(UTC) > deadline:
+    if run_outcome.delivery_budget_expired(run_dir):
         return  # the automated delivery outlived its own budget
     raise DeliverRefused(
         f"run {facts.run_id} was APPROVED and its automated delivery has "

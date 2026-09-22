@@ -57,7 +57,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 15 |
-| `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 16 |
+| `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 17 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
@@ -424,6 +424,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `delivery_complete` — Whether THIS approved run's post-dialogue PR delivery succeeded.
 - def `delivery_failed` — The reason THIS run's PR delivery FAILED (#194), or ``None``.
 - def `delivery_deadline` — The instant this run's delivery budget expires (#189), or ``None``.
+- def `delivery_budget_expired` — Whether the recorded delivery deadline has already PASSED (#189).
 - def `delivery_timed_out` — Whether an in-flight delivery has exceeded its bound (#189).
 - def `record_delivery_deadline` — Record when this run's PR delivery budget expires, for `develop attach` (#189).
 - def `record_delivery_failure` — Mark this run's PR delivery as FAILED in its private delivery.json (#194).

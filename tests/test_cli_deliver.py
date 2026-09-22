@@ -1175,6 +1175,89 @@ def test_an_approved_run_past_its_delivery_budget_is_salvageable(
     assert len(gh["created"]) == 1
 
 
+def test_an_approved_salvage_records_its_approval_and_delivery_failure(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """[davesnowdon] f-001: on the approved salvage path (#194 / #189) the panel
+    DID approve, and what stopped is the run's own PR delivery — whose reason
+    `state.json` never carries. "stopped `approved`", a verdict of "not
+    recorded" and a promise of a full reason nothing carried over describe none
+    of it."""
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    # only the reason-bearing statuses set one: an approved dialogue did not fail
+    state["failure_reason"] = None
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "delivery.json").write_text(
+        json.dumps({"failed": True, "reason": "gh pr create failed: api said 502"}),
+        encoding="utf-8",
+    )
+
+    plan = _invoke(_RUN, "--dry-run")
+    assert plan.exit_code == 0, plan.output
+    # the operator's own copy names the delivery failure, not an empty dash
+    assert "approved — gh pr create failed: api said 502" in plan.output
+
+    assert _invoke(_RUN).exit_code == 0
+    body = gh["created"][0]["body"]
+
+    # the recorded approval, rendered as the approval it was
+    assert "verdicts: approved — the review panel agreed" in body
+    assert "not recorded" not in body and "not approved" not in body
+    # …and the delivery failure as the stop reason, not "stopped `approved`"
+    assert "stopped `approved`" not in body
+    assert "was approved by the review panel" in body
+    assert "gh pr create failed: api said 502" in body
+    assert "the story carries the full, unredacted reason" in body
+    # the story's audit copy says the same
+    findings = [f["summary"] for f in lithos.findings if f["task_id"] == _STORY]
+    assert "the run was approved and its own PR delivery never completed" in findings[0]
+    assert "had stopped approved" not in findings[0]
+
+
+def test_an_expired_delivery_budget_is_the_stop_reason(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """[davesnowdon] f-001, the #189 half: nothing recorded a failure, so the
+    budget the daemon never came back inside IS the reason."""
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    state["failure_reason"] = None
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "delivery.json").write_text(
+        json.dumps({"deadline": "2020-01-01T00:00:00+00:00"}), encoding="utf-8"
+    )
+
+    assert _invoke(_RUN).exit_code == 0
+    body = gh["created"][0]["body"]
+    assert "was approved by the review panel" in body
+    assert "the automated delivery never reported inside its budget" in body
+
+
+def test_a_reasonless_stop_never_promises_a_reason_on_the_story(
+    tmp_path: Path,
+) -> None:
+    """[davesnowdon] f-001, the pure half: the parenthetical is a claim about
+    the STORY, so a run whose reason nothing recorded must not make it."""
+    facts = cli_facts.RunFacts(
+        story_id=_STORY, branch=_BRANCH, run_id=_RUN, status="failed"
+    )
+    lines = cli_facts.provenance_lines(facts)
+    assert any("stopped `failed`" in line for line in lines)
+    assert not any("full, unredacted reason" in line for line in lines)
+    # …and it still makes it when there IS a reason to redact
+    with_reason = cli_facts.provenance_lines(
+        cli_facts.RunFacts(
+            story_id=_STORY,
+            branch=_BRANCH,
+            run_id=_RUN,
+            status="failed",
+            failure_reason="the coder died",
+        )
+    )
+    assert any("full, unredacted reason" in line for line in with_reason)
+
+
 def test_nonsense_rounds_and_cost_read_as_unknown(tmp_path: Path) -> None:
     """correctness/f-014: type-correct is not truthful. A negative round count
     or a NaN / negative spend cannot describe a run."""

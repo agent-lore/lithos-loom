@@ -205,6 +205,20 @@ def delivery_deadline(run_dir: Path) -> datetime | None:
     return deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
 
 
+def delivery_budget_expired(run_dir: Path) -> bool:
+    """Whether the recorded delivery deadline has already PASSED (#189).
+
+    The "this delivery is not coming back" half of :func:`delivery_deadline`,
+    shared by every caller that must tell a delivery still inside its budget
+    from one that outlived it: `develop deliver`'s salvage guard, and the
+    provenance it publishes for the run it salvages. ``False`` when no deadline
+    was recorded — an unbounded delivery is not an expired one (callers that
+    need a bound without a deadline use :func:`delivery_timed_out`'s grace).
+    """
+    deadline = delivery_deadline(run_dir)
+    return deadline is not None and datetime.now(UTC) >= deadline
+
+
 def delivery_timed_out(run_dir: Path, *, delivering_seconds: float) -> bool:
     """Whether an in-flight delivery has exceeded its bound (#189).
 

@@ -66,6 +66,10 @@ class RunFacts:
     run_id: str = ""
     status: str = ""
     failure_reason: str = ""
+    delivery_failure: str = ""
+    """Why an APPROVED run's OWN automated delivery produced no PR (#194 /
+    #189) — the stop reason ``failure_reason`` cannot carry on that salvage
+    path, because the dialogue itself did not fail."""
     rounds: int | None = None
     cost_usd: float | None = None
     test_gate_verdict: str | None = None
@@ -275,6 +279,28 @@ def defang_markup(text: str) -> str:
     return _FENCE_RE.sub("``", out)
 
 
+def _delivery_failure(run_dir: Path, status: str) -> str:
+    """Why an APPROVED run's own automated delivery produced no PR, or ``""``.
+
+    ``state.json``'s ``failure_reason`` is ``None`` for an approved run (only
+    the reason-bearing statuses set one — the dialogue did not fail), so on the
+    approved salvage path this command exists for the stop reason lives
+    elsewhere: the run's private ``delivery.json`` marker, or its terminal
+    ``result.json`` delivery error (#194) — and when nothing recorded a failure,
+    the delivery budget the daemon never came back inside (#189). The same two
+    facts ``_refuse_if_run_may_be_live`` admits the salvage on, and the same
+    two ``capture_outcome`` reads for ``develop attach``.
+    """
+    if status != run_outcome.APPROVED:
+        return ""
+    recorded = run_outcome.delivery_failed(run_dir)
+    if recorded:
+        return recorded
+    if run_outcome.delivery_budget_expired(run_dir):
+        return "the automated delivery never reported inside its budget"
+    return ""
+
+
 def run_facts(run_dir: Path) -> RunFacts:
     """Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
 
@@ -288,12 +314,14 @@ def run_facts(run_dir: Path) -> RunFacts:
     escalation = result.get("escalation")
     brief = escalation.get("brief") if isinstance(escalation, Mapping) else None
     brief = brief if isinstance(brief, Mapping) else {}
+    status = _opt_str(state.get("status"))
     return RunFacts(
         story_id=run_dir.parent.name,
         branch=_opt_str(state.get("branch")),
         run_id=_opt_str(state.get("run_id")) or run_dir.name,
-        status=_opt_str(state.get("status")),
+        status=status,
         failure_reason=_opt_str(state.get("failure_reason")),
+        delivery_failure=_delivery_failure(run_dir, status),
         rounds=_opt_rounds(state.get("rounds")),
         cost_usd=_opt_cost(brief.get("cost_usd")),
         test_gate_verdict=_opt_str(brief.get("test_gate_verdict")) or None,
@@ -399,6 +427,13 @@ def provenance_lines(facts: RunFacts) -> list[str]:
     reason goes through :func:`redact_for_publication` first: it is not a
     curated label (agent error text / stderr / unparsed stdout), and a PR body
     is world-readable. The operator's copy stays whole on the story.
+
+    Two shapes, because two runs end up here. A run the panel never approved
+    stopped in the dialogue, and its status names that. An **approved** run
+    (#194 / #189: the delivery that failed or outlived its budget — a documented
+    salvage path) stopped in its own PR delivery: "stopped ``approved``"
+    describes neither half of it, and its reason is
+    :attr:`RunFacts.delivery_failure` rather than ``failure_reason``.
     """
     lines = [
         "delivered by hand with `lithos-loom develop deliver` — the run that "
@@ -406,20 +441,40 @@ def provenance_lines(facts: RunFacts) -> list[str]:
     ]
     if facts.run_id:
         stop = f"run `{facts.run_id}`"
-        if facts.status:
+        if facts.status == run_outcome.APPROVED:
+            stop += (
+                " was approved by the review panel, but its own automated PR "
+                "delivery never completed"
+            )
+        elif facts.status:
             stop += f" stopped `{facts.status}`"
-        reason = redact_for_publication(facts.failure_reason)
+        reason = redact_for_publication(facts.failure_reason or facts.delivery_failure)
         if reason:
-            stop += f": {reason}"
-        stop += " (the story carries the full, unredacted reason)"
+            # The parenthetical is a claim about the STORY, so it is made only
+            # when a reason was rendered here to be the redacted half of it —
+            # otherwise it promises a full reason nothing carried over.
+            stop += f": {reason} (the story carries the full, unredacted reason)"
         lines.append(stop)
     lines.append(f"branch `{facts.branch}`")
     return lines
 
 
 def reviews_summary(facts: RunFacts) -> str:
-    """The Review section's verdict line: this branch was NOT panel-approved."""
-    if facts.status and facts.status != run_outcome.APPROVED:
+    """The Review section's verdict line: what the panel recorded, if anything.
+
+    Almost every hand delivery is of a branch the panel never approved. But the
+    **approved** run whose own delivery failed or outlived its budget (#194 /
+    #189) is a documented salvage path too, and there the verdict IS recorded —
+    calling it "not recorded" would understate a review that happened and send
+    the reviewer looking for one.
+    """
+    if facts.status == run_outcome.APPROVED:
+        return (
+            "approved — the review panel agreed on this branch; what did not "
+            "complete was the run's own automated PR delivery, so the PR was "
+            "opened by hand"
+        )
+    if facts.status:
         return (
             f"not approved — the run stopped `{facts.status}` before the panel "
             "agreed; review this PR as you would any other"

@@ -33,6 +33,7 @@ from lithos_loom.cli._deliver_repo import (
     PUSH_UP_TO_DATE,
     RemoteState,
 )
+from lithos_loom.plugins.story_develop import run_outcome
 
 __all__ = ["MANUAL_DELIVERY", "delivery_finding", "echo_plan", "render"]
 
@@ -80,7 +81,11 @@ def delivery_finding(
         parts.append(f"branch {facts.branch} already on origin at {sha}")
     else:
         parts.append(f"branch {facts.branch}")
-    if facts.status:
+    if facts.status == run_outcome.APPROVED:
+        # the approved salvage path (#194 / #189): the panel DID approve, and
+        # what stopped is the run's own delivery — "stopped approved" is neither
+        parts.append("the run was approved and its own PR delivery never completed")
+    elif facts.status:
         parts.append(f"the run had stopped {facts.status}")
     # The mode is the operator's flag, NOT "did we end up with an outcome
     # object": a gate attempt that failed leaves `outcome` None too, and
@@ -161,8 +166,10 @@ def echo_plan(
     echo(f"  repo:   {repo} → {repo_name}")
     echo(f"  story:  {story.story_id} [{story.status}] — {story.title}")
     # the raw failure reason stays on the operator's terminal; the PR body
-    # carries only the classification (see `provenance_lines`)
-    echo(f"  run:    {facts.status or '?'} — {facts.failure_reason or '—'}")
+    # carries only the classification (see `provenance_lines`). An approved run
+    # has no `failure_reason` — its reason is why its own delivery never landed.
+    reason = facts.failure_reason or facts.delivery_failure
+    echo(f"  run:    {facts.status or '?'} — {reason or '—'}")
     echo(f"  1 push: {push_words[state.action]}")
     echo(f"  2 PR:   adopt the open PR for the branch, else open onto {base}")
     echo(f"          title {title!r}")
