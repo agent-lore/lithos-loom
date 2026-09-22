@@ -455,16 +455,15 @@ def test_spawn_description_carries_defect_and_deferral_reason(
     assert "Button text overlaps the icon" in call["title"]
 
 
-def test_post_results_needs_decision_bounds_the_number_of_decisions(
+def test_post_results_needs_decision_carries_every_decision_whole(
     fake_client: FakeLithosClient,
 ) -> None:
-    # security/f-007: the per-field caps bound ONE decision, but a coder may
-    # mark every open finding — and the quantity that has to stay postable is
-    # this finding body. The overflow is named by id, not dropped in silence.
-    from lithos_loom.plugins.story_develop.findings import (
-        MAX_RENDERED_DECISIONS,
-        PendingDecision,
-    )
+    # correctness/f-002: the collection is bounded on ADMISSION, so the body
+    # carries every decision the run HAS, whole — none is reduced to an id
+    # with its question left in the conversation log. A mark that did not fit
+    # that budget is named as NOT a decision (an ordinary dispute), which is
+    # what it is.
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
 
     decisions = tuple(
         PendingDecision(
@@ -472,16 +471,23 @@ def test_post_results_needs_decision_bounds_the_number_of_decisions(
             finding_id=f"f-{i:03d}",
             severity="critical",
             question=f"question {i}?",
-            options="(a) accept; (b) block",
+            options=f"(a) accept {i}; (b) block {i}",
         )
-        for i in range(MAX_RENDERED_DECISIONS + 2)
+        for i in range(7)
     )
     lithos_io.post_results(
-        "http://x", "task-1", _result(status="needs_decision", decisions=decisions)
+        "http://x",
+        "task-1",
+        _result(
+            status="needs_decision",
+            decisions=decisions,
+            decisions_not_admitted=("correctness/f-101",),
+        ),
     )
 
     body = fake_client.findings[1]["summary"]
-    assert "question 0?" in body
-    assert f"question {MAX_RENDERED_DECISIONS}?" not in body  # past the bound
-    assert "…and 2 more decision(s)" in body
-    assert f"correctness/f-{MAX_RENDERED_DECISIONS:03d}" in body  # named anyway
+    for i in range(7):
+        assert f"question {i}?" in body  # every one of them
+        assert f"(b) block {i}" in body  # with its options and their costs
+    assert "correctness/f-101" in body
+    assert "NOT decisions on this run" in body

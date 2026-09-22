@@ -61,7 +61,13 @@ from .config import (
     ReviewerSpec,
     is_valid_reviewer_name,
 )
-from .findings import DeferredFinding, PendingDecision, collect_deferred
+from .findings import (
+    DeferredFinding,
+    PendingDecision,
+    admitted_decisions,
+    collect_deferred,
+    collect_pending_decisions,
+)
 from .gate_findings import GateFinding
 from .handoff import HandoffError
 from .loop_entry import LoopEntry
@@ -145,6 +151,10 @@ class DevelopResult:
     # need not re-list the finding for the question to exist) and carried
     # structurally so the gate's brief is the DECISION, not the run facts.
     decisions: tuple[PendingDecision, ...] = ()
+    # Labels of `needs-decision` marks the escalation could not carry whole
+    # (correctness/f-002): NOT decisions on this run — ordinary disputes,
+    # named as such on both operator surfaces instead of published as ids.
+    decisions_not_admitted: tuple[str, ...] = ()
     # ``infra_failed`` only (slice B): what to fix on the host before completing
     # the needs-human gate — structured, so the gate's capped summary can never
     # truncate it away
@@ -708,11 +718,15 @@ def develop(
         review_profile=config.review_profile,
         resume_after=resume_after,
         deferred_findings=collect_deferred(r.ledger for r in reviewers),
-        decisions=tuple(
-            d
-            for r in reviewers
-            for d in r.ledger.pending_decisions(r.spec.block_threshold)
-        ),
+        # The SAME admission `decision_phase` applied before stopping, on the
+        # same ordered input — so what the run says it has is exactly what it
+        # publishes, whole (correctness/f-002).
+        decisions=admitted_decisions(
+            collect_pending_decisions(
+                (r.ledger, r.spec.block_threshold) for r in reviewers
+            )
+        )[0],
+        decisions_not_admitted=ctx.decisions_not_admitted,
         failure_reason=failure_reason if status in _REASON_BEARING_STATUSES else "",
         host_action=host_action,
     )

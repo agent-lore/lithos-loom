@@ -48,6 +48,7 @@ from . import (
 )
 from .check_set import Check, CheckResult, CheckSetResult, render_check_summary
 from .config import HANDOFF_DIRNAME, DevelopConfig
+from .findings import admitted_decisions, collect_pending_decisions
 from .gate_findings import GateLedger
 from .handoff import max_severity, render_prompt
 from .loop_entry import PostCommitOutcome
@@ -217,6 +218,10 @@ class RoundContext:
     # prompt's gate summary so the loop can fix the capture instead of
     # stalling silently. Cleared once delivered.
     artifact_capture_notice: str | None = None
+    # 9d5ebca6: `needs-decision` marks the escalation could not carry whole
+    # (labels only) — named on the operator's surfaces as NOT admitted, which
+    # is what they are: ordinary disputes on this run (correctness/f-002).
+    decisions_not_admitted: tuple[str, ...] = ()
 
 
 def _combine_review_outcomes(
@@ -813,6 +818,12 @@ def decision_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     DID contest (citing the acceptance line the finding meets) left no pending
     decision here, and the deadlock guard below applies unchanged.
 
+    The decisions are **admitted** here, before the exit: what the run claims
+    is exactly what both operator surfaces carry whole (:func:`
+    ~.findings.admitted_decisions`), and a mark that does not fit the
+    publication budget is named as not-admitted rather than published as an id
+    (correctness/f-002).
+
     At most ONE escalation can happen per run — this exit ends it — and the
     next one needs the operator to complete the gate first, so "how many
     decisions may a story raise" is bounded by operator consent rather than a
@@ -821,13 +832,14 @@ def decision_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
 
     Exit: H' ``needs_decision``.
     """
-    decisions = [
-        d
-        for r in ctx.reviewers
-        for d in r.ledger.pending_decisions(r.spec.block_threshold)
-    ]
+    decisions, not_admitted = admitted_decisions(
+        collect_pending_decisions(
+            (r.ledger, r.spec.block_threshold) for r in ctx.reviewers
+        )
+    )
     if not decisions:
         return None
+    ctx.decisions_not_admitted = tuple(d.label for d in not_admitted)
     logger.warning(
         "[ReviewDispute] story-develop %s: round %d needs a product decision on "
         "%s — stopping before another coder turn",
@@ -835,6 +847,15 @@ def decision_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         round_no,
         ", ".join(d.label for d in decisions),
     )
+    if not_admitted:
+        # Named, not silently dropped: these marks are NOT decisions this run
+        # (correctness/f-002 — the escalation publishes what it admits, whole).
+        logger.warning(
+            "[ReviewDispute] story-develop %s: %s did not fit the escalation's "
+            "publication budget and stay ordinary disputes",
+            ctx.config.run_id,
+            ", ".join(d.label for d in not_admitted),
+        )
     # The reason line is LOOM-AUTHORED on purpose (security/f-002): it becomes
     # `escalation.summary`, which the needs-human notifier publishes as an
     # `@operator` comment on the story's public GitHub issue / PR and passes to

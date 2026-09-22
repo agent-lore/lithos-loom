@@ -1451,16 +1451,13 @@ def test_build_result_payload_needs_decision_brief_is_the_decision(
     validate_result_schema(payload)
 
 
-def test_needs_decision_brief_carries_each_decision_whole_but_bounds_the_list(
-    tmp_path: Path,
-) -> None:
-    """The brief becomes task METADATA in one unbounded write, so the list is
-    bounded (security/f-007) — but each decision it carries is WHOLE, because
-    its length was checked on admission (correctness/f-002): the gate must
-    never show a prefix of the question it exists to put to the operator."""
+def test_needs_decision_brief_carries_every_decision_whole(tmp_path: Path) -> None:
+    """The brief is one unbounded metadata write, so the collection is bounded
+    on ADMISSION (security/f-007) — and therefore every decision it carries is
+    carried WHOLE, question and options (correctness/f-002): the gate never
+    shows a prefix, nor an id standing in for a decision."""
     from lithos_loom.plugins.story_develop.findings import (
         DECISION_TEXT_MAX_CHARS,
-        MAX_RENDERED_DECISIONS,
         PendingDecision,
     )
 
@@ -1470,12 +1467,12 @@ def test_needs_decision_brief_carries_each_decision_whole_but_bounds_the_list(
             reviewer="correctness",
             finding_id=f"f-{i:03d}",
             severity="critical",
-            question=long_question,
+            question=long_question if i == 0 else f"question {i}?",
             options="(a) accept; (b) block",
             coder_response="no compare-and-set",
             conceded=True,
         )
-        for i in range(MAX_RENDERED_DECISIONS + 3)
+        for i in range(7)
     )
     payload, _ = build_result_payload(
         _result(
@@ -1483,6 +1480,7 @@ def test_needs_decision_brief_carries_each_decision_whole_but_bounds_the_list(
             tmp_path,
             failure_reason="round 3: needs a decision",
             decisions=decisions,
+            decisions_not_admitted=("correctness/f-101", "correctness/f-102"),
         ),
         task_id="t-1",
         started_at=_NOW,
@@ -1490,12 +1488,13 @@ def test_needs_decision_brief_carries_each_decision_whole_but_bounds_the_list(
         run_dir=tmp_path,
     )
     brief = payload["escalation"]["brief"]
-    assert len(brief["decisions"]) == MAX_RENDERED_DECISIONS
+    assert len(brief["decisions"]) == 7
     assert brief["decisions"][0]["question"] == long_question  # whole, no "…"
+    assert brief["decisions"][6]["question"] == "question 6?"
     assert brief["decisions"][0]["reviewer_verdict"] == "conceded"
-    # the ones left out are named, not dropped in silence
-    assert "…and 3 more decision(s)" in brief["decisions_omitted"]
-    assert "correctness/f-007" in brief["decisions_omitted"]
+    # marks that did not fit the budget are named as what they are
+    assert "correctness/f-101" in brief["marks_not_admitted"]
+    assert "ordinary disputes" in brief["marks_not_admitted"]
     validate_result_schema(payload)
 
 

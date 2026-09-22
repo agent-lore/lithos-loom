@@ -507,6 +507,13 @@ def test_blank_options_never_overwrite_a_recorded_decision() -> None:
 # ── the reviewer must ANSWER a pending decision (security/f-003) ───────
 
 
+def reviewer_validator_for(ledger: FindingLedger):
+    """The per-turn validator the panel builds for a ledger-mode review."""
+    from lithos_loom.plugins.story_develop.findings import reviewer_validator
+
+    return reviewer_validator(ledger, findings_are_new=False)
+
+
 def _keeps_open(**kw) -> ReviewHandoff:
     return _review(_f("f-001", **kw))
 
@@ -686,6 +693,76 @@ def test_the_validator_re_prompts_once_then_lets_the_review_land() -> None:
     assert reviewer_validator(ledger, findings_are_new=False)(_keeps_open()) is not None
 
 
+def _two_pending_ledger() -> FindingLedger:
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_review(_f(), _f()), 1)
+    ledger.record_coder_updates([_decision("f-001"), _decision("f-002")], 2)
+    return ledger
+
+
+def _keeps_both_open(**kw) -> ReviewHandoff:
+    return _review(_f("f-001", **kw), _f("f-002", **kw))
+
+
+def test_the_ask_is_one_per_turn_not_one_per_finding() -> None:
+    # correctness/f-005 + security/f-008: `panel._review_turn` allows ONE
+    # correction, so asking per finding let N unanswered decisions consume N
+    # rejections — the second one failed the handoff and the run stopped
+    # `reviewer_failed`, attributing to the reviewer a stop the coder chose by
+    # marking N findings. Every unanswered decision is now named in the one
+    # message, and the retry can never be rejected for this class.
+    from lithos_loom.plugins.story_develop.findings import reviewer_validator
+
+    validate = reviewer_validator(_two_pending_ledger(), findings_are_new=False)
+
+    first = validate(_keeps_both_open())
+    assert first is not None
+    assert "f-001" in first and "f-002" in first  # both, in one ask
+    assert validate(_keeps_both_open()) is None  # the retry always lands
+
+
+def test_a_retry_that_answers_neither_lapses_both() -> None:
+    ledger = _two_pending_ledger()
+    validate = reviewer_validator_for(ledger)
+    assert validate(_keeps_both_open()) is not None
+    assert validate(_keeps_both_open()) is None
+
+    ledger.apply_review(_keeps_both_open(), 2)
+    assert ledger.pending_decisions("major") == []
+    assert all(e.decision_lapsed for e in ledger.entries.values())
+    ledger.apply_review(_keeps_both_open(), 3)
+    assert ledger.disputed_deadlocks("major") == ["f-001", "f-002"]
+
+
+def test_a_partially_answered_retry_keeps_the_answer_and_lapses_the_rest() -> None:
+    ledger = _two_pending_ledger()
+    validate = reviewer_validator_for(ledger)
+    assert validate(_keeps_both_open()) is not None
+    # the retry answers one of the two: that answer stands, the other lapses
+    retry = _review(_f("f-001", decision_verdict="concede"), _f("f-002"))
+    assert validate(retry) is None
+    ledger.apply_review(retry, 2)
+
+    assert [d.finding_id for d in ledger.pending_decisions("major")] == ["f-001"]
+    assert ledger.entries["f-001"].decision_conceded is True
+    assert ledger.entries["f-002"].decision_lapsed is True
+
+
+def test_every_problem_kind_is_named_in_the_single_ask() -> None:
+    from lithos_loom.plugins.story_develop.findings import reviewer_validator
+
+    ledger = _two_pending_ledger()
+    err = reviewer_validator(ledger, findings_are_new=False)(
+        _review(
+            _f("f-001", decision_verdict="contest"),  # no citation
+            _f("f-002", decision_verdict="concede", decision_contest="AC 2"),
+        )
+    )
+    assert err is not None
+    assert "f-001" in err and "decision_contest" in err
+    assert "f-002" in err and "contradict" in err
+
+
 def test_a_lapsed_decision_can_be_re_raised_next_round() -> None:
     # A lapse is an ABSENCE of a verdict, not one: unlike a contest it is not
     # sticky, so a reviewer that simply missed the key does not permanently
@@ -702,23 +779,78 @@ def test_a_lapsed_decision_can_be_re_raised_next_round() -> None:
 # ── the rendered list is bounded in NUMBER too (security/f-007) ────────
 
 
-def test_overflow_note_names_what_a_bounded_rendering_left_out() -> None:
-    from lithos_loom.plugins.story_develop.findings import (
-        MAX_RENDERED_DECISIONS,
-        overflow_note,
+def _pd(i: int, size: int = 10) -> PendingDecision:
+    return PendingDecision(
+        reviewer="correctness",
+        finding_id=f"f-{i:03d}",
+        severity="major",
+        question="q" * size,
+        options="o" * size,
     )
 
-    decisions = [
-        PendingDecision(
-            reviewer="correctness",
-            finding_id=f"f-{i:03d}",
-            severity="major",
-            question="q",
-            options="o",
-        )
-        for i in range(MAX_RENDERED_DECISIONS + 2)
-    ]
-    note = overflow_note(decisions)
-    assert "…and 2 more decision(s)" in note
+
+def test_admission_takes_whole_decisions_while_they_fit_the_budget() -> None:
+    # correctness/f-002: the collection limit is part of ADMISSION, so every
+    # decision the run claims is published whole — none is rendered as an id
+    # with its question left in the log.
+    from lithos_loom.plugins.story_develop.findings import admitted_decisions
+
+    decisions = [_pd(i, size=100) for i in range(6)]  # 200 chars each
+    admitted, not_admitted = admitted_decisions(decisions, budget=500)
+
+    assert [d.finding_id for d in admitted] == ["f-000", "f-001"]  # 2 × 200
+    assert [d.finding_id for d in not_admitted] == [f"f-{i:03d}" for i in range(2, 6)]
+    # what IS admitted is untouched — no ellipsis, no prefix
+    assert admitted[0].question == "q" * 100 and admitted[0].options == "o" * 100
+    # and the whole collection fits when the budget allows
+    assert admitted_decisions(decisions)[1] == ()
+
+
+def test_admission_is_order_stable_not_best_fit() -> None:
+    # A later small decision must not jump the queue: the operator reads them
+    # in ledger order, and "the first N that fit" is the rule the two call
+    # sites (the stop and the result) both apply to the same input.
+    from lithos_loom.plugins.story_develop.findings import admitted_decisions
+
+    # f-000 spends 400 of 500; f-001 needs 200 more and does not fit; f-002
+    # would fit in the remaining 100 but must not jump the queue.
+    decisions = [_pd(0, size=200), _pd(1, size=100), _pd(2, size=10)]
+    admitted, not_admitted = admitted_decisions(decisions, budget=500)
+    assert [d.finding_id for d in admitted] == ["f-000"]
+    assert [d.finding_id for d in not_admitted] == ["f-001", "f-002"]
+
+
+def test_the_first_decision_is_always_admitted() -> None:
+    # A budget that admitted nothing would leave the run with a pending
+    # decision it neither publishes nor stops for. Every field is bounded on
+    # admission, so the first always fits in production; pin the invariant.
+    from lithos_loom.plugins.story_develop.findings import admitted_decisions
+
+    admitted, not_admitted = admitted_decisions([_pd(0, size=900)], budget=10)
+    assert [d.finding_id for d in admitted] == ["f-000"]
+    assert not_admitted == ()
+
+
+def test_not_admitted_note_says_they_are_disputes_not_missing_decisions() -> None:
+    from lithos_loom.plugins.story_develop.findings import not_admitted_note
+
+    note = not_admitted_note(["correctness/f-005", "correctness/f-006"])
+    assert "2 further finding(s)" in note
     assert "correctness/f-005" in note and "correctness/f-006" in note
-    assert overflow_note(decisions[:MAX_RENDERED_DECISIONS]) == ""
+    assert "NOT decisions on this run" in note and "ordinary disputes" in note
+    assert not_admitted_note([]) == ""
+
+
+def test_collect_pending_decisions_keeps_panel_then_ledger_order() -> None:
+    from lithos_loom.plugins.story_develop.findings import collect_pending_decisions
+
+    first, second = _pending_ledger(), FindingLedger("security")
+    second.apply_review(_review(_f(), _f()), 1)
+    second.record_coder_updates([_decision("f-002")], 2)
+    second.apply_review(
+        _review(_f("f-001"), _f("f-002", decision_verdict="concede")), 2
+    )
+    first.apply_review(_keeps_open(decision_verdict="concede"), 2)
+
+    out = collect_pending_decisions([(first, "major"), (second, "major")])
+    assert [d.label for d in out] == ["correctness/f-001", "security/f-002"]

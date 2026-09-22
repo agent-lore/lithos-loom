@@ -1287,6 +1287,86 @@ def test_contested_needs_decision_falls_back_to_the_dispute_guard(
     assert result.decisions == ()
 
 
+# Two findings, so two decisions can be raised in one coder handoff — the
+# shape correctness/f-005 / security/f-008 showed the per-finding ask failing
+# on (the single correction retry was spent on the first id, so the second
+# rejected the handoff and the run stopped `reviewer_failed`).
+_FINDINGS_TWO = (
+    "## Status: FINDINGS\n## Summary\nTwo issues.\n## Findings\n"
+    "- finding_id:\n  severity: major\n  status: open\n"
+    '  files: ["greeting.txt:1"]\n  rationale: needs work\n'
+    "- finding_id:\n  severity: major\n  status: open\n"
+    '  files: ["greeting.txt:2"]\n  rationale: also needs work\n'
+)
+_REVIEW_KEEPS_BOTH = (
+    "## Status: FINDINGS\n## Summary\nStill not addressed.\n## Findings\n"
+    "- finding_id: f-001\n  severity: major\n  status: open\n"
+    "  rationale: still needs work\n"
+    "- finding_id: f-002\n  severity: major\n  status: open\n"
+    "  rationale: still needs work\n"
+)
+_CODER_TWO_DECISIONS = (
+    "## Status: LGTM\n## Summary\nBoth are out of this story's reach.\n"
+    "## Findings\n"
+    "- finding_id: f-001\n  severity: major\n  status: needs-decision\n"
+    "  coder_response: Lens has no effective-config display\n"
+    "  decision_question: Add the display, or drop the criterion?\n"
+    "  decision_options: (a) build it — a second story; (b) drop it\n"
+    "- finding_id: f-002\n  severity: major\n  status: needs-decision\n"
+    "  coder_response: Lithos has no compare-and-set on task_update\n"
+    "  decision_question: Accept an at-most-once marker, or block on Lithos?\n"
+    "  decision_options: (a) accept the marker; (b) block — this cannot land\n"
+)
+
+
+def test_two_unanswered_decisions_still_cost_only_one_correction(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # correctness/f-005 + security/f-008: `_review_turn` allows ONE correction,
+    # so an ask per finding meant two pending decisions consumed two
+    # rejections — the second failed the handoff and the run stopped
+    # `reviewer_failed`, telling the operator a reviewer broke when what
+    # happened is the coder raised two questions. One ask per TURN names both;
+    # the retry lands and both decisions lapse to ordinary disputes.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[
+            {"text": _FINDINGS_TWO},
+            {"text": _REVIEW_KEEPS_BOTH, "retry_text": _REVIEW_KEEPS_BOTH},
+        ],
+        coder_handoffs={2: _CODER_TWO_DECISIONS, 3: _CODER_TWO_DECISIONS},
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "disputed"  # NOT failed / reviewer_failed
+    assert result.decisions == ()
+    assert "f-001" in result.message and "f-002" in result.message
+
+
+def test_two_conceded_decisions_are_both_carried_whole(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # The other half of correctness/f-002 end to end: what the run claims it
+    # has is what it publishes — both questions and both option lists.
+    concedes_both = _REVIEW_KEEPS_BOTH.replace(
+        "  rationale: still needs work\n", "  decision_verdict: concede\n"
+    )
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _FINDINGS_TWO}, {"text": concedes_both}],
+        coder_handoffs={2: _CODER_TWO_DECISIONS},
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "needs_decision"
+    assert [d.finding_id for d in result.decisions] == ["f-001", "f-002"]
+    assert result.decisions_not_admitted == ()
+    assert result.decisions[1].question.startswith("Accept an at-most-once marker")
+    assert "(b) drop it" in result.decisions[0].options
+
+
 def test_a_never_answered_decision_lapses_instead_of_failing_the_reviewer(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

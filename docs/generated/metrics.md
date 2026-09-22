@@ -45,7 +45,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | GitHub | 4 | 1723 | 1336 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 1 |
 | LithosClient | 2 | 2268 | 1904 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 270 | 224 | 2 | 1 | 0.33 | 7 (`lithos_loom.notifications.build_notifier`) | 0 |
-| Plugins | 51 | 19432 | 15581 | 2 | 5 | 0.71 | 100 (`lithos_loom.plugins.story_develop.__main__.main`) | 51 |
+| Plugins | 51 | 19540 | 15659 | 2 | 5 | 0.71 | 100 (`lithos_loom.plugins.story_develop.__main__.main`) | 51 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
 | Runners | 8 | 1838 | 1478 | 5 | 1 | 0.17 | 12 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 1 |
@@ -57,7 +57,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **187**, lines: **68746**, SLOC: **55629**
+- Modules: **187**, lines: **68854**, SLOC: **55707**
 - Largest module: `lithos_loom.lithos_client` (2030 lines)
 - Modules over 800 lines: **10**
   - `lithos_loom.cli._deliver_lithos`
@@ -73,7 +73,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **1765**, cyclomatic > 10: **172**
+- Functions: **1767**, cyclomatic > 10: **172**
 
 Top 10 most complex functions:
 
@@ -82,7 +82,7 @@ Top 10 most complex functions:
 | 100 | `lithos_loom.plugins.story_develop.__main__.main` |
 | 60 | `lithos_loom.cli.converge.converge_command` |
 | 60 | `lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider` |
-| 55 | `lithos_loom.plugins.story_develop.develop.develop` |
+| 54 | `lithos_loom.plugins.story_develop.develop.develop` |
 | 52 | `lithos_loom.subscriptions.reconciliation_state._derive` |
 | 49 | `lithos_loom.cli.project.import_project` |
 | 44 | `lithos_loom.children.obsidian_sync._amain` |
@@ -140,4 +140,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.56** (107431 test lines / 68746 source lines)
+- Test-to-source line ratio: **1.56** (107648 test lines / 68854 source lines)

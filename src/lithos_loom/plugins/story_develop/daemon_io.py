@@ -43,7 +43,7 @@ from .config import (
     parse_model,
     parse_reviewer_entry,
 )
-from .findings import MAX_RENDERED_DECISIONS, overflow_note
+from .findings import not_admitted_note
 from .lithos_io import AGENT_ID, TaskContext
 from .model_policy import apply_panel_default_models
 from .panel import findings_by_severity
@@ -777,15 +777,14 @@ def _decision_escalation(result: DevelopResult) -> dict[str, Any]:
     `@operator` GitHub comment, security/f-002); the question and options ride
     in the brief, which stays inside Lithos.
 
-    Each is carried **whole**: its length was checked on ADMISSION
-    (`findings._admits_decision`), so the gate never shows the operator a
-    prefix of the decision it exists to put to them (correctness/f-002). The
-    supporting context beside it is trimmed at the record, saying so. What is
-    bounded here is the NUMBER of decisions (security/f-007) — the brief
-    becomes task metadata in one unbounded write, and a handoff may mark every
-    open finding; the overflow is named by id.
+    EVERY decision is carried **whole**: both its length and the size of the
+    collection were checked on ADMISSION (`findings._admits_decision` /
+    `findings.admitted_decisions`, before the run stopped), so the brief is
+    bounded — this is one unbounded metadata write (security/f-007) — without
+    the gate ever showing the operator a prefix of the decision it exists to
+    put to them, or an id in place of one (correctness/f-002). Only the
+    supporting context beside it is trimmed, at the record, saying so.
     """
-    rendered = result.decisions[:MAX_RENDERED_DECISIONS]
     brief: dict[str, Any] = {
         "decisions": [
             {
@@ -797,14 +796,13 @@ def _decision_escalation(result: DevelopResult) -> dict[str, Any]:
                 "coder_response": d.coder_response,
                 "reviewer_verdict": "conceded" if d.conceded else "unanswered",
             }
-            for d in rendered
+            for d in result.decisions
         ],
         "branch": result.branch,
         "worktree": str(result.worktree),
     }
-    note = overflow_note(result.decisions)
-    if note:
-        brief["decisions_omitted"] = note
+    if result.decisions_not_admitted:
+        brief["marks_not_admitted"] = not_admitted_note(result.decisions_not_admitted)
     if result.conversation_log is not None:
         brief["conversation_log"] = str(result.conversation_log)
     return {
