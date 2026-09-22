@@ -237,26 +237,37 @@ def echo_plan(
     def echo(line: str) -> None:
         typer.echo(sanitize_for_terminal(line))
 
+    def echo_labelled(label: str, text: str, *, empty: str = "") -> None:
+        """``<label><text>``, with *text* shaped to the space beside *label*.
+
+        The label is part of the line, so wrapping the text at the block width
+        alone still leaves a line the terminal soft-wraps — and a soft-wrapped
+        continuation starts at column 0 just like an embedded newline does
+        (:func:`quoted_block`). Sizing the first segment to what is left after
+        the label is what keeps the whole visual line inside the block.
+        """
+        lines = quoted_block(text, width=max(24, _BLOCK_WIDTH - len(label)))
+        echo(f"{label}{lines[0] if lines and lines[0] else empty}")
+        for line in lines[1:]:
+            echo(f"          {_BLOCK_MARKER}{line}")
+
     echo(f"deliver {facts.run_id or facts.branch}: dry run, nothing written")
     echo(f"  repo:   {repo} → {repo_name}")
-    # the title's FIRST line only — the PR title three steps down is
-    # `heading.splitlines()[0][:90]`, so a multi-line title is already known
-    # to be possible; here it would forge plan lines
-    heading = story.title.splitlines()[0] if story.title.splitlines() else ""
-    echo(f"  story:  {story.story_id} [{story.status}] — {heading}")
+    # A mirrored story's title is a GitHub issue title: anyone's to write, and
+    # up to 256 characters of it. Shaped like every other untrusted string on
+    # this screen — the break half AND the length half, since a title padded
+    # to the terminal's width soft-wraps into a row at column 0 that reads as
+    # a plan line of loom's own.
+    echo_labelled(f"  story:  {story.story_id} [{story.status}] — ", story.title)
     # The unredacted reason stays on the operator's terminal (the PR body
     # carries only the redacted classification — see `provenance_lines`), but
     # it is `gh` / `git` stderr and arrives multi-line and unbounded: it gets
     # the story copy's own bound (`story_reason`) and this screen's line
     # shaping. An approved run has no `failure_reason` — its reason is why its
     # own delivery never landed.
-    reason = quoted_block(story_reason(facts).text)
-    if len(reason) <= 1:
-        echo(f"  run:    {facts.status or '?'} — {reason[0] if reason else '—'}")
-    else:
-        echo(f"  run:    {facts.status or '?'} —")
-        for line in reason:
-            echo(f"          {_BLOCK_MARKER}{line}")
+    echo_labelled(
+        f"  run:    {facts.status or '?'} — ", story_reason(facts).text, empty="—"
+    )
     unbound = (
         approval_unbound(facts, delivered_head=state.local_sha)
         if facts.status == run_outcome.APPROVED
@@ -287,13 +298,13 @@ def echo_plan(
         )
     elif plan.refusal:
         # the refusal quotes GitHub's own fields back (PR titles, base refs)
-        refusal = quoted_block(plan.refusal)
-        echo(f"  2 PR:   REFUSE — {refusal[0] if refusal else ''}")
-        for line in refusal[1:]:
-            echo(f"          {_BLOCK_MARKER}{line}")
+        echo_labelled("  2 PR:   REFUSE — ", plan.refusal)
     else:
         echo(f"  2 PR:   open a new PR onto {plan.base}")
-        echo(f"          title {title!r}")
+        # the PR title is the story's first line capped at 90 — still the
+        # issue author's text, so it is shaped like the rest of it (the repr
+        # quotes what is left, and the block bounds the visual line)
+        echo_labelled("          title ", repr(title))
         if facts.coder_summary:
             # The one thing in the body loom did not author, shown AS IT WOULD
             # BE PUBLISHED. The redaction it has been through removes

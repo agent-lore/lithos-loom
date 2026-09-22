@@ -127,6 +127,18 @@ def _opt_str(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _verbatim(value: Any) -> str:
+    """A string kept exactly as it was recorded, or ``""``.
+
+    For the stop REASON only. Everything else here is an identifier or a label
+    whose surrounding whitespace is noise, but the reason is published with a
+    claim about its bytes (:func:`story_reason` counts every edit, and the PR
+    body says which were made), and a strip on the way in would make that
+    claim true of a string this module had already changed.
+    """
+    return value if isinstance(value, str) else ""
+
+
 # Handoff files are bind-mounted RW into agent containers, so their bodies are
 # agent-written: bound the read, strip terminal control bytes, and cap what
 # reaches a PR body. (`cli/develop` bounds the same files for the terminal.)
@@ -360,7 +372,9 @@ def run_facts(run_dir: Path) -> RunFacts:
         branch=_opt_str(state.get("branch")),
         run_id=_opt_str(state.get("run_id")) or run_dir.name,
         status=status,
-        failure_reason=_opt_str(state.get("failure_reason")),
+        # verbatim, not `_opt_str`: `story_reason` publishes a claim about
+        # this string's bytes, so nothing may edit it before it gets there
+        failure_reason=_verbatim(state.get("failure_reason")),
         delivery_failure=_delivery_failure(run_dir, status),
         rounds=_opt_rounds(state.get("rounds")),
         cost_usd=_opt_cost(brief.get("cost_usd")),
@@ -509,8 +523,8 @@ def story_reason(facts: RunFacts) -> StoredReason:
     Three things can change it on the way, and each is **measured** rather
     than assumed harmless — the caller publishes a claim about this copy, so
     "verbatim" has to mean it: terminal control / bidi / zero-width bytes are
-    stripped (a finding is a rendered surface too), trailing whitespace goes
-    (it survives no rendering anyway), and a reason longer than
+    stripped (a finding is a rendered surface too), surrounding whitespace
+    goes (it survives no rendering anyway), and a reason longer than
     :data:`STORY_REASON_MAX_CHARS` is capped so a pathological one cannot make
     the finding unpostable. Line structure is kept — collapsing it would be
     another silent edit. Whichever of the three actually fired is named in
@@ -523,7 +537,7 @@ def story_reason(facts: RunFacts) -> StoredReason:
         edits.append("control bytes stripped")
     trimmed = "\n".join(line.rstrip() for line in reason.splitlines()).strip()
     if trimmed != reason:
-        edits.append("trailing whitespace trimmed")
+        edits.append("surrounding whitespace trimmed")
     if len(trimmed) > STORY_REASON_MAX_CHARS:
         trimmed = trimmed[: STORY_REASON_MAX_CHARS - 1].rstrip() + "…"
         edits.append(f"capped at {STORY_REASON_MAX_CHARS} characters")

@@ -176,8 +176,10 @@ def deliver_command(
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Print the plan with every fact resolved and write nothing — no "
-        "push, no gh call, no Lithos write.",
+        help="Print the plan with every fact resolved and WRITE nothing — no "
+        "push, no PR, no Lithos write. It does make the two read-only gh "
+        "calls step 2 makes (the default base, the open-PR list), so the "
+        "adopt / open / refuse decision it shows is the real one.",
     ),
     json_out: Path | None = typer.Option(
         None, "--json", help="Write the structured JSON record to this path."

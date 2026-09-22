@@ -222,8 +222,79 @@ def push_branch(repo: Path, branch: str, state: RemoteState) -> str | None:
                 "the push is append-only, so a second run is safe either way"
             ) from exc
         if landed != state.local_sha:
-            raise DeliverRefused(f"git push failed: {proc.stderr.strip()}")
+            _refuse_unless_the_push_may_have_landed(
+                repo, branch, state=state, landed=landed, stderr=proc.stderr.strip()
+            )
     return _set_upstream(repo, branch)
+
+
+def _refuse_unless_the_push_may_have_landed(
+    repo: Path, branch: str, *, state: RemoteState, landed: str, stderr: str
+) -> None:
+    """Classify a failed push whose remote is now at neither the pre-push sha
+    nor ours — raising unless the evidence says the push landed after all.
+
+    "The ref is not at my sha" is not "my push wrote nothing": between the
+    failed push and this read another actor can append to the same branch, and
+    then the ref holds a THIRD sha with ours in its history. Exiting 1 there
+    claims nothing was written about a commit that is on ``origin``, leaves
+    the PR unopened and the story ungated, and sends every retry into the
+    diverged refusal.
+
+    So the three answers are kept apart:
+
+    * the ref is **exactly where it was** (or still absent) — the push is a
+      proven non-landing, and the refusal is the truth;
+    * the ref moved and **contains** our commit — the push landed (or someone
+      else carried it); the caller goes on and the head read-back in step 2
+      reports what the PR now delivers;
+    * anything else — the remote does not hold our commit, or containment
+      could not be read at all. Neither is "nothing was written", so it is a
+      partial the operator re-runs, never a clean refusal.
+    """
+    if landed == state.remote_sha:
+        # untouched since the classification: the push really did not land
+        raise DeliverRefused(f"git push failed: {stderr}")
+    contained = _remote_contains(repo, branch, state.local_sha)
+    if contained is True:
+        return
+    before = state.remote_sha[:12] or "(absent)"
+    raise DeliverUncertain(
+        f"git push reported failure ({stderr}) and origin/{branch} is now at "
+        f"{landed[:12] or '(absent)'} — neither the {before} it held before "
+        f"nor the {state.local_sha[:12]} this delivery sent, so "
+        "another actor moved the branch and it is not known whether the push "
+        + (
+            "landed first (it is not in the branch's history now). "
+            if contained is False
+            else "landed (the branch's history could not be read). "
+        )
+        + "Nothing else was attempted; reconcile the branch and re-run — the "
+        "push is append-only, so a second run is safe either way"
+    )
+
+
+def _remote_contains(repo: Path, branch: str, sha: str) -> bool | None:
+    """Whether ``origin/<branch>`` has *sha* in its history — ``None`` when
+    that cannot be established.
+
+    The remote tip may be a commit this checkout has never seen, so the branch
+    is fetched first (a read: it writes only ``FETCH_HEAD`` locally). Every
+    failure answers ``None`` rather than ``False``: "I could not look" must
+    not be reported as "your commit is not there".
+    """
+    try:
+        fetch = run_git(repo, ["fetch", "--quiet", "origin", f"refs/heads/{branch}"])
+        if fetch.returncode != 0:
+            return None
+        anc = run_git(
+            repo, ["merge-base", "--is-ancestor", sha, "FETCH_HEAD"], timeout=120
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if anc.returncode == 0:
+        return True
+    return False if anc.returncode == 1 else None
 
 
 def origin_repo_name(repo: Path) -> str:
@@ -488,19 +559,40 @@ def _created_despite_the_error(
 ) -> tuple[str | None, bool]:
     """The PR a failed ``gh pr create`` opened anyway — ``(url, answered)``.
 
-    Re-asks with exactly the adoption rule of the first pass — same-repo, our
-    head, our base — so a PR recovered here is one this delivery could have
-    adopted. *answered* separates the two ways of getting no url: GitHub said
-    there is no such PR (``(None, True)`` — the create really failed), and the
-    re-ask could not be made at all (``(None, False)`` — a PR may exist, and
-    the caller must not report an absence it never established).
+    Re-asks first with exactly the adoption rule of the first pass —
+    same-repo, our head, our base — so the PR recovered on that branch is one
+    this delivery could have adopted outright. *answered* separates the two
+    ways of getting no url: GitHub said there is no such PR (``(None, True)``
+    — the create really failed), and the re-ask could not be made at all
+    (``(None, False)`` — a PR may exist, and the caller must not report an
+    absence it never established).
+
+    **A moved head is not proof of no write.** A PR's head is whatever
+    ``origin/<branch>`` points at, so an actor appending to the branch between
+    the create and this read leaves our own new PR reporting THEIR sha. The
+    exact rule would then answer "no such PR" about a PR that exists, open and
+    ungated, and every retry would refuse. So the fallback is the widest match
+    that is still provably about this delivery: the caller has just tried to
+    open a PR **for this branch** and saw none a moment earlier, so a
+    same-repository PR on this branch, onto this base, is that one (or a
+    concurrent one for the same branch, which delivers the same commits — the
+    fork class, which is what the head check exists for, stays excluded).
+    Nothing rests on the recovered head: the caller reads it back in step 2b,
+    reports the delivery partial and withdraws any approval claim.
     """
     try:
-        found, _ = adoptable(
-            list_open_prs_for_branch(repo, branch, repo_name=repo_name),
-            head_sha=head_sha,
-            base=base,
-        )
+        candidates = list_open_prs_for_branch(repo, branch, repo_name=repo_name)
     except (RuntimeError, OSError, subprocess.SubprocessError):
         return None, False
-    return (found.url if found is not None else None), True
+    found, _ = adoptable(candidates, head_sha=head_sha, base=base)
+    if found is not None:
+        return found.url, True
+    moved = next(
+        (
+            pr
+            for pr in candidates
+            if not pr.cross_repository and pr.base_ref == base and pr.head_sha
+        ),
+        None,
+    )
+    return (moved.url if moved is not None else None), True

@@ -13,7 +13,9 @@ the story → abandon it. `deliver` keeps what the run produced.
 ## TL;DR
 
 ```bash
-# See what it would do — no push, no gh call, no Lithos write
+# See what it would do — writes nothing: no push, no PR, no Lithos write
+# (it does read GitHub: the default base and the open-PR list, so the
+#  adopt / open / refuse decision it shows is the real one)
 lithos-loom develop deliver de459d10 --dry-run
 
 # Deliver it: push, open the PR, swap the needs-human gate for a pr gate
@@ -44,9 +46,16 @@ partial first pass finishes the job and changes nothing else.
    symbolic ref — a local process that advances or rewrites the branch in
    between can never make the command classify one commit and deliver another,
    or report a sha it did not send. A push that reports failure is checked
-   against the remote before it is believed: a ref that now holds the pushed
-   commit *did* land (the response was lost, not the update), so the delivery
-   carries on rather than claiming nothing was written. The local branch's
+   against the remote before it is believed, and the answer has **three**
+   shapes, not two: a ref that now holds the pushed commit *did* land (the
+   response was lost, not the update), so the delivery carries on; a ref
+   exactly where the classification left it is a proven non-landing, and the
+   refusal stands; a **third** sha — another actor appended to the same branch
+   — is neither, so its history is read, and our commit being in it means the
+   push landed after all (the head read-back in step 2 then reports what the
+   PR delivers). Anything left, a history that cannot be read included, is
+   `PUSH UNCERTAIN`: "nothing was written" is the one claim that cannot be
+   made there. The local branch's
    upstream is then set to `origin/<branch>` — a pinned refspec cannot carry
    `push -u`'s meaning, so the tracking config is written directly. That last
    write is genuinely best-effort *and reported*: a read-only or locked
@@ -105,6 +114,18 @@ partial first pass finishes the job and changes nothing else.
    that was pushed), and the delivery is left **unmarked** — the run that does
    read the head posts the record, corrected if the head turns out to have
    moved.
+
+   The **lost-response** re-ask follows the same rule. `gh pr create` can
+   commit and lose its answer, and the branch can move in between, so the PR
+   it opened is then reported at somebody else's sha. A PR at our exact head
+   is recovered first; failing that, a **same-repository** open PR on this
+   branch, onto this base, is recovered too — the command has just tried to
+   open one for this branch and saw none a moment earlier, so that PR is this
+   delivery's (the fork class, which the head check exists for, stays
+   excluded). Nothing rests on its head: the read-back above reports the
+   delivery partial and withdraws any approval claim. Treating a moved head as
+   proof that no PR exists would leave an open, ungated PR behind while the
+   command reported it opened none.
 
 3. **Raise the `pr` gate** on the story and record it: `pr_gate_id`, and — on
    the same write — a per-key delete of the stop's failed-attempt marker and
@@ -365,7 +386,7 @@ unreviewed code merges on a reviewed PR's reputation.
 | `--story TASK_ID` | The story this branch implements (default: the run dir's task id). Read live from Lithos: title, description, `acceptance_criteria`, `project`, `github_issue_url`. |
 | `--base REF` | Base branch for the PR (default: the repo's default branch, via `gh repo view`). It constrains **adoption** as well as opening: a candidate PR whose base is not this one is not this delivery's, so it is refused rather than adopted (an adopted PR merges somewhere `deliver` would never have opened onto, with the `pr` gate tracking that merge). |
 | `--no-gate` | Open the PR only. No `pr` gate is raised and the needs-human gate is left open, so the PR is **UNMONITORED** — nothing tracks its merge, ingests reviews on it, or re-gates it when the base moves. The finding says so. |
-| `--dry-run` | Print the five steps with every fact **resolved** and write nothing. Resolved means asked: remote state from git, and — through the same `pr_plan` reads step 2 makes — the repository's **default base** and the concrete step-2 decision (`adopt #N`, `open a new PR onto <base>`, or the `REFUSE` a same-name PR that is not this branch's would produce), plus the would-be title, the gates that would be completed and the ones that would be kept. The preview asks *before* step 1 and the real step 2 asks after it, so the push is **projected into the decision**: an open PR for a branch this delivery will fast-forward sits at `origin`'s current sha now and at the delivered one then, and the plan reads it as the adoption it will be (`adopt #N (head <old> → <new> after the push above)`) instead of refusing something that cannot refuse. The two `gh` reads are read-only; nothing is pushed, created or written to Lithos. A push the plan refuses stops there — step 2 reads nothing, because the real invocation never reaches it. When a new PR would be opened, the plan also prints the coder's handoff quote **as it would be published**. Text loom did not author — the stop reason, the story title, the quote, a `gh` refusal — is stripped of terminal control bytes, **bounded**, and emitted with every continuation line indented behind a `|` marker before it is echoed. Stripping escapes is only half of it: LF survives by design, and a newline would land the next word at column 0 as a forged plan line, while sheer volume would scroll the real plan away. The story line takes the title's first line only, as the PR title already does. This is the screen the decision is made on. |
+| `--dry-run` | Print the five steps with every fact **resolved** and write nothing. Resolved means asked: remote state from git, and — through the same `pr_plan` reads step 2 makes — the repository's **default base** and the concrete step-2 decision (`adopt #N`, `open a new PR onto <base>`, or the `REFUSE` a same-name PR that is not this branch's would produce), plus the would-be title, the gates that would be completed and the ones that would be kept. The preview asks *before* step 1 and the real step 2 asks after it, so the push is **projected into the decision**: an open PR for a branch this delivery will fast-forward sits at `origin`'s current sha now and at the delivered one then, and the plan reads it as the adoption it will be (`adopt #N (head <old> → <new> after the push above)`) instead of refusing something that cannot refuse. The two `gh` calls are **reads**, and they are the only ones: nothing is pushed, created or written to Lithos. The preview therefore needs GitHub reachable and `gh` authenticated, exactly as the delivery does — a plan that resolved neither the base nor the adoption would be a guess the operator approves in place of a decision. A push the plan refuses stops there — step 2 reads nothing, because the real invocation never reaches it. When a new PR would be opened, the plan also prints the coder's handoff quote **as it would be published**. Text loom did not author — the stop reason, the story title, the quote, a `gh` refusal — is stripped of terminal control bytes, **bounded**, and emitted with every continuation line indented behind a `|` marker before it is echoed. Stripping escapes is only half of it: LF survives by design, and a newline would land the next word at column 0 as a forged plan line, while sheer volume would scroll the real plan away. The story line takes the title's first line only, as the PR title already does. This is the screen the decision is made on. |
 | `--json PATH` | Write the structured record. |
 | `--config` | Host config path. |
 

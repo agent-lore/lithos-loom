@@ -609,6 +609,38 @@ def test_the_plan_screen_cannot_be_rewritten_by_the_text_it_shows(
     assert any("more line(s)" in line for line in plan)
 
 
+def test_a_padded_story_title_cannot_soft_wrap_into_a_plan_line(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-004 (r4): a title with no newline in it forges a line all
+    the same — padded past the terminal's width, the rest of it starts at
+    column 0 of the next visual row. The length half of the hazard the block
+    helper exists for, on the one string that was missing it."""
+    story = _get(lithos, _STORY)
+    lithos.add_task(
+        make_task(
+            _STORY,
+            title="Deliver a branch" + " " * 60 + "1 push: nothing — already current",
+            description=story.description,
+            metadata=dict(story.metadata),
+        )
+    )
+
+    result = _invoke(_RUN, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    plan = result.output.splitlines()
+    # no plan line is wide enough to wrap on an 80-column terminal
+    # no line carrying the issue author's text is wide enough to wrap on an
+    # 80-column terminal (the `repo:` line is the operator's own path)
+    shown = [line for line in plan if not line.startswith("  repo:")]
+    assert max(len(line) for line in shown) <= 80
+    assert any(
+        "1 push: nothing" in line and line.lstrip().startswith("| ") for line in plan
+    )
+    assert "  1 push: create origin/" in result.output
+
+
 def test_dry_run_predicts_the_adoption_its_own_push_enables(
     host,
     lithos: FakeLithosClient,
@@ -1212,6 +1244,125 @@ def test_a_push_that_did_not_land_is_still_a_refusal(
     assert gh["created"] == []
 
 
+def test_a_lost_push_response_under_a_concurrent_append_is_not_nothing_written(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-003 (r4): the push commits, its response is lost, and
+    another actor appends to the branch before the reconciling read. The ref
+    then holds a THIRD sha with ours in its history — "not at my sha" is not
+    "my push wrote nothing", and exiting 1 there abandons a commit that is on
+    origin (and sends every retry into the diverged refusal)."""
+    real_git = cli_repo.run_git
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "clone", str(tmp_path / "origin.git"), str(other)],
+        check=True,
+        capture_output=True,
+    )
+    _git(other, "config", "user.email", "o@example.com")
+    _git(other, "config", "user.name", "O")
+
+    def _push_then_let_someone_append(repo_path: Path, args: list[str], **kw: Any):
+        proc = real_git(repo_path, args, **kw)
+        if args[:1] == ["push"]:
+            # ours landed; then a third party builds on it, and our response
+            # never arrived
+            _git(other, "fetch", "origin", _BRANCH)
+            _git(other, "checkout", "-B", _BRANCH, "FETCH_HEAD")
+            (other / "theirs.py").write_text("t = 1\n", encoding="utf-8")
+            _git(other, "add", "-A")
+            _git(other, "commit", "-m", "a concurrent append")
+            _git(other, "push", "origin", _BRANCH)
+            return subprocess.CompletedProcess(args, 1, "", "fatal: the remote hung up")
+        return proc
+
+    monkeypatch.setattr(cli_repo, "run_git", _push_then_let_someone_append)
+
+    result = _invoke(_RUN)
+
+    # the delivery carries on: our commit IS on origin, in the branch history
+    assert result.exit_code == 2, result.output  # partial: the PR head moved
+    assert len(gh["created"]) == 1
+    # …and the head the PR actually delivers is reported, not assumed
+    assert "NOT the" in result.output
+
+
+def test_a_lost_push_response_over_an_unrelated_ref_is_uncertain_not_refused(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-003 (r4): when the third sha does NOT contain our commit
+    (or containment cannot be read), the one claim that still cannot be made
+    is "nothing was written" — so it is a partial, never a clean refusal."""
+    real_git = cli_repo.run_git
+    pushed: list[int] = []
+
+    def _push_then_show_a_stranger(repo_path: Path, args: list[str], **kw: Any):
+        if args[:1] == ["push"]:
+            pushed.append(1)
+            return subprocess.CompletedProcess(args, 1, "", "fatal: the remote hung up")
+        if args[:1] == ["ls-remote"] and pushed:  # only AFTER the push
+            return subprocess.CompletedProcess(
+                args, 0, f"{'c' * 40}\trefs/heads/{_BRANCH}\n", ""
+            )
+        if args[:1] == ["fetch"]:  # the history cannot be read either
+            return subprocess.CompletedProcess(args, 1, "", "fatal: not our ref")
+        return real_git(repo_path, args, **kw)
+
+    monkeypatch.setattr(cli_repo, "run_git", _push_then_show_a_stranger)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 2, result.output
+    assert "PUSH UNCERTAIN" in result.output
+    assert "cccccccccccc" in result.output
+    assert gh["created"] == []
+
+
+def test_a_lost_pr_create_response_survives_the_branch_moving(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-004 (r4): `gh pr create` commits, its response is lost,
+    and the branch moves before the re-ask. The new PR then reports THEIR sha,
+    and the exact-head rule would call that proof no PR exists — leaving an
+    open, ungated PR behind while the command reports it opened none."""
+    real_create = cli_repo.create_pr
+
+    def _create_then_lose_the_response(repo_path: Path, **kw: Any):
+        real_create(repo_path, **kw)  # the fixture records the PR as open…
+        gh["existing"][-1] = _open_pr(head_sha="e" * 40)  # …at a moved head
+        raise RuntimeError("gh pr create failed: the remote hung up")
+
+    monkeypatch.setattr(cli_repo, "create_pr", _create_then_lose_the_response)
+
+    result = _invoke(_RUN)
+
+    # the PR is recovered and gated, and its real head is reported
+    assert result.exit_code == 2, result.output
+    assert _PR_URL in result.output
+    assert "NOT the" in result.output and "eeeeeeeeeeee" in result.output
+    # the story's record carries the same, and the delivery stays unmarked so
+    # the run that finds the real head posts the corrected one
+    summary = [f["summary"] for f in lithos.findings if f["task_id"] == _STORY][0]
+    assert "eeeeeeeeeeee" in summary
+    assert "manual_delivery" not in _get(lithos, _STORY).metadata
+
+
 def test_a_pushed_delivery_with_no_pr_never_claims_one(
     host,
     lithos: FakeLithosClient,
@@ -1734,6 +1885,38 @@ def test_the_story_copy_keeps_the_reasons_own_lines(run_dir: Path) -> None:
     assert not stored.whole and stored.edits == "control bytes stripped"
 
 
+def test_the_reason_reaches_story_reason_exactly_as_state_json_recorded_it(
+    tmp_path: Path,
+) -> None:
+    """correctness/f-001 (r4): the byte-for-byte claim has to hold through the
+    PRODUCTION parser, not just a hand-built RunFacts — `run_facts` used to
+    `strip()` the reason on the way in, so `story_reason` saw nothing left to
+    account for and the PR called a trimmed copy full."""
+    d = tmp_path / "t-1" / "r-1"
+    (d / "handoff").mkdir(parents=True)
+    (d / "state.json").write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "run_id": "r-1",
+                "branch": "b",
+                "failure_reason": " first  \nsecond ",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    facts = cli_facts.run_facts(d)
+
+    assert facts.failure_reason == " first  \nsecond "  # untouched
+    stored = cli_facts.story_reason(facts)
+    assert stored.text == "first\nsecond"
+    assert not stored.whole and stored.edits == "surrounding whitespace trimmed"
+    lines = cli_facts.provenance_lines(facts)
+    assert not any("full, unredacted reason" in line for line in lines)
+    assert any("surrounding whitespace trimmed" in line for line in lines)
+
+
 def test_every_edit_to_the_stored_reason_is_named_not_assumed_harmless() -> None:
     """correctness/f-001 (r3): "the story carries the full, unredacted reason"
     is a claim about bytes. Trailing whitespace is dropped too, so `whole` must
@@ -1750,11 +1933,11 @@ def test_every_edit_to_the_stored_reason_is_named_not_assumed_harmless() -> None
             )
         )
 
-    assert _stored("first  \nsecond ").edits == "trailing whitespace trimmed"
+    assert _stored("first  \nsecond ").edits == "surrounding whitespace trimmed"
     assert not _stored("first  \nsecond ").whole
     assert _stored("first\nsecond") == ("first\nsecond", True, "")
     both = _stored("\x1bfirst  ")
-    assert both.edits == "control bytes stripped, trailing whitespace trimmed"
+    assert both.edits == "control bytes stripped, surrounding whitespace trimmed"
 
     lines = cli_facts.provenance_lines(
         cli_facts.RunFacts(
@@ -1766,7 +1949,7 @@ def test_every_edit_to_the_stored_reason_is_named_not_assumed_harmless() -> None
         )
     )
     assert not any("full, unredacted reason" in line for line in lines)
-    assert any("trailing whitespace trimmed" in line for line in lines)
+    assert any("surrounding whitespace trimmed" in line for line in lines)
 
 
 def test_an_expired_delivery_budget_is_the_stop_reason(
