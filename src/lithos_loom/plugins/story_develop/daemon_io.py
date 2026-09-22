@@ -768,17 +768,44 @@ def escalation_block(
     return {"reason": reason, "summary": summary, "brief": brief}
 
 
+# The gate's brief is agent-written text becoming task METADATA on an
+# unbounded write (`gates.create_human_gate`), and its first lines are echoed
+# by `lithos-loom gates`. Bound every field here — the same 600-char shape
+# `_deliver_facts._MAX_SUMMARY_CHARS` uses for the other text loom publishes
+# on someone else's behalf (security/f-002). The operator's whole copy is the
+# `[ReviewDispute]` finding on the story, the conversation log and the raw
+# handoff; nothing is lost, it just is not all in the gate's metadata.
+BRIEF_TEXT_MAX_CHARS = 600
+"""Per-field cap on the agent-written decision text the gate brief carries
+(security/f-002). Public so the contract is assertable without reaching for a
+private name."""
+
+
+def _brief_text(text: str) -> str:
+    text = text.strip()
+    if len(text) <= BRIEF_TEXT_MAX_CHARS:
+        return text
+    return text[: BRIEF_TEXT_MAX_CHARS - 1].rstrip() + "…"
+
+
 def _decision_escalation(result: DevelopResult) -> dict[str, Any]:
-    """The ``needs_decision`` escalation: the decision, not the run facts."""
+    """The ``needs_decision`` escalation: the decision, not the run facts.
+
+    ``summary`` is the run's own loom-authored reason line (the coder's prose
+    is deliberately NOT on this channel — it is published verbatim as an
+    `@operator` GitHub comment, security/f-002); the bounded question and
+    options ride in the brief, which stays inside Lithos.
+    """
     brief: dict[str, Any] = {
         "decisions": [
             {
                 "finding": d.label,
                 "severity": d.severity,
-                "question": d.question,
-                "options": d.options,
-                "finding_rationale": d.rationale,
-                "coder_response": d.coder_response,
+                "question": _brief_text(d.question),
+                "options": _brief_text(d.options),
+                "finding_rationale": _brief_text(d.rationale),
+                "coder_response": _brief_text(d.coder_response),
+                "reviewer_verdict": "conceded" if d.conceded else "unanswered",
             }
             for d in result.decisions
         ],

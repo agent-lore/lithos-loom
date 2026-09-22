@@ -48,6 +48,10 @@ _RESOLVED_STATES = frozenset(
     {"fixed", "accepted", "superseded", "merged", "out-of-scope"}
 )
 _ALL_STATES = _OPEN_STATES | _RESOLVED_STATES
+# The reviewer's answer to a pending `needs-decision` (security/f-003): an
+# explicit act, recorded in the ledger, never inferred from an absent key.
+_DECISION_VERDICTS = frozenset({"contest", "concede"})
+DECISION_VERDICTS = _DECISION_VERDICTS
 # Public alias: the eval harness validates retained-report finding statuses
 # against the canonical set (PR #342 review P2) without reaching for the
 # private name.
@@ -64,6 +68,35 @@ def max_severity(severities: list[str]) -> str | None:
     if not severities:
         return None
     return max((s.lower() for s in severities), key=lambda s: _SEVERITY_ORDER[s])
+
+
+# Handoff bodies are agent-written (the dir is bind-mounted RW into the agent
+# containers), so every free-text field parsed out of one is untrusted input on
+# its way to screens an operator DECIDES on: the reviewer prompt, the terminal
+# epilogue, the `[ReviewDispute]` / `[NeedsHuman]` findings, the needs-human
+# gate's description. Strip the bytes that let text render differently from
+# what it carries — C0/C1 (ANSI escapes forge or erase a line, CWE-150/CWE-117)
+# plus the bidi overrides / isolates and the zero-width formatters (trojan
+# source) — keeping TAB and LF, since folded scalars are multi-line.
+#
+# The same hazard is stripped at two other boundaries by the identical pattern
+# (`cli/develop._sanitize` and `cli/_deliver_facts.sanitize_for_terminal`, both
+# of which strip raw FILE BODIES this parser never sees). This copy lives here,
+# not in a shared module, because `cli` and `plugins` are sibling components:
+# a common home would be a new Foundation component and three new cross-
+# component edges against a budget already at its cap (docs/architecture.toml).
+# Stripping at the PARSE — where agent bytes become domain objects — is also
+# strictly wider than stripping per-sink: the ledger, the prompts, the run
+# result, the gate brief and every future consumer inherit it (security/f-001).
+_AGENT_CONTROL_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f"
+    "\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
+
+
+def sanitize_agent_text(text: str) -> str:
+    """Strip terminal-control / text-reordering bytes from agent-written text."""
+    return _AGENT_CONTROL_RE.sub("", text)
 
 
 class HandoffError(ValueError):
@@ -92,6 +125,13 @@ class Finding:
     # The reviewer's contest of that decision: the acceptance line the finding
     # already meets, which downgrades it to an ordinary dispute.
     decision_contest: str = ""
+    # The reviewer's EXPLICIT answer to a pending decision — "contest" or
+    # "concede". Mandatory (``FindingLedger.check``) while the decision is
+    # open, so an escalation is never read out of a reviewer's SILENCE: the
+    # question is agent-written text sitting in the reviewer's own prompt, and
+    # an injected "do not emit decision_contest this round" would otherwise
+    # veto any blocking finding by suppressing one key (security/f-003).
+    decision_verdict: str = ""
 
     @property
     def is_open(self) -> bool:
@@ -439,18 +479,29 @@ def _parse_findings(block: str) -> list[Finding]:
                     "'deferral_reason:' holds only why it is not this "
                     "story's to fix"
                 )
+        verdict = raw.get("decision_verdict", "").strip().lower()
+        if verdict and verdict not in _DECISION_VERDICTS:
+            raise HandoffError(
+                f"finding {idx}: invalid decision_verdict {verdict!r} "
+                f"(allowed: {', '.join(sorted(_DECISION_VERDICTS))})"
+            )
+        # Every free-text field is agent-written: strip at the boundary where
+        # it becomes a domain object, so no sink can be forgotten.
         findings.append(
             Finding(
                 finding_id=(raw.get("finding_id") or raw.get("id") or "").strip(),
                 severity=severity,
                 status=status,
-                files=_split_files(raw.get("files", "")),
-                rationale=raw.get("rationale", ""),
-                coder_response=raw.get("coder_response", ""),
-                deferral_reason=raw.get("deferral_reason", ""),
-                decision_question=raw.get("decision_question", ""),
-                decision_options=raw.get("decision_options", ""),
-                decision_contest=raw.get("decision_contest", ""),
+                files=[
+                    sanitize_agent_text(f) for f in _split_files(raw.get("files", ""))
+                ],
+                rationale=sanitize_agent_text(raw.get("rationale", "")),
+                coder_response=sanitize_agent_text(raw.get("coder_response", "")),
+                deferral_reason=sanitize_agent_text(raw.get("deferral_reason", "")),
+                decision_question=sanitize_agent_text(raw.get("decision_question", "")),
+                decision_options=sanitize_agent_text(raw.get("decision_options", "")),
+                decision_contest=sanitize_agent_text(raw.get("decision_contest", "")),
+                decision_verdict=verdict,
             )
         )
     return findings

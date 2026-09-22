@@ -384,3 +384,57 @@ def test_reviewer_contest_parses() -> None:
     )
     (f,) = parse_review_handoff(text).findings
     assert f.decision_contest.startswith("AC 3")
+
+
+# ── agent text is stripped at the parse boundary (security/f-001) ──────
+
+
+def test_parse_strips_terminal_escapes_and_bidi_from_every_free_text_field() -> None:
+    # The handoff dir is bind-mounted RW into the agent containers, so these
+    # fields are untrusted bytes on their way to the reviewer's prompt, the
+    # operator's terminal, the `[ReviewDispute]` finding and the gate brief.
+    # Stripping at the PARSE means no sink can be forgotten.
+    text = (
+        "## Status: LGTM\n## Summary\ns\n## Findings\n"
+        "- finding_id: f-1\n  severity: major\n  status: needs-decision\n"
+        '  files: ["a\x1b[2Kb.py:1"]\n'
+        "  rationale: rat\x1b[31mionale\n"
+        "  coder_response: resp​onse\n"
+        "  decision_question: \x1b[2K‮forged question\n"
+        "  decision_options: (a)\x07 keep; (b) drop\n"
+    )
+    (f,) = parse_review_handoff(text).findings
+    # the ESC / bidi / zero-width bytes are gone; what is left is inert text
+    # (the same semantics as the CLI strippers: "a\x1b[31mb" -> "a[31mb")
+    assert "\x1b" not in f.decision_question and "‮" not in f.decision_question
+    assert f.decision_question == "[2Kforged question"
+    assert f.decision_options == "(a) keep; (b) drop"
+    assert f.rationale == "rat[31mionale"
+    assert f.coder_response == "response"  # the zero-width joiner is gone
+    assert f.files == ["a[2Kb.py:1"]
+
+
+def test_sanitize_agent_text_keeps_tabs_and_newlines() -> None:
+    # Folded scalars are multi-line and the prompt renderers rely on it; only
+    # the bytes that make text render differently from what it carries go.
+    from lithos_loom.plugins.story_develop.handoff import sanitize_agent_text
+
+    assert sanitize_agent_text("a\tb\nc") == "a\tb\nc"
+    assert sanitize_agent_text("a\x1b[31mb​c﻿") == "a[31mbc"  # ESC/ZWSP/BOM out
+
+
+# ── the reviewer's explicit verdict (security/f-003) ───────────────────
+
+
+def test_decision_verdict_parses_and_is_validated() -> None:
+    def _parse(verdict: str):
+        return parse_review_handoff(
+            "## Status: FINDINGS\n## Summary\ns\n## Findings\n"
+            "- finding_id: f-1\n  severity: major\n  status: open\n"
+            f"  rationale: r\n  decision_verdict: {verdict}\n"
+        ).findings[0]
+
+    assert _parse("concede").decision_verdict == "concede"
+    assert _parse("Contest").decision_verdict == "contest"  # normalised
+    with pytest.raises(HandoffError, match="invalid decision_verdict"):
+        _parse("maybe")

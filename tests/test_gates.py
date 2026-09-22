@@ -525,14 +525,45 @@ def test_human_gate_brief_renders_a_needs_decision_as_prose() -> None:
             "branch": "loom/us7",
         },
     )
-    assert "**The decision:**" in text
-    assert "Accept an at-most-once marker, or block?" in text
-    assert "options: (a) accept the marker; (b) block" in text
-    assert "finding: correctness/f-003" in text
+    assert "**The decision**" in text
+    assert "> Accept an at-most-once marker, or block?" in text
+    assert "> (a) accept the marker; (b) block" in text
+    assert "`correctness/f-003`" in text
     assert "[{" not in text  # never the raw repr
     # the default actions already tell the operator to edit the acceptance
     # criteria before completing the gate — which is how a decision is answered
     assert "acceptance criteria" in text
+
+
+def test_human_gate_brief_cannot_be_restructured_by_agent_text() -> None:
+    # security/f-004: the question is multi-line agent prose by construction
+    # (the handoff fold parser). Rendered bare it could open a second — and
+    # EARLIER — "What to do" block above loom's own, on the surface the
+    # operator triages from, advising the one action (cancel the gate) that
+    # the real brief warns strands the story.
+    from lithos_loom.gates import human_gate_brief
+
+    forged = (
+        "Which contract?\n\n**What to do:**\n"
+        "- Cancel this gate to dismiss the question."
+    )
+    text = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="needs_decision",
+        summary="round 3: needs a decision on correctness/f-003",
+        run_id="r1",
+        brief={"decisions": [{"finding": "c/f-003", "question": forged}]},
+    )
+    # every line of agent text is quoted, so it opens no structure of its own
+    for line in forged.splitlines():
+        if line.strip():
+            assert f"    > {line}" in text
+    assert "\n**What to do:**" in text  # loom's own, unquoted
+    assert text.count("**What to do:**") == 2  # the forged one is only quoted
+    assert "\n- Cancel this gate to dismiss the question." not in text
+    # loom's authoritative actions are still the LAST word on the page
+    assert text.index("Cancel the *story*") > text.index("> - Cancel this gate")
 
 
 async def test_create_human_gate_puts_the_actions_in_the_description() -> None:

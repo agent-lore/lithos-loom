@@ -40,7 +40,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
 | `lithos_loom.plugins.story_develop.github_access` | S | 1 | 4 |
-| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 13 |
+| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 14 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
@@ -272,6 +272,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.handoff`
 - def `severity_at_or_above` — True if *severity* meets or exceeds *threshold* (minor < major < critical).
 - def `max_severity` — Highest severity in the list, or ``None`` when empty.
+- def `sanitize_agent_text` — Strip terminal-control / text-reordering bytes from agent-written text.
 - class `HandoffError` — A handoff file was missing required structure or had invalid values.
 - class `Finding` — One addressable review finding (see ``prompts/FORMAT.md``).
 - class `ReviewHandoff` — A parsed reviewer handoff: a verdict plus structured findings.

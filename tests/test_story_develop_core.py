@@ -1197,7 +1197,14 @@ _CODER_NEEDS_DECISION = (
 )
 # The reviewer's contest: it keeps f-001 open AND cites the acceptance line.
 _REVIEW_CONTESTS_F001 = _FINDINGS_KEEP_F001.rstrip("\n") + (
+    "\n  decision_verdict: contest"
     "\n  decision_contest: AC 2 — 'the command prints the resolved config'\n"
+)
+# The reviewer's concession: it cannot show the finding is in scope, so the
+# question is the operator's. An EXPLICIT answer is mandatory while a decision
+# is open (security/f-003) — silence is re-prompted, never read as consent.
+_REVIEW_CONCEDES_F001 = _FINDINGS_KEEP_F001.rstrip("\n") + (
+    "\n  decision_verdict: concede\n"
 )
 
 
@@ -1213,7 +1220,7 @@ def test_needs_decision_stops_after_the_same_review_round(
     _install_fakes(
         monkeypatch,
         config,
-        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_KEEP_F001}],
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _REVIEW_CONCEDES_F001}],
         coder_handoffs={2: _CODER_NEEDS_DECISION},
     )
     with caplog.at_level("WARNING"):
@@ -1226,11 +1233,39 @@ def test_needs_decision_stops_after_the_same_review_round(
     assert decision.label == "code-quality/f-001"
     assert decision.question.startswith("Add the effective-config display")
     assert "(b) drop it" in decision.options
-    assert "needs a decision" in result.message
+    assert decision.conceded is True  # an answered decision, not a silence
+    assert "needs-decision" in result.message
     assert any("[ReviewDispute]" in r.message for r in caplog.records)
-    # needs_decision is reason-bearing: the question reaches state.json.
+    # needs_decision is reason-bearing — and the reason is LOOM-authored: the
+    # coder's prose must not ride the channel that is published as an
+    # `@operator` GitHub comment (security/f-002). It says where to read it.
     reason = json.loads((config.run_dir / "state.json").read_text())["failure_reason"]
-    assert reason and "Add the effective-config display" in reason
+    assert reason and "code-quality/f-001" in reason
+    assert "Add the effective-config display" not in reason
+    assert "[ReviewDispute]" in reason
+
+
+def test_an_unanswered_needs_decision_re_prompts_the_reviewer(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # security/f-003: the abuse guard is adjudicated from a prompt that quotes
+    # the coder's own words, so an injected "say nothing this round" must not
+    # buy an escalation. A review that leaves the decision unanswered is
+    # rejected and re-prompted; only the explicit answer escalates.
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[
+            {"text": _FINDINGS_MAJOR},
+            {"text": _FINDINGS_KEEP_F001, "retry_text": _REVIEW_CONCEDES_F001},
+        ],
+        coder_handoffs={2: _CODER_NEEDS_DECISION},
+    )
+    result = develop_mod.develop(config)
+
+    assert result.status == "needs_decision"  # after the CORRECTION, not before
+    assert result.rounds == 2
+    assert result.decisions and result.decisions[0].conceded is True
 
 
 def test_contested_needs_decision_falls_back_to_the_dispute_guard(

@@ -1229,14 +1229,20 @@ def test_decision_phase_stops_the_run_on_an_uncontested_decision(
 ) -> None:
     ctx, ledger = _decision_ctx(tmp_path)
     ledger.record_coder_updates([_coder_decision()], 2)
-    ledger.apply_review(_reviewer_keeps_open(), 2)  # the reviewer's one turn
+    # the reviewer's one turn: it answers, and cannot show the finding is in
+    # scope (an unanswered review is re-prompted — security/f-003)
+    ledger.apply_review(_reviewer_keeps_open(decision_verdict="concede"), 2)
 
     exit_ = rounds_mod.decision_phase(ctx, 2)
 
     assert exit_ is not None
     assert exit_.status == "needs_decision"
     assert "correctness/f-001" in exit_.failure_reason
-    assert "Accept an at-most-once marker" in exit_.failure_reason
+    # the reason line is loom-authored — it names the finding and where the
+    # question is, never the coder's prose (security/f-002: this string is
+    # published as an `@operator` GitHub comment by the needs-human notifier)
+    assert "Accept an at-most-once marker" not in exit_.failure_reason
+    assert "[ReviewDispute]" in exit_.failure_reason
     # ... and it stops BEFORE the dispute guard would have paid two more rounds
     assert rounds_mod.deadlock_phase(ctx, 2) is None
 

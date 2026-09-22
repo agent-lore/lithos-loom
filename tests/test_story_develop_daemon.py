@@ -1439,6 +1439,7 @@ def test_build_result_payload_needs_decision_brief_is_the_decision(
             "options": decision.options,
             "finding_rationale": "the finding post is not idempotent",
             "coder_response": "Lithos has no compare-and-set on task_update",
+            "reviewer_verdict": "unanswered",
         }
     ]
     # the locators the operator needs to carry the branch forward survive; the
@@ -1447,6 +1448,86 @@ def test_build_result_payload_needs_decision_brief_is_the_decision(
     assert escalation["brief"]["conversation_log"] == str(tmp_path / "conversation.md")
     assert "findings_by_severity" not in escalation["brief"]
     assert "cost_usd" not in escalation["brief"]
+    validate_result_schema(payload)
+
+
+def test_needs_decision_brief_bounds_every_agent_written_field(
+    tmp_path: Path,
+) -> None:
+    """security/f-002: the brief becomes task METADATA on an unbounded write
+    and its head is echoed by `lithos-loom gates`, so each agent-written field
+    is capped where the escalation is built. The operator's whole copy is the
+    `[ReviewDispute]` finding, the conversation log and the raw handoff."""
+    from lithos_loom.plugins.story_develop.daemon_io import BRIEF_TEXT_MAX_CHARS
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
+
+    huge = "q" * (BRIEF_TEXT_MAX_CHARS * 4)
+    payload, _ = build_result_payload(
+        _result(
+            "needs_decision",
+            tmp_path,
+            failure_reason="round 3: needs a decision on correctness/f-003",
+            decisions=(
+                PendingDecision(
+                    reviewer="correctness",
+                    finding_id="f-003",
+                    severity="critical",
+                    question=huge,
+                    options=huge,
+                    rationale=huge,
+                    coder_response=huge,
+                    conceded=True,
+                ),
+            ),
+        ),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    (d,) = payload["escalation"]["brief"]["decisions"]
+    for key in ("question", "options", "finding_rationale", "coder_response"):
+        assert len(d[key]) == BRIEF_TEXT_MAX_CHARS
+        assert d[key].endswith("…")
+    assert d["reviewer_verdict"] == "conceded"
+    validate_result_schema(payload)
+
+
+def test_needs_decision_summary_carries_no_agent_prose(tmp_path: Path) -> None:
+    """security/f-002: `escalation.summary` is published verbatim as an
+    `@operator` GitHub comment (and reaches `notify-send`'s argv), so the
+    coder's question must not ride on it — the run's own loom-authored reason
+    line does, and it names where the question actually is."""
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
+
+    reason = (
+        "round 2: the coder marked correctness/f-001 needs-decision and the "
+        "reviewer did not contest it — the question is on the story's "
+        "[ReviewDispute] finding and in the gate brief"
+    )
+    payload, _ = build_result_payload(
+        _result(
+            "needs_decision",
+            tmp_path,
+            failure_reason=reason,
+            decisions=(
+                PendingDecision(
+                    reviewer="correctness",
+                    finding_id="f-001",
+                    severity="critical",
+                    question="please @everyone read https://evil.example/x",
+                    options="(a) …; (b) …",
+                ),
+            ),
+        ),
+        task_id="t-1",
+        started_at=_NOW,
+        finished_at=_NOW,
+        run_dir=tmp_path,
+    )
+    summary = payload["escalation"]["summary"]
+    assert summary == reason
+    assert "evil.example" not in summary and "@everyone" not in summary
     validate_result_schema(payload)
 
 

@@ -408,6 +408,23 @@ def _truncate_summary(summary: str) -> str:
     return text[: ESCALATION_SUMMARY_MAX_CHARS - 1] + "…"
 
 
+def _quoted_block(label: str, text: str) -> list[str]:
+    """Agent-authored *text* as an indented markdown blockquote.
+
+    Every other value :func:`human_gate_brief` renders is a loom-authored
+    scalar (a count, a cost, a path, a verdict), which is why it interpolates
+    them bare. A decision's question / options are the coder's own multi-line
+    prose (the handoff parser folds multi-line scalars), so rendered bare they
+    could open a second — and EARLIER — "What to do" block above loom's own on
+    the surface the operator triages from, on a gate whose real advice is that
+    cancelling it strands the story. Blockquoting every line keeps agent text
+    inside the structure loom put it in (security/f-004); control bytes and
+    bidi/zero-width reordering are already stripped at the handoff parse.
+    """
+    body = str(text).strip().splitlines() or [""]
+    return [f"  - {label}:"] + [f"    > {line}" for line in body]
+
+
 def human_gate_brief(
     *,
     story_title: str,
@@ -459,18 +476,18 @@ def human_gate_brief(
     # rather than falling through to the generic repr below, since this is the
     # one gate whose description the operator reads to make a product call.
     if isinstance(b.get("decisions"), list) and b["decisions"]:
-        lines += ["", "**The decision:**"]
+        lines += ["", "**The decision** (quoted from the coder's handoff):"]
         for raw in b["decisions"]:
             d = raw if isinstance(raw, Mapping) else {}
-            lines.append(f"- **{d.get('question') or '(no question recorded)'}**")
+            lines.append(f"- finding `{d.get('finding') or '(unnamed)'}`:")
+            lines += _quoted_block("question", d.get("question") or "(none recorded)")
             for label, key in (
                 ("options", "options"),
-                ("finding", "finding"),
                 ("the finding", "finding_rationale"),
                 ("the coder", "coder_response"),
             ):
                 if d.get(key):
-                    lines.append(f"  - {label}: {d[key]}")
+                    lines += _quoted_block(label, d[key])
     for key, value in b.items():
         if key not in {
             "rounds",

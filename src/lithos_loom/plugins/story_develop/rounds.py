@@ -813,6 +813,12 @@ def decision_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     DID contest (citing the acceptance line the finding meets) left no pending
     decision here, and the deadlock guard below applies unchanged.
 
+    At most ONE escalation can happen per run — this exit ends it — and the
+    next one needs the operator to complete the gate first, so "how many
+    decisions may a story raise" is bounded by operator consent rather than a
+    counter (security/f-003); within the run, a contested decision is sticky,
+    so the same finding cannot re-arm it either.
+
     Exit: H' ``needs_decision``.
     """
     decisions = [
@@ -829,12 +835,21 @@ def decision_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         round_no,
         ", ".join(d.label for d in decisions),
     )
+    # The reason line is LOOM-AUTHORED on purpose (security/f-002): it becomes
+    # `escalation.summary`, which the needs-human notifier publishes as an
+    # `@operator` comment on the story's public GitHub issue / PR and passes to
+    # `notify-send`'s argv. Every other stop's summary is a loom template; the
+    # coder's question must not be the first free-form agent text on that
+    # channel, and it does not need to be — it reaches the operator whole on
+    # the `[ReviewDispute]` finding and in the gate's brief, both Lithos-only.
+    # Naming the finding(s) is what the summary is for: where to look.
     return CycleExit(
         status="needs_decision",
         failure_reason=(
-            f"round {round_no}: needs a decision on "
-            f"{', '.join(d.label for d in decisions)} — "
-            f"{decisions[0].question}"
+            f"round {round_no}: the coder marked "
+            f"{', '.join(d.label for d in decisions)} needs-decision and the "
+            "reviewer did not contest it — the question is on the story's "
+            "[ReviewDispute] finding and in the gate brief"
         ),
         resume_after=None,
     )
