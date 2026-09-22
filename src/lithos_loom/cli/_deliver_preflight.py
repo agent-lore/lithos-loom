@@ -62,7 +62,17 @@ def resolve_facts(
     if branch:
         facts = RunFacts(**{**asdict(facts), "branch": branch})
     if story_id:
-        facts = RunFacts(**{**asdict(facts), "story_id": story_id})
+        # A DIFFERENT story is a different set of acceptance criteria, and the
+        # PR publishes those beside the run's verdict — so the swap is
+        # recorded, and an approval the panel gave against the run's own story
+        # is no longer published as one (`_deliver_facts.approval_unbound`).
+        facts = RunFacts(
+            **{
+                **asdict(facts),
+                "story_id": story_id,
+                "story_overridden": story_id != facts.story_id,
+            }
+        )
     if facts.delivered_pr_url:
         raise DeliverRefused(
             f"run {facts.run_id} already delivered {facts.delivered_pr_url} — "

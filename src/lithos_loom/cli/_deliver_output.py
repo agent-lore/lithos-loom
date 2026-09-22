@@ -24,7 +24,12 @@ from typing import Any
 
 import typer
 
-from lithos_loom.cli._deliver_facts import RunFacts, sanitize_for_terminal
+from lithos_loom.cli._deliver_facts import (
+    RunFacts,
+    approval_unbound,
+    sanitize_for_terminal,
+    story_reason,
+)
 from lithos_loom.cli._deliver_lithos import GateOutcome, GateRetirement, StoryState
 from lithos_loom.cli._deliver_repo import (
     PUSH_CREATE,
@@ -81,12 +86,31 @@ def delivery_finding(
         parts.append(f"branch {facts.branch} already on origin at {sha}")
     else:
         parts.append(f"branch {facts.branch}")
+    # The stop reason, whole. The PR body publishes only a redacted 200-char
+    # rendering and tells its reader the story carries the rest — and the path
+    # this command exists for is exactly the one where nothing else on the
+    # story does (a daemon that died before posting its [NeedsHuman] finding),
+    # so this finding is what makes that pointer true.
+    reason = story_reason(facts)
     if facts.status == run_outcome.APPROVED:
         # the approved salvage path (#194 / #189): the panel DID approve, and
         # what stopped is the run's own delivery — "stopped approved" is neither
-        parts.append("the run was approved and its own PR delivery never completed")
+        said = "the run was approved and its own PR delivery never completed"
+        # …but the approval was given on a revision and a story, and the audit
+        # copy says so whenever this delivery is not that pair (f-004): the
+        # story's record must not read as a review of what was delivered here.
+        unbound = approval_unbound(
+            facts, delivered_head=str(record.get("pushed_sha") or "")
+        )
+        if unbound:
+            said += f" — but it is NOT confirmed for this revision: {unbound}"
+        parts.append(f"{said}: {reason}" if reason else said)
     elif facts.status:
-        parts.append(f"the run had stopped {facts.status}")
+        parts.append(
+            f"the run had stopped {facts.status}: {reason}"
+            if reason
+            else f"the run had stopped {facts.status}"
+        )
     # The mode is the operator's flag, NOT "did we end up with an outcome
     # object": a gate attempt that failed leaves `outcome` None too, and
     # recording that as a deliberate hand-off would tell the operator they
@@ -170,6 +194,16 @@ def echo_plan(
     # has no `failure_reason` — its reason is why its own delivery never landed.
     reason = facts.failure_reason or facts.delivery_failure
     echo(f"  run:    {facts.status or '?'} — {reason or '—'}")
+    unbound = (
+        approval_unbound(facts, delivered_head=state.local_sha)
+        if facts.status == run_outcome.APPROVED
+        else ""
+    )
+    if unbound:
+        # the approval is about a revision + a story, and this delivery is not
+        # that pair: the PR would publish the verdict downgraded, and the
+        # operator decides to publish HERE
+        echo(f"          approval NOT confirmed for this revision: {unbound}")
     echo(f"  1 push: {push_words[state.action]}")
     echo(f"  2 PR:   adopt the open PR for the branch, else open onto {base}")
     echo(f"          title {title!r}")

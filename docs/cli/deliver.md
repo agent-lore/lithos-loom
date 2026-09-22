@@ -147,7 +147,9 @@ partial first pass finishes the job and changes nothing else.
    a gate this delivery kept.
 5. **Post `[ManualDelivery]`** on the story: the run, the PR (opened or
    adopted), the delivered sha (always — an audit that cannot be checked later
-   is no audit), the `pr` gate that now holds it, the gates retired, and the
+   is no audit), **why the run stopped** (whole and unredacted, control bytes
+   out — the PR body carries only a bounded, redacted rendering and points its
+   reader here), the `pr` gate that now holds it, the gates retired, and the
    gates deliberately kept open. The record says what was **done**, never what
    was attempted: a gate phase that failed reads "the pr gate was NOT raised",
    which is not the same sentence as the deliberate `--no-gate` hand-off. Any
@@ -296,7 +298,10 @@ Provenance the run never recorded (a reaped run's rounds or cost) renders as
 `unknown`, never as a confident zero — and so does provenance that cannot be
 true (a negative round count, a negative / `NaN` / infinite cost). And the
 claim that the story carries the full, unredacted reason is made only when a
-reason was rendered here to be the redacted half of it.
+reason was rendered here to be the redacted half of it — a claim
+`[ManualDelivery]` then makes true by carrying that reason itself, rather than
+leaning on a `[NeedsHuman]` finding the run this command salvages may have
+died before posting.
 
 **The approved run reads as approved.** On the salvage path where the panel
 *did* approve and the run's own automated delivery failed (#194) or outlived
@@ -309,6 +314,19 @@ budget it never came back inside — since `state.json` carries a
 `failure_reason` only for the statuses whose *dialogue* failed. It is redacted
 and bounded like any other (`gh` stderr is host text too), and `--dry-run`
 shows the operator the untouched original.
+
+**An approval is published only for what it was given on.** A verdict is about
+a *revision* judged against a *story's* acceptance criteria, and neither is
+pinned here by default: a branch is a mutable ref (a commit after the run
+stopped moves it), and `--story` names the criteria the PR publishes. So the
+Review section claims the panel's approval only when the sha being delivered is
+the head the run recorded as approved (the tail of `result.json`'s run-bound
+`commits`) **and** the story is the run's own. Otherwise the line reads
+"approved, but NOT confirmed for this revision" and names which half could not
+be checked — the branch moved since the panel approved `<sha>`, the run
+recorded no approved revision at all, or the criteria above came from another
+`--story`. Publishing "the panel agreed" over an unverified head is how
+unreviewed code merges on a reviewed PR's reputation.
 
 ## Flags
 

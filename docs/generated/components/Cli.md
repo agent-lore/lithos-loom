@@ -12,7 +12,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
-| `lithos_loom.cli._deliver_facts` | M | 1 | 8 |
+| `lithos_loom.cli._deliver_facts` | M | 1 | 10 |
 | `lithos_loom.cli._deliver_lithos` | L | 7 | 4 |
 | `lithos_loom.cli._deliver_output` | S | 0 | 3 |
 | `lithos_loom.cli._deliver_preflight` | S | 0 | 4 |
@@ -42,7 +42,9 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
 - def `run_facts` — Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
 - def `redact_for_publication` — A bounded, markup-inert rendering of host text that is about to be published.
+- def `story_reason` — The stop reason as the STORY carries it: whole, control-stripped.
 - def `provenance_lines` — The PR body's ``## Provenance`` block: where this branch came from.
+- def `approval_unbound` — Why a recorded approval does NOT describe what this PR delivers, or ``""`` when it does.
 - def `reviews_summary` — The Review section's verdict line: what the panel recorded, if anything.
 - def `pr_body` — The generated body for a newly opened PR — the shared builder plus this delivery's provenance. Built lazily: an adopted PR needs none.
 

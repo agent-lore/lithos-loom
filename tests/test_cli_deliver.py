@@ -1175,14 +1175,12 @@ def test_an_approved_run_past_its_delivery_budget_is_salvageable(
     assert len(gh["created"]) == 1
 
 
-def test_an_approved_salvage_records_its_approval_and_delivery_failure(
-    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
-) -> None:
-    """[davesnowdon] f-001: on the approved salvage path (#194 / #189) the panel
-    DID approve, and what stopped is the run's own PR delivery — whose reason
-    `state.json` never carries. "stopped `approved`", a verdict of "not
-    recorded" and a promise of a full reason nothing carried over describe none
-    of it."""
+def _approved_salvage(run_dir: Path, *, approved_head: str | None) -> None:
+    """Rewrite the fixture run as the #194 salvage: approved, delivery failed.
+
+    *approved_head* is the revision ``result.json`` records the run as having
+    ended on — the one the panel approved. ``None`` records none at all.
+    """
     state = json.loads((run_dir / "state.json").read_text())
     state["status"] = "approved"
     # only the reason-bearing statuses set one: an approved dialogue did not fail
@@ -1192,6 +1190,21 @@ def test_an_approved_salvage_records_its_approval_and_delivery_failure(
         json.dumps({"failed": True, "reason": "gh pr create failed: api said 502"}),
         encoding="utf-8",
     )
+    result = json.loads((run_dir.parent / "result.json").read_text())
+    if approved_head is not None:
+        result["commits"] = ["0" * 40, approved_head]
+    (run_dir.parent / "result.json").write_text(json.dumps(result), encoding="utf-8")
+
+
+def test_an_approved_salvage_records_its_approval_and_delivery_failure(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """[davesnowdon] f-001: on the approved salvage path (#194 / #189) the panel
+    DID approve, and what stopped is the run's own PR delivery — whose reason
+    `state.json` never carries. "stopped `approved`", a verdict of "not
+    recorded" and a promise of a full reason nothing carried over describe none
+    of it."""
+    _approved_salvage(run_dir, approved_head=_head(repo))
 
     plan = _invoke(_RUN, "--dry-run")
     assert plan.exit_code == 0, plan.output
@@ -1201,9 +1214,12 @@ def test_an_approved_salvage_records_its_approval_and_delivery_failure(
     assert _invoke(_RUN).exit_code == 0
     body = gh["created"][0]["body"]
 
-    # the recorded approval, rendered as the approval it was
-    assert "verdicts: approved — the review panel agreed" in body
+    # the recorded approval, rendered as the approval it was — bound to the
+    # revision it was given on ([davesnowdon] f-004)
+    assert "verdicts: approved — the review panel agreed on this exact revision" in body
+    assert f"`{_head(repo)[:12]}`" in body
     assert "not recorded" not in body and "not approved" not in body
+    assert "NOT confirmed" not in body
     # …and the delivery failure as the stop reason, not "stopped `approved`"
     assert "stopped `approved`" not in body
     assert "was approved by the review panel" in body
@@ -1213,6 +1229,157 @@ def test_an_approved_salvage_records_its_approval_and_delivery_failure(
     findings = [f["summary"] for f in lithos.findings if f["task_id"] == _STORY]
     assert "the run was approved and its own PR delivery never completed" in findings[0]
     assert "had stopped approved" not in findings[0]
+
+
+def test_an_approval_is_never_published_for_a_revision_the_panel_never_saw(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """[davesnowdon] f-004: a branch is a MUTABLE ref, and this command pushes
+    whatever it points at now. An approval recorded for one revision must not
+    be published over a head the panel never saw — the PR would carry a review
+    that never happened."""
+    _approved_salvage(run_dir, approved_head=_head(repo))
+    reviewed = _head(repo)
+    # a commit lands on the branch after the panel approved it
+    (repo / "sneaked.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "after the review")
+
+    # the screen the operator decides to publish on says it first
+    plan = _invoke(_RUN, "--dry-run")
+    assert plan.exit_code == 0, plan.output
+    assert "approval NOT confirmed for this revision" in plan.output
+
+    assert _invoke(_RUN).exit_code == 0
+    body = gh["created"][0]["body"]
+
+    assert "approved, but NOT confirmed for this revision" in body
+    assert f"the branch has moved since the panel approved `{reviewed[:12]}`" in body
+    assert f"`{_head(repo)[:12]}`" in body
+    assert "the review panel agreed on this exact revision" not in body
+
+    # …and the story's own audit copy does not read as a review of this head
+    summary = [f["summary"] for f in lithos.findings if f["task_id"] == _STORY][0]
+    assert "NOT confirmed for this revision" in summary
+
+
+def test_an_approval_is_never_published_against_another_storys_criteria(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """[davesnowdon] f-004, the other half: `--story` replaces the acceptance
+    criteria the PR publishes, and a verdict is only about the criteria it was
+    given on."""
+    lithos.add_task(
+        make_task(
+            "story-other",
+            title="A different story",
+            description="Different work entirely.",
+            metadata={
+                "project": _SLUG,
+                "acceptance_criteria": "Done when something else is true.",
+            },
+        )
+    )
+    _approved_salvage(run_dir, approved_head=_head(repo))
+
+    assert _invoke(_RUN, "--story", "story-other").exit_code == 0
+    body = gh["created"][0]["body"]
+
+    assert "approved, but NOT confirmed for this revision" in body
+    assert "come from a --story other than the one the run was reviewed" in body
+    # the head itself still matches — only the criteria moved
+    assert "the branch has moved" not in body
+
+
+def test_an_approval_with_no_recorded_revision_is_downgraded(repo: Path) -> None:
+    """[davesnowdon] f-004, the pure rule: nothing to compare against is not
+    the same as a match. A run whose commits nothing recorded (a crash before
+    `result.json`, an older daemon) binds its approval to no revision."""
+    unrecorded = cli_facts.RunFacts(
+        story_id=_STORY, branch=_BRANCH, run_id=_RUN, status="approved"
+    )
+    assert "no approved revision" in cli_facts.approval_unbound(
+        unrecorded, delivered_head=_head(repo)
+    )
+    bound = cli_facts.RunFacts(
+        story_id=_STORY,
+        branch=_BRANCH,
+        run_id=_RUN,
+        status="approved",
+        approved_head=_head(repo),
+    )
+    assert cli_facts.approval_unbound(bound, delivered_head=_head(repo)) == ""
+    # an unreadable delivered head is not a match either
+    assert "could not be read" in cli_facts.approval_unbound(bound, delivered_head="")
+    assert "exact revision" in cli_facts.reviews_summary(
+        bound, delivered_head=_head(repo).upper()
+    )
+
+
+def test_a_recorded_head_must_be_a_full_object_name(tmp_path: Path) -> None:
+    """[davesnowdon] f-004: the delivered head is 40 hex characters read from
+    git, so a short or malformed record must fail the comparison rather than
+    half-match it."""
+    d = tmp_path / "t-1" / "r-1"
+    (d / "handoff").mkdir(parents=True)
+    (d / "state.json").write_text(
+        json.dumps({"status": "approved", "branch": "b"}), encoding="utf-8"
+    )
+
+    def _with_commits(commits: object) -> str:
+        (d.parent / "result.json").write_text(
+            json.dumps({"run_id": "r-1", "status": "failed", "commits": commits}),
+            encoding="utf-8",
+        )
+        return cli_facts.run_facts(d).approved_head
+
+    assert _with_commits(["a" * 40, "b" * 40]) == "b" * 40
+    assert _with_commits(["b" * 12]) == ""  # abbreviated
+    assert _with_commits([]) == ""
+    assert _with_commits("deadbeef") == ""
+    assert _with_commits([None]) == ""
+
+
+def test_the_story_finding_carries_the_reason_the_pr_body_promises(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """[davesnowdon] f-004, the Low half: the PR body tells its reader the
+    story carries the full, unredacted reason — and the path this command
+    exists for is the one where a daemon died before posting any of it. So
+    [ManualDelivery] carries the reason itself."""
+    state = json.loads((run_dir / "state.json").read_text())
+    state["failure_reason"] = (
+        "the reviewer died under /home/dave/loom/run.log with exit 137"
+    )
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    # the daemon died before posting any escalation of its own: the story
+    # carries no failed-attempt marker and no [NeedsHuman] finding
+    story = _get(lithos, _STORY)
+    metadata = {
+        k: v
+        for k, v in story.metadata.items()
+        if k != "loom_last_attempt:story-develop"
+    }
+    lithos.add_task(
+        make_task(
+            _STORY,
+            title=story.title,
+            description=story.description,
+            metadata=metadata,
+        )
+    )
+
+    assert _invoke(_RUN).exit_code == 0
+
+    body = gh["created"][0]["body"]
+    assert "the story carries the full, unredacted reason" in body
+    assert "(path redacted)" in body  # the PUBLISHED copy is redacted
+
+    summary = [f["summary"] for f in lithos.findings if f["task_id"] == _STORY][0]
+    assert summary.startswith("[ManualDelivery]")
+    assert "the run had stopped disputed: " in summary
+    # the story's copy is whole — paths and all
+    assert "/home/dave/loom/run.log" in summary
 
 
 def test_an_expired_delivery_budget_is_the_stop_reason(

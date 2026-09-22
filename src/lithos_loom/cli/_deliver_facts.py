@@ -40,6 +40,7 @@ from lithos_loom.plugins.story_develop.pr_delivery import build_pr_body, closes_
 
 __all__ = [
     "RunFacts",
+    "approval_unbound",
     "coder_summary",
     "defang_markup",
     "pr_body",
@@ -48,6 +49,7 @@ __all__ = [
     "reviews_summary",
     "run_facts",
     "sanitize_for_terminal",
+    "story_reason",
 ]
 
 
@@ -78,6 +80,16 @@ class RunFacts:
     """The last round's coder handoff ``## Summary`` — what the branch does,
     in the author's own words (bounded + control-stripped: handoffs are
     agent-written)."""
+    approved_head: str = ""
+    """The revision the panel approved: the LAST commit this run recorded on
+    its branch (``result.json``'s run-bound ``commits``, oldest first — so its
+    tail is the branch head the final round was reviewed at). Empty for a run
+    the panel never approved, and for one whose commits nothing recorded — and
+    then the approval binds to no revision (:func:`approval_unbound`)."""
+    story_overridden: bool = False
+    """Whether ``--story`` named a story other than the run's own — the
+    acceptance criteria this PR publishes are then not the ones the panel
+    reviewed against."""
     run_dir: str = ""
 
 
@@ -301,6 +313,34 @@ def _delivery_failure(run_dir: Path, status: str) -> str:
     return ""
 
 
+# A recorded commit is only usable as an approval binding if it is a full
+# object name: the delivered head is read from git as 40 hex characters, and a
+# short / malformed record must fail the comparison rather than half-match it.
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def _approved_head(status: str, result: Mapping[str, Any]) -> str:
+    """The revision THIS run's panel approved, or ``""`` when nothing binds.
+
+    ``result.json``'s ``commits`` are the branch's own commits, oldest first,
+    taken at the end of the last round — so the tail is the head the panel
+    approved. The file is already bound to this run by ``run_id``
+    (:func:`run_outcome.result_for_run`), so a prior run's leftover cannot
+    supply it. Only an approved run has an approved head; anything that is not
+    a full object name is no record at all.
+    """
+    if status != run_outcome.APPROVED:
+        return ""
+    commits = result.get("commits")
+    if not isinstance(commits, list) or not commits:
+        return ""
+    head = commits[-1]
+    if not isinstance(head, str):
+        return ""
+    head = head.strip().lower()
+    return head if _FULL_SHA_RE.match(head) else ""
+
+
 def run_facts(run_dir: Path) -> RunFacts:
     """Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
 
@@ -327,6 +367,7 @@ def run_facts(run_dir: Path) -> RunFacts:
         test_gate_verdict=_opt_str(brief.get("test_gate_verdict")) or None,
         delivered_pr_url=run_outcome.delivered_pr_url(run_dir, state),
         coder_summary=coder_summary(run_dir / "handoff"),
+        approved_head=_approved_head(status, result),
         run_dir=str(run_dir),
     )
 
@@ -420,6 +461,33 @@ def redact_for_publication(text: str, *, limit: int = _MAX_REASON_CHARS) -> str:
     return out
 
 
+# The operator's copy of the stop reason is not redacted (the story is not
+# world-readable — that is the whole point of the PR body's pointer to it),
+# but it is still host text on its way to a rendered surface: control bytes
+# out, and a bound far above any real reason so a pathological one cannot
+# make the finding unpostable.
+STORY_REASON_MAX_CHARS = 2000
+
+
+def story_reason(facts: RunFacts) -> str:
+    """The stop reason as the STORY carries it: whole, control-stripped.
+
+    The PR body publishes only a redacted, 200-character rendering and points
+    the reader at the story for the rest (:func:`provenance_lines`). That
+    pointer is a promise, and the one path this command exists for can break
+    it: a daemon that died before posting its ``[NeedsHuman]`` finding leaves
+    a story with no escalation on it at all (``_deliver_preflight`` admits
+    exactly that case when no daemon is running). So ``[ManualDelivery]``
+    carries the reason itself, and the promise is kept by this delivery rather
+    than by a finding that may never have been written.
+    """
+    reason = sanitize_for_terminal(facts.failure_reason or facts.delivery_failure)
+    reason = " ".join(reason.split())
+    if len(reason) > STORY_REASON_MAX_CHARS:
+        reason = reason[: STORY_REASON_MAX_CHARS - 1].rstrip() + "…"
+    return reason
+
+
 def provenance_lines(facts: RunFacts) -> list[str]:
     """The PR body's ``## Provenance`` block: where this branch came from.
 
@@ -459,7 +527,41 @@ def provenance_lines(facts: RunFacts) -> list[str]:
     return lines
 
 
-def reviews_summary(facts: RunFacts) -> str:
+def approval_unbound(facts: RunFacts, *, delivered_head: str) -> str:
+    """Why a recorded approval does NOT describe what this PR delivers, or
+    ``""`` when it does.
+
+    A verdict is about a **revision** judged against a **story's** acceptance
+    criteria, and this command binds neither by default: a branch is a mutable
+    ref (a local commit after the run stopped moves it), ``--story`` names the
+    criteria the PR publishes, and the salvage this run delivers may be days
+    old. So the approval is claimed only when both halves are pinned — the
+    delivered head IS the revision the run recorded as approved, and the story
+    is the run's own — and otherwise the claim is downgraded, naming which
+    half could not be checked. Publishing "the panel agreed" over an
+    unverified head is how unreviewed code gets merged on a reviewed PR's
+    reputation.
+    """
+    reasons = []
+    if not facts.approved_head:
+        reasons.append("the run recorded no approved revision to compare against")
+    elif not delivered_head:
+        reasons.append("the delivered revision could not be read")
+    elif delivered_head.strip().lower() != facts.approved_head:
+        reasons.append(
+            f"the branch has moved since the panel approved "
+            f"`{facts.approved_head[:12]}` (this PR's head is "
+            f"`{delivered_head.strip().lower()[:12]}`)"
+        )
+    if facts.story_overridden:
+        reasons.append(
+            "the acceptance criteria above come from a --story other than the "
+            "one the run was reviewed against"
+        )
+    return "; ".join(reasons)
+
+
+def reviews_summary(facts: RunFacts, *, delivered_head: str = "") -> str:
     """The Review section's verdict line: what the panel recorded, if anything.
 
     Almost every hand delivery is of a branch the panel never approved. But the
@@ -467,12 +569,24 @@ def reviews_summary(facts: RunFacts) -> str:
     #189) is a documented salvage path too, and there the verdict IS recorded —
     calling it "not recorded" would understate a review that happened and send
     the reviewer looking for one.
+
+    That approval is published only for the revision and the story it was
+    given on (:func:`approval_unbound`); when either is unverified the line
+    says the run was approved and that THIS head is not known to be what the
+    panel agreed on, which is the only claim the facts support.
     """
     if facts.status == run_outcome.APPROVED:
+        unbound = approval_unbound(facts, delivered_head=delivered_head)
+        if unbound:
+            return (
+                "approved, but NOT confirmed for this revision — the review "
+                f"panel agreed with the run, then {unbound}. Review this PR "
+                "as you would any other"
+            )
         return (
-            "approved — the review panel agreed on this branch; what did not "
-            "complete was the run's own automated PR delivery, so the PR was "
-            "opened by hand"
+            "approved — the review panel agreed on this exact revision "
+            f"(`{facts.approved_head[:12]}`); what did not complete was the "
+            "run's own automated PR delivery, so the PR was opened by hand"
         )
     if facts.status:
         return (
@@ -482,13 +596,19 @@ def reviews_summary(facts: RunFacts) -> str:
     return "not recorded — delivered by hand from a stopped run"
 
 
-def pr_body(*, facts: RunFacts, story: StoryState, repo_name: str) -> str:
+def pr_body(
+    *, facts: RunFacts, story: StoryState, repo_name: str, head_sha: str = ""
+) -> str:
     """The generated body for a newly opened PR — the shared builder plus this
-    delivery's provenance. Built lazily: an adopted PR needs none."""
+    delivery's provenance. Built lazily: an adopted PR needs none.
+
+    *head_sha* is the revision this delivery puts behind the PR, which is what
+    a recorded approval has to be checked against before it is published as
+    one (:func:`approval_unbound`)."""
     return build_pr_body(
         description=story.task_text,
         acceptance_criteria=story.acceptance_criteria,
-        reviews_summary=reviews_summary(facts),
+        reviews_summary=reviews_summary(facts, delivered_head=head_sha),
         rounds=facts.rounds,
         gate_verdict=facts.test_gate_verdict,
         cost_usd=facts.cost_usd,

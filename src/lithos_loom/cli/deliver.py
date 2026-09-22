@@ -499,7 +499,14 @@ def _deliver_claimed(
             base=base,
             head_sha=state.local_sha,
             title=title,
-            body=lambda: pr_body(facts=facts, story=story, repo_name=repo_name),
+            body=lambda: pr_body(
+                facts=facts,
+                story=story,
+                repo_name=repo_name,
+                # the revision being delivered: a recorded approval is
+                # published as one only if it was given on THIS head
+                head_sha=state.local_sha,
+            ),
         )
     except (
         DeliverUncertain,
