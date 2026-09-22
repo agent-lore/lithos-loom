@@ -32,7 +32,7 @@ import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from lithos_loom.cli._deliver_lithos import StoryState
 from lithos_loom.plugins.story_develop import run_outcome
@@ -433,6 +433,15 @@ def redact_for_publication(text: str, *, limit: int = _MAX_REASON_CHARS) -> str:
     ``www.``-autolinked), internal hostnames, IPv4 literals and bare
     ``host:port`` pairs, absolute / home paths and credential-shaped runs
     become placeholders, markup is defanged, and the result is capped at
+    **A shape filter, not a confidentiality boundary.** It removes what it can
+    RECOGNISE from text whose author chooses the encoding: the coder handoff it
+    also treats is written by an agent holding live host credentials, and
+    splitting or re-encoding a secret defeats :data:`_SECRETISH_RE` without
+    looking unusual. So this bounds the accident (a path, an endpoint, a token
+    pasted verbatim into an error), not an adversary — the operator's read of
+    ``--dry-run``, which prints the quote exactly as it would be published, is
+    the control that does.
+
     *limit* — which also bounds the text the patterns ever see
     (:data:`_REDACT_INPUT_SLACK`), since several of them cost O(n²) on a long
     dotted run and one caller's input is an agent-written file. The operator
@@ -469,8 +478,18 @@ def redact_for_publication(text: str, *, limit: int = _MAX_REASON_CHARS) -> str:
 STORY_REASON_MAX_CHARS = 2000
 
 
-def story_reason(facts: RunFacts) -> str:
-    """The stop reason as the STORY carries it: whole, control-stripped.
+class StoredReason(NamedTuple):
+    """The stop reason as the story will carry it, and whether that copy is
+    the whole of it — the PR body's pointer is worded from *whole*, never
+    from the hope that no reason is ever long."""
+
+    text: str
+    whole: bool
+
+
+def story_reason(facts: RunFacts) -> StoredReason:
+    """The stop reason as the STORY carries it: control-stripped, bounded, and
+    honest about which of those it had to do.
 
     The PR body publishes only a redacted, 200-character rendering and points
     the reader at the story for the rest (:func:`provenance_lines`). That
@@ -480,12 +499,20 @@ def story_reason(facts: RunFacts) -> str:
     exactly that case when no daemon is running). So ``[ManualDelivery]``
     carries the reason itself, and the promise is kept by this delivery rather
     than by a finding that may never have been written.
+
+    The copy is **verbatim** but for two things, and both are declared rather
+    than assumed away: terminal control / bidi / zero-width bytes are stripped
+    (a finding is a rendered surface too, and none of them are content), and a
+    reason longer than :data:`STORY_REASON_MAX_CHARS` is capped so a
+    pathological one cannot make the finding unpostable — which is exactly
+    when ``whole`` is ``False`` and the PR body stops calling it full. Line
+    structure is kept: collapsing it would be another silent edit.
     """
     reason = sanitize_for_terminal(facts.failure_reason or facts.delivery_failure)
-    reason = " ".join(reason.split())
+    reason = "\n".join(line.rstrip() for line in reason.splitlines()).strip()
     if len(reason) > STORY_REASON_MAX_CHARS:
-        reason = reason[: STORY_REASON_MAX_CHARS - 1].rstrip() + "…"
-    return reason
+        return StoredReason(reason[: STORY_REASON_MAX_CHARS - 1].rstrip() + "…", False)
+    return StoredReason(reason, True)
 
 
 def provenance_lines(facts: RunFacts) -> list[str]:
@@ -520,8 +547,18 @@ def provenance_lines(facts: RunFacts) -> list[str]:
         if reason:
             # The parenthetical is a claim about the STORY, so it is made only
             # when a reason was rendered here to be the redacted half of it —
-            # otherwise it promises a full reason nothing carried over.
-            stop += f": {reason} (the story carries the full, unredacted reason)"
+            # otherwise it promises a full reason nothing carried over — and it
+            # is worded from what the story will ACTUALLY carry: a reason past
+            # the finding's own bound is stored capped, and "full" would then
+            # send a reader after text no surface holds.
+            stored = story_reason(facts)
+            carried = (
+                "the story carries the full, unredacted reason"
+                if stored.whole
+                else "the story carries the unredacted reason, itself capped "
+                f"at {STORY_REASON_MAX_CHARS} characters"
+            )
+            stop += f": {reason} ({carried})"
         lines.append(stop)
     lines.append(f"branch `{facts.branch}`")
     return lines
@@ -585,8 +622,11 @@ def reviews_summary(facts: RunFacts, *, delivered_head: str = "") -> str:
             )
         return (
             "approved — the review panel agreed on this exact revision "
-            f"(`{facts.approved_head[:12]}`); what did not complete was the "
-            "run's own automated PR delivery, so the PR was opened by hand"
+            f"(`{facts.approved_head[:12]}`), which is the commit this "
+            "delivery pushed; check that it is still this PR's head, since "
+            "anything pushed above it was never reviewed. What did not "
+            "complete was the run's own automated PR delivery, so the PR was "
+            "opened by hand"
         )
     if facts.status:
         return (

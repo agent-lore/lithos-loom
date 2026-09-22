@@ -91,6 +91,16 @@ partial first pass finishes the job and changes nothing else.
    target would, for a fork checkout, resolve to the *parent* repository: the
    PR, the review request and the gate's `repo` metadata would land somewhere
    the branch was never pushed.
+   After the PR exists, its head is **read back** from GitHub. `gh pr create`
+   opens a PR from a head *branch* — the API takes no sha — so an actor who
+   advances `origin/<branch>` between the push and the create gets their commit
+   into a PR whose body describes ours; adoption has the same shape around its
+   list. The window cannot be closed, so it is observed: a head that is not the
+   sha this delivery pushed is a `[Friction]` naming both, the delivery reports
+   partial (exit 2), and every later claim about the delivered revision — the
+   approval above all — is made against the **PR's** head, not the pushed one.
+   A head that could not be read is reported as unverified, never as a match.
+
 3. **Raise the `pr` gate** on the story and record it: `pr_gate_id`, and — on
    the same write — a per-key delete of the stop's failed-attempt marker and
    its `needs_human_gate_id` provenance. This is literally the write the
@@ -276,6 +286,19 @@ can see. The text is capped, and the story keeps the untouched original
 (its `[NeedsHuman]` finding, the gate brief, and `--dry-run`, which are all
 host-side or operator-only).
 
+**The redaction is a shape filter, not a confidentiality boundary.** It removes
+what it can *recognise* — urls, hosts, absolute / home paths, and runs that look
+like credentials — from text whose author chooses its encoding. The coder
+handoff below is written by an agent whose own instructions include the story
+description (a GitHub issue body, for a mirrored story: anyone's to write), and
+that agent's container holds live host credentials, so a determined or
+prompt-injected coder can carry material past a shape rule simply by splitting
+or re-encoding it. Treat the quote as agent-authored text being published under
+your GitHub identity, permanently: `--dry-run` prints it exactly as it would be
+published, and that read is the actual control. (The same agent has ordinary
+network egress unless the host blocks it, so this channel is not the only one —
+it is the one that ends up in a public, permanent record.)
+
 The coder's final handoff goes through **the same redaction** and travels as a
 **fenced block**, never as inline prose: it is written by the coder agent into
 a read-write mount, and a PR description is live markup — GitHub honours
@@ -337,7 +360,7 @@ unreviewed code merges on a reviewed PR's reputation.
 | `--story TASK_ID` | The story this branch implements (default: the run dir's task id). Read live from Lithos: title, description, `acceptance_criteria`, `project`, `github_issue_url`. |
 | `--base REF` | Base branch for the PR (default: the repo's default branch, via `gh repo view`). It constrains **adoption** as well as opening: a candidate PR whose base is not this one is not this delivery's, so it is refused rather than adopted (an adopted PR merges somewhere `deliver` would never have opened onto, with the `pr` gate tracking that merge). |
 | `--no-gate` | Open the PR only. No `pr` gate is raised and the needs-human gate is left open, so the PR is **UNMONITORED** — nothing tracks its merge, ingests reviews on it, or re-gates it when the base moves. The finding says so. |
-| `--dry-run` | Print the five steps with every fact resolved (remote state, the would-be title, the gates that would be completed and the ones that would be kept) and write nothing: no push, no `gh` call, no Lithos write. Text loom did not author — the stop reason, the story title — is stripped of terminal control bytes before it is echoed: this is the screen the decision is made on. |
+| `--dry-run` | Print the five steps with every fact **resolved** and write nothing. Resolved means asked: remote state from git, and — through the same `pr_plan` reads step 2 makes — the repository's **default base** and the concrete step-2 decision (`adopt #N`, `open a new PR onto <base>`, or the `REFUSE` a same-name PR that is not this branch's would produce), plus the would-be title, the gates that would be completed and the ones that would be kept. The two `gh` reads are read-only; nothing is pushed, created or written to Lithos. A push the plan refuses stops there — step 2 reads nothing, because the real invocation never reaches it. When a new PR would be opened, the plan also prints the coder's handoff quote **as it would be published**. Text loom did not author — the stop reason, the story title, the quote — is stripped of terminal control bytes before it is echoed: this is the screen the decision is made on. |
 | `--json PATH` | Write the structured record. |
 | `--config` | Host config path. |
 

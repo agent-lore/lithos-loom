@@ -106,9 +106,12 @@ from lithos_loom.cli._deliver_preflight import (
 )
 from lithos_loom.cli._deliver_repo import (
     PUSH_CREATE,
+    PUSH_DIVERGED,
     PUSH_FAST_FORWARD,
+    delivered_pr_head,
     open_or_adopt,
     origin_repo_name,
+    pr_plan,
     push_branch,
     remote_state,
 )
@@ -196,13 +199,22 @@ def deliver_command(
         )
     except LithosLoomError as exc:
         # DeliverRefused (a precondition), or a config that would not load —
-        # either way nothing was written.
-        typer.secho(f"error: {exc}", err=True, fg=typer.colors.RED)
+        # either way nothing was written. Stripped like every other line this
+        # command prints: a refusal message carries `git` / `gh` stderr, which
+        # relays remote- and server-supplied bytes, and an ANSI escape on the
+        # REFUSAL path could erase the `error:` line and forge the success line
+        # under this process's authority (CWE-117 / CWE-150).
+        typer.secho(
+            f"error: {sanitize_for_terminal(str(exc))}", err=True, fg=typer.colors.RED
+        )
         raise typer.Exit(EXIT_CODES["refused"]) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         # git / gh could not be run at all (missing binary, timeout): nothing
-        # was written by the step that raised, so this is a refusal too.
-        typer.secho(f"error: {exc}", err=True, fg=typer.colors.RED)
+        # was written by the step that raised, so this is a refusal too — and
+        # the message carries the failed command line and its output.
+        typer.secho(
+            f"error: {sanitize_for_terminal(str(exc))}", err=True, fg=typer.colors.RED
+        )
         raise typer.Exit(EXIT_CODES["refused"]) from exc
     if record is None:  # --dry-run: the plan was printed, nothing to record
         raise typer.Exit(EXIT_CODES["delivered"])
@@ -279,13 +291,32 @@ def _deliver(
     heading = story.title.strip()
     title = heading.splitlines()[0][:90] if heading else facts.branch
     if dry_run:
+        state = remote_state(repo, facts.branch)
+        # Every fact resolved, nothing written: the base and the adopt /
+        # open / refuse decision come from the SAME reads step 2 makes
+        # (`pr_plan`), so the screen the operator approves is the decision
+        # the delivery takes — not a placeholder base and a generic "adopt or
+        # open". Skipped only when the push above is refused, which is where
+        # the real invocation stops too: a decision it would never reach is
+        # not a fact about this delivery.
+        plan = (
+            None
+            if state.action == PUSH_DIVERGED
+            else pr_plan(
+                repo,
+                branch=facts.branch,
+                repo_name=repo_name,
+                base=base,
+                head_sha=state.local_sha,
+            )
+        )
         echo_plan(
             facts=facts,
             story=story,
             repo=repo,
             repo_name=repo_name,
-            base=base or "the repo's default branch",
-            state=remote_state(repo, facts.branch),
+            plan=plan,
+            state=state,
             title=title,
             no_gate=no_gate,
             retirement=story.retirement(run_id=facts.run_id, dispatch_routes=routes),
@@ -454,6 +485,8 @@ def _deliver_claimed(
         "pushed_sha": "",
         "pr_url": None,
         "pr_number": None,
+        "pr_head_sha": "",
+        "pr_head_moved": False,
         "adopted": False,
         "push_uncertain": False,
         "pr_uncertain": False,
@@ -540,6 +573,37 @@ def _deliver_claimed(
         record["pr_number"] = pr_number_from_url(pr_url)
     except RuntimeError as exc:
         notes.append(f"could not read the PR number from {pr_url} ({exc})")
+
+    # 2b — read back the revision GitHub actually put behind the PR. `gh pr
+    # create` opens from a head BRANCH (the API takes no sha), so an actor who
+    # advances origin/<branch> between the push and the create gets their
+    # commit into a PR whose body describes ours; adoption has the same shape
+    # around its list. The window cannot be closed, so it is OBSERVED: every
+    # later claim about the delivered revision — the story's audit copy above
+    # all — is made against this head, not against the sha we chose to push.
+    record["pr_head_sha"] = delivered_pr_head(
+        repo, branch=facts.branch, repo_name=repo_name, pr_url=pr_url
+    )
+    if not record["pr_head_sha"]:
+        notes.append(
+            f"the head behind {pr_url} could not be read back, so the revision "
+            f"it delivers is UNVERIFIED — this delivery pushed "
+            f"{state.local_sha[:12]}; check the PR before merging"
+        )
+    elif record["pr_head_sha"] != state.local_sha:
+        # Not a refusal: the PR exists and must be gated and reported. But it
+        # is not the revision this delivery pushed, so nothing said about it
+        # may rest on that — including a recorded panel approval.
+        record["pr_head_moved"] = True
+        record["complete"] = False
+        notes.append(
+            f"{pr_url} is at {record['pr_head_sha'][:12]}, NOT the "
+            f"{state.local_sha[:12]} this delivery pushed — the branch moved "
+            "under the delivery, so the PR carries commits this run neither "
+            "pushed nor described, and the body's review provenance (any "
+            "recorded approval included) covers the pushed revision only. "
+            "Review the PR head before merging"
+        )
 
     # Best-effort notify (#113). Never fatal, and never before the PR exists.
     section = getattr(host, "story_develop", None)

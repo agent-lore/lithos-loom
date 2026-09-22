@@ -45,7 +45,10 @@ __all__ = [
     "PUSH_FAST_FORWARD",
     "PUSH_UP_TO_DATE",
     "RemoteState",
+    "PRPlan",
     "adoptable",
+    "delivered_pr_head",
+    "pr_plan",
     "open_or_adopt",
     "origin_repo_name",
     "push_branch",
@@ -298,6 +301,45 @@ def adoptable(
     )
 
 
+@dataclass(frozen=True)
+class PRPlan:
+    """What step 2 would do, decided from reads alone.
+
+    *base* is the resolved base (``--base``, else the repository's default);
+    exactly one of *existing* (adopt it) / *refusal* (a same-name PR that is
+    not ours) is set, and neither means "open a new PR onto *base*".
+    """
+
+    base: str
+    existing: OpenPullRequest | None
+    refusal: str
+
+
+def pr_plan(
+    repo: Path, *, branch: str, repo_name: str, base: str | None, head_sha: str
+) -> PRPlan:
+    """The READ-ONLY half of step 2: resolve the base and the adoption
+    decision, writing nothing.
+
+    Shared with ``--dry-run`` on purpose. A preview that names the base as
+    "the repo's default branch" and the PR step as "adopt or open" has
+    resolved neither: the real invocation asks GitHub for both and can refuse
+    outright at the second. One function, the same three reads in the same
+    order, so the plan the operator approves is the decision the delivery
+    takes (`feedback-extract-shared-no-duplicate-impl`).
+    """
+    try:
+        # Resolved BEFORE the adoption decision: the base a candidate must
+        # match is the one this delivery targets, whether the operator named
+        # it or the repository's default supplied it.
+        resolved_base = base or default_base_branch(repo, repo_name=repo_name)
+        candidates = list_open_prs_for_branch(repo, branch, repo_name=repo_name)
+    except RuntimeError as exc:
+        raise DeliverRefused(str(exc)) from exc
+    existing, refusal = adoptable(candidates, head_sha=head_sha, base=resolved_base)
+    return PRPlan(base=resolved_base, existing=existing, refusal=refusal)
+
+
 def open_or_adopt(
     repo: Path,
     *,
@@ -317,17 +359,15 @@ def open_or_adopt(
     avoid. Everything after ``create_pr`` returns is the caller's to degrade —
     the PR exists from that moment and its url must never be lost.
     """
+    plan = pr_plan(
+        repo, branch=branch, repo_name=repo_name, base=base, head_sha=head_sha
+    )
+    resolved_base = plan.base
+    if plan.existing is not None:
+        return plan.existing.url, True
+    if plan.refusal:
+        raise DeliverRefused(plan.refusal)
     try:
-        # Resolved BEFORE the adoption decision: the base a candidate must
-        # match is the one this delivery targets, whether the operator named
-        # it or the repository's default supplied it.
-        resolved_base = base or default_base_branch(repo, repo_name=repo_name)
-        candidates = list_open_prs_for_branch(repo, branch, repo_name=repo_name)
-        existing, refusal = adoptable(candidates, head_sha=head_sha, base=resolved_base)
-        if existing is not None:
-            return existing.url, True
-        if refusal:
-            raise DeliverRefused(refusal)
         try:
             return (
                 create_pr(
@@ -369,6 +409,34 @@ def open_or_adopt(
             raise
     except RuntimeError as exc:
         raise DeliverRefused(str(exc)) from exc
+
+
+def delivered_pr_head(repo: Path, *, branch: str, repo_name: str, pr_url: str) -> str:
+    """The revision GitHub reports behind *pr_url* NOW, or ``""`` if it could
+    not be read.
+
+    The one fact this command cannot derive from its own inputs. ``gh pr
+    create`` opens a PR from a head **branch**, never from a sha — GitHub's
+    API takes no revision — so between the push and the create another actor
+    can advance ``origin/<branch>`` and the PR opens at *their* commit while
+    the body this delivery composed describes ours. The adopt path has the
+    same check-then-act shape around ``gh pr list``. Nothing closes that
+    window; reading the head back after the fact is what turns it from an
+    unnoticed false claim into a stated one — so the caller compares this
+    against the sha it pushed, and withdraws the approval claim (and says so)
+    when they differ.
+
+    ``""`` is "not answered", never "no head": a gh failure, or a PR that is
+    no longer in the open list, must not read as a mismatch.
+    """
+    try:
+        candidates = list_open_prs_for_branch(repo, branch, repo_name=repo_name)
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return ""
+    for pr in candidates:
+        if pr.url == pr_url:
+            return pr.head_sha
+    return ""
 
 
 def _created_despite_the_error(

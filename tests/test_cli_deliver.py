@@ -218,7 +218,15 @@ def gh(monkeypatch: pytest.MonkeyPatch) -> dict:
     ``existing`` is the list ``gh pr list`` would return; tests that want the
     adopt path set it (``_open_pr(head_sha=<the pushed sha>)`` is ours).
     """
-    calls: dict[str, Any] = {"existing": [], "created": [], "listed": []}
+    calls: dict[str, Any] = {
+        "existing": [],
+        "created": [],
+        "listed": [],
+        # the head GitHub ends up putting behind a CREATED PR; `None` means
+        # "the branch's own tip", which is what `gh pr create` gives when
+        # nobody moves the ref under the delivery
+        "create_head": None,
+    }
 
     def _list(repo_path: Path, branch: str, *, repo_name: str | None = None):
         calls["listed"].append({"branch": branch, "repo_name": repo_name})
@@ -241,6 +249,17 @@ def gh(monkeypatch: pytest.MonkeyPatch) -> dict:
                 "body": body,
                 "repo_name": repo_name,
             }
+        )
+        # GitHub now reports the PR, at the head the branch pointed at when it
+        # was created — which is what the delivery's read-back (step 2b) sees.
+        pushed = _git(repo_path, "ls-remote", "origin", f"refs/heads/{branch}")
+        calls["existing"].append(
+            _open_pr(
+                # GitHub opens from the head BRANCH, so the PR's head is
+                # origin's ref — not whatever the local branch points at now
+                head_sha=calls["create_head"] or (pushed.split()[0] if pushed else ""),
+                base_ref=base,
+            )
         )
         return _PR_URL
 
@@ -453,6 +472,34 @@ def test_a_diverged_remote_is_refused_and_nothing_is_written(
 # ── refusals + flags ───────────────────────────────────────────────────
 
 
+def test_a_refusal_reaches_the_terminal_with_its_escapes_stripped(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """security/f-001 (r2): a refusal message carries `git` / `gh` stderr,
+    which relays remote- and server-supplied bytes. On the REFUSAL path an
+    ANSI escape could erase the `error:` line and forge the success line under
+    this process's authority (CWE-117 / CWE-150)."""
+
+    def _hostile(*a: Any, **k: Any):
+        raise cli_lithos.DeliverRefused(
+            "gh pr list failed: \x1b[2Kdeliver de459d10: "
+            "https://github.com/agent-lore/lithos-loom/pull/1 \x1b]0;pwned\x07"
+        )
+
+    monkeypatch.setattr(cli, "origin_repo_name", _hostile)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1
+    assert "\x1b" not in result.output and "\x07" not in result.output
+    assert "gh pr list failed" in result.output  # the text itself still reads
+
+
 def test_dry_run_prints_the_plan_and_writes_nothing(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:
@@ -461,10 +508,78 @@ def test_dry_run_prints_the_plan_and_writes_nothing(
     assert result.exit_code == 0, result.output
     assert "dry run, nothing written" in result.output
     assert "gate-human" in result.output  # the gate it would complete
+    # every fact RESOLVED — the base is asked for, not named "the default"
+    assert "open a new PR onto main" in result.output
+    assert gh["listed"] == [{"branch": _BRANCH, "repo_name": _REPO_NAME}]
+    # …and nothing written: no push, no PR, no Lithos write
     assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
     assert lithos.mutating_calls == []
     assert gh["created"] == []
-    assert gh["listed"] == []  # no gh call at all
+
+
+def test_dry_run_resolves_the_same_base_and_adoption_the_real_run_takes(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-002 (r2): the preview is the real preflight — same reads,
+    same decision — or it is a guess the operator approves in place of one."""
+    # 1. an adoptable PR: the plan names the very PR the delivery adopts
+    gh["existing"] = [_open_pr(number=42, head_sha=_head(repo))]
+    plan = _invoke(_RUN, "--dry-run")
+    assert plan.exit_code == 0, plan.output
+    assert "adopt #42" in plan.output and gh["created"] == []
+
+    assert _invoke(_RUN).exit_code == 0
+    assert gh["created"] == []  # adopted, exactly as previewed
+
+    # 2. a same-name PR that is NOT ours: the plan refuses where step 2 does
+    gh["existing"] = [_open_pr(number=7, head_sha="f" * 40)]
+    plan = _invoke(_RUN, "--dry-run")
+    assert plan.exit_code == 0, plan.output
+    assert "REFUSE" in plan.output and "#7" in plan.output
+
+    real = _invoke(_RUN)
+    # the branch is already on origin from the adopt pass above, so this one
+    # writes nothing at all: a plain refusal, on the same decision
+    assert real.exit_code == 1, real.output
+    assert "#7" in real.output
+
+
+def test_dry_run_does_not_ask_github_about_a_refused_push(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-002 (r2): a decision the real invocation never reaches is
+    not a fact about this delivery."""
+    _git(repo, "push", "origin", f"{_BRANCH}:{_BRANCH}")
+    _git(repo, "reset", "--hard", "HEAD~1")
+    (repo / "other.py").write_text("y = 2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "diverged")
+
+    result = _invoke(_RUN, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "REFUSE — origin" in result.output
+    assert "not reached" in result.output
+    assert gh["listed"] == []
+
+
+def test_dry_run_shows_the_agent_text_it_would_publish(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-002 (r2): the handoff quote is the one part of the body loom
+    did not author, and the redaction it goes through is a shape filter, not a
+    confidentiality boundary — so the operator can read it before it is
+    world-readable for good."""
+    (run_dir / "handoff" / "round_04_coder_done.md").write_text(
+        "## Status: LGTM\n\n## Summary\nRewired the widget cache.\n",
+        encoding="utf-8",
+    )
+
+    result = _invoke(_RUN, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "quotes the coder's handoff summary, as published" in result.output
+    assert "Rewired the widget cache." in result.output
 
 
 def test_no_gate_opens_the_pr_and_leaves_the_human_gate_alone(
@@ -1382,6 +1497,121 @@ def test_the_story_finding_carries_the_reason_the_pr_body_promises(
     assert "/home/dave/loom/run.log" in summary
 
 
+def test_a_pr_opened_at_a_head_we_did_not_push_withdraws_the_approval(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-001 (r2): `gh pr create` opens from a head BRANCH — the
+    API takes no sha — so an actor who advances origin/<branch> between the
+    push and the create gets a PR at THEIR commit while the body describes
+    ours. The head is read back, and nothing rests on the pushed sha after."""
+    _approved_salvage(run_dir, approved_head=_head(repo))
+    pushed = _head(repo)
+    gh["create_head"] = "b" * 40  # GitHub opened it at someone else's commit
+
+    result = _invoke(_RUN)
+
+    # the PR exists and is gated — but the delivery is not "done and correct"
+    assert result.exit_code == 2, result.output
+    assert "NOT the " + pushed[:12] in result.output
+    assert "bbbbbbbbbbbb" in result.output
+    # the story's audit copy withdraws the approval claim: the PR's head is
+    # not the revision the panel approved
+    summary = [f["summary"] for f in lithos.findings if f["task_id"] == _STORY][0]
+    assert "NOT confirmed for this revision" in summary
+    assert "the branch has moved since the panel approved" in summary
+
+
+def test_an_unreadable_pr_head_is_reported_as_unverified_not_as_a_match(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-001 (r2): "could not ask" is not "it matches" — and it is
+    not a mismatch either. The delivery stands; the gap is stated."""
+    real = cli_repo.list_open_prs_for_branch
+    seen: list[int] = []
+
+    def _list_then_fail(*a: Any, **k: Any):
+        seen.append(1)
+        if len(seen) > 1:  # the read-back, after the create
+            raise RuntimeError("gh pr list failed: network is down")
+        return real(*a, **k)
+
+    monkeypatch.setattr(cli_repo, "list_open_prs_for_branch", _list_then_fail)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output  # nothing is owed, only unknown
+    assert "could not be read back" in result.output and "UNVERIFIED" in result.output
+
+
+def test_an_adopted_pr_is_verified_at_its_head_too(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """correctness/f-001 (r2): the adopt path has the same check-then-act gap
+    around `gh pr list`, so it gets the same read-back."""
+    gh["existing"] = [_open_pr(head_sha=_head(repo))]
+
+    assert _invoke(_RUN).exit_code == 0
+    assert gh["created"] == []
+    # adopted, then read back: two list calls, no mismatch reported
+    assert len(gh["listed"]) == 2
+    assert "NOT the" not in _invoke(_RUN, "--no-gate").output
+
+
+def test_a_capped_story_copy_is_never_called_the_full_reason(run_dir: Path) -> None:
+    """correctness/f-001 (r2): the PR body's pointer is a claim about what the
+    story holds, and the story's copy is bounded. Past that bound the wording
+    says so instead of promising text no surface carries."""
+    short = cli_facts.RunFacts(
+        story_id=_STORY,
+        branch=_BRANCH,
+        run_id=_RUN,
+        status="failed",
+        failure_reason="the coder died",
+    )
+    assert cli_facts.story_reason(short).whole
+    assert any(
+        "the story carries the full, unredacted reason" in line
+        for line in cli_facts.provenance_lines(short)
+    )
+
+    huge = cli_facts.RunFacts(
+        story_id=_STORY,
+        branch=_BRANCH,
+        run_id=_RUN,
+        status="failed",
+        failure_reason="deadlock " * 400,
+    )
+    stored = cli_facts.story_reason(huge)
+    assert not stored.whole and len(stored.text) <= cli_facts.STORY_REASON_MAX_CHARS
+    lines = cli_facts.provenance_lines(huge)
+    assert not any("full, unredacted reason" in line for line in lines)
+    assert any(
+        f"capped at {cli_facts.STORY_REASON_MAX_CHARS} characters" in line
+        for line in lines
+    )
+
+
+def test_the_story_copy_keeps_the_reasons_own_lines(run_dir: Path) -> None:
+    """correctness/f-001 (r2): the story's copy is verbatim but for control
+    bytes — collapsing the line structure would be another silent edit."""
+    facts = cli_facts.RunFacts(
+        story_id=_STORY,
+        branch=_BRANCH,
+        run_id=_RUN,
+        status="failed",
+        failure_reason="traceback:\n  line one\n  line two\x1b[2K",
+    )
+    stored = cli_facts.story_reason(facts)
+    # lines kept, ESC gone (the payload stays, inert — as everywhere else)
+    assert stored.text.splitlines() == ["traceback:", "  line one", "  line two[2K"]
+    assert "\x1b" not in stored.text and stored.whole
+
+
 def test_an_expired_delivery_budget_is_the_stop_reason(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:
@@ -1528,7 +1758,8 @@ def test_every_gh_call_is_pinned_to_the_origin_repository(
     """security/f-002: gh must not infer the target from the checkout (for a
     fork checkout its default is the parent)."""
     assert _invoke(_RUN).exit_code == 0
-    assert gh["listed"] == [{"branch": _BRANCH, "repo_name": _REPO_NAME}]
+    # the adoption search AND the post-create head read-back (step 2b)
+    assert gh["listed"] == [{"branch": _BRANCH, "repo_name": _REPO_NAME}] * 2
     assert gh["created"][0]["repo_name"] == _REPO_NAME
 
 

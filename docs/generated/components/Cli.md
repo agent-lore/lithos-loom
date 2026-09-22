@@ -12,11 +12,11 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
-| `lithos_loom.cli._deliver_facts` | M | 1 | 10 |
+| `lithos_loom.cli._deliver_facts` | M | 2 | 10 |
 | `lithos_loom.cli._deliver_lithos` | L | 7 | 4 |
-| `lithos_loom.cli._deliver_output` | S | 0 | 3 |
+| `lithos_loom.cli._deliver_output` | M | 0 | 3 |
 | `lithos_loom.cli._deliver_preflight` | S | 0 | 4 |
-| `lithos_loom.cli._deliver_repo` | M | 1 | 8 |
+| `lithos_loom.cli._deliver_repo` | M | 2 | 10 |
 | `lithos_loom.cli._deliver_session` | S | 0 | 7 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
@@ -42,7 +42,8 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
 - def `run_facts` — Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
 - def `redact_for_publication` — A bounded, markup-inert rendering of host text that is about to be published.
-- def `story_reason` — The stop reason as the STORY carries it: whole, control-stripped.
+- class `StoredReason` — The stop reason as the story will carry it, and whether that copy is the whole of it — the PR body's pointer is worded from *whole*, never from the hope that no reason is ever long.
+- def `story_reason` — The stop reason as the STORY carries it: control-stripped, bounded, and honest about which of those it had to do.
 - def `provenance_lines` — The PR body's ``## Provenance`` block: where this branch came from.
 - def `approval_unbound` — Why a recorded approval does NOT describe what this PR delivers, or ``""`` when it does.
 - def `reviews_summary` — The Review section's verdict line: what the panel recorded, if anything.
@@ -81,7 +82,10 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `push_branch` — Push *branch* to ``origin`` — append-only; a diverged ref is refused.
 - def `origin_repo_name` — ``owner/name`` of the checkout's ``origin`` — the repository every ``gh`` call in this command is pinned to.
 - def `adoptable` — Pick the open PR that is *ours* to adopt, or say why none is (pure).
+- class `PRPlan` — What step 2 would do, decided from reads alone.
+- def `pr_plan` — The READ-ONLY half of step 2: resolve the base and the adoption decision, writing nothing.
 - def `open_or_adopt` — Step 2: adopt this branch's own open PR, else open one. Returns ``(url, adopted)``.
+- def `delivered_pr_head` — The revision GitHub reports behind *pr_url* NOW, or ``""`` if it could not be read.
 
 ### `lithos_loom.cli._deliver_session`
 - def `run_lithos` — Run one Lithos phase, mapping transport failures onto the refusal.

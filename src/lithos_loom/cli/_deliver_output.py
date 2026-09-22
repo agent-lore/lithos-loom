@@ -18,6 +18,7 @@ reaches the terminal.
 
 from __future__ import annotations
 
+import textwrap
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from lithos_loom.cli._deliver_repo import (
     PUSH_DIVERGED,
     PUSH_FAST_FORWARD,
     PUSH_UP_TO_DATE,
+    PRPlan,
     RemoteState,
 )
 from lithos_loom.plugins.story_develop import run_outcome
@@ -91,7 +93,7 @@ def delivery_finding(
     # this command exists for is exactly the one where nothing else on the
     # story does (a daemon that died before posting its [NeedsHuman] finding),
     # so this finding is what makes that pointer true.
-    reason = story_reason(facts)
+    reason = story_reason(facts).text
     if facts.status == run_outcome.APPROVED:
         # the approved salvage path (#194 / #189): the panel DID approve, and
         # what stopped is the run's own delivery — "stopped approved" is neither
@@ -99,8 +101,14 @@ def delivery_finding(
         # …but the approval was given on a revision and a story, and the audit
         # copy says so whenever this delivery is not that pair (f-004): the
         # story's record must not read as a review of what was delivered here.
+        # against the head GitHub reports for the PR when it could be read,
+        # and only otherwise against the sha this delivery pushed: the claim
+        # is about the revision the PR actually delivers (deliver.py step 2b).
         unbound = approval_unbound(
-            facts, delivered_head=str(record.get("pushed_sha") or "")
+            facts,
+            delivered_head=str(
+                record.get("pr_head_sha") or record.get("pushed_sha") or ""
+            ),
         )
         if unbound:
             said += f" — but it is NOT confirmed for this revision: {unbound}"
@@ -163,7 +171,7 @@ def echo_plan(
     story: StoryState,
     repo: Path,
     repo_name: str,
-    base: str,
+    plan: PRPlan | None,
     state: RemoteState,
     title: str,
     no_gate: bool,
@@ -205,8 +213,33 @@ def echo_plan(
         # operator decides to publish HERE
         echo(f"          approval NOT confirmed for this revision: {unbound}")
     echo(f"  1 push: {push_words[state.action]}")
-    echo(f"  2 PR:   adopt the open PR for the branch, else open onto {base}")
-    echo(f"          title {title!r}")
+    if plan is None:
+        # the push above is refused, so step 2 is never reached: naming an
+        # adoption decision here would describe a delivery that cannot happen
+        echo("  2 PR:   not reached — the push above is refused")
+    elif plan.existing is not None:
+        echo(
+            f"  2 PR:   adopt #{plan.existing.number} {plan.existing.url} "
+            f"(head {plan.existing.head_sha[:12]} → {plan.base}) — no body is "
+            "written"
+        )
+    elif plan.refusal:
+        echo(f"  2 PR:   REFUSE — {plan.refusal}")
+    else:
+        echo(f"  2 PR:   open a new PR onto {plan.base}")
+        echo(f"          title {title!r}")
+        if facts.coder_summary:
+            # The one thing in the body loom did not author, shown AS IT WOULD
+            # BE PUBLISHED. The redaction it has been through removes
+            # recognisable shapes (urls, paths, credential-like runs); it is
+            # not a confidentiality boundary — the coder agent chooses this
+            # text and the encoding it is in — so the operator's read of it
+            # here is the last check before it is world-readable for good.
+            echo("          it quotes the coder's handoff summary, as published:")
+            for line in textwrap.wrap(
+                facts.coder_summary, width=72, initial_indent="", subsequent_indent=""
+            ):
+                echo(f"            | {line}")
     if no_gate:
         echo("  3 gate: skipped (--no-gate) — the PR would be UNMONITORED")
         echo("  4 human gates: left open (no pr gate would hold the story)")
