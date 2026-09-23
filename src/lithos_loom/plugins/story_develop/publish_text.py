@@ -86,19 +86,26 @@ _FENCE_RE = re.compile(r"`{3,}|~{3,}")
 # text from the reader while leaving it in the body. Only a `<` that starts a
 # tag is escaped — `a < b` stays readable.
 _HTML_OPEN_RE = re.compile(r"<(?=[A-Za-z/!?])")
-# `[text](target)` is a live link, and so is `![alt](target)` — an off-site
-# request needing no `<`. The lookahead crosses `]` (a NESTED label,
-# `[outer [inner]](url)`, is the inline form too) but never `(`, so ordinary
-# bracketed prose (`[Friction]`) is left alone; `&#91;` renders as `[`, so
-# escaping one bracket too many costs nothing on screen.
-_LINK_RE = re.compile(r"\[(?=[^(]*\]\()")
-# The other half: `[label][ref]`, `[ref][]` and the bare `[ref]` shortcut are
-# equally live, and their target lives in a **link-reference definition** on
-# its own line — which renders as nothing at all, so the payload's plumbing is
-# invisible to a reader skimming the rendered body. Break the definitions and
-# every reference to them degrades to the literal text of its label, without
-# touching a single bracket of ordinary prose.
-_LINK_DEF_RE = re.compile(r"(?m)^([ \t]{0,3})\[(?=[^\]\n]*\]:)")
+# Both link families are broken at the ONE literal sequence each of them
+# cannot be written without, rather than at the bracket that opens a label
+# whose contents the author chooses. Enumerating labels is what let the nested
+# `[outer [inner]](…)`, the backslash-escaped `[a\]b]:` and the
+# container-prefixed `> [a]:` through in earlier rounds, and the widest label
+# pattern was quadratic as well (security/f-007) — a fixed two-character match
+# is linear and has nothing left to enumerate.
+#
+# `[text](target)` and `![alt](target)` (an off-site request needing no `<`)
+# both need `](`: CommonMark admits no space there. Escaping the `(` breaks
+# the link and leaves the label's brackets readable.
+_INLINE_LINK_RE = re.compile(r"\]\(")
+# `[label][ref]`, `[ref][]` and the bare `[ref]` shortcut all resolve through a
+# **link-reference definition**, which renders as nothing at all — so the
+# payload's plumbing is invisible to a reader skimming the rendered body. A
+# definition needs `]:` after its label, whatever that label holds and whatever
+# container block it sits in (definitions are collected document-globally), and
+# the colon is read at block level before any entity is decoded. Break it and
+# every reference to it degrades to the literal text of its label.
+_LINK_DEF_RE = re.compile(r"\]:")
 # Backtick runs decide how long a fence must be to be unterminable.
 _BACKTICK_RUN_RE = re.compile(r"`+")
 
@@ -112,6 +119,14 @@ operator interrupt each time). Generous enough that a real story description
 travels whole; the Lithos story always carries the untruncated text."""
 
 _TRUNCATION_NOTE = "… (truncated — the whole text is on the Lithos story)"
+
+# How much of the input the rewrites are allowed to see, as a multiple of the
+# published bound. The rewrites only ever GROW text (bar the invisibles they
+# strip), so text past this slice could not have fitted under the bound anyway
+# — and `redact_for_publication` already makes the same trade for the same
+# reason: bound what the patterns ever see, rather than hand an external
+# author the size of the host's regex work (security/f-007).
+_DEFANG_INPUT_SLACK = 2
 
 
 def defang_markup(text: str) -> str:
@@ -129,9 +144,12 @@ def defang_markup(text: str) -> str:
     Each construct is rewritten so it still READS the same and binds nothing:
     the keyword keeps its word and gains an arrow between it and the ref, the
     mention's ``@`` becomes the entity that renders as one and notifies nobody,
-    a tag-opening ``<`` and a link's ``[`` (inline, nested, and the definitions
-    every reference form resolves through) are HTML-escaped, and backtick /
-    tilde runs that would open or escape a fence are defused.
+    a tag-opening ``<`` is HTML-escaped, a link's ``](`` and a reference
+    definition's ``]:`` — the one sequence each family cannot be written
+    without, so neither a nested label, a backslash escape inside one nor a
+    blockquote / list prefix is a way past — lose their punctuation to the
+    entity that renders as it, and backtick / tilde runs that would open or
+    escape a fence are defused.
     **Nothing here leans on code spans**: quoting a mention in backticks only
     works while the backticks pair up, and the author of this text chooses how
     many of those it contains.
@@ -150,8 +168,8 @@ def defang_markup(text: str) -> str:
     out = _CLOSES_RE.sub(lambda m: f"{m.group(0)}→ ", out)
     out = _MENTION_RE.sub(r"&#64;\1", out)
     out = _HTML_OPEN_RE.sub("&lt;", out)
-    out = _LINK_DEF_RE.sub(r"\1&#91;", out)
-    out = _LINK_RE.sub("&#91;", out)
+    out = _INLINE_LINK_RE.sub("]&#40;", out)
+    out = _LINK_DEF_RE.sub("]&#58;", out)
     return _FENCE_RE.sub(lambda m: m.group(0)[0] * 2, out)
 
 
@@ -170,12 +188,25 @@ def fence_untrusted(text: str, *, limit: int = MAX_SECTION_CHARS) -> str:
     The content is still :func:`defang_markup`-ed inside the fence: the body is
     re-ingested by machines as well as read (an LLM reviewer on the PR, the
     external-review sweep), and one of them may not honour the fence.
+
+    The bound is applied **twice**: once to the input, before a single pattern
+    runs (the author of this text picks its length, so it also picks how much
+    work the host does on it), and once to the result, so the published cap is
+    exact. Either cut says so in the body — a section that lost text never
+    reads as the whole story.
     """
-    body = defang_markup(text).strip()
+    clipped = text[: limit * _DEFANG_INPUT_SLACK]
+    body = defang_markup(clipped).strip()
+    truncated = len(clipped) < len(text)
+    if len(body) > limit:
+        body, truncated = body[:limit].rstrip(), True
+    if truncated:
+        # Before the emptiness check, not after: a section whose visible text
+        # all sat past the input slice would otherwise be published as an
+        # empty `## What`, which reads as "the story said nothing".
+        body = f"{body}\n{_TRUNCATION_NOTE}".lstrip()
     if not body:
         return ""
-    if len(body) > limit:
-        body = body[:limit].rstrip() + "\n" + _TRUNCATION_NOTE
     longest = max(
         (len(run.group(0)) for run in _BACKTICK_RUN_RE.finditer(body)), default=0
     )

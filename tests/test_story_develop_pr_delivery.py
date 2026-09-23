@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -146,6 +147,8 @@ _HOSTILE_ISSUE_BODY = (
     "see [details](//evil.example/x) and [outer [inner]](//evil.example/y)\n"
     "[click here][a], ![beacon][b], [evil.example][]\n\n"
     "[a]: https://evil.example/phish\n"
+    "> [c]: https://evil.example/quoted\n"
+    "- [d\\]e]: https://evil.example/escaped\n"
     "[b]: https://evil.example/beacon.png\n"
     "[evil.example]: https://evil.example\n"
     "[r]: https://github.com/o/r/issues/9\n"
@@ -205,11 +208,14 @@ def test_build_pr_body_defangs_the_story_text_a_stranger_wrote() -> None:
     # …no link binds, in any form: inline, nested-label, and the reference
     # definitions every `[label][ref]` / `[ref][]` / `[ref]` resolves through
     # (broken, so each one degrades to the literal text of its label)…
-    assert "[details](" not in body and "&#91;details](" in body
-    assert "[outer [inner]](" not in body
-    for definition in ("[a]: ", "[b]: ", "[evil.example]: ", "[r]: "):
-        assert f"\n{definition}" not in body
-        assert f"\n&#91;{definition[1:]}" in body
+    assert "[details](" not in body and "[details]&#40;" in body
+    assert "[outer [inner]](" not in body and "[outer [inner]]&#40;" in body
+    # …including the two spellings no label pattern reached: a definition
+    # inside a container block (definitions are collected document-globally)
+    # and a backslash-escaped `]` in the label
+    for definition in ("[a]", "[b]", "[evil.example]", "[r]", "[c]", "[d\\]e]"):
+        assert f"{definition}: " not in body
+        assert f"{definition}&#58; " in body
     # …and no formatter reorders or hides what the reader sees
     assert "\u202e" not in body and "reorderthis" in body
     assert "\U000e0001" not in body and "smuggled" in body
@@ -259,6 +265,34 @@ def test_fence_untrusted_cannot_be_closed_by_its_own_content() -> None:
     assert "try" in quoted and "to escape" in quoted
     assert _outside_fences(quoted) == ""  # every line of it is inert
     assert fence_untrusted("   ") == ""  # nothing to quote, no empty block
+
+
+def test_an_untrusted_section_is_bounded_before_the_rewrites_run() -> None:
+    """security/f-007: the reporter picks the length of their issue body, so
+    they must not also pick how much regex work the host does on it — the
+    input is cut before a single pattern runs, as `redact_for_publication`
+    already cuts its own. 64 KiB of `[]` (GitHub's issue-body ceiling, and the
+    shape that made a label-scanning lookahead quadratic) cost ~2s of delivery
+    CPU per section; the cut plus a fixed-width pattern make it milliseconds."""
+    payload = "[]" * 32768
+
+    start = time.perf_counter()
+    quoted = fence_untrusted(payload)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 1.0
+    assert len(quoted) < MAX_SECTION_CHARS + 200
+    assert "(truncated" in quoted
+
+
+def test_a_section_clipped_to_nothing_still_says_so() -> None:
+    """The input cut must not be able to publish an empty `## What` that reads
+    as a story with no description: text that all sat past the slice leaves the
+    truncation note behind, not silence."""
+    quoted = fence_untrusted("\u200b" * 400 + "the real text", limit=100)
+
+    assert "(truncated" in quoted
+    assert fence_untrusted("   ") == ""  # …while nothing at all stays nothing
 
 
 def test_an_oversized_story_description_is_bounded() -> None:

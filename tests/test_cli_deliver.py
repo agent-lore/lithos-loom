@@ -2107,7 +2107,7 @@ def test_protocol_relative_markup_never_renders_live(
     assert "<img" not in provenance  # the tag no longer opens
     assert "&lt;img" in provenance  # …it reads as text
     assert "[more](" not in provenance  # the link no longer binds
-    assert "&#91;more]" in provenance
+    assert "[more]&#40;" in provenance
     assert "evil.example" not in body  # the target redacted either way
     assert "proxy.internal" not in body and "(host redacted)" in body
 
@@ -2242,12 +2242,17 @@ def test_defang_covers_every_keyword_and_link_form_a_body_can_carry() -> None:
         "[click here][a]\n\n[a]: https://evil.example/phish",
         "[evil.example][]\n\n[evil.example]: https://evil.example",
         "![beacon][b]\n\n[b]: https://evil.example/beacon.png",
+        # the two spellings a label pattern could not reach: a backslash
+        # escape inside the label, and a definition in a container block
+        "[a\\]b]\n\n[a\\]b]: https://evil.example/escaped",
+        "[q]\n\n> [q]: https://evil.example/quoted",
+        "[l]\n\n- [l]: https://evil.example/listed",
     ):
         out = cli_facts.defang_markup(payload)
-        assert "\n[" not in out and "&#91;" in out
+        assert "]: " not in out and "]&#58; " in out
     # …and the nested-label inline form is the inline form
     nested = cli_facts.defang_markup("[outer [inner]](https://evil.example/)")
-    assert "[outer" not in nested and "&#91;outer" in nested
+    assert "]https" not in nested and "]]&#40;https" in nested
     # ordinary bracketed prose is untouched — the breadcrumbs stay readable
     assert cli_facts.defang_markup("[Friction] gh declined (401)") == (
         "[Friction] gh declined (401)"
