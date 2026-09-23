@@ -304,6 +304,26 @@ _NOT_AN_APPROVAL = [
     "The flag task.approved, so nothing validates it. The admin token is "
     "logged at src/api.py:88.",
     "metadata.approved.value is never checked; src/api.py:88 logs the token",
+    # round-3 panel, correctness f-002: a fenced block ends at a line holding
+    # nothing BUT its fence — a longer run with trailing text is content, so
+    # the ``LGTM`` between them is still inside the code block.
+    "````\n````` example\nLGTM\n````\nThe token is logged at src/api.py:88.",
+    "```\n``` example\nLGTM\n```\nThe token is logged at src/api.py:88.",
+    # …and the identifier domain includes ``_``, which the decoration strip
+    # deletes: keying the dot rule on letters and digits alone let
+    # ``task._approved`` split and then lose its underscore.
+    "The flag task._approved, so nothing validates it. The token is logged at "
+    "src/api.py:88.",
+    # round-3 panel, security f-003: GitHub renders consecutive lines as ONE
+    # paragraph, so a hard-wrapped sentence must not be cut at the wrap — each
+    # of these is correctly ineligible on a single line, so the break was the
+    # whole cause.
+    "The endpoint returns 200 whether or not the caller is\napproved, so the "
+    "authz check is dead code at src/api.py:12.",
+    "The session is reused even when the user is not\napproved. The token is "
+    "logged at src/api.py:88.",
+    "Nothing about this cookie handling looks\ngood. It has no Secure flag at "
+    "src/api.py:20.",
     # The control: undecorated defect prose, which was never eligible.
     "The query builder concatenates user input at src/db.py:44.",
 ]
@@ -345,6 +365,12 @@ def test_a_body_with_no_approval_verdict_is_never_eligible(body: str) -> None:
         # An indented continuation of a verdict list is not a code block:
         # masking it costs the sub-item, never the verdict beside it.
         "- No findings.\n    - the three streams look right\n- Ready to merge.",
+        # A verdict the author hard-wrapped is still a verdict (round-3 panel
+        # security f-003): the join reads the paragraph GitHub renders, so the
+        # wrap can neither manufacture a unit nor destroy one.
+        "**No findings.** The three streams all look\nright to me. Ready to merge.",
+        "No\nfindings. Ready to merge.",
+        "## No findings\nReady to merge.",
     ],
 )
 def test_an_approval_the_author_wrote_stays_eligible(body: str) -> None:

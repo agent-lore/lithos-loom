@@ -382,6 +382,11 @@ _NOT_THE_AUTHORS_VERDICT = [
     "<!-- LGTM -->\nThe admin token is logged at src/api.py:88 — redact it.",
     "The flag task.approved, so nothing validates it. The token is logged at "
     "src/api.py:88.",
+    "The flag task._approved, so nothing validates it. The token is logged at "
+    "src/api.py:88.",
+    "````\n````` example\nLGTM\n````\nThe token is logged at src/api.py:88.",
+    "The session is reused even when the user is not\napproved. The token is "
+    "logged at src/api.py:88.",
 ]
 
 

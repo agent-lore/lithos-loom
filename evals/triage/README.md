@@ -58,7 +58,8 @@ approval-and-ask               5     5                    —            5/5 57-
   as if they had made a claim, so it does not score. The verdict is measured
   as production honours it: only for a finding whose own body carries
   recognised approving words in its author's own voice (never one merely
-  quoted, fenced, struck out, hidden in an HTML comment or listed as a value) and which is not a blocking
+  quoted, fenced, struck out, hidden in an HTML comment, listed as a value or
+  left in front of a hard wrap) and which is not a blocking
   `CHANGES_REQUESTED` review (`approval_eligible_ids`), so a case body with no approval in it
   cannot score here however the agent answers. `—` when the batch
   carries no approval, and the rate then gates nothing.
