@@ -166,6 +166,17 @@ def _decision_breadcrumb(result: DevelopResult) -> str:
     operator must answer (correctness/f-002, security/f-007). A mark that did
     not fit that budget is named as NOT ADMITTED — an ordinary dispute, which
     is what it is — rather than as a decision whose text went missing.
+
+    The header states what each shape MEANS, and states it accurately
+    (correctness/f-002): every decision here was quoted into the reviewer's
+    own prompt (`findings.FindingLedger.render_open`, filling
+    `reviewer_rereview.md`'s `{open_findings}`) before that round's review,
+    and an omitted `decision_verdict:` is re-prompted once
+    (`findings.FindingLedger.check`) before the review is allowed to land. So
+    an unanswered decision is a reviewer that was ASKED — twice, normally —
+    and supplied no valid answer, never a question that reached nobody. The
+    operator reads this before editing the acceptance criteria or salvaging
+    the branch, so the difference has to be stated as what it is.
     """
     # Local import, like `develop.findings_by_severity` below: this module
     # keeps the plugin's domain modules out of its runtime import surface.
@@ -175,9 +186,12 @@ def _decision_breadcrumb(result: DevelopResult) -> str:
         f"{DISPUTE_PREFIX} story-develop run {result.run_id} stopped for a "
         f"product decision after {result.rounds} round(s) — the coder holds "
         "the finding(s) below are out of this story's reach, and no reviewer "
-        "contested that. Each one names what the reviewer actually DID: a "
-        "concession is an adjudicated answer, 'no reviewer answer recorded' "
-        "means the question reached nobody (security/f-004):",
+        "contested that. Each one names what the reviewer actually DID. The "
+        "question was PUT to the reviewer either way — it is quoted into its "
+        "prompt, and an omitted verdict is re-prompted once before its review "
+        "is allowed to land — so a concession is an adjudicated answer, while "
+        "'no reviewer answer recorded' means it was asked and none came back "
+        "(security/f-004):",
         "",
     ]
     for d in result.decisions:

@@ -347,6 +347,20 @@ def test_post_results_needs_decision_says_whether_a_reviewer_answered(
     assert "did not show otherwise" not in silent
     assert "what the reviewer actually DID" in silent
 
+    # correctness/f-002: and it says what "unanswered" ACTUALLY means. Every
+    # decision here was quoted into the reviewer's own prompt (`render_open`
+    # → `{open_findings}`) before that round's review, and an omitted verdict
+    # is re-prompted once (`FindingLedger.check`) before the review may land —
+    # so a silence is a reviewer that was ASKED and said nothing valid, never
+    # a question that reached nobody. The operator edits acceptance criteria
+    # or salvages a branch off this page; the two readings are not the same.
+    for body in (conceded, silent):
+        assert "reached nobody" not in body
+        assert "reached no one" not in body
+    assert "question was PUT to the reviewer either way" in silent
+    assert "re-prompted once" in silent
+    assert "it was asked and none came back" in silent
+
 
 def test_post_results_needs_decision_cannot_be_restructured_by_agent_text(
     fake_client: FakeLithosClient,
