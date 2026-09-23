@@ -15,6 +15,7 @@ from lithos_loom.github_models import (
     LOOM_NOTICE_MARKER,
     IssueComment,
     PullRequestReview,
+    carries_approval,
     is_approval_text,
     is_automated_reply,
     is_landed_fix_reply,
@@ -213,6 +214,41 @@ def test_typographic_punctuation_is_folded_not_deleted() -> None:
     assert is_approval_text("**No findings.** … Ready to merge.")
     # …while a zero-width character cannot smuggle an ask past the matcher.
     assert not is_approval_text("LGTM​ rename the handle")
+
+
+def test_carries_approval_is_the_floor_not_the_whole_rule() -> None:
+    """The eligibility floor under S5a's ``NOTHING_TO_REMEDIATE`` verdict: any
+    unit may be the approval, so it admits bodies the end-to-end rule refuses
+    — but a body with no approval in it at all is never eligible."""
+    assert carries_approval("LGTM")
+    assert carries_approval("LGTM, but rename `foo`")  # the model's call
+    assert carries_approval(
+        "**No findings.** The three streams all look right to me. Ready to merge."
+    )
+    assert not carries_approval("this leaks the admin token at src/api.py:88")
+    assert not carries_approval("Ready to merge?")  # a question is not a verdict
+
+
+def test_a_decorative_approval_emoji_does_not_satisfy_the_eligibility_floor() -> None:
+    """Security f-003: the emoji rewrite turns "👍" into an approval UNIT,
+    which is safe under the end-to-end rule (every other unit must still
+    pass) but let a checkmark-bulleted defect report satisfy the any-unit
+    floor — and an eligible row is one a `NOTHING_TO_REMEDIATE` verdict may
+    drop at round 0, with no coder, no panel and no thread reply."""
+    decorated = [
+        "✅ Checked the auth path.\n"
+        "❌ The token is logged at src/api.py:88 — redact it.",
+        "Nice 🚀 but the session cookie has no Secure flag.",
+        ":white_check_mark: tests\nThe password hash uses md5 at src/auth.py:12.",
+    ]
+    for body in decorated:
+        assert not carries_approval(body), body
+        assert not is_approval_text(body), body
+
+    # An emoji that IS the whole verdict still is one — that is what the
+    # rewrite exists for, and the end-to-end rule carries it.
+    for body in ("👍", ":+1:", "Ship it 🚀", "🚀"):
+        assert carries_approval(body) and is_approval_text(body), body
 
 
 def test_review_state_policy_follows_the_body_not_just_the_state() -> None:

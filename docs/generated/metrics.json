@@ -427,11 +427,11 @@
         "classes": 18,
         "functions": 85,
         "largest_module": "lithos_loom.github_models",
-        "largest_module_lines": 719,
-        "lines": 2064,
+        "largest_module_lines": 735,
+        "lines": 2080,
         "modules": 4,
         "public_symbols": 49,
-        "sloc": 1582
+        "sloc": 1596
       },
       "LithosClient": {
         "classes": 14,
@@ -558,13 +558,13 @@
       "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 69759,
+    "total_lines": 69775,
     "total_modules": 187,
-    "total_sloc": 56364
+    "total_sloc": 56378
   },
   "tests": {
     "ratio": 1.57,
-    "src_lines": 69759,
-    "test_lines": 109300
+    "src_lines": 69775,
+    "test_lines": 109336
   }
 }

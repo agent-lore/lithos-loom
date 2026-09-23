@@ -661,10 +661,14 @@ _COURTESY_UNIT_RE = re.compile(
 
 def _units(body: str) -> list[str]:
     """*body* as canonicalised units (sentence / list item / line), blanks
-    dropped — the one splitting rule both classifiers below read."""
-    # The emoji stands alone as its own unit: "Ship it 🚀" is two approvals,
-    # never one unrecognised sentence.
-    text = _APPROVAL_EMOJI_RE.sub(". lgtm .", body).translate(_CANONICAL)
+    dropped — the one splitting rule both classifiers below read.
+
+    Splitting only: the approval-emoji rewrite is NOT done here. It belongs to
+    the whole-body reading (:func:`is_approval_text`), where every other unit
+    must still be approval or courtesy, so a decorative emoji cannot carry a
+    body on its own (PR #426 re-review, security f-003).
+    """
+    text = body.translate(_CANONICAL)
     units = []
     for raw in _UNIT_SPLIT_RE.split(text):
         unit = " ".join(_DECORATION_RE.sub("", raw).split()).strip("- ")
@@ -691,10 +695,20 @@ def carries_approval(body: str) -> bool:
     out of the dispatched batch, so requiring it would leave the verdict
     unreachable in production (and the S8 approval fixture unscorable)
     rather than guarded.
+
+    An approval EMOJI counts only when it is the whole verdict (the
+    ``or is_approval_text`` arm), never as decoration inside prose (PR #426
+    re-review, security f-003): the rewrite that turns "👍" into an approval
+    unit is safe under the strong classifier, where every other unit must
+    still pass, but under an any-unit rule it let a checkmark-bulleted defect
+    report — "✅ Checked the auth path. ❌ The token is logged at
+    src/api.py:88" — satisfy the floor. Nothing is lost in production: a body
+    the strong classifier reads end to end is never in a dispatched batch
+    anyway.
     """
-    return any(
-        unit.isascii() and _APPROVAL_UNIT_RE.match(unit) for unit in _units(body)
-    )
+    if any(unit.isascii() and _APPROVAL_UNIT_RE.match(unit) for unit in _units(body)):
+        return True
+    return is_approval_text(body)
 
 
 def is_approval_text(body: str) -> bool:
@@ -707,7 +721,9 @@ def is_approval_text(body: str) -> bool:
     cannot read — makes the whole body a finding.
     """
     approved = False
-    for unit in _units(body):
+    # The emoji stands alone as its own unit: "Ship it 🚀" is two approvals,
+    # never one unrecognised sentence.
+    for unit in _units(_APPROVAL_EMOJI_RE.sub(". lgtm .", body)):
         if not unit.isascii():
             # Not deleted, not skipped: text this vocabulary cannot read is
             # an ask until something says otherwise (security f-001).
