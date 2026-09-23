@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -28,6 +29,10 @@ from lithos_loom.plugins.story_develop.pr_delivery import (
     parse_issue_ref,
     pr_number_from_url,
     reply_body,
+)
+from lithos_loom.plugins.story_develop.publish_text import (
+    MAX_SECTION_CHARS,
+    fence_untrusted,
 )
 
 # --- pure builders --------------------------------------------------------------
@@ -87,39 +92,108 @@ def test_build_pr_body_minimal() -> None:
     assert "Lithos task" not in body
 
 
+_FENCE_LINE_RE = re.compile(r"(`{3,}|~{3,})")
+
+
+def _outside_fences(body: str) -> str:
+    """The part of *body* GitHub renders as live markup.
+
+    GFM: a fenced block opens on a run of three-or-more backticks **or** tildes
+    indented at most three spaces, and closes on a run of the same character at
+    least as long with nothing else on the line. Everything between is inert —
+    which is exactly the claim the untrusted sections rest on, so the tests
+    check it the way the renderer does rather than by looking for a literal
+    ``` `` ` ``` ``` `` `.
+    """
+    live: list[str] = []
+    fence = ""
+    for line in body.splitlines():
+        stripped = line.lstrip(" ")
+        indented = len(line) - len(stripped) > 3
+        match = None if indented else _FENCE_LINE_RE.match(stripped)
+        run = match.group(1) if match else ""
+        if fence:
+            closes = (
+                run
+                and run[0] == fence[0]
+                and len(run) >= len(fence)
+                and not stripped[len(run) :].strip()
+            )
+            if closes:
+                fence = ""
+            continue
+        if run:
+            fence = run
+            continue
+        live.append(line)
+    return "\n".join(live)
+
+
+# A GitHub issue body is arbitrary markdown, so the fixture carries one of
+# every live construct the reviews named: the keyword forms (plain, `GH-`,
+# cross-repo, full-url, emphasised, `&nbsp;`-separated, reference-wrapped), a
+# mention behind a lone backtick, inline HTML, inline / nested / reference /
+# shortcut links and a reference IMAGE with its definitions, both fence
+# characters, and two invisibles.
+_HOSTILE_ISSUE_BODY = (
+    "Please fix the parser.\n\n"
+    "<!-- Closes #1 -->\n"
+    "Closes GH-2 and fixes agent-lore/other#3\n"
+    "Closes https://github.com/agent-lore/lithos-loom/issues/5\n"
+    "**Closes** #6, Closes&nbsp;#8, and Closes [#9][r]\n"
+    "cc @agent-lore/security and `@evil-user\n"
+    "<img src=//evil.example/p.png>\n"
+    "see [details](//evil.example/x) and [outer [inner]](//evil.example/y)\n"
+    "[click here][a], ![beacon][b], [evil.example][]\n\n"
+    "[a]: https://evil.example/phish\n"
+    "[b]: https://evil.example/beacon.png\n"
+    "[evil.example]: https://evil.example\n"
+    "[r]: https://github.com/o/r/issues/9\n"
+    "```\nnot a fence escape\n```\n"
+    "reorder\u202ethis, smuggle\U000e0001d, so\u00adft\n"
+    "~~~"
+)
+
+
+def _hostile_body(**overrides: object) -> str:
+    kwargs: dict[str, object] = {
+        "description": _HOSTILE_ISSUE_BODY,
+        "acceptance_criteria": "1. parses. Resolves #4 — ask @octocat",
+        "reviews_summary": "[cq]=LGTM",
+        "rounds": 1,
+        "gate_verdict": "GREEN",
+        "cost_usd": 0.5,
+        "task_id": "task-9",
+        "issue_closes": "Closes #7",
+    }
+    kwargs.update(overrides)
+    return build_pr_body(**kwargs)  # type: ignore[arg-type]
+
+
 def test_build_pr_body_defangs_the_story_text_a_stranger_wrote() -> None:
     """security/f-004: for a story the github-issue watcher materialised, the
     description IS the external issue body (and the acceptance criteria can be
-    too), so the body must publish neither under the operator's `gh` identity:
-    a hidden `Closes #1` would close an unrelated issue on merge, an @mention
-    pings real people, an HTML comment hides text and `<img>` is an off-site
+    too), so the body must publish neither as live markup under the operator's
+    `gh` identity: a hidden `Closes #1` would close an unrelated issue on
+    merge, an @mention pings real people, an HTML comment hides text and an
+    `<img>` — or a reference image, which needs no `<` — is an off-site
     request for every viewer."""
-    issue_body = (
-        "Please fix the parser.\n\n"
-        "<!-- Closes #1 -->\n"
-        "Closes GH-2 and fixes agent-lore/other#3\n"
-        "cc @agent-lore/security and `@evil-user\n"
-        "<img src=//evil.example/p.png>\n"
-        "see [details](//evil.example/x)\n"
-        "```\nnot a fence escape\n```\n"
-        "reorder\u202ethis"
-    )
-    body = build_pr_body(
-        description=issue_body,
-        acceptance_criteria="1. parses. Resolves #4 — ask @octocat",
-        reviews_summary="[cq]=LGTM",
-        rounds=1,
-        gate_verdict="GREEN",
-        cost_usd=0.5,
-        task_id="task-9",
-        issue_closes="Closes #7",
-    )
+    body = _hostile_body()
 
     # the text still READS as written…
     assert "Please fix the parser." in body and "1. parses." in body
     # …but nothing in it binds: no closing keyword survives next to its ref,
-    # in either section
-    for live in ("Closes #1", "Closes GH-2", "fixes agent-lore/other#3", "Resolves #4"):
+    # in any of its forms, in either section
+    for live in (
+        "Closes #1",
+        "Closes GH-2",
+        "fixes agent-lore/other#3",
+        "Closes https://github.com/agent-lore/lithos-loom/issues/5",
+        "Closes** #6",
+        "Closes&nbsp;#8",
+        "Closes [#9][r]",
+        "Resolves #4",
+    ):
         assert live not in body
     assert "#1" in body and "GH-2" in body  # the refs still read
     # …nobody is notified (a stray backtick is no exemption)…
@@ -128,13 +202,75 @@ def test_build_pr_body_defangs_the_story_text_a_stranger_wrote() -> None:
     # …no tag opens (the comment that hides text, the beacon that fires)…
     assert "<!--" not in body and "&lt;!--" in body
     assert "<img" not in body and "&lt;img" in body
-    # …no link binds, and no fence run escapes the body…
+    # …no link binds, in any form: inline, nested-label, and the reference
+    # definitions every `[label][ref]` / `[ref][]` / `[ref]` resolves through
+    # (broken, so each one degrades to the literal text of its label)…
     assert "[details](" not in body and "&#91;details](" in body
-    assert "```" not in body
-    # …and no formatter reorders what the reader sees
+    assert "[outer [inner]](" not in body
+    for definition in ("[a]: ", "[b]: ", "[evil.example]: ", "[r]: "):
+        assert f"\n{definition}" not in body
+        assert f"\n&#91;{definition[1:]}" in body
+    # …and no formatter reorders or hides what the reader sees
     assert "\u202e" not in body and "reorderthis" in body
+    assert "\U000e0001" not in body and "smuggled" in body
+    assert "\u00ad" not in body and "soft" in body
     # the one live closing keyword is the one loom composed itself
     assert "\nCloses #7\n" in body
+
+
+def test_the_story_text_cannot_reach_out_of_its_fence() -> None:
+    """correctness/f-001 + security/f-002: defanging enumerates GFM and GFM
+    keeps growing (`~~~` opens a fence exactly like ``` `` ` ``` `` ` `` does,
+    reference links need no `](`). So the untrusted sections are FENCED, with a
+    fence measured against their own content — and everything loom composes
+    around them stays live markup, above all the `Closes #7` that makes the
+    delivered PR close its source issue on merge."""
+    live = _outside_fences(_hostile_body())
+
+    # loom's own sections are outside every fence — they still render, and the
+    # closing keyword still binds
+    assert "Closes #7" in live
+    assert "## What" in live and "## Acceptance criteria" in live
+    assert "- verdicts: [cq]=LGTM" in live and "- test gate: GREEN" in live
+    assert "- Lithos task: `task-9`" in live
+    # …while not one line the reporter wrote is
+    for quoted in ("Please fix the parser.", "not a fence escape", "1. parses."):
+        assert quoted not in live
+
+
+def test_a_trailing_tilde_fence_cannot_swallow_the_rest_of_the_body() -> None:
+    """security/f-002, minimal shape: an issue body that ends on `~~~` opened a
+    code block that ran to the end of the document — taking loom's `Closes #N`,
+    the panel verdicts and the test-gate result into it."""
+    live = _outside_fences(
+        _hostile_body(description="ok\n\n~~~", acceptance_criteria="```\nand")
+    )
+
+    assert "Closes #7" in live
+    assert "- verdicts: [cq]=LGTM" in live and "- test gate: GREEN" in live
+
+
+def test_fence_untrusted_cannot_be_closed_by_its_own_content() -> None:
+    """The fence is measured against the text it quotes, so no line of that
+    text can close it early and resume live markup."""
+    quoted = fence_untrusted("try\n``````\nto escape\n~~~~~~\nor this")
+
+    assert quoted.startswith("```")
+    assert "try" in quoted and "to escape" in quoted
+    assert _outside_fences(quoted) == ""  # every line of it is inert
+    assert fence_untrusted("   ") == ""  # nothing to quote, no empty block
+
+
+def test_an_oversized_story_description_is_bounded() -> None:
+    """security/f-005 (CWE-770): a GitHub issue body may be 64 KiB and GitHub
+    rejects a PR body over the same limit — an unbounded section would let a
+    reporter fail `gh pr create` for every delivery of the story they filed,
+    burning a run and an operator interrupt each time."""
+    body = _hostile_body(description="x" * (MAX_SECTION_CHARS * 3))
+
+    assert len(body) < MAX_SECTION_CHARS + 2000
+    assert "(truncated" in body  # never silently misrepresented
+    assert "Closes #7" in _outside_fences(body)
 
 
 def test_reply_body_variants() -> None:

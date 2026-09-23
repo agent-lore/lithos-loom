@@ -79,10 +79,10 @@ partial first pass finishes the job and changes nothing else.
    generated one — what / acceptance criteria / review / `Closes #N` for an
    issue-linked story — plus a **`## Provenance`** section naming the run, its
    stop *classification*, the branch, and the coder's final handoff summary.
-   The *what* and *acceptance criteria* sections are **defanged** like the
-   handoff quote (below): for a mirrored story they are the GitHub issue body
-   an outside reporter wrote, and the `Closes #N` loom composes itself is the
-   only closing keyword left live in the body.
+   The *what* and *acceptance criteria* sections are **fenced, bounded and
+   defanged** exactly like the handoff quote (below): for a mirrored story they
+   are the GitHub issue body an outside reporter wrote, and the `Closes #N`
+   loom composes itself is the only closing keyword left live in the body.
    `[story_develop] operator_github_login`, when set, is asked for review
    exactly as on a daemon delivery.
 
@@ -332,7 +332,8 @@ network egress unless the host blocks it, so this channel is not the only one �
 it is the one that ends up in a public, permanent record.)
 
 The coder's final handoff goes through **the same redaction** and travels as a
-**fenced block**, never as inline prose: it is written by the coder agent into
+**fenced block** — its fence measured against the quote itself, so no line of
+the quote can close it early and resume live markup — never as inline prose: it is written by the coder agent into
 a read-write mount, and a PR description is live markup — GitHub honours
 closing keywords (`#12`, `GH-12`, `owner/repo#12`) anywhere in it and notifies
 every `@name`. Both are rewritten so they read the same but bind nothing, and

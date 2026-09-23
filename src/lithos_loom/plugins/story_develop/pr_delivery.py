@@ -31,7 +31,7 @@ from lithos_loom.github_models import (
 
 from . import run_outcome
 from .github_access import github_call, repo_name_with_owner
-from .publish_text import defang_markup
+from .publish_text import fence_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -116,19 +116,22 @@ def build_pr_body(
     delivery whose run dir was reaped) and render as ``unknown`` — never as a
     confident zero.
 
-    *provenance_quote* is untrusted text (an agent's handoff) rendered as a
-    fenced block so none of it is active markup.
+    **Every section loom did not author is published fenced** through
+    :func:`~.publish_text.fence_untrusted` (bounded, defanged, in a code block
+    its own content cannot terminate): *provenance_quote* is an agent's
+    handoff, and *description* / *acceptance_criteria* are — for a story the
+    github-issue watcher materialised — the GitHub issue body an outside
+    reporter wrote, copied into the task by the mirror and re-read live at
+    delivery. A PR description is live markup opened under the operator's `gh`
+    identity, so unfenced any of them could close an unrelated issue on merge
+    (`Closes #1`), ping strangers, fire an off-site request for every viewer
+    (an `<img>` or a reference image), or — with one trailing fence line —
+    swallow every section composed *after* it, including the panel's verdicts
+    and loom's own `Closes #N`. A fence needs no enumeration of GFM, which is
+    why it and not a rewrite pass is what these sections rest on.
 
-    *description* and *acceptance_criteria* are untrusted too, and unfenced:
-    for a story the github-issue watcher materialised they ARE the GitHub
-    issue body an outside reporter wrote (the mirror copies it into the task,
-    and delivery re-reads it live), so they go through
-    :func:`~.publish_text.defang_markup` — otherwise a `Closes #1` buried in
-    an issue body would close an unrelated issue when this PR merges, an
-    `@mention` would ping strangers and an HTML comment would hide text, all
-    under the operator's `gh` identity. They stay markdown, just inert; the
-    *issue_closes* line loom composes itself is the one live closing keyword
-    in the body, and it is added AFTER the description is defanged.
+    The *issue_closes* line loom composes itself is therefore the only live
+    closing keyword in the body, and it is added outside the fenced *what*.
 
     *provenance* is an optional block of extra lines about where the branch
     came from — empty for a run that delivered itself (the Review section
@@ -136,16 +139,12 @@ def build_pr_body(
     (``lithos-loom develop deliver``: the run id and why that run stopped).
     One body builder, so a hand delivery's PR reads like every other.
     """
-    parts = ["## What", "", defang_markup(description.strip()), ""]
+    parts = ["## What", "", fence_untrusted(description), ""]
     if issue_closes:
         parts += [issue_closes, ""]
     if acceptance_criteria:
-        parts += [
-            "## Acceptance criteria",
-            "",
-            defang_markup(acceptance_criteria.strip()),
-            "",
-        ]
+        criteria = fence_untrusted(acceptance_criteria)
+        parts += ["## Acceptance criteria", "", criteria, ""]
     parts += [
         "## Review",
         "",
@@ -172,14 +171,13 @@ def build_pr_body(
         # coder's handoff), and a PR description is live markup — GitHub
         # honours closing keywords and @-mentions anywhere in it. Inside a code
         # block neither fires, and the operator still sees exactly what was
-        # written.
+        # written — the fence being measured against the quote itself, so the
+        # quote cannot close it and resume live markup.
         parts += [
             "",
             "Coder's final handoff, verbatim:",
             "",
-            "```text",
-            provenance_quote,
-            "```",
+            fence_untrusted(provenance_quote),
         ]
     parts += [
         "",

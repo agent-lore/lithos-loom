@@ -2210,17 +2210,53 @@ def test_redaction_is_bounded_and_markup_inert() -> None:
     assert "@agent-lore/sec" not in out and "&#64;agent-lore/sec" in out
 
 
-def test_live_github_constructs_survive_no_backtick_trick() -> None:
-    """security/f-002: `GH-<n>` closes an issue exactly like `#<n>`, and a
-    single stray backtick opens no code span — so neither may be the thing a
-    defence depends on."""
-    for keyword in ("Closes GH-1337", "fixes gh-1337"):
+def test_defang_covers_every_keyword_and_link_form_a_body_can_carry() -> None:
+    """security/f-002 (`GH-<n>` closes an issue exactly like `#<n>`, and a
+    single stray backtick opens no code span) widened by round 2's
+    security/f-001 + f-003 + f-004: the rule is the sole defence
+    on the unfenced provenance bullet, so each shape a narrower pattern let
+    through is checked here — the reference link forms whose target hides in a
+    definition that renders as nothing, the keyword renderings separated by
+    something other than a plain space, and the invisibles that are present in
+    the bytes a machine re-ingests but absent from the screen an operator
+    reads."""
+    # the keyword never stays adjacent to its ref, however it is written
+    for keyword in (
+        "Closes GH-1337",
+        "fixes gh-1337",
+        "**Closes** #1337",
+        "_fixes_ #1337",
+        "Closes&nbsp;#1337",
+        "Closes [#1337][r]",
+        "Closes https://github.com/agent-lore/lithos-loom/issues/1337",
+    ):
         out = cli_facts.defang_markup(keyword)
         assert out != keyword and "1337" in out
         assert not _CLOSES_RE.search(out)
     # a backtick before the mention used to exempt it entirely
     quoted = cli_facts.defang_markup("cc `@evil-user please approve")
     assert "@evil-user" not in quoted and "&#64;evil-user" in quoted
+    # every reference form loses its definition, so it renders as its own
+    # label rather than as a link (or, for `![…][…]`, an off-site request)
+    for payload in (
+        "[click here][a]\n\n[a]: https://evil.example/phish",
+        "[evil.example][]\n\n[evil.example]: https://evil.example",
+        "![beacon][b]\n\n[b]: https://evil.example/beacon.png",
+    ):
+        out = cli_facts.defang_markup(payload)
+        assert "\n[" not in out and "&#91;" in out
+    # …and the nested-label inline form is the inline form
+    nested = cli_facts.defang_markup("[outer [inner]](https://evil.example/)")
+    assert "[outer" not in nested and "&#91;outer" in nested
+    # ordinary bracketed prose is untouched — the breadcrumbs stay readable
+    assert cli_facts.defang_markup("[Friction] gh declined (401)") == (
+        "[Friction] gh declined (401)"
+    )
+    # both fence characters are defused, not only the backtick
+    assert cli_facts.defang_markup("ok\n~~~\n") == "ok\n~~\n"
+    # invisibles: the tag block, the soft hyphen, the hangul filler
+    assert cli_facts.defang_markup("smuggle\U000e0001d") == "smuggled"
+    assert cli_facts.defang_markup("so\u00adft \u3164gap") == "soft gap"
 
 
 def test_the_pr_body_carries_the_coders_final_handoff_summary(
