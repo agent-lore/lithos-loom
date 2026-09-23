@@ -69,7 +69,10 @@ Raise the question that actually blocks you, not one per finding. Keep `coder_re
 reach, and `rationale:` untouched. The run then stops after the **next**
 review round with that question put to the operator — no further round is
 spent restating it. Use it for a product or platform decision, never as a
-stronger way to disagree about the code.
+stronger way to disagree about the code. The escape is a **story-develop
+run's**: a `develop converge` run has no operator gate behind it, so there
+the mark is recorded as the ordinary `disputed` it also is and the two-round
+guard applies — its prompt does not offer it.
 
 **Answering a needs-decision (reviewers only):** while a decision is open on a
 finding you keep open, you must answer it in that same round. The two verdicts

@@ -235,10 +235,18 @@ class LedgerEntry:
 class FindingLedger:
     """Per-reviewer finding registry with plugin-assigned monotonic ids."""
 
-    def __init__(self, reviewer: str) -> None:
+    def __init__(self, reviewer: str, *, decisions_enabled: bool = True) -> None:
         self.reviewer = reviewer
         self.entries: dict[str, LedgerEntry] = {}
         self._next = 1
+        # correctness/f-003: the cheap `needs-decision` escalation ends in a
+        # loom `human` gate on the STORY — a surface only story-develop's own
+        # runner has. `develop converge` shares this loop but flattens every
+        # unapproved run to `not_converged` (what both watcher consumers
+        # branch on), so an escalation raised there is a question nobody is
+        # asked: a converge ledger records the mark as the ordinary dispute it
+        # also is, under the unchanged two-round guard.
+        self.decisions_enabled = decisions_enabled
 
     # --- validation (pure — safe to call before committing anything) -------
 
@@ -528,7 +536,8 @@ class FindingLedger:
         to put to the operator (a question with no choices and costs is the
         dispute it already is), so it stays an ordinary dispute
         (correctness/f-001). A re-raise after a contest refreshes the text but
-        never re-arms the escalation.
+        never re-arms the escalation. A ledger with ``decisions_enabled=False``
+        (converge — correctness/f-003) records the dispute and nothing else.
         """
         for f in findings:
             entry = self.entries.get(f.finding_id)
@@ -540,7 +549,11 @@ class FindingLedger:
                 if not entry.coder_disputed:
                     entry.coder_disputed = True
                     entry.blocked_while_disputed = 0
-                if f.status == "needs-decision" and _admits_decision(f):
+                if (
+                    self.decisions_enabled
+                    and f.status == "needs-decision"
+                    and _admits_decision(f)
+                ):
                     entry.decision_question = f.decision_question
                     entry.decision_options = f.decision_options
                     entry.decision_round = round_no
@@ -678,6 +691,18 @@ def reviewer_validator(
     return _check
 
 
+def _quoted_field(label: str, text: str) -> list[str]:
+    """One agent-authored field of a decision, every line quoted as data.
+
+    The ``[ReviewDispute]`` breadcrumb's half of the trust boundary
+    :func:`~lithos_loom.gates._quoted_block` holds for the gate description
+    (correctness/f-003); kept local so the plugin's domain modules stay off
+    the daemon's import surface.
+    """
+    body = str(text).strip().splitlines() or [""]
+    return [f"  {label}:"] + [f"    > {line}" for line in body]
+
+
 @dataclass(frozen=True)
 class PendingDecision:
     """A coder ``needs-decision`` mark the reviewer did not contest (9d5ebca6).
@@ -707,14 +732,28 @@ class PendingDecision:
         return f"{self.reviewer}/{self.finding_id}"
 
     def render(self) -> str:
-        """The decision as operator-facing prose (finding, question, options)."""
-        lines = [f"[{self.label}] {self.severity}: {self.question}"]
-        if self.options:
-            lines.append(f"  options: {self.options}")
-        if self.rationale:
-            lines.append(f"  finding: {self.rationale}")
-        if self.coder_response:
-            lines.append(f"  coder: {self.coder_response}")
+        """The decision as operator-facing prose (finding, question, options).
+
+        Every field here is agent-authored prose, and multi-line by
+        construction (the handoff parser folds multi-line scalars). It is
+        published on the story's ``[ReviewDispute]`` finding, whose own
+        structure carries a stable finding prefix and loom's instruction for
+        how to answer — so a field labelled only on its FIRST line would let
+        the rest start at column 0 and open structure of its own
+        (correctness/f-003). Every line is therefore quoted as data, as
+        :func:`gates._quoted_block` already does for the gate brief; the
+        header is loom-composed from validated values (configured reviewer
+        name, ledger-assigned id, closed-vocabulary severity).
+        """
+        lines = [f"[{self.label}] {self.severity}:"]
+        lines += _quoted_field("question", self.question or "(none recorded)")
+        for label, text in (
+            ("options", self.options),
+            ("finding", self.rationale),
+            ("coder", self.coder_response),
+        ):
+            if text:
+                lines += _quoted_field(label, text)
         return "\n".join(lines)
 
 

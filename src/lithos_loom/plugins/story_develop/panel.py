@@ -341,7 +341,15 @@ def _review_turn(
 class ReviewerState:
     """Mutable per-reviewer run state (container, session, tool, ledger)."""
 
-    def __init__(self, spec, container: str, run_cmd: list[str], wt: Path) -> None:
+    def __init__(
+        self,
+        spec,
+        container: str,
+        run_cmd: list[str],
+        wt: Path,
+        *,
+        decisions_enabled: bool = True,
+    ) -> None:
         self.spec = spec
         self.container = container
         self.run_cmd = run_cmd
@@ -354,7 +362,11 @@ class ReviewerState:
         # engine_now.name — the reviewers.<name>.tool string contract is unchanged.
         self.engine_now: engines.Engine = engines.get_engine(spec.tool)
         self.outcome: ReviewOutcome | None = None  # latest completed round
-        self.ledger = FindingLedger(spec.name)  # T7: plugin-owned finding ids
+        # T7: plugin-owned finding ids. `decisions_enabled=False` (converge —
+        # correctness/f-003) records a coder `needs-decision` as the ordinary
+        # dispute it also is; only story-develop has the gate the escalation
+        # ends in.
+        self.ledger = FindingLedger(spec.name, decisions_enabled=decisions_enabled)
         # order-preserving dedupe (see T5 review): never self-switch
         self.chain: tuple[str, ...] = tuple(
             dict.fromkeys((spec.tool, *spec.fallback_chain))

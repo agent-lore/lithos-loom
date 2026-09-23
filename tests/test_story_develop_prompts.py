@@ -289,9 +289,24 @@ def test_needs_decision_is_taught_on_every_surface_that_uses_it() -> None:
     assert "decision_question:" in fmt and "decision_options:" in fmt
     assert "decision_contest:" in fmt
 
+    # the coder's half lives in its own fragment: the loop fills
+    # coder_fix.md's `{decision_escape}` slot with it on the story-develop
+    # path and leaves it EMPTY on converge (correctness/f-003)
     coder = load_prompt("coder_fix.md")
-    assert "status: needs-decision" in coder
-    assert "decision_question:" in coder
+    assert "{decision_escape}" in coder
+    assert "needs-decision" not in coder
+    escape = load_prompt("coder_decision_escape.md")
+    assert "status: needs-decision" in escape
+    assert "decision_question:" in escape
+    # the slot is the whole paragraph, so the prompt reads cleanly either way
+    from lithos_loom.plugins.story_develop.handoff import render_prompt
+
+    filled = render_prompt(coder, decision_escape=escape)
+    empty = render_prompt(coder, decision_escape="")
+    assert "rather than ground forever.\n\n   If the finding" in filled
+    assert "ordinary dispute.\n\n2. You do" in filled
+    assert "rather than ground forever.\n\n2. You do" in empty
+    assert "needs-decision" not in empty
 
     reviewer = load_prompt("reviewer_rereview.md")
     assert "needs-decision" in reviewer
@@ -314,5 +329,5 @@ def test_needs_decision_is_taught_on_every_surface_that_uses_it() -> None:
     def flat(text: str) -> str:
         return " ".join(text.split())
 
-    assert "both keys are required" in flat(coder).lower()
+    assert "both keys are required" in flat(escape).lower()
     assert "Both are required" in flat(fmt)

@@ -1245,6 +1245,66 @@ def test_needs_decision_stops_after_the_same_review_round(
     assert "[ReviewDispute]" in reason
 
 
+def _converge_entry(config: DevelopConfig):
+    """A LoopEntry positioned at a PR head — the converge path
+    (``entry is not None``), where the cheap escalation is deliberately off."""
+    from lithos_loom.plugins.story_develop.develop import LoopEntry
+    from lithos_loom.runner import git, worktree
+
+    base = git.base_sha(config.repo)
+    (config.repo / "pr.txt").write_text("pr change\n")
+    subprocess.run(
+        ["git", "add", "-A"], cwd=config.repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "the PR commit"],
+        cwd=config.repo,
+        check=True,
+        capture_output=True,
+    )
+    head = git.base_sha(config.repo)
+    return LoopEntry(
+        worktree_factory=lambda cfg: worktree.create_on_branch(
+            cfg.repo, head, cfg.description, parent=cfg.worktree_parent
+        ),
+        base_override=git.RangeBase(base),
+        intake_reviews=[],
+        intake_check_set=None,
+    )
+
+
+def test_converge_records_a_needs_decision_as_an_ordinary_dispute(
+    monkeypatch: pytest.MonkeyPatch,
+    config: DevelopConfig,
+) -> None:
+    # correctness/f-003: `develop converge` shares this loop but has no
+    # needs-decision surface behind it — `converge_pr` flattens every
+    # unapproved run to `not_converged`, which both watcher consumers branch
+    # on, so an escalation raised here would be a question nobody is asked.
+    # Same script as the story-develop twin above: the mark keeps its dispute
+    # half and the unchanged two-round guard stops the run in r3 instead.
+    entry = _converge_entry(config)
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[
+            {"text": _FINDINGS_MAJOR},
+            {"text": _REVIEW_CONCEDES_F001},
+            {"text": _FINDINGS_KEEP_F001},
+        ],
+        coder_handoffs={2: _CODER_NEEDS_DECISION},
+    )
+    result = develop_mod.develop(config, entry=entry)
+
+    assert result.status == "disputed"  # not needs_decision, and not in r2
+    assert result.rounds == 3
+    assert result.decisions == ()
+    assert result.decisions_not_admitted == ()
+    assert "dispute deadlock" in result.message
+    # ...and the coder was never offered the escape it cannot cash in
+    assert all("needs-decision" not in p for p in state["coder_prompts"])
+
+
 def test_an_unanswered_needs_decision_re_prompts_the_reviewer(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

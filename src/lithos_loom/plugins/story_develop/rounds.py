@@ -193,6 +193,12 @@ class RoundContext:
     # external mode (PR #396 review): admits a round-1 no-change claim for
     # review instead of exit C — see LoopEntry
     no_change_claim: Callable[[int], bool] | None = None
+    # correctness/f-003: whether the cheap `needs-decision` escalation is live
+    # this run — the story-develop path only (`develop()` sets it from
+    # ``entry is None``). False keeps the escape out of the coder's prompt and,
+    # via the ledgers, out of the ledger: converge records such a mark as the
+    # ordinary dispute it also is.
+    decisions_enabled: bool = True
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -347,6 +353,11 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
             handoff_file=handoff.coder_handoff_name(round_no),
             sandbox_facts=_sandbox_section(config.image, for_coder=True),
             external_ack=ctx.external_ack,  # every round (#387); "" off external
+            decision_escape=(
+                handoff.load_prompt("coder_decision_escape.md")
+                if ctx.decisions_enabled
+                else ""
+            ),
         )
         coder_resume = True
 
