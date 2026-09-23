@@ -24,6 +24,7 @@ from lithos_loom.evals.triage.harness import (
 )
 from lithos_loom.plugins.story_develop.external_reviews import external_intake_reviews
 from lithos_loom.plugins.story_develop.external_triage import (
+    LINE_NOTHING,
     LINE_PROCEED,
     LINE_REJECT,
     TriageVerdicts,
@@ -75,19 +76,103 @@ def _case(**kw: Any) -> TriageCase:
 
 
 def _verdicts(
-    proceed: tuple[str, ...], rejections: dict[str, str], note: str = ""
+    proceed: tuple[str, ...],
+    rejections: dict[str, str],
+    note: str = "",
+    *,
+    nothing: dict[str, str] | None = None,
 ) -> TriageVerdicts:
-    kinds = {fid: LINE_PROCEED for fid in proceed} | {
-        fid: LINE_REJECT for fid in rejections
-    }
+    kinds = (
+        {fid: LINE_PROCEED for fid in proceed}
+        | {fid: LINE_REJECT for fid in rejections}
+        | {fid: LINE_NOTHING for fid in nothing or {}}
+    )
     return TriageVerdicts(
         proceed=proceed,
         rejections=rejections,
+        nothing_to_remediate=nothing or {},
         cost_usd=0.1,
         note=note,
         line_kinds=kinds,
         verdict_text="## Verdicts\n",
     )
+
+
+# ── the approval verdict (827cedf8) ────────────────────────────────────
+
+
+def _approval_case() -> TriageCase:
+    """The shipped fixture's shape: one pure approval + one approval-with-ask."""
+    return _case(
+        findings=(
+            _finding("f-001", "nothing", path="", line=None),
+            _finding("f-002", "proceed", ambiguous=True),
+        )
+    )
+
+
+def test_an_approval_answered_nothing_to_remediate_scores_correct() -> None:
+    score = score_sample(
+        _approval_case(),
+        _verdicts(("f-002",), {}, nothing={"f-001": "an approval, no ask"}),
+    )
+    assert score.correct == {"f-001": True, "f-002": True}
+    assert score.recognised_approvals == 1
+    assert score.suppressed_known_true == 0
+    assert score.payload()["nothing_to_remediate"] == {"f-001": "an approval, no ask"}
+
+
+def test_an_approval_that_proceeds_is_the_measured_miss() -> None:
+    """The 827cedf8 waste: it proceeds, and a coder turn plus a panel pass
+    are spent to learn what the comment already said."""
+    score = score_sample(_approval_case(), _verdicts(("f-001", "f-002"), {}))
+    assert score.correct["f-001"] is False
+    assert score.recognised_approvals == 0
+    assert score.suppressed_known_true == 0  # an approval is not a must-proceed
+
+
+def test_a_must_proceed_waved_through_as_an_approval_is_over_suppression() -> None:
+    """The guard, in the instrument: `NOTHING_TO_REMEDIATE` used as a cheap
+    REJECT must score exactly like a rejection."""
+    score = score_sample(
+        _approval_case(),
+        _verdicts((), {}, nothing={"f-001": "approval", "f-002": "also fine"}),
+    )
+    assert score.correct == {"f-001": True, "f-002": False}
+    assert score.suppressed_known_true == 1
+
+
+def test_the_approval_rate_gates_the_case_and_is_vacuous_without_approvals() -> None:
+    case = _approval_case()
+    missed = aggregate_triage(
+        "t",
+        [score_sample(case, _verdicts(("f-001", "f-002"), {}))],
+        case=case,
+        k=1,
+        bar=0.8,
+        max_over_suppression=0.0,
+    )
+    assert (missed.recognised_approvals, missed.approval_opportunities) == (0, 1)
+    assert missed.approval_rate == 0.0 and not missed.passed
+    caught = aggregate_triage(
+        "t",
+        [score_sample(case, _verdicts(("f-002",), {}, nothing={"f-001": "approval"}))],
+        case=case,
+        k=1,
+        bar=0.8,
+        max_over_suppression=0.0,
+    )
+    assert caught.approval_rate == 1.0 and caught.passed
+    # A batch with no approval is not held to the rate at all.
+    plain = aggregate_triage(
+        "t",
+        [score_sample(_case(), _verdicts(("f-001", "f-002", "f-003", "f-004"), {}))],
+        case=_case(),
+        k=1,
+        bar=0.0,
+        max_over_suppression=0.0,
+    )
+    assert plain.approval_opportunities == 0 and plain.passed
 
 
 def test_perfect_sample_scores_every_finding_correct() -> None:

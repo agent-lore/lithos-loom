@@ -571,6 +571,7 @@ def _install_triage(
     *,
     proceed: tuple[str, ...],
     rejections: dict[str, str] | None = None,
+    nothing_to_remediate: dict[str, str] | None = None,
     cost: float = 0.1,
 ):
     from lithos_loom.plugins.story_develop.external_triage import TriageVerdicts
@@ -578,7 +579,10 @@ def _install_triage(
     def fake_triage(config, change, outcome, *, timeout=1800):
         captured["triage_findings"] = [f.finding_id for f in outcome.findings]
         return TriageVerdicts(
-            proceed=proceed, rejections=rejections or {}, cost_usd=cost
+            proceed=proceed,
+            rejections=rejections or {},
+            nothing_to_remediate=nothing_to_remediate or {},
+            cost_usd=cost,
         )
 
     monkeypatch.setattr(converge_mod, "triage_external_findings", fake_triage)
@@ -661,6 +665,97 @@ def test_external_mode_all_rejected_builds_no_coder(
     assert "entry" not in captured  # develop() never ran
     assert "push" not in captured
     assert {o.disposition for o in result.external_outcomes} == {"rejected"}
+
+
+def test_external_mode_an_approval_only_batch_is_already_clean_at_round_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """827cedf8 / lens #100: the batch's only content was "No findings. Ready
+    to merge." Triage says NOTHING_TO_REMEDIATE and the run ends at round 0
+    — `already_clean` (the watcher refunds the round), never a coder turn
+    and a panel pass to rediscover the approval."""
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=(),
+        nothing_to_remediate={"f-001": "the comment is an approval"},
+    )
+
+    result = converge_pr(
+        _config(tmp_path), _change(), external_findings=(_ext_finding(7),)
+    )
+
+    assert result.status == "already_clean"
+    assert result.succeeded
+    assert "entry" not in captured  # develop() never ran
+    assert "push" not in captured
+    (outcome,) = result.external_outcomes
+    assert outcome.disposition == "nothing_to_remediate"
+    assert outcome.detail == "the comment is an approval"
+
+
+def test_external_mode_an_approval_beside_a_rejection_stays_triage_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A refuted claim still owes the reviewer a rejection reply, so the
+    mixed batch keeps the `triage_rejected` status — the approval just reads
+    as what it is."""
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=(),
+        rejections={"f-001": "src/x.py:12 refutes it"},
+        nothing_to_remediate={"f-002": "an approval"},
+    )
+
+    result = converge_pr(
+        _config(tmp_path),
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+
+    assert result.status == "triage_rejected"
+    assert "entry" not in captured
+    by_id = {o.finding_id: o.disposition for o in result.external_outcomes}
+    assert by_id == {"f-001": "rejected", "f-002": "nothing_to_remediate"}
+
+
+def test_external_mode_an_approval_beside_a_real_claim_only_injects_the_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The guard, end to end: the mixed batch dispatches on its actionable
+    part only — the approval never reaches the coder and is not reported as
+    unaddressed."""
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=("f-002",),
+        nothing_to_remediate={"f-001": "an approval, no ask"},
+    )
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
+        "## Status: LGTM\n## Summary\nfixed.\n"
+        "## External findings\n- f-002: FIXED — guarded the handle\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config,
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8, body="claim two")),
+    )
+
+    entry = captured["entry"]
+    (outcome,) = entry.intake_reviews
+    assert [f.finding_id for f in outcome.findings] == ["f-002"]  # the claim only
+    by_id = {o.finding_id: o.disposition for o in result.external_outcomes}
+    assert by_id == {"f-001": "nothing_to_remediate", "f-002": "fixed"}
 
 
 def test_external_mode_triage_spend_meets_budget_fails(

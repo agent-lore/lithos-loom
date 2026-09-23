@@ -8,10 +8,13 @@ handled), and the actionability rule.
 
 from __future__ import annotations
 
+import pytest
+
 from lithos_loom.github_models import (
     AUTOMATED_REPLY_MARKER,
     LOOM_NOTICE_MARKER,
     IssueComment,
+    is_approval_text,
     is_automated_reply,
     is_landed_fix_reply,
     is_loom_pr_comment,
@@ -118,3 +121,50 @@ def test_genuine_loom_shapes_are_still_recognised_structurally() -> None:
         f"Fixed in abc — done\n\n{AUTOMATED_REPLY_MARKER}", _URL
     )
     assert is_loom_pr_comment(body) and is_landed_fix_reply(body)
+
+
+# ── an approval is not a finding (827cedf8 / lens #100) ────────────────
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "LGTM",
+        "lgtm!",
+        "**No findings.** Ready to merge.",  # Dave's comment on lens #100
+        "No findings. Ready to merge.",
+        "Looks good to me. Thanks!",
+        "Approved; nothing to flag here.",
+        "- LGTM\n- no issues found",
+        "👍",
+        "Ship it 🚀",
+        "All good",
+        "I'm happy with this, ready to merge",
+        "No findings.\n\nThanks again — great work!",
+    ],
+)
+def test_pure_approvals_are_recognised(body: str) -> None:
+    assert is_approval_text(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # The guard: an approval that ALSO asks is a finding, not an approval.
+        "LGTM, but rename X",
+        "LGTM — but please rename `foo`",
+        "👍 but rename X",
+        "Approving, but note the TODO on line 40",
+        "Ready to merge once CI is green",
+        # Not approvals at all.
+        "this leaks a handle",
+        "nit: rename this",
+        "Two problems here: the guard is wrong",
+        "Thanks!",  # courtesy alone is not a verdict
+        "Nice work",
+        "",
+        "```python\nx = 1\n```",
+    ],
+)
+def test_anything_carrying_an_ask_is_not_an_approval(body: str) -> None:
+    assert not is_approval_text(body)

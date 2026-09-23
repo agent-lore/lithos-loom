@@ -22,6 +22,15 @@ cite the specific code that refutes it — a file and line whose actual
 behaviour contradicts what the claim asserts. "Seems unlikely", "the tests
 probably cover this", or "the reviewer misread the style" are not evidence.
 
+There is one other thing a "claim" can turn out to be: **not a claim at
+all**. Reviewers approve on the same channels they review on, so a batch can
+carry a comment whose entire content is "No findings / LGTM / ready to
+merge" — praise, an acknowledgement, an approval. There is nothing there to
+verify and nothing to change, so it gets `NOTHING_TO_REMEDIATE` and no coder
+is paid to rediscover it. This is **not** a soft REJECT: a claim that asks
+for anything at all — "LGTM, but rename `foo`" — keeps its ask and
+PROCEEDs.
+
 ## Acceptance criteria (the change's intent, for context)
 
 {acceptance_criteria}
@@ -51,6 +60,7 @@ per claim, exactly this shape:
 ## Verdicts
 - f-001: PROCEED
 - f-002: REJECT — src/util.py:14 already guards the None case; the claimed crash cannot occur
+- f-003: NOTHING_TO_REMEDIATE — the comment is an approval ("No findings. Ready to merge."); it asks for no change
 ```
 
 Keep each verdict on **one line** (do not wrap the evidence).
@@ -66,6 +76,12 @@ Rules:
   treated as PROCEED, and so is one whose evidence names no `file:line`
   resolving to a repo file (a bare filename or version number is not a
   citation).
+- `NOTHING_TO_REMEDIATE` is **only** for a claim that asks for nothing —
+  an approval, a thank-you, a note that a previous round's fix looks right.
+  State in one line why it asks for nothing. If it contains any ask,
+  question about the code, or disagreement, however politely worded, it is
+  a claim: use `PROCEED`. Never use it because you think the claim is wrong
+  — that is what `REJECT` (with evidence) is for.
 - Every claim must get a verdict line. A claim you are unsure about gets
   `PROCEED`.
 - Do not invent verdicts for finding ids that are not in the list above.

@@ -12,9 +12,9 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.github_client` | M | 7 | 0 |
-| `lithos_loom.github_models` | M | 6 | 16 |
+| `lithos_loom.github_models` | M | 6 | 17 |
 | `lithos_loom.github_review_activity` | S | 2 | 3 |
-| `lithos_loom.github_review_streams` | M | 3 | 8 |
+| `lithos_loom.github_review_streams` | M | 3 | 10 |
 
 ## Public API
 
@@ -50,6 +50,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - def `issue_comment_reply_body` — Wrap a per-finding reply for the conversation tab, naming its target.
 - def `issue_comment_reply_target` — The conversation comment id a loom reply answers, or ``None``.
 - def `review_is_actionable` — The per-state external-review policy (PRD S2).
+- def `is_approval_text` — True when *body* carries an approval and **no ask** — nothing to remediate.
 
 ### `lithos_loom.github_review_activity`
 - class `ReviewStream` — The GitHub stream a row came from — also its id space.
@@ -68,7 +69,9 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - class `AuthorTrust` — Per-batch answer to "may this author's material act?" (ADR 0011 d8).
 - def `landed_fix_claims` — ``(root_key, reply_author)`` pairs whose reply *claims* a landed fix.
 - def `proven_handled` — Root keys proven handled by an **authenticated** landed-fix reply.
+- def `reviews_with_comments` — Summary reviews that own at least one inline ROOT comment.
 - def `handled_review_ids` — Summary reviews ALL of whose own inline roots are handled.
+- def `dispositions` — ``(actionable, approvals)`` for *candidates*, in input order.
 - def `actionable` — The rows of *candidates* worth reporting / injecting, in input order.
 
 ## Dependencies

@@ -34,6 +34,7 @@ from lithos_loom.github_review_streams import (
     ReplyMode,
     actionable,
     adapter_for,
+    dispositions,
     fetch_activity,
     handled_review_ids,
     landed_fix_claims,
@@ -333,6 +334,68 @@ def test_actionable_candidates_can_be_a_subset_of_the_context() -> None:
     ]  # no context → no roots known
 
 
+# ── an approval is not a finding (827cedf8 / lens #100) ───────────────
+
+
+def test_dispositions_splits_approvals_out_of_the_actionable_batch() -> None:
+    rows = [
+        from_review(_review(500, state="APPROVED", body=""), repo=_REPO, pr_number=_PR),
+        from_conversation_comment(
+            _conversation(20, body="**No findings.** Ready to merge.")
+        ),
+        from_inline_comment(_inline(7)),  # a real claim
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert [a.activity_id for a in act] == [7]
+    assert [a.activity_id for a in appr] == [500, 20]
+
+
+def test_an_approval_that_asks_stays_in_the_actionable_batch() -> None:
+    rows = [
+        from_conversation_comment(_conversation(20, body="LGTM, but rename `foo`")),
+        from_inline_comment(_inline(7, body="looks good to me")),
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert [a.activity_id for a in act] == [20]
+    assert [a.activity_id for a in appr] == [7]  # a bare "looks good" inline root
+
+
+def test_an_approved_review_owning_comments_is_neither_approval_nor_actionable() -> (
+    None
+):
+    """Its own inline comments carry the asks and speak for it — the summary
+    is not reported as "nothing to remediate"."""
+    rows = [
+        from_review(
+            _review(500, state="APPROVED", body="LGTM"), repo=_REPO, pr_number=_PR
+        ),
+        from_inline_comment(_inline(7, review_id=500)),
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert [a.activity_id for a in act] == [7]
+    assert appr == []
+
+
+def test_dismissals_replies_and_loom_replies_are_neither() -> None:
+    rows = [
+        from_review(
+            _review(501, state="DISMISSED", body="LGTM"), repo=_REPO, pr_number=_PR
+        ),
+        from_inline_comment(_inline(8, body="LGTM", in_reply_to_id=7)),
+        from_conversation_comment(
+            _conversation(21, body=issue_comment_reply_body(_FIXED, "x#issuecomment-1"))
+        ),
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert act == [] and appr == []
+
+
+def test_a_handled_root_is_suppressed_rather_than_reported_as_an_approval() -> None:
+    root = from_inline_comment(_inline(7, body="LGTM"))
+    act, appr = dispositions([root], frozenset({root.key}))
+    assert act == [] and appr == []
+
+
 # ── the registry is the ONLY policy site (PR #356 review, finding 1) ──
 
 
@@ -341,6 +404,7 @@ def test_every_stream_policy_is_registered_exhaustively() -> None:
     for a in STREAM_ADAPTERS:
         assert adapter_for(a.stream) is a
         assert callable(a.fetch) and callable(a.is_actionable) and callable(a.render)
+        assert callable(a.is_approval)
         assert a.label and a.reply_mode in set(ReplyMode)
 
 
@@ -362,6 +426,8 @@ def test_an_unregistered_stream_fails_loudly_never_as_a_catch_all(
         adapter_for(ReviewStream.CONVERSATION)
     with pytest.raises(LookupError):
         actionable([row], frozenset())
+    with pytest.raises(LookupError):
+        dispositions([row], frozenset())
     with pytest.raises(LookupError):
         render_row(row)
 

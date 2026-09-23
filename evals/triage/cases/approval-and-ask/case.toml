@@ -1,0 +1,72 @@
+[case]
+id = "approval-and-ask"
+description = """
+PRD pr-reconciliation S8, triage shape — the approval fixture (827cedf8).
+Two claims, both left on a delivered PR by the same trusted reviewer: one is
+a PURE APPROVAL, the other approves AND asks for something. The pair is the
+whole point: `NOTHING_TO_REMEDIATE` must catch the first without swallowing
+the second.
+
+WHY THIS SHAPE: remediation run 827cedf8 on lens PR #100 was dispatched by
+Dave's Conversation-tab comment "**No findings.** … Ready to merge." Triage
+proceeded on it (the vocabulary was proceed / reject, and an approval is not
+a known-false claim), the coder answered "NO CHANGE NEEDED — the finding is
+an explicit approval of head 21c041e, not a defect", and a full panel round
+then re-approved an unchanged head — about an hour of codex to learn what
+the comment already said, with the PR's merge-gate deferred behind it the
+whole time. f-001 is that comment verbatim. f-002 is the guard: an approval
+that carries an ask is a CLAIM, and suppressing it would lose real review
+material — the failure direction this whole arc exists to avoid.
+
+THE TREE: loom at 81b2f0d (the commit the S2 ingestion module shipped at),
+with f-002 anchored in that module. The claims are deliberately about a tree
+the agent can read: a triage agent that decides f-002 is "just an approval"
+without opening the file has made exactly the mistake being measured.
+
+AUTHOR IS NEUTRAL BY DESIGN: one author across the batch, so the [author]
+prefix cannot correlate with the expected verdict.
+
+WHAT A CORRECT VERDICT LOOKS LIKE: f-001 → `NOTHING_TO_REMEDIATE` (nothing
+is claimed; the run ends at round 0 `already_clean`, the round refunded).
+f-002 → `PROCEED`: it is a judgement about naming and ordering that the
+coder and loom's own panel dispose of, not something triage adjudicates — a
+`REJECT` would need to cite code refuting a claim that was never made, and
+a `NOTHING_TO_REMEDIATE` would silently drop an ask.
+
+DECISION RULE, STATED BEFORE THE FIRST PAID RUN: K=5 gives 5 approval and 5
+must-proceed opportunities. Approval 5/5 with over-suppression 0/5 is the
+pass: the verdict is usable. 0-1/5 approval means the prompt is not landing
+the third verdict at all and the detection-side classifier
+(`is_approval_text`) is carrying the feature alone — no harm done, but the
+mixed case stays expensive. ANY over-suppression (f-002 answered
+`NOTHING_TO_REMEDIATE` or rejected) is the failing reading, and is the one
+that would change S5a's posture: it says the third verdict is being used as
+a cheap REJECT, and it should then be narrowed to rows the ingestion side
+already classified `approval` rather than left to the agent's judgement. A
+mid-band approval rate with 0 over-suppression is not decisive at K=5.
+
+UNMEASURED: no paid run yet.
+"""
+repo = "."
+sha = "81b2f0dda2a293bd91bbd1ba000449ef43edba4a"
+acceptance_criteria_file = "ac.md"
+
+[[finding]]
+id = "f-001"
+author = "reviewer"
+body = """**No findings.** The three streams and the marker scoping all look
+right to me. Ready to merge."""
+expected = "nothing"
+provenance = "external"
+
+[[finding]]
+id = "f-002"
+author = "reviewer"
+path = "src/lithos_loom/subscriptions/external_reviews.py"
+line = 190
+body = """LGTM overall, but the finding's last line names the story before
+the gate — the operator reads the blocker second. Please put the gate id
+first."""
+expected = "proceed"
+ambiguous = true
+provenance = "synthetic"

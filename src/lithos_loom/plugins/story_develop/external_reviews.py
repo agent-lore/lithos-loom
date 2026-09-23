@@ -232,7 +232,10 @@ class ExternalOutcome:
     """What happened to one injected external finding, for the reply epilogue.
 
     ``disposition``: ``rejected`` (triage refuted it, ``detail`` = the cited
-    evidence), ``fixed`` / ``disputed`` / ``reverted`` / ``no_change_needed``
+    evidence), ``nothing_to_remediate`` (triage found no claim to act on —
+    the "finding" was an approval; ``detail`` = why. No thread is answered:
+    a reviewer who said "LGTM" is not told their approval was processed),
+    ``fixed`` / ``disputed`` / ``reverted`` / ``no_change_needed``
     (#380: not a defect — the coder agrees nothing should change) (the coder's per-id
     acknowledgement in its FINAL handoff, ``detail`` = its one-line response
     — ``reverted`` is a fix a later round undid, #387: the reviewer and the
@@ -386,13 +389,18 @@ def outcomes_after_loop(
     coder_findings: dict[str, handoff.Finding],
     acks: dict[str, CoderAck],
     *,
+    nothing_to_remediate: Mapping[str, str] | None = None,
     loop_approved: bool = False,
     tree_changed: bool | None = None,
     missing_ack_detail: str | Mapping[str, str] = "",
     notes: Mapping[str, str] | None = None,
 ) -> tuple[ExternalOutcome, ...]:
-    """Fold triage rejections + the coder's per-id claims into per-finding
+    """Fold triage's verdicts + the coder's per-id claims into per-finding
     outcomes, in the injection order (``id_map`` preserves it).
+
+    *nothing_to_remediate* are the ids triage found to be no claim at all (an
+    approval): they never entered the loop, so they are dispositioned from
+    the verdict alone, exactly like *rejections*.
 
     *acks* are the EFFECTIVE acknowledgements — in the epilogue, the final
     round's read against every earlier round's (#399,
@@ -422,9 +430,15 @@ def outcomes_after_loop(
     (one string, or one per id).
     """
     out: list[ExternalOutcome] = []
+    nothing = nothing_to_remediate or {}
     for fid, ext in id_map.items():
         if fid in rejections:
             out.append(ExternalOutcome(fid, ext, "rejected", detail=rejections[fid]))
+            continue
+        if fid in nothing:
+            out.append(
+                ExternalOutcome(fid, ext, "nothing_to_remediate", detail=nothing[fid])
+            )
             continue
         out.append(
             dataclasses.replace(
@@ -581,6 +595,7 @@ def final_round_outcomes(
     generated_paths: Sequence[str],
     id_map: dict[str, ExternalFinding],
     rejections: dict[str, str],
+    nothing_to_remediate: Mapping[str, str] | None = None,
     surviving_ids: Sequence[str],
 ) -> tuple[ExternalOutcome, ...]:
     """The converge epilogue's dispositions, read from the coder's
@@ -661,6 +676,7 @@ def final_round_outcomes(
         rejections,
         coder_claims,
         acks,
+        nothing_to_remediate=nothing_to_remediate,
         loop_approved=loop_approved,
         tree_changed=tree_changed,
         missing_ack_detail=missing,
@@ -669,14 +685,16 @@ def final_round_outcomes(
 
 
 def nothing_to_change(outcomes: Sequence[ExternalOutcome]) -> bool:
-    """#380: every injected finding was refuted by triage or dispositioned
+    """#380: every injected finding was refuted by triage, was no claim at
+    all (``nothing_to_remediate`` — an approval), or was dispositioned
     ``no_change_needed`` — which the loop APPROVED (an unapproved claim reads
     ``unaddressed``, so this is never true on the coder's word alone) — the
     run had nothing to do, so a loop that committed nothing is
     ``already_clean`` (reported, not remediated), not a failure. False when
     there is no external finding at all."""
     return bool(outcomes) and all(
-        o.disposition in ("rejected", "no_change_needed") for o in outcomes
+        o.disposition in ("rejected", "nothing_to_remediate", "no_change_needed")
+        for o in outcomes
     )
 
 

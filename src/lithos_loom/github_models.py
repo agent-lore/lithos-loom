@@ -36,6 +36,7 @@ __all__ = [
     "parse_pull_request_review",
     "parse_pull_request_review_comment",
     "strip_marker",
+    "is_approval_text",
     "is_automated_reply",
     "is_landed_fix_reply",
     "is_loom_pr_comment",
@@ -517,3 +518,90 @@ def review_is_actionable(review: PullRequestReview) -> bool:
     if review.state in SILENT_REVIEW_STATES:
         return False
     return bool(review.body.strip())
+
+
+# ── "an approval is not a finding" (the sibling of 8cfa3184) ───────────
+#
+# A review whose entire content is an approval — "**No findings.** … Ready to
+# merge." — asks for nothing. Remediating it costs a coder turn and a full
+# panel pass to learn what the comment already said (remediation run 827cedf8
+# on lens #100 spent exactly that, and deferred the PR's merge-gate behind
+# it). The classifier below is the cheap half of the answer: it recognises
+# approval-only prose BEFORE any paid turn, so the sweep reports the activity
+# as an ``approval`` and dispatches nothing. The S5a triage's
+# ``NOTHING_TO_REMEDIATE`` verdict is the model-driven backstop for the mixed
+# prose this cannot see.
+#
+# It fails towards ACTIONABLE, the recoverable direction: prose read as a
+# finding costs at most one remediation round (the loop's own gate + panel
+# still judge the result), while an ask read as an approval is silently
+# dropped. Hence a **unit** — one sentence, list item or line — must match a
+# known approval phrase END TO END: "LGTM, but rename X" is a single unit
+# that matches nothing, so it stays a finding.
+
+# Emoji / shortcodes that ARE the approval ("👍" alone is a verdict).
+_APPROVAL_EMOJI_RE = re.compile(
+    r"👍|✅|🚀|🎉|:\+1:|:shipit:|:rocket:|:tada:|:white_check_mark:"
+)
+# Sentence / clause boundaries. Splitting hard is safe: an ask can only end up
+# in MORE units, and every unit must match on its own.
+_UNIT_SPLIT_RE = re.compile(r"[\n.!?;,:]|—|–|\s-\s")
+# Markdown decoration, emoji shortcodes and any non-ASCII left after the
+# approval emoji are dropped before matching ("**No findings**" → "no findings").
+_DECORATION_RE = re.compile(r"""[*_`~#>\[\]()"'|]|:[a-z0-9_+-]+:|[^\x00-\x7f]""")
+
+_APPROVAL_UNIT_RE = re.compile(
+    r"""^(?:
+        lgtm
+      | (?:this\ )?looks?\ good(?:\ to\ me)?
+      | (?:this\ )?(?:is\ )?(?:all\ )?good(?:\ to\ (?:go|merge))?
+      | approved?|approving|approval
+      | ship\ it
+      | \+1
+      | all\ clear
+      | no\ (?:findings?|issues?|concerns?|comments?|blockers?|objections?
+            |problems?|notes?|nits?)(?:\ (?:here|found|from\ me))?
+      | nothing\ (?:to\ (?:flag|add|fix|change|remediate|do|address|report)
+            |further|blocking|else)(?:\ (?:here|from\ me))?
+      | (?:ready|good|ok|okay|fine|safe)\ to\ merge
+      | (?:merge|merging)\ (?:away|it|this)
+      | (?:im\ |i\ am\ )?happy\ (?:with\ (?:this|it)|to\ merge)
+      | (?:this\ )?(?:is\ )?fine(?:\ (?:by|with)\ me)?
+    )$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# Neutral courtesy: allowed ALONGSIDE an approval, never an approval by itself
+# ("Thanks!" on its own is not a verdict).
+_COURTESY_UNIT_RE = re.compile(
+    r"""^(?:
+        thanks?(?:\ (?:again|all|both))?
+      | thank\ you
+      | cheers
+      | (?:very\ )?nice(?:\ (?:work|catch|one))?
+      | (?:great|good)\ (?:work|stuff|job)
+      | great|awesome|perfect|excellent
+    )$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def is_approval_text(body: str) -> bool:
+    """True when *body* carries an approval and **no ask** — nothing to remediate.
+
+    Every unit of the body (sentence / list item / line) must be a known
+    approval phrase or a neutral courtesy, and at least one must be an
+    approval. Anything else — a request, a question, an observation, code,
+    prose the vocabulary does not know — makes the whole body a finding.
+    """
+    approved = False
+    # The emoji stands alone as its own unit: "Ship it 🚀" is two approvals,
+    # never one unrecognised sentence.
+    for raw in _UNIT_SPLIT_RE.split(_APPROVAL_EMOJI_RE.sub(". lgtm .", body)):
+        unit = " ".join(_DECORATION_RE.sub("", raw).split()).strip("- ")
+        if not unit:
+            continue
+        if _APPROVAL_UNIT_RE.match(unit):
+            approved = True
+        elif not _COURTESY_UNIT_RE.match(unit):
+            return False
+    return approved

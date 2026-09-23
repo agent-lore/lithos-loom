@@ -6,8 +6,10 @@ activity: new PR reviews and inline review comments post a one-shot
 marks (``last_review_id`` / ``last_comment_id``) in a url-scoped
 ``external_review_seen`` marker on the GATE. Per-state policy:
 ``CHANGES_REQUESTED`` always posts; ``COMMENTED`` only with content;
-``APPROVED`` / ``DISMISSED`` advance the marker silently. GitHub + Lithos are
-stubbed exactly as in ``test_develop_pr_merge``.
+``DISMISSED`` advances the marker silently. An approval — an ``APPROVED``
+review with no inline comments of its own, a "No findings / LGTM" comment —
+posts with the ``approval`` disposition and is kept OUT of the dispatchable
+batch. GitHub + Lithos are stubbed exactly as in ``test_develop_pr_merge``.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from lithos_loom.github_models import (
 from lithos_loom.github_review_activity import ReviewStream
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions.external_reviews import (
+    APPROVAL_NOTE,
     EXTERNAL_REVIEW,
     REVIEW_SEEN_KEY,
     ingest_external_reviews,
@@ -196,7 +199,12 @@ async def test_summary_only_changes_requested_posts_exactly_once() -> None:
     assert len(_findings(client)) == 1
 
 
-async def test_approved_and_dismissed_advance_marker_without_posting() -> None:
+async def test_dismissed_and_an_approval_that_asks_advance_the_marker_silently() -> (
+    None
+):
+    """A dismissal has had its say; an APPROVED review whose body still asks
+    for something keeps the per-state silent policy (it is not reported as an
+    approval, because it is not one)."""
     client = FakeLithosClient(agent_id="a")
     story, gate = await _gate_with_story(client)
     github = _github(
@@ -208,6 +216,136 @@ async def test_approved_and_dismissed_advance_marker_without_posting() -> None:
     assert _findings(client) == []
     marker = await _marker(client, gate.id)
     assert marker["last_review_id"] == 501  # recorded, silent
+
+
+# ── an approval is not a finding (827cedf8 / lens #100) ────────────────
+
+
+async def test_approved_review_posts_the_approval_disposition_and_no_batch() -> None:
+    """The acceptance shape: the operator learns the PR was approved, and the
+    batch that could dispatch a paid remediation round is EMPTY."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500, state="APPROVED", body="")])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    (finding,) = _findings(client)
+    assert finding.startswith(EXTERNAL_REVIEW)
+    assert "[approval] review by reviewer-human (APPROVED" in finding
+    assert APPROVAL_NOTE in finding
+    assert result.posted
+    assert result.actionable == []
+    assert [a.activity_id for a in result.approvals] == [500]
+    assert (await _marker(client, gate.id))["last_review_id"] == 500
+
+
+async def test_no_findings_conversation_comment_is_an_approval() -> None:
+    """Dave's actual comment on lens #100: a Conversation-tab verdict with
+    nothing to do. It must not reach the dispatchable batch."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        issue_comments=[_issue_comment(9001, body="**No findings.** Ready to merge.")]
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    (finding,) = _findings(client)
+    assert "[approval] comment by davesnowdon on the PR conversation" in finding
+    assert APPROVAL_NOTE in finding
+    assert result.actionable == []
+    assert [a.activity_id for a in result.approvals] == [9001]
+
+
+async def test_an_approval_that_also_asks_is_a_finding() -> None:
+    """The guard: "LGTM, but rename X" keeps its actionable sentence — only a
+    PURE approval is discarded."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        issue_comments=[_issue_comment(9002, body="LGTM, but rename `foo` first")]
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    (finding,) = _findings(client)
+    assert "[approval]" not in finding
+    assert APPROVAL_NOTE not in finding
+    assert [a.activity_id for a in result.actionable] == [9002]
+    assert result.approvals == []
+
+
+async def test_a_mixed_batch_reports_the_approval_and_dispatches_the_rest() -> None:
+    """One sweep, both dispositions: the real finding is the batch, the
+    approval rides along as a breadcrumb."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        reviews=[_review(500, state="APPROVED", body="No findings")],
+        comments=[_comment(111)],
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    (finding,) = _findings(client)
+    assert "- comment by reviewer-human on src/x.py:12" in finding
+    assert "[approval] review by reviewer-human (APPROVED" in finding
+    assert APPROVAL_NOTE not in finding  # something IS actionable here
+    assert [a.activity_id for a in result.actionable] == [111]
+    assert [a.activity_id for a in result.approvals] == [500]
+
+
+async def test_an_approved_review_owning_inline_comments_is_not_an_approval() -> None:
+    """Its own comments carry the asks and speak for it — the review is not
+    reported as "nothing to remediate" (and stays silent, as it always was)."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        reviews=[_review(500, state="APPROVED", body="LGTM overall")],
+        comments=[_comment(111, pull_request_review_id=500)],
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    (finding,) = _findings(client)
+    assert "[approval]" not in finding
+    assert [a.activity_id for a in result.actionable] == [111]
+    assert result.approvals == []
+
+
+async def test_an_approval_parks_no_pending_dispatch_trigger() -> None:
+    """The provider decides dispatch debt; an approvals-only batch must never
+    reach it, so no round can be owed for an approval."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(reviews=[_review(500, state="APPROVED", body="LGTM")])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+    asked: list[Any] = []
+
+    async def provider(batch: Any) -> dict[str, Any]:
+        asked.append(batch)
+        return {"external_remediation_pending": {"pr_url": _PR_URL}}
+
+    result = await ingest_external_reviews(
+        gate, spec, story, github, _ctx(client), pending_marker_for=provider
+    )
+
+    assert asked == []
+    assert result.posted and result.actionable == []
+    stored = await _refresh(client, gate)
+    assert "external_remediation_pending" not in stored.metadata
 
 
 async def test_commented_review_posts_only_with_content() -> None:
@@ -747,7 +885,7 @@ async def test_ingest_returns_the_actionable_batch() -> None:
 async def test_ingest_returns_empty_batch_when_nothing_posts() -> None:
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
-    github = _github(reviews=[_review(500, state="APPROVED", body="")])
+    github = _github(reviews=[_review(501, state="DISMISSED", body="")])
     spec = parse_pr_gate(gate)
     assert spec is not None
     result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
@@ -888,7 +1026,7 @@ async def test_pending_marker_rides_atomically_with_the_seen_marks() -> None:
 
 
 async def test_silent_material_marker_failure_reports_failed() -> None:
-    """PR #348 re-review round 3: for APPROVED/DISMISSED/reply-only activity
+    """PR #348 re-review round 3: for DISMISSED/reply-only activity
     the marker IS the durable record — a failed write must surface as
     ``failed`` so the merged-path caller defers resolution instead of losing
     the observation forever."""
@@ -904,7 +1042,7 @@ async def test_silent_material_marker_failure_reports_failed() -> None:
         return await original(**kwargs)
 
     client.task_update = failing_update  # type: ignore[method-assign]
-    github = _github(reviews=[_review(500, state="APPROVED", body="")])
+    github = _github(reviews=[_review(501, state="DISMISSED", body="")])
     spec = parse_pr_gate(gate)
     assert spec is not None
 

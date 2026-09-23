@@ -20,6 +20,7 @@ from lithos_loom.plugins.story_develop import external_triage as triage_mod
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.external_triage import (
     LINE_MISSING,
+    LINE_NOTHING,
     LINE_PROCEED,
     LINE_REJECT,
     LINE_REJECT_UNCITED,
@@ -87,6 +88,43 @@ def test_a_cited_reject_is_sticky_across_contradictory_lines() -> None:
     # Without an evidenced rejection, the later line wins.
     text = "- f-001: REJECT — no evidence\n- f-001: PROCEED\n"
     assert classify_verdict_lines(text, ["f-001"]) == {"f-001": LINE_PROCEED}
+
+
+def test_nothing_to_remediate_drops_the_finding_without_a_citation() -> None:
+    """The third verdict (827cedf8): an approval is not a claim, so there is
+    nothing to cite — it needs no evidence and is kept apart from a
+    rejection, which answers the reviewer's thread."""
+    text = (
+        "## Verdicts\n"
+        "- f-001: NOTHING_TO_REMEDIATE — the comment is an approval, no ask\n"
+        "- f-002: PROCEED\n"
+    )
+    verdicts = parse_triage_verdicts(text, ["f-001", "f-002"])
+    assert verdicts.proceed == ("f-002",)
+    assert verdicts.rejections == {}
+    assert verdicts.nothing_to_remediate == {
+        "f-001": "the comment is an approval, no ask"
+    }
+    assert classify_verdict_lines(text, ["f-001", "f-002"]) == {
+        "f-001": LINE_NOTHING,
+        "f-002": LINE_PROCEED,
+    }
+
+
+def test_nothing_to_remediate_tolerates_spacing_and_a_bare_line() -> None:
+    text = "- f-001: nothing to remediate\n- f-002: Nothing-To-Remediate — praise\n"
+    verdicts = parse_triage_verdicts(text, ["f-001", "f-002"])
+    assert verdicts.proceed == ()
+    assert verdicts.nothing_to_remediate == {"f-001": "", "f-002": "praise"}
+
+
+def test_an_evidenced_rejection_outranks_a_later_nothing_to_remediate() -> None:
+    """The evidenced verdict stays sticky: a contradictory file never turns a
+    refuted claim into "not a claim"."""
+    text = "- f-001: REJECT — src/x.py:1 a\n- f-001: NOTHING_TO_REMEDIATE — eh\n"
+    verdicts = parse_triage_verdicts(text, ["f-001"])
+    assert verdicts.rejections == {"f-001": "src/x.py:1 a"}
+    assert verdicts.nothing_to_remediate == {}
 
 
 def test_parser_reads_proceed_and_evidenced_reject() -> None:

@@ -15,6 +15,17 @@ still gate the result, and the push is append-only), while suppressing a
 true positive is the failure this whole arc exists to fix. The lens34
 over-suppression result is the risk to watch; the evidence requirement is
 its guard.
+
+The third verdict, ``NOTHING_TO_REMEDIATE``, is for material that is not a
+claim at all: reviewers approve on the same channels they review on, so a
+batch can carry a pure approval ("No findings. Ready to merge."). There is
+nothing to verify and nothing to change, so the run ends at round 0
+``already_clean`` — the #380 outcome reached without the coder turn and the
+panel pass remediation run 827cedf8 spent to learn what the comment already
+said. It is NOT a cheap REJECT: an approval that also asks ("LGTM, but
+rename X") is a claim and PROCEEDs, and a verdict that suppresses a
+must-proceed finding is scored as over-suppression by the S8 eval either
+way.
 """
 
 from __future__ import annotations
@@ -40,6 +51,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "NOTHING_TO_REMEDIATE",
     "TRIAGE_HANDOFF_NAME",
     "TriageVerdicts",
     "cited_locations",
@@ -49,23 +61,30 @@ __all__ = [
 ]
 
 # Per-finding verdict-line classes (``classify_verdict_lines``). Only
-# ``LINE_REJECT`` drops a finding; the other three all PROCEED — they are kept
-# apart so an instrument can tell a held default-to-act from a rejection the
-# evidence rule silently rescued (PRD S8 triage eval).
+# ``LINE_REJECT`` and ``LINE_NOTHING`` drop a finding; the other three all
+# PROCEED — they are kept apart so an instrument can tell a held
+# default-to-act from a rejection the evidence rule silently rescued (PRD S8
+# triage eval).
 LINE_PROCEED = "proceed"
 LINE_REJECT = "reject"  # explicit REJECT with cited, resolving evidence
 LINE_REJECT_UNCITED = "reject-uncited"  # REJECT lacking usable evidence → proceeds
 LINE_MISSING = "missing"  # no verdict line for the id → proceeds
+LINE_NOTHING = "nothing-to-remediate"  # the claim asks for nothing (an approval)
 
 # The verdict file the triage agent writes into the handoff mount.
 TRIAGE_HANDOFF_NAME = "round_00_triage.md"
 
-# One verdict per LINE: `- f-001: PROCEED` or `- f-001: REJECT — <evidence>`.
+# The third verdict's token, as the prompt spells it.
+NOTHING_TO_REMEDIATE = "NOTHING_TO_REMEDIATE"
+
+# One verdict per LINE: `- f-001: PROCEED`, `- f-001: REJECT — <evidence>` or
+# `- f-001: NOTHING_TO_REMEDIATE — <why it asks for nothing>`.
 # Anchored ^..$ with MULTILINE and no newline-crossing whitespace — an
 # unanchored `\s*` would let one verdict's optional evidence group swallow the
 # next line entirely (a PROCEED line eating the REJECT after it).
 _VERDICT_RE = re.compile(
-    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*(?P<verdict>PROCEED|REJECT)"
+    r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*"
+    r"(?P<verdict>PROCEED|REJECT|NOTHING[ _-]TO[ _-]REMEDIATE)"
     r"[ \t]*(?:[—–-]+[ \t]*(?P<evidence>.*\S))?[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -137,10 +156,19 @@ def _resolves_in_repo(evidence: str, repo_files: frozenset[str]) -> bool:
 
 @dataclass(frozen=True)
 class TriageVerdicts:
-    """Parsed per-finding verdicts (also the container step's result shape)."""
+    """Parsed per-finding verdicts (also the container step's result shape).
+
+    ``rejections`` are refuted claims (id → cited evidence);
+    ``nothing_to_remediate`` are ids that were never claims at all (id → the
+    one-line reason). Both are out of ``proceed``; the two are kept apart
+    because they mean different things to the operator, answer the reviewer
+    differently (a rejection replies on the thread, an approval is not
+    answered) and end the run under different statuses.
+    """
 
     proceed: tuple[str, ...]
     rejections: dict[str, str] = field(default_factory=dict)
+    nothing_to_remediate: dict[str, str] = field(default_factory=dict)
     cost_usd: float = 0.0
     note: str = ""  # non-empty when triage degraded and defaulted to act
     # Diagnostics, never consulted by the remediation path: what the verdict
@@ -162,18 +190,31 @@ def parse_triage_verdicts(
     cites a ``file:line`` location (``_CITATION_RE``) — and, when
     *repo_files* is supplied (the production step always passes the
     worktree's tracked-file snapshot), one that resolves to a real tracked
-    file. Everything else — PROCEED, bare REJECT, uncited prose,
-    citation-shaped prose naming no repo file, unmentioned, garbled —
-    proceeds. Ids the output invents are ignored. ``repo_files=None`` is the
-    pure/unit-test mode: shape-only, no filesystem coupling.
+    file. It is dropped as nothing-to-remediate only by an explicit
+    ``NOTHING_TO_REMEDIATE`` line, which needs no citation (there is no
+    claim to refute); the S8 eval scores such a line on a must-proceed
+    finding as over-suppression, exactly like a rejection. Everything else
+    — PROCEED, bare REJECT, uncited prose, citation-shaped prose naming no
+    repo file, unmentioned, garbled — proceeds. Ids the output invents are
+    ignored. ``repo_files=None`` is the pure/unit-test mode: shape-only, no
+    filesystem coupling.
     """
     kinds, evidence = _scan_verdict_lines(text, finding_ids, repo_files=repo_files)
     rejections = {
         fid: evidence[fid] for fid in finding_ids if kinds[fid] == LINE_REJECT
     }
-    proceed = tuple(fid for fid in finding_ids if fid not in rejections)
+    nothing = {
+        fid: evidence.get(fid, "") for fid in finding_ids if kinds[fid] == LINE_NOTHING
+    }
+    proceed = tuple(
+        fid for fid in finding_ids if fid not in rejections and fid not in nothing
+    )
     return TriageVerdicts(
-        proceed=proceed, rejections=rejections, line_kinds=kinds, verdict_text=text
+        proceed=proceed,
+        rejections=rejections,
+        nothing_to_remediate=nothing,
+        line_kinds=kinds,
+        verdict_text=text,
     )
 
 
@@ -209,15 +250,19 @@ def _scan_verdict_lines(
         cited = bool(evidence) and _CITATION_RE.search(evidence) is not None
         if cited and repo_files is not None:
             cited = _resolves_in_repo(evidence, repo_files)
-        if match.group("verdict").upper() == "REJECT" and cited:
+        verdict = " ".join(match.group("verdict").upper().replace("-", " ").split("_"))
+        if verdict == "REJECT" and cited:
             kinds[fid] = LINE_REJECT
             evidence_by_id[fid] = (
                 evidence  # a later cited REJECT refreshes the evidence
             )
         elif kinds[fid] == LINE_REJECT:
             continue  # sticky: an evidenced rejection is not undone by a later line
-        elif match.group("verdict").upper() == "REJECT":
+        elif verdict == "REJECT":
             kinds[fid] = LINE_REJECT_UNCITED
+        elif verdict != "PROCEED":  # NOTHING TO REMEDIATE — not a claim at all
+            kinds[fid] = LINE_NOTHING
+            evidence_by_id[fid] = evidence
         else:
             kinds[fid] = LINE_PROCEED
     return kinds, evidence_by_id
@@ -306,15 +351,17 @@ def triage_external_findings(
 
     verdicts = parse_triage_verdicts(text, finding_ids, repo_files=repo_files)
     logger.info(
-        "triage %s: %d proceed / %d rejected (cost $%.2f)",
+        "triage %s: %d proceed / %d rejected / %d nothing-to-remediate (cost $%.2f)",
         config.run_id,
         len(verdicts.proceed),
         len(verdicts.rejections),
+        len(verdicts.nothing_to_remediate),
         cost,
     )
     return TriageVerdicts(
         proceed=verdicts.proceed,
         rejections=verdicts.rejections,
+        nothing_to_remediate=verdicts.nothing_to_remediate,
         cost_usd=cost,
         line_kinds=verdicts.line_kinds,
         verdict_text=verdicts.verdict_text,

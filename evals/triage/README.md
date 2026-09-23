@@ -12,7 +12,17 @@ decides, per claim, whether a coder should act on it. Its contract is
 - **Under-rejection** — a false claim let through. Recoverable: the fix is
   still gated by the panel and the check-set before anything is pushed.
 
-So the eval reports two rates per case, and the second is a gate by default.
+There is also a third thing a "claim" can be: **not a claim** — a pure
+approval ("No findings. Ready to merge."), which reviewers leave on the same
+channels they review on. `NOTHING_TO_REMEDIATE` is its verdict, and letting
+one PROCEED is the 827cedf8 waste: a coder turn and a full panel pass to
+learn what the comment already said. That is cheap compared to
+over-suppression, so it is measured but weighed accordingly — and a
+must-proceed finding answered that way counts as over-suppression, exactly
+like a rejection.
+
+So the eval reports three rates per case, and over-suppression is a gate by
+default.
 
 ## Run it
 
@@ -30,9 +40,10 @@ uv run lithos-loom eval triage --tool codex --model <id> --effort high
 ```
 
 ```
-case                           n valid        reject (95% CI)     over-supp (95% CI)     cost  result
-----------------------------------------------------------------------------------------------------
-lens43-known-good-batch        5     5          9/10 60-98%           0/20 0-16%    $1.10  PASS
+case                           n valid        reject (95% CI)      approval (95% CI)     over-supp (95% CI)     cost  result
+---------------------------------------------------------------------------------------------------------------------------
+lens43-known-good-batch        5     5          9/10 60-98%                      —            0/20 0-16%    $1.10  PASS
+approval-and-ask               5     5                    —            5/5 57-100%             0/5 0-43%    $0.30  PASS
 ```
 
 - **reject** — known-false findings rejected *with a citation into their
@@ -41,8 +52,14 @@ lens43-known-good-batch        5     5          9/10 60-98%           0/20 0-16%
   0.8). The parser's own "any resolving `file:line`" is not enough here: the
   eval asks whether triage cited the code that actually refutes the claim,
   and a range keeps the claim's own anchor from scoring as evidence.
-- **over-supp** — must-proceed findings rejected, over every such opportunity
-  (`--max-over-suppression`, default **0**: one wrongly rejected true finding
+- **approval** — `expected = "nothing"` findings answered
+  `NOTHING_TO_REMEDIATE`, over every such opportunity (the same `--bar`).
+  Strict: a `REJECT` also avoids the paid round, but it answers the reviewer
+  as if they had made a claim, so it does not score. `—` when the batch
+  carries no approval, and the rate then gates nothing.
+- **over-supp** — must-proceed findings suppressed — by a cited `REJECT` **or**
+  by a `NOTHING_TO_REMEDIATE` — over every such opportunity
+  (`--max-over-suppression`, default **0**: one wrongly suppressed true finding
   fails the case).
 - **valid** — samples whose triage turn produced verdicts. A degraded turn
   (failed, or no verdict file) defaulted to act on everything; that is the
@@ -57,7 +74,7 @@ ledger assigns the ids, the rationale carries the `[author]` prefix, there is
 one anchor or none, and the severity is production's `minor` — the agent reads
 what `converge --from-github` would hand it, never the eval's own rendering.
 
-Both rates are per *opportunity* (finding × valid sample) and carry Wilson 95%
+All three rates are per *opportunity* (finding × valid sample) and carry Wilson 95%
 intervals — which ignore that one sample's opportunities come from one turn and
 that the same findings are re-asked every sample, so the bands are a **lower
 bound** on the uncertainty. `summary.json` also records
@@ -67,9 +84,10 @@ sample-size table](../review/README.md#how-many-samples--what-an-ab-can-actually
 in mind.
 
 Every sample retains the raw verdict file and a per-finding **line class**
-(`proceed` / `reject` / `reject-uncited` / `missing`), so a deliberate
-PROCEED, an uncited REJECT the evidence rule discarded, and a missing verdict
-line are distinguishable after the fact — a reject rate near zero can then be
+(`proceed` / `reject` / `reject-uncited` / `nothing-to-remediate` /
+`missing`), so a deliberate PROCEED, an uncited REJECT the evidence rule
+discarded, an approval waved through and a missing verdict line are
+distinguishable after the fact — a reject rate near zero can then be
 read as "held default-to-act" or "the citation rule did all the work".
 
 ## Add a case
@@ -99,7 +117,7 @@ author = "copilot"                      # the external ledger assigns them that 
 path = "src/x.py"                       # the claim's anchor (optional; one, like a
 line = 12                               # real inline comment; checked to exist)
 body = """the claim, as the reviewer wrote it"""
-expected = "proceed"                    # known-true OR ambiguous — both must proceed
+expected = "proceed"                    # proceed | reject | nothing (see below)
 provenance = "panel"                    # external | panel | synthetic
 
 [[finding]]
@@ -121,7 +139,8 @@ provenance = "synthetic"                # or path:START-END; put the refuting co
 Rules. The first two and the "exists at the tree" half of the third are
 gate-enforced by `tests/test_eval_triage_shipped.py` (hermetic, git only; skips
 where the checkout is absent); the loader enforces the schema (positional ids,
-a refutation on every known-false, `ambiguous` only on a proceed); the rest are
+a refutation on every known-false and on nothing else, `ambiguous` only on a
+proceed); the rest are
 conventions:
 
 - **Every batch carries at least one must-proceed finding.** A corpus that only
@@ -132,6 +151,12 @@ conventions:
   refute it; a rejection that cites elsewhere — including the claim's own anchor
   — does not score. Synthetic known-false claims are fine (closed questions the
   tree answers in a line) but declare `provenance = "synthetic"`.
+- **An approval is `nothing`, and carries no refutation.** A claim that asks
+  for nothing gets `expected = "nothing"`: there is no code to cite, so the
+  loader refuses a `refutation` (and `ambiguous`) on it. A batch that ships
+  one must also ship the *mixed* shape — an approval that carries an ask,
+  `expected = "proceed"` — or it measures only half the rule and trains the
+  verdict as a cheap REJECT.
 - **Ambiguous is `proceed`, and says so.** A design judgement, a deferral the
   code documents, a disputed AC reading — triage must not adjudicate those
   (loom's review has an out-of-scope disposition for that; triage does not).
@@ -164,3 +189,12 @@ preflight pins the rebuilt tree against the local commit. No real false claim
 existed in the material — every real finding validated as true or as a
 judgement — which is itself the S2 arc's finding repeated. Unmeasured until its
 first K=5 run.
+
+`approval-and-ask` (2026-09-23) — the 827cedf8 fixture, two claims by one
+reviewer on loom at 81b2f0d: Dave's verbatim "**No findings.** … Ready to
+merge." from lens PR #100 (`expected = "nothing"`) beside a synthetic
+approval that carries an ask — "LGTM overall, but … please put the gate id
+first" (`expected = "proceed"`, ambiguous: it is a judgement about naming
+the coder and the panel dispose of, not something triage adjudicates). The
+pair is the whole measurement: the first must stop the run at round 0, and
+the second must survive. Unmeasured until its first K=5 run.

@@ -1,11 +1,15 @@
 """Triage-eval harness: build the tree, score one batch verdict, aggregate K.
 
-Two rates, one denominator rule. A sample is one triage turn over the whole
+Three rates, one denominator rule. A sample is one triage turn over the whole
 batch (production shape). **Reject rate** = known-false findings rejected
 *with a citation into their declared refutation* (file, and line range when
 given) over every known-false opportunity in the valid samples;
-**over-suppression rate** = must-proceed findings that were rejected over
-every such opportunity. A sample whose triage turn degraded
+**approval rate** = ``expected = "nothing"`` findings answered
+``NOTHING_TO_REMEDIATE`` over every such opportunity (827cedf8: an approval
+that PROCEEDs costs a coder turn and a panel pass to learn what the comment
+already said); **over-suppression rate** = must-proceed findings that were
+rejected — by a cited REJECT or by a ``NOTHING_TO_REMEDIATE``, both suppress
+— over every such opportunity. A sample whose triage turn degraded
 (``TriageVerdicts.note`` set — failed turn, no verdict file) defaulted to
 act on everything, which is the step's contract, not a verdict: it is
 *errored* and excluded from both denominators, exactly as the review
@@ -126,6 +130,7 @@ class SampleScore:
     correct: dict[str, bool]
     proceed: tuple[str, ...]
     rejections: dict[str, str]
+    nothing_to_remediate: dict[str, str]
     line_kinds: dict[str, str]
     verdict_text: str
     errored: bool
@@ -133,11 +138,13 @@ class SampleScore:
     cost_usd: float
     rejected_known_false: int
     suppressed_known_true: int
+    recognised_approvals: int
 
     def payload(self) -> dict:
         return {
             "proceed": list(self.proceed),
             "rejections": dict(self.rejections),
+            "nothing_to_remediate": dict(self.nothing_to_remediate),
             "line_kinds": dict(self.line_kinds),
             "verdict_text": self.verdict_text,
             "correct": dict(self.correct),
@@ -146,6 +153,7 @@ class SampleScore:
             "cost_usd": self.cost_usd,
             "rejected_known_false": self.rejected_known_false,
             "suppressed_known_true": self.suppressed_known_true,
+            "recognised_approvals": self.recognised_approvals,
         }
 
 
@@ -164,20 +172,33 @@ def score_sample(case: TriageCase, verdicts: TriageVerdicts) -> SampleScore:
     correct: dict[str, bool] = {}
     rejected_kf = 0
     suppressed_kt = 0
+    recognised = 0
     for f in case.findings:
         if f.expected == "reject":
             ok = f.finding_id in verdicts.rejections and _cites_refutation(
                 verdicts.rejections[f.finding_id], f
             )
             rejected_kf += int(ok)
+        elif f.expected == "nothing":
+            # Strict: the verdict being measured is NOTHING_TO_REMEDIATE. A
+            # REJECT also avoids the paid round, but it answers the
+            # reviewer's thread as if they had made a claim.
+            ok = f.finding_id in verdicts.nothing_to_remediate
+            recognised += int(ok)
         else:
-            ok = f.finding_id not in verdicts.rejections
+            # Both suppressing verdicts count — a true finding waved through
+            # as "an approval" is over-suppression just as much as a REJECT.
+            ok = (
+                f.finding_id not in verdicts.rejections
+                and f.finding_id not in verdicts.nothing_to_remediate
+            )
             suppressed_kt += int(not ok)
         correct[f.finding_id] = ok
     return SampleScore(
         correct=correct,
         proceed=tuple(verdicts.proceed),
         rejections=dict(verdicts.rejections),
+        nothing_to_remediate=dict(verdicts.nothing_to_remediate),
         line_kinds=dict(verdicts.line_kinds),
         verdict_text=verdicts.verdict_text,
         errored=bool(verdicts.note),
@@ -185,6 +206,7 @@ def score_sample(case: TriageCase, verdicts: TriageVerdicts) -> SampleScore:
         cost_usd=verdicts.cost_usd,
         rejected_known_false=rejected_kf,
         suppressed_known_true=suppressed_kt,
+        recognised_approvals=recognised,
     )
 
 
@@ -208,15 +230,20 @@ class TriageCaseResult:
     reject_rate_ci: tuple[float, float]
     over_suppression_rate: float
     over_suppression_ci: tuple[float, float]
+    approval_rate: float
+    approval_rate_ci: tuple[float, float]
     passed: bool
     rejected_known_false: int
     known_false_opportunities: int
     suppressed_known_true: int
     known_true_opportunities: int
+    recognised_approvals: int
+    approval_opportunities: int
     samples_with_suppression: int
     errored_per_sample: tuple[bool, ...]
     rejected_known_false_per_sample: tuple[int, ...]
     suppressed_known_true_per_sample: tuple[int, ...]
+    recognised_approvals_per_sample: tuple[int, ...]
     cost_usd_per_sample: tuple[float, ...]
     notes_per_sample: tuple[str, ...]
     per_finding_correct: dict[str, int]
@@ -236,19 +263,25 @@ def aggregate_triage(
     """Turn per-sample scores into a :class:`TriageCaseResult`.
 
     ``passed`` needs valid samples, the reject rate at the bar (vacuously
-    true when the batch has no known-false), and over-suppression at or
-    under *max_over_suppression* — default 0: one wrongly rejected true
-    finding fails the case, because that is the expensive direction.
+    true when the batch has no known-false), the approval rate at the same
+    bar (vacuously true when the batch has no approval), and
+    over-suppression at or under *max_over_suppression* — default 0: one
+    wrongly rejected true finding fails the case, because that is the
+    expensive direction.
     """
     valid = [s for s in scores if not s.errored]
     n_kf = len(case.known_false)
     n_kt = len(case.known_true)
+    n_ap = len(case.approvals)
     rejected = sum(s.rejected_known_false for s in valid)
     kf_opps = n_kf * len(valid)
     suppressed = sum(s.suppressed_known_true for s in valid)
     kt_opps = n_kt * len(valid)
+    recognised = sum(s.recognised_approvals for s in valid)
+    ap_opps = n_ap * len(valid)
     reject_rate = rejected / kf_opps if kf_opps else 0.0
     over = suppressed / kt_opps if kt_opps else 0.0
+    approval_rate = recognised / ap_opps if ap_opps else 0.0
     per_finding = {
         f.finding_id: sum(int(s.correct.get(f.finding_id, False)) for s in valid)
         for f in case.findings
@@ -256,6 +289,7 @@ def aggregate_triage(
     passed = (
         bool(valid)
         and (kf_opps == 0 or reject_rate >= bar)
+        and (ap_opps == 0 or approval_rate >= bar)
         and over <= max_over_suppression
     )
     return TriageCaseResult(
@@ -268,15 +302,22 @@ def aggregate_triage(
         over_suppression_ci=(
             wilson_interval(suppressed, kt_opps) if kt_opps else (0.0, 0.0)
         ),
+        approval_rate=approval_rate,
+        approval_rate_ci=(
+            wilson_interval(recognised, ap_opps) if ap_opps else (0.0, 0.0)
+        ),
         passed=passed,
         rejected_known_false=rejected,
         known_false_opportunities=kf_opps,
         suppressed_known_true=suppressed,
         known_true_opportunities=kt_opps,
+        recognised_approvals=recognised,
+        approval_opportunities=ap_opps,
         samples_with_suppression=sum(1 for s in valid if s.suppressed_known_true),
         errored_per_sample=tuple(s.errored for s in scores),
         rejected_known_false_per_sample=tuple(s.rejected_known_false for s in scores),
         suppressed_known_true_per_sample=tuple(s.suppressed_known_true for s in scores),
+        recognised_approvals_per_sample=tuple(s.recognised_approvals for s in scores),
         cost_usd_per_sample=tuple(s.cost_usd for s in scores),
         notes_per_sample=tuple(s.note for s in scores),
         per_finding_correct=per_finding,

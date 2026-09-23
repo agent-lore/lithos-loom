@@ -885,6 +885,59 @@ async def test_reconcile_still_open_dispatches_remediation(
     assert marker["last_seen_head_sha"] == "e" * 40  # observed pre-ingest
 
 
+async def test_an_approval_posts_but_spends_nothing_and_lets_the_merge_gate_run(
+    tmp_path,
+) -> None:
+    """An approval is not a finding (827cedf8 / lens #100): the sweep reports
+    it with the `approval` disposition, reserves NO budget round, spawns
+    nothing — and the merge-gate runs in the same sweep instead of being
+    deferred behind a remediation run that should never have started."""
+    from lithos_loom.subscriptions.external_remediation import REMEDIATION_KEY
+    from lithos_loom.subscriptions.external_reviews import APPROVAL_NOTE
+
+    considered: list[bool] = []
+
+    class _MergeGate:
+        def busy_on(self, pr_url: str) -> bool:
+            return False
+
+        async def consider(self, gate, spec, story_id, pr, ctx, *, hold):
+            considered.append(hold)
+            return "unchanged"
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _review_github(_open_pr())
+    github.list_pull_request_reviews.return_value = [
+        PullRequestReview(
+            author="davesnowdon",
+            body="**No findings.** Ready to merge.",
+            review_id=500,
+            state="APPROVED",
+        )
+    ]
+    github.get_collaborator_permission.return_value = "admin"  # trusted author
+    rem = _remediation(tmp_path)  # its spawn asserts it is never called
+
+    outcome = await reconcile_pr_gate(
+        gate,
+        github,
+        _ctx(client),
+        ingest_reviews=True,
+        remediation=rem,
+        merge_gate=_MergeGate(),  # type: ignore[arg-type]
+    )
+
+    assert outcome == "still_open"
+    (finding,) = [f["summary"] for f in client._findings]
+    assert finding.startswith("[ExternalReview]") and APPROVAL_NOTE in finding
+    assert rem._task is None  # nothing dispatched
+    stored = await _get(client, gate.id)
+    assert stored.metadata[REMEDIATION_KEY]["rounds_used"] == 0  # no round reserved
+    assert "external_remediation_pending" not in stored.metadata  # none owed
+    assert considered == [False]  # the merge-gate ran, unheld
+
+
 async def test_reconcile_exhausted_budget_states_it_in_the_finding(
     tmp_path,
 ) -> None:
