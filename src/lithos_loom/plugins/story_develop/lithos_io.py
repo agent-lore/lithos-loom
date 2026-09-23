@@ -149,6 +149,67 @@ def _result_summary(result: DevelopResult) -> str:
     return "\n".join(lines)
 
 
+def _decision_breadcrumb(result: DevelopResult) -> str:
+    """The ``[ReviewDispute]`` finding for a ``needs_decision`` stop (9d5ebca6).
+
+    The coder asked something neither agent can settle by re-reading the code,
+    and no reviewer showed otherwise, so the run stopped before paying another
+    round. The body is the QUESTION (and its options) — the operator answers
+    by editing the acceptance criteria, then ticks the needs-human gate to
+    re-dispatch under it (or salvages the branch with `develop deliver` /
+    `converge --ac-file`).
+
+    EVERY decision the run has is carried WHOLE — its length was checked on
+    admission (`findings._admits_decision`) and so was the size of the
+    collection (`findings.admitted_decisions`, applied before the run stopped),
+    so this body is bounded without ever being a prefix of the question the
+    operator must answer (correctness/f-002, security/f-007). A mark that did
+    not fit that budget is named as NOT ADMITTED — an ordinary dispute, which
+    is what it is — rather than as a decision whose text went missing.
+
+    The header states what each shape MEANS, and states it accurately
+    (correctness/f-002): every decision here was quoted into the reviewer's
+    own prompt (`findings.FindingLedger.render_open`, filling the
+    `{open_findings}` slot of `reviewer_rereview.md` AND of the
+    `reviewer_reseed.md` a usage limit builds — security/f-005: the claim is
+    only true while BOTH carry it) before that round's review, and an omitted
+    `decision_verdict:` is re-prompted once
+    (`findings.FindingLedger.check`) before the review is allowed to land. So
+    an unanswered decision is a reviewer that was ASKED — twice, normally —
+    and supplied no valid answer, never a question that reached nobody. The
+    operator reads this before editing the acceptance criteria or salvaging
+    the branch, so the difference has to be stated as what it is.
+    """
+    # Local import, like `develop.findings_by_severity` below: this module
+    # keeps the plugin's domain modules out of its runtime import surface.
+    from .findings import not_admitted_note
+
+    lines = [
+        f"{DISPUTE_PREFIX} story-develop run {result.run_id} stopped for a "
+        f"product decision after {result.rounds} round(s) — the coder holds "
+        "the finding(s) below are out of this story's reach, and no reviewer "
+        "contested that. Each one names what the reviewer actually DID. The "
+        "question was PUT to the reviewer either way — it is quoted into its "
+        "prompt, and an omitted verdict is re-prompted once before its review "
+        "is allowed to land — so a concession is an adjudicated answer, while "
+        "'no reviewer answer recorded' means it was asked and none came back "
+        "(security/f-004):",
+        "",
+    ]
+    for d in result.decisions:
+        lines += [d.render(), ""]
+    if result.decisions_not_admitted:
+        lines += [not_admitted_note(result.decisions_not_admitted), ""]
+    lines += [
+        "Answer by editing the acceptance criteria (a 'Settled during run "
+        f"{result.run_id}: …' clause), then complete the needs-human gate to "
+        f"re-dispatch under it — or keep the branch {result.branch} with "
+        "`lithos-loom develop deliver` / `develop converge --ac-file`.",
+        f"conversation log: {result.conversation_log}",
+    ]
+    return "\n".join(lines)
+
+
 def _deferred_section(spawns: Sequence[DeferredSpawn]) -> str:
     """The ``[DevelopResult]`` block naming every deferred finding (819370e5).
 
@@ -338,7 +399,12 @@ def post_results(
             elif pr_url:
                 summary += f"\n\npull request: {pr_url}"
             await client.finding_post(task_id=task_id, summary=summary)
-            if result.status == "disputed":
+            if result.status == "needs_decision":
+                await client.finding_post(
+                    task_id=task_id,
+                    summary=_decision_breadcrumb(result),
+                )
+            elif result.status == "disputed":
                 await client.finding_post(
                     task_id=task_id,
                     summary=(

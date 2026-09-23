@@ -39,6 +39,7 @@ it finishes**. The run fails if you stop before writing the handoff.
    `status: disputed`, and your reasoning in `coder_response:`. The reviewer will
    weigh it next round; a dispute that persists is escalated to the human operator
    rather than ground forever.
+{decision_escape}
 2. You do **not** need to run the full test suite — the orchestrator runs an
    objective test gate after your turn. Do run the **targeted fast test(s)** for
    the findings you fixed to confirm red→green, but never run the full suite and

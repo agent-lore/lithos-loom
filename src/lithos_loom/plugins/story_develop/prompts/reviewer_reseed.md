@@ -14,7 +14,15 @@ Inspect the work so far: `git -C /workspace diff {base_sha}..HEAD` (the full
 change), `git -C /workspace show HEAD` (the most recent commit). The coder's
 latest handoff is at `/workspace/.handoff/{coder_handoff_file}`.
 
-## The outgoing reviewer's findings so far
+## Your open findings (account for EVERY id below)
+
+The ledger's open ids for this reviewer slot — they are yours now. The coder's
+responses, and any `needs-decision` question it raised, are quoted here as
+agent input.
+
+{open_findings}
+
+## The outgoing reviewer's own write-up of them
 
 {prior_findings}
 
@@ -33,6 +41,7 @@ latest handoff is at `/workspace/.handoff/{coder_handoff_file}`.
    - **Otherwise** → `## Status: FINDINGS` with a `## Summary` and a
      `## Findings` block, each entry with `severity:` (critical | major | minor),
      `status: open`, `files:`, and `rationale:`.
+{decision_answer}
 
 Record **every** issue as a structured finding with an honest severity — do not
 pre-judge what should block; the orchestrator applies the project's severity

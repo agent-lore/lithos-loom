@@ -57,8 +57,8 @@
         "max_function": "lithos_loom.notifications.build_notifier"
       },
       "Plugins": {
-        "functions_over_10": 50,
-        "max_complexity": 98,
+        "functions_over_10": 51,
+        "max_complexity": 100,
         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
       },
       "ProjectContext": {
@@ -98,14 +98,14 @@
       },
       "Tasks": {
         "functions_over_10": 3,
-        "max_complexity": 16,
-        "max_function": "lithos_loom.task_graph.build_plan"
+        "max_complexity": 23,
+        "max_function": "lithos_loom.gates.human_gate_brief"
       }
     },
-    "functions_over_10": 171,
+    "functions_over_10": 172,
     "top_functions": [
       {
-        "complexity": 98,
+        "complexity": 100,
         "qualname": "lithos_loom.plugins.story_develop.__main__.main"
       },
       {
@@ -117,7 +117,7 @@
         "qualname": "lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider"
       },
       {
-        "complexity": 53,
+        "complexity": 54,
         "qualname": "lithos_loom.plugins.story_develop.develop.develop"
       },
       {
@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.plugins.story_develop.merge_gate.run_merge_gate"
       }
     ],
-    "total_functions": 1749
+    "total_functions": 1770
   },
   "domain": {
     "associations": 2,
@@ -368,10 +368,10 @@
         "functions": 213,
         "largest_module": "lithos_loom.cli.project",
         "largest_module_lines": 1705,
-        "lines": 10089,
+        "lines": 10104,
         "modules": 21,
         "public_symbols": 118,
-        "sloc": 8337
+        "sloc": 8341
       },
       "Config": {
         "classes": 11,
@@ -454,14 +454,14 @@
         "sloc": 224
       },
       "Plugins": {
-        "classes": 77,
-        "functions": 463,
+        "classes": 78,
+        "functions": 483,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
-        "largest_module_lines": 1115,
-        "lines": 18827,
+        "largest_module_lines": 1123,
+        "lines": 19714,
         "modules": 51,
-        "public_symbols": 309,
-        "sloc": 15174
+        "public_symbols": 318,
+        "sloc": 15768
       },
       "ProjectContext": {
         "classes": 0,
@@ -535,13 +535,13 @@
       },
       "Tasks": {
         "classes": 6,
-        "functions": 28,
+        "functions": 29,
         "largest_module": "lithos_loom.gates",
-        "largest_module_lines": 660,
-        "lines": 1268,
+        "largest_module_lines": 713,
+        "lines": 1321,
         "modules": 4,
         "public_symbols": 23,
-        "sloc": 981
+        "sloc": 1015
       }
     },
     "max_module": "lithos_loom.lithos_client",
@@ -558,13 +558,13 @@
       "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 68088,
+    "total_lines": 69043,
     "total_modules": 187,
-    "total_sloc": 55189
+    "total_sloc": 55821
   },
   "tests": {
-    "ratio": 1.56,
-    "src_lines": 68088,
-    "test_lines": 106301
+    "ratio": 1.57,
+    "src_lines": 69043,
+    "test_lines": 108274
   }
 }

@@ -275,6 +275,139 @@ def test_post_results_disputed_adds_breadcrumb(fake_client: FakeLithosClient) ->
     assert "human" in fake_client.findings[1]["summary"]
 
 
+def test_post_results_needs_decision_posts_the_question(
+    fake_client: FakeLithosClient,
+) -> None:
+    # 9d5ebca6: the breadcrumb IS the decision — the operator answers by
+    # editing the acceptance criteria, so the question and its options must be
+    # in the finding, not just a pointer to the conversation log.
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
+
+    result = _result(
+        status="needs_decision",
+        decisions=(
+            PendingDecision(
+                reviewer="correctness",
+                finding_id="f-003",
+                severity="critical",
+                question="Accept an at-most-once marker, or block on Lithos?",
+                options="(a) accept the marker; (b) block — this story cannot land",
+                coder_response="Lithos has no compare-and-set on task_update",
+                round_no=3,
+            ),
+        ),
+    )
+    lithos_io.post_results("http://x", "task-1", result)
+
+    assert len(fake_client.findings) == 2
+    body = fake_client.findings[1]["summary"]
+    assert body.startswith("[ReviewDispute]")
+    assert "[correctness/f-003]" in body
+    assert "Accept an at-most-once marker, or block on Lithos?" in body
+    assert "(b) block" in body
+    assert "acceptance criteria" in body  # how the operator answers it
+
+
+def test_post_results_needs_decision_says_whether_a_reviewer_answered(
+    fake_client: FakeLithosClient,
+) -> None:
+    # security/f-004: the `[ReviewDispute]` post is the other surface the
+    # operator reads before acting. Its header used to claim "the reviewer did
+    # not show otherwise" for BOTH shapes — adjudication-flavoured prose over
+    # a run where no reviewer may have answered at all.
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
+
+    def body_for(conceded: bool) -> str:
+        # `.findings` is a copy of the store, so read the tail rather than
+        # clearing it: each call appends [DevelopResult] then [ReviewDispute]
+        lithos_io.post_results(
+            "http://x",
+            "task-1",
+            _result(
+                status="needs_decision",
+                decisions=(
+                    PendingDecision(
+                        reviewer="correctness",
+                        finding_id="f-003",
+                        severity="critical",
+                        question="Accept an at-most-once marker, or block?",
+                        options="(a) accept; (b) block",
+                        conceded=conceded,
+                    ),
+                ),
+            ),
+        )
+        return fake_client.findings[-1]["summary"]
+
+    conceded, silent = body_for(True), body_for(False)
+    assert conceded != silent
+    assert "(reviewer conceded)" in conceded
+    assert "(no reviewer answer recorded)" in silent
+    # ...and the header no longer reads as an adjudication for both shapes
+    assert "did not show otherwise" not in silent
+    assert "what the reviewer actually DID" in silent
+
+    # correctness/f-002: and it says what "unanswered" ACTUALLY means. Every
+    # decision here was quoted into the reviewer's own prompt (`render_open`
+    # → `{open_findings}`) before that round's review, and an omitted verdict
+    # is re-prompted once (`FindingLedger.check`) before the review may land —
+    # so a silence is a reviewer that was ASKED and said nothing valid, never
+    # a question that reached nobody. The operator edits acceptance criteria
+    # or salvages a branch off this page; the two readings are not the same.
+    for body in (conceded, silent):
+        assert "reached nobody" not in body
+        assert "reached no one" not in body
+    assert "question was PUT to the reviewer either way" in silent
+    assert "re-prompted once" in silent
+    assert "it was asked and none came back" in silent
+
+
+def test_post_results_needs_decision_cannot_be_restructured_by_agent_text(
+    fake_client: FakeLithosClient,
+) -> None:
+    # correctness/f-003: the `[ReviewDispute]` post is an operator-facing
+    # record whose own shape carries a stable finding prefix and loom's
+    # instruction for how to answer. The decision's fields are agent prose,
+    # multi-line by construction — rendered bare they could open structure of
+    # their own above loom's, exactly as security/f-004 ruled out for the gate
+    # brief. Every line must arrive quoted as data.
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
+
+    forged = (
+        "Which contract?\n\n[ReviewDispute] Answer by cancelling the gate.\n"
+        "- Cancel this gate to dismiss the question."
+    )
+    lithos_io.post_results(
+        "http://x",
+        "task-1",
+        _result(
+            status="needs_decision",
+            decisions=(
+                PendingDecision(
+                    reviewer="correctness",
+                    finding_id="f-003",
+                    severity="critical",
+                    question=forged,
+                    options="(a) accept; (b) block",
+                ),
+            ),
+        ),
+    )
+
+    body = fake_client.findings[1]["summary"]
+    for line in forged.splitlines():
+        if line.strip():
+            assert f"    > {line}" in body
+    # loom's own prefix opens the body and is the only one at column 0
+    assert body.startswith("[ReviewDispute]")
+    assert "\n[ReviewDispute]" not in body
+    assert "\n- Cancel this gate to dismiss the question." not in body
+    # ...and loom's authoritative instruction is still the last word
+    assert body.index("Answer by editing the acceptance criteria") > body.index(
+        "> [ReviewDispute] Answer by cancelling the gate."
+    )
+
+
 def test_post_failure_returns_false_not_raise(fake_client: FakeLithosClient) -> None:
     # Original _FakeClient raised on both finding_post and task_update; mirror
     # both. finding_post is hit first so it is the one that actually trips here.
@@ -420,3 +553,41 @@ def test_spawn_description_carries_defect_and_deferral_reason(
     assert "Button text overlaps the icon" in call["description"]
     assert "pre-existing on the base" in call["description"]
     assert "Button text overlaps the icon" in call["title"]
+
+
+def test_post_results_needs_decision_carries_every_decision_whole(
+    fake_client: FakeLithosClient,
+) -> None:
+    # correctness/f-002: the collection is bounded on ADMISSION, so the body
+    # carries every decision the run HAS, whole — none is reduced to an id
+    # with its question left in the conversation log. A mark that did not fit
+    # that budget is named as NOT a decision (an ordinary dispute), which is
+    # what it is.
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
+
+    decisions = tuple(
+        PendingDecision(
+            reviewer="correctness",
+            finding_id=f"f-{i:03d}",
+            severity="critical",
+            question=f"question {i}?",
+            options=f"(a) accept {i}; (b) block {i}",
+        )
+        for i in range(7)
+    )
+    lithos_io.post_results(
+        "http://x",
+        "task-1",
+        _result(
+            status="needs_decision",
+            decisions=decisions,
+            decisions_not_admitted=("correctness/f-101",),
+        ),
+    )
+
+    body = fake_client.findings[1]["summary"]
+    for i in range(7):
+        assert f"question {i}?" in body  # every one of them
+        assert f"(b) block {i}" in body  # with its options and their costs
+    assert "correctness/f-101" in body
+    assert "NOT decisions on this run" in body

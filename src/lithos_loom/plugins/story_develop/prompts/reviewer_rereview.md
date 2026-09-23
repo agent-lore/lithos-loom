@@ -61,6 +61,7 @@ changed — and any points it disputes.
      `## Findings` block listing only the issues that remain open (plus any
      genuinely new ones), each with `severity:` (critical | major | minor),
      `status: open`, `files:`, and `rationale:`.
+{decision_answer}
    - A finding that is REAL but **not this change's to fix** — pre-existing on
      the base, a harness or pipeline fault, another story's agreed work — gets
      `status: out-of-scope`, keeping `rationale:` as the defect description

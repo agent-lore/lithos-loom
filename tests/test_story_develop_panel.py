@@ -1200,6 +1200,100 @@ def test_review_context_survives_a_usage_limit_reseed(
     assert all("## MERGE-CONTEXT-MARKER" in p for p in prompts)
 
 
+def test_a_pending_decision_reaches_the_usage_limit_reseed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """security/f-005: the reseed is a fresh session run under the SAME
+    `FindingLedger.check`, so a pending `needs-decision` is the replacement
+    reviewer's to answer — and since the lapse went, a non-answer escalates.
+    Its prompt used to carry no `{open_findings}`, no verdict contract and no
+    AGENT-INPUT framing, so the coder's question reached it (if at all)
+    unquoted via the raw handoff file, with the fail-open direction doing the
+    rest."""
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+    from lithos_loom.plugins.story_develop.handoff import ReviewHandoff
+    from lithos_loom.plugins.story_develop.panel_prompts import decision_answer_block
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    rstate = _ReviewerState(
+        ReviewerSpec(name="correctness", fallback_chain=("codex",)),
+        "cid-correctness",
+        [],
+        tmp_path,
+    )
+    # a blocking finding the coder has marked needs-decision, un-answered
+    rstate.ledger.apply_review(
+        ReviewHandoff(
+            status="FINDINGS",
+            summary="",
+            findings=[
+                Finding(
+                    finding_id="",
+                    severity="major",
+                    status="open",
+                    rationale="the effective-config view is unimplemented",
+                )
+            ],
+        ),
+        1,
+    )
+    rstate.ledger.record_coder_updates(
+        [
+            Finding(
+                finding_id="f-001",
+                severity="major",
+                status="needs-decision",
+                coder_response="Lens has no effective-config display",
+                decision_question="Add the display, or drop the criterion?",
+                decision_options="(a) build it — a second story; (b) drop it",
+            )
+        ],
+        1,
+    )
+
+    monkeypatch.setattr(panel_mod.containers, "stop_container", lambda c: None)
+    monkeypatch.setattr(panel_mod.containers, "start_container", lambda cmd: "cid2")
+    monkeypatch.setattr(panel_mod, "build_run_cmd", lambda *a, **k: ("cid2", ["cmd"]))
+    prompts: list[str] = []
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return _limited_turn()
+        (
+            config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+        ).write_text(_ART_LGTM)
+        return _ok_turn(session_id)
+
+    panel_mod.run_panel_round(
+        config,
+        [rstate],
+        wt=config.repo,
+        base=panel_mod.git.RangeBase("0" * 40),
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+    )
+
+    assert len(prompts) == 2
+    reseed = prompts[1]
+    assert "taking over" in reseed  # it IS the reseed prompt
+    # the question arrives quoted and labelled as agent input, via the one
+    # call that does that (`render_open`) — never as raw prose
+    assert "question> Add the display, or drop the criterion?" in reseed
+    assert "options> (a) build it — a second story; (b) drop it" in reseed
+    assert "AGENT INPUT" in reseed
+    # ...and the contract it is held to rides along, as the same paragraph
+    assert decision_answer_block() in reseed
+    # every slot is actually filled — an unfilled one would ship the literal
+    assert "{open_findings}" not in reseed and "{decision_answer}" not in reseed
+
+
 # --- slice B: reviewer infra reactions (retry with backoff, then escalate) ---
 
 

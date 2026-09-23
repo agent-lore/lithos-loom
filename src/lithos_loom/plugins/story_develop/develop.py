@@ -25,9 +25,14 @@ Unattended runs are bounded (T7): ``max_rounds``, a ``max_cost_usd`` ceiling,
 a stall guard keyed off finding identity (empty round commit or an unchanged
 blocking set, two rounds running), and a dispute escalation — a coder-disputed
 finding the reviewer keeps blocking for 2 rounds stops the run with a
-``[ReviewDispute]`` breadcrumb instead of grinding to ``max_rounds``. Finding
-identity itself is plugin-enforced via each reviewer's
-:class:`~.findings.FindingLedger`.
+``[ReviewDispute]`` breadcrumb instead of grinding to ``max_rounds``. A coder
+mark of ``needs-decision`` no reviewer contests short-circuits even that
+(9d5ebca6): the run stops ``needs_decision`` at the end of that same review
+round, carrying the question to the operator instead of paying two more rounds
+to reach the same place — on the STORY-DEVELOP path only (``entry is None``):
+converge has no gate behind the question, so there the mark stays the ordinary
+dispute it also is (correctness/f-003). Finding identity itself is
+plugin-enforced via each reviewer's :class:`~.findings.FindingLedger`.
 """
 
 from __future__ import annotations
@@ -58,7 +63,13 @@ from .config import (
     ReviewerSpec,
     is_valid_reviewer_name,
 )
-from .findings import DeferredFinding, collect_deferred
+from .findings import (
+    DeferredFinding,
+    PendingDecision,
+    admitted_decisions,
+    collect_deferred,
+    collect_pending_decisions,
+)
 from .gate_findings import GateFinding
 from .handoff import HandoffError
 from .loop_entry import LoopEntry
@@ -97,6 +108,7 @@ class DevelopResult:
 
     # "approved" | "max_rounds" | "failed" | "interrupted"
     # | "stalled" | "disputed" | "cost_exceeded"  (T7 guards)
+    # | "needs_decision"  (9d5ebca6: an un-contested coder needs-decision)
     # | "infra_failed"  (slice B: an auth / transport / spawn failure persisted)
     status: str
     run_id: str
@@ -134,6 +146,17 @@ class DevelopResult:
     # final round's outcomes (a deferral round earlier than the seal would
     # otherwise vanish from the record).
     deferred_findings: tuple[DeferredFinding, ...] = ()
+    # 9d5ebca6: the coder decisions no reviewer contested — the whole content
+    # of a ``needs_decision`` stop (and empty on every status that resolves or
+    # never reaches one, since only a BLOCKING finding can carry one). Read
+    # off the LEDGERS like `deferred_findings` (the escalating round's review
+    # need not re-list the finding for the question to exist) and carried
+    # structurally so the gate's brief is the DECISION, not the run facts.
+    decisions: tuple[PendingDecision, ...] = ()
+    # Labels of `needs-decision` marks the escalation could not carry whole
+    # (correctness/f-002): NOT decisions on this run — ordinary disputes,
+    # named as such on both operator surfaces instead of published as ids.
+    decisions_not_admitted: tuple[str, ...] = ()
     # ``infra_failed`` only (slice B): what to fix on the host before completing
     # the needs-human gate — structured, so the gate's capped summary can never
     # truncate it away
@@ -295,7 +318,15 @@ def _record_coder_disputes(
 # for a max_rounds run. ``state.json`` records the reason only for these, so the
 # offline ``attach`` summary (#188) never shows a stale reason for max_rounds.
 _REASON_BEARING_STATUSES = frozenset(
-    {"failed", "interrupted", "stalled", "disputed", "cost_exceeded", "infra_failed"}
+    {
+        "failed",
+        "interrupted",
+        "stalled",
+        "disputed",
+        "cost_exceeded",
+        "infra_failed",
+        "needs_decision",
+    }
 )
 
 
@@ -437,6 +468,13 @@ def develop(
         wt=wt,
         read_only=False,
     )
+    # correctness/f-003: the cheap `needs-decision` escalation is the
+    # story-develop path's (``entry is None``). A converge run shares this loop
+    # but has no needs-decision surface behind it — `converge_pr` flattens every
+    # unapproved run to `not_converged`, and both watcher consumers branch on
+    # that — so there the mark stays the ordinary dispute it also is, the coder
+    # is never told otherwise, and the two-round guard bounds it as before.
+    decisions_enabled = entry is None
     reviewers: list[panel.ReviewerState] = []
     for spec in specs:
         rname, rcmd = agent_session.build_run_cmd(
@@ -447,7 +485,11 @@ def develop(
             wt=wt,
             read_only=True,
         )
-        reviewers.append(panel.ReviewerState(spec, rname, rcmd, wt))
+        reviewers.append(
+            panel.ReviewerState(
+                spec, rname, rcmd, wt, decisions_enabled=decisions_enabled
+            )
+        )
     coder_session = str(uuid.uuid4())
 
     # The per-round gate is an ordered check-set (#131). ``fast`` checks run every
@@ -512,6 +554,7 @@ def develop(
         post_commit_pass=entry.post_commit_pass if entry is not None else None,
         review_context=entry.review_context if entry is not None else "",
         no_change_claim=entry.no_change_claim if entry is not None else None,
+        decisions_enabled=decisions_enabled,
     )
 
     # The default outcome is "max_rounds" — the exit the loop lands on when it
@@ -610,7 +653,7 @@ def develop(
             f"sessions + handoffs preserved in {config.run_dir} (re-run to retry); "
             f"cost ${total:.4f}"
         )
-    elif status in ("stalled", "disputed", "cost_exceeded"):
+    elif status in ("stalled", "disputed", "cost_exceeded", "needs_decision"):
         message = (
             f"STOPPED ({status}): {failure_reason}; "
             f"last reviews: {_reviews_part(final_reviews)}{gate_part}; "
@@ -689,6 +732,15 @@ def develop(
         review_profile=config.review_profile,
         resume_after=resume_after,
         deferred_findings=collect_deferred(r.ledger for r in reviewers),
+        # The SAME admission `decision_phase` applied before stopping, on the
+        # same ordered input — so what the run says it has is exactly what it
+        # publishes, whole (correctness/f-002).
+        decisions=admitted_decisions(
+            collect_pending_decisions(
+                (r.ledger, r.spec.block_threshold) for r in reviewers
+            )
+        )[0],
+        decisions_not_admitted=ctx.decisions_not_admitted,
         failure_reason=failure_reason if status in _REASON_BEARING_STATUSES else "",
         host_action=host_action,
     )

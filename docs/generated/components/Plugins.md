@@ -31,16 +31,16 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.converge` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.converge_result` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
-| `lithos_loom.plugins.story_develop.develop` | M | 2 | 1 |
+| `lithos_loom.plugins.story_develop.develop` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.external_reviews` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.external_triage` | M | 1 | 4 |
-| `lithos_loom.plugins.story_develop.findings` | M | 3 | 2 |
+| `lithos_loom.plugins.story_develop.findings` | L | 4 | 6 |
 | `lithos_loom.plugins.story_develop.gate_adapters` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
 | `lithos_loom.plugins.story_develop.github_access` | S | 1 | 4 |
-| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 13 |
+| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 15 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
@@ -48,7 +48,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
-| `lithos_loom.plugins.story_develop.panel_prompts` | S | 0 | 4 |
+| `lithos_loom.plugins.story_develop.panel_prompts` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
@@ -56,7 +56,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
-| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 15 |
+| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 17 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
@@ -235,9 +235,14 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `triage_external_findings` — Run the one-turn read-only triage pass over *outcome*'s findings.
 
 ### `lithos_loom.plugins.story_develop.findings`
+- def `truncate_context` — Supporting text bounded to *limit*, saying so when it overran.
+- def `admitted_decisions` — Split *pending* into ``(admitted, not_admitted)`` for this run.
+- def `collect_pending_decisions` — Every reviewer's pending decisions, in panel order then ledger order.
+- def `not_admitted_note` — The line naming marks the escalation could not carry whole, or ``""``.
 - class `LedgerEntry` — One finding's life across rounds (mutable; owned by the ledger).
 - class `FindingLedger` — Per-reviewer finding registry with plugin-assigned monotonic ids.
 - def `reviewer_validator` — The lifecycle-validate callback for one reviewer turn.
+- class `PendingDecision` — A coder ``needs-decision`` mark the reviewer did not contest (9d5ebca6).
 - class `DeferredFinding` — A finding the reviewer marked ``out-of-scope`` (819370e5): real, but not this story's to fix. Collected off the ledgers at run end and spun out as its own Lithos task (``lithos_io.spawn_deferred_tasks``) so the run can approve without the finding being lost.
 - def `collect_deferred` — Every ``out-of-scope`` entry across the panel's ledgers, in stable (reviewer, finding_id) order.
 
@@ -271,6 +276,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.handoff`
 - def `severity_at_or_above` — True if *severity* meets or exceeds *threshold* (minor < major < critical).
 - def `max_severity` — Highest severity in the list, or ``None`` when empty.
+- def `sanitize_agent_text` — Strip terminal-control / text-reordering bytes from agent-written text.
 - class `HandoffError` — A handoff file was missing required structure or had invalid values.
 - class `Finding` — One addressable review finding (see ``prompts/FORMAT.md``).
 - class `ReviewHandoff` — A parsed reviewer handoff: a verdict plus structured findings.
@@ -278,6 +284,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `load_prompt` — Read a packaged prompt template (e.g. ``coder_init.md``).
 - def `render_prompt` — Placeholder substitution that is safe against braces in the values.
 - def `render_findings` — Render a reviewer's findings as a compact block for the coder's prompt.
+- def `quote_agent_block` — *text* as quoted, indented lines under *label* — one prompt line per source line, so multi-line agent text cannot leave the block it was put in.
 - def `coder_handoff_name` — Filename for the coder's handoff in a given round (1-based).
 - def `reviewer_handoff_name` — Filename for a reviewer's handoff in a given round.
 - def `render_log_section` — Render one conversation-log section as a list of lines (the caller joins).
@@ -341,6 +348,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.panel_prompts`
 - def `context_block` — The ``{review_context}`` slot's value: the block padded onto its own lines, or nothing — every reviewer template (round, re-review, artifact pass, reseed) renders it the same way.
+- def `decision_answer_block` — The reviewer's ``needs-decision`` answering contract, for the prompts that can be asked for a ``decision_verdict:``.
 - def `reviewer_brief` — The optional per-reviewer focus paragraph + lane discipline for its prompts.
 - def `artifact_reviewer_brief` — The reviewer's responsibility on the ARTIFACT pass (#308 review).
 - def `round_prompt` — Render one reviewer's prompt for this round: ``(prompt, resume, review file override)``. *rstate* is the panel's ``ReviewerState`` (its ``spec``, ``ledger`` and last ``outcome`` are read).
@@ -412,6 +420,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `panel_phase` — Run the reviewer panel — the one shared primitive (#154). Sets ``ctx.final_reviews`` / accrues ``ctx.review_cost``.
 - def `approval_phase` — Seal approval when ALL reviewers pass their OWN threshold this round (PRD #7). Runs the expensive candidate-staged checks once per committed tree (#140) and holds approval while a *required* check blocks (floor). Approval takes precedence over the same-round cost ceiling (the spend already happened).
 - def `no_change_verdict_phase` — The admitted no-change round (commit_phase, PR #396 review) is a VALIDATION pass, not an entry to the fix loop: approval sealed it in :func:`approval_phase`; reaching here means the panel rejected the coder's claim, or a required check is red on the unchanged head and the floor held. End the run with that rationale — a trigger that asked for nothing (an approval comment ingested as a finding, #380) must never drive paid rounds, nor push unrelated commits onto a delivered PR (opus round 2); the converge epilogue reports the claim unaddressed.
+- def `decision_phase` — The cheap escalation (9d5ebca6): a coder ``needs-decision`` the reviewer just declined to contest stops the run NOW — before another coder turn is paid — because the question is a product decision neither agent can settle by re-reading the code.
 - def `deadlock_phase` — T7 dispute escalation: a coder-disputed finding the reviewer kept blocking for 2 consecutive rounds stops the run with a human breadcrumb rather than grinding to max_rounds.
 - def `stall_phase` — T7 stall guard, keyed off finding IDENTITY: an empty round commit or an unchanged blocking set, two rounds running, stops the run.
 - def `run_round` — Sequence one develop round's phases. Returns the first phase's :class:`CycleExit` (terminating the loop), or ``None`` to continue to the next round. The order — and the TWO ``cost_ceiling_phase`` calls straddling approval — is load-bearing (see :func:`cost_ceiling_phase`).

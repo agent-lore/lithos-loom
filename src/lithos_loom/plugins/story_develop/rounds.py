@@ -48,6 +48,7 @@ from . import (
 )
 from .check_set import Check, CheckResult, CheckSetResult, render_check_summary
 from .config import HANDOFF_DIRNAME, DevelopConfig
+from .findings import admitted_decisions, collect_pending_decisions
 from .gate_findings import GateLedger
 from .handoff import max_severity, render_prompt
 from .loop_entry import PostCommitOutcome
@@ -192,6 +193,12 @@ class RoundContext:
     # external mode (PR #396 review): admits a round-1 no-change claim for
     # review instead of exit C — see LoopEntry
     no_change_claim: Callable[[int], bool] | None = None
+    # correctness/f-003: whether the cheap `needs-decision` escalation is live
+    # this run — the story-develop path only (`develop()` sets it from
+    # ``entry is None``). False keeps the escape out of the coder's prompt and,
+    # via the ledgers, out of the ledger: converge records such a mark as the
+    # ordinary dispute it also is.
+    decisions_enabled: bool = True
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -217,6 +224,10 @@ class RoundContext:
     # prompt's gate summary so the loop can fix the capture instead of
     # stalling silently. Cleared once delivered.
     artifact_capture_notice: str | None = None
+    # 9d5ebca6: `needs-decision` marks the escalation could not carry whole
+    # (labels only) — named on the operator's surfaces as NOT admitted, which
+    # is what they are: ordinary disputes on this run (correctness/f-002).
+    decisions_not_admitted: tuple[str, ...] = ()
 
 
 def _combine_review_outcomes(
@@ -342,6 +353,11 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
             handoff_file=handoff.coder_handoff_name(round_no),
             sandbox_facts=_sandbox_section(config.image, for_coder=True),
             external_ack=ctx.external_ack,  # every round (#387); "" off external
+            decision_escape=(
+                handoff.load_prompt("coder_decision_escape.md")
+                if ctx.decisions_enabled
+                else ""
+            ),
         )
         coder_resume = True
 
@@ -801,6 +817,82 @@ def no_change_verdict_phase(ctx: RoundContext, round_no: int) -> CycleExit | Non
     )
 
 
+def decision_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
+    """The cheap escalation (9d5ebca6): a coder ``needs-decision`` the reviewer
+    just declined to contest stops the run NOW — before another coder turn is
+    paid — because the question is a product decision neither agent can settle
+    by re-reading the code.
+
+    Runs before :func:`deadlock_phase`: the ordinary dispute guard costs two
+    more review rounds to reach the same human, and both observed cases
+    ($26.44 / $89.41) spent them saying the same thing again. A reviewer that
+    DID contest (citing the acceptance line the finding meets) left no pending
+    decision here, and the deadlock guard below applies unchanged.
+
+    The decisions are **admitted** here, before the exit: what the run claims
+    is exactly what both operator surfaces carry whole (:func:`
+    ~.findings.admitted_decisions`), and a mark that does not fit the
+    publication budget is named as not-admitted rather than published as an id
+    (correctness/f-002).
+
+    At most ONE escalation can happen per run — this exit ends it — and the
+    next one needs the operator to complete the gate first, so "how many
+    decisions may a story raise" is bounded by operator consent rather than a
+    counter (security/f-003); within the run, a contested decision is sticky,
+    so the same finding cannot re-arm it either.
+
+    Exit: H' ``needs_decision``.
+    """
+    decisions, not_admitted = admitted_decisions(
+        collect_pending_decisions(
+            (r.ledger, r.spec.block_threshold) for r in ctx.reviewers
+        )
+    )
+    if not decisions:
+        return None
+    ctx.decisions_not_admitted = tuple(d.label for d in not_admitted)
+    logger.warning(
+        "[ReviewDispute] story-develop %s: round %d needs a product decision on "
+        "%s — stopping before another coder turn",
+        ctx.config.run_id,
+        round_no,
+        ", ".join(d.label for d in decisions),
+    )
+    if not_admitted:
+        # Named, not silently dropped: these marks are NOT decisions this run
+        # (correctness/f-002 — the escalation publishes what it admits, whole).
+        logger.warning(
+            "[ReviewDispute] story-develop %s: %s did not fit the escalation's "
+            "publication budget and stay ordinary disputes",
+            ctx.config.run_id,
+            ", ".join(d.label for d in not_admitted),
+        )
+    # The reason line is LOOM-AUTHORED on purpose (security/f-002): it becomes
+    # `escalation.summary`, which the needs-human notifier publishes as an
+    # `@operator` comment on the story's public GitHub issue / PR and passes to
+    # `notify-send`'s argv. Every other stop's summary is a loom template; the
+    # coder's question must not be the first free-form agent text on that
+    # channel, and it does not need to be — it reaches the operator whole on
+    # the `[ReviewDispute]` finding and in the gate's brief, both Lithos-only.
+    # Naming the finding(s) is what the summary is for: where to look.
+    marked = ", ".join(f"{d.label} (reviewer: {d.reviewer_verdict})" for d in decisions)
+    return CycleExit(
+        status="needs_decision",
+        failure_reason=(
+            # security/f-004: the per-decision verdict token rides here too.
+            # This line is `escalation_summary` — the one the `gates` CLI
+            # shows and the only one reaching the GitHub `@mention` — so it is
+            # the cheapest place to say whether a reviewer answered at all,
+            # and it stays loom-authored (the tokens are a closed vocabulary).
+            f"round {round_no}: the coder marked "
+            f"{marked} "
+            "needs-decision and no reviewer contested it — the question is on "
+            "the story's [ReviewDispute] finding and in the gate brief"
+        ),
+        resume_after=None,
+    )
+
+
 def deadlock_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """T7 dispute escalation: a coder-disputed finding the reviewer kept blocking
     for 2 consecutive rounds stops the run with a human breadcrumb rather than
@@ -876,6 +968,7 @@ def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
         panel_phase,
         approval_phase,
         no_change_verdict_phase,
+        decision_phase,
         deadlock_phase,
         stall_phase,
         lambda c, r: cost_ceiling_phase(c, r, when="post_review"),

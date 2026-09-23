@@ -134,6 +134,10 @@ ESCALATION_REASONS: frozenset[str] = frozenset(
         "stalled",
         "disputed",
         "cost_exceeded",
+        # a coder `needs-decision` no reviewer contested (9d5ebca6): the story
+        # asks for something out of its own reach, so the gate's brief is the
+        # QUESTION and the operator answers by editing the acceptance criteria
+        "needs_decision",
         # a `failed` DevelopResult, split by which turn died
         "coder_failed",
         "reviewer_failed",
@@ -404,6 +408,37 @@ def _truncate_summary(summary: str) -> str:
     return text[: ESCALATION_SUMMARY_MAX_CHARS - 1] + "…"
 
 
+# security/f-004: how a `needs_decision` brief's per-decision
+# `reviewer_verdict` token reads to the operator. Since the lapse went, an
+# UNANSWERED decision escalates exactly as a conceded one does, and the gate
+# is where a human ratifies it — so the description has to say which it is,
+# or "a reviewer agreed this is out of reach" and "no reviewer answered at
+# all" look identical on the surface the decision is made from. Closed: an
+# unrecognised token (a brief written before this existed, or a tampered
+# metadata write) renders nothing rather than agent-chosen prose.
+_REVIEWER_VERDICTS = {
+    "conceded": " — the reviewer conceded it is out of this story's reach",
+    "unanswered": " — NO reviewer answered; the question stands unchallenged",
+}
+
+
+def _quoted_block(label: str, text: str) -> list[str]:
+    """Agent-authored *text* as an indented markdown blockquote.
+
+    Every other value :func:`human_gate_brief` renders is a loom-authored
+    scalar (a count, a cost, a path, a verdict), which is why it interpolates
+    them bare. A decision's question / options are the coder's own multi-line
+    prose (the handoff parser folds multi-line scalars), so rendered bare they
+    could open a second — and EARLIER — "What to do" block above loom's own on
+    the surface the operator triages from, on a gate whose real advice is that
+    cancelling it strands the story. Blockquoting every line keeps agent text
+    inside the structure loom put it in (security/f-004); control bytes and
+    bidi/zero-width reordering are already stripped at the handoff parse.
+    """
+    body = str(text).strip().splitlines() or [""]
+    return [f"  - {label}:"] + [f"    > {line}" for line in body]
+
+
 def human_gate_brief(
     *,
     story_title: str,
@@ -451,6 +486,23 @@ def human_gate_brief(
         lines.append(f"**Worktree:** `{b['worktree']}`")
     if b.get("conversation_log"):
         lines.append(f"**Conversation log:** `{b['conversation_log']}`")
+    # 9d5ebca6: a `needs_decision` brief IS the question — rendered as prose
+    # rather than falling through to the generic repr below, since this is the
+    # one gate whose description the operator reads to make a product call.
+    if isinstance(b.get("decisions"), list) and b["decisions"]:
+        lines += ["", "**The decision** (quoted from the coder's handoff):"]
+        for raw in b["decisions"]:
+            d = raw if isinstance(raw, Mapping) else {}
+            answered = _REVIEWER_VERDICTS.get(str(d.get("reviewer_verdict") or ""), "")
+            lines.append(f"- finding `{d.get('finding') or '(unnamed)'}`{answered}:")
+            lines += _quoted_block("question", d.get("question") or "(none recorded)")
+            for label, key in (
+                ("options", "options"),
+                ("the finding", "finding_rationale"),
+                ("the coder", "coder_response"),
+            ):
+                if d.get(key):
+                    lines += _quoted_block(label, d[key])
     for key, value in b.items():
         if key not in {
             "rounds",
@@ -460,6 +512,7 @@ def human_gate_brief(
             "findings_by_severity",
             "worktree",
             "conversation_log",
+            "decisions",
         }:
             lines.append(f"**{key}:** {value}")
     lines += ["", "**What to do:**"]

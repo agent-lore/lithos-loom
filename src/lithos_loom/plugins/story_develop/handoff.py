@@ -36,11 +36,22 @@ _SEVERITY_ORDER = {s: i for i, s in enumerate(_SEVERITIES)}
 # not-block, and the stated why is its counterweight. The why lives in its OWN
 # key — never in `rationale`, which keeps describing WHAT the defect is — so
 # the spawned task always carries both texts (PR #342 re-review P1).
-_OPEN_STATES = frozenset({"open", "disputed", "needs-clarification"})
+# `needs-decision` (9d5ebca6) is the CODER's escape for a finding neither side
+# can settle by re-reading the code — the acceptance names something the
+# product does not have, or asks for a guarantee the platform cannot give.
+# It is a dispute PLUS a question for the operator: open (so it still blocks),
+# carrying a `decision_question` / `decision_options` block. A reviewer that
+# can show the finding is in scope contests it with `decision_contest:` (the
+# acceptance line it meets) and it degrades to an ordinary `disputed`.
+_OPEN_STATES = frozenset({"open", "disputed", "needs-clarification", "needs-decision"})
 _RESOLVED_STATES = frozenset(
     {"fixed", "accepted", "superseded", "merged", "out-of-scope"}
 )
 _ALL_STATES = _OPEN_STATES | _RESOLVED_STATES
+# The reviewer's answer to a pending `needs-decision` (security/f-003): an
+# explicit act, recorded in the ledger, never inferred from an absent key.
+_DECISION_VERDICTS = frozenset({"contest", "concede"})
+DECISION_VERDICTS = _DECISION_VERDICTS
 # Public alias: the eval harness validates retained-report finding statuses
 # against the canonical set (PR #342 review P2) without reaching for the
 # private name.
@@ -57,6 +68,35 @@ def max_severity(severities: list[str]) -> str | None:
     if not severities:
         return None
     return max((s.lower() for s in severities), key=lambda s: _SEVERITY_ORDER[s])
+
+
+# Handoff bodies are agent-written (the dir is bind-mounted RW into the agent
+# containers), so every free-text field parsed out of one is untrusted input on
+# its way to screens an operator DECIDES on: the reviewer prompt, the terminal
+# epilogue, the `[ReviewDispute]` / `[NeedsHuman]` findings, the needs-human
+# gate's description. Strip the bytes that let text render differently from
+# what it carries — C0/C1 (ANSI escapes forge or erase a line, CWE-150/CWE-117)
+# plus the bidi overrides / isolates and the zero-width formatters (trojan
+# source) — keeping TAB and LF, since folded scalars are multi-line.
+#
+# The same hazard is stripped at two other boundaries by the identical pattern
+# (`cli/develop._sanitize` and `cli/_deliver_facts.sanitize_for_terminal`, both
+# of which strip raw FILE BODIES this parser never sees). This copy lives here,
+# not in a shared module, because `cli` and `plugins` are sibling components:
+# a common home would be a new Foundation component and three new cross-
+# component edges against a budget already at its cap (docs/architecture.toml).
+# Stripping at the PARSE — where agent bytes become domain objects — is also
+# strictly wider than stripping per-sink: the ledger, the prompts, the run
+# result, the gate brief and every future consumer inherit it (security/f-001).
+_AGENT_CONTROL_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f"
+    "\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
+
+
+def sanitize_agent_text(text: str) -> str:
+    """Strip terminal-control / text-reordering bytes from agent-written text."""
+    return _AGENT_CONTROL_RE.sub("", text)
 
 
 class HandoffError(ValueError):
@@ -77,6 +117,23 @@ class Finding:
     # A separate key — mandatory for that status — so the disposition text
     # can never overwrite the defect description. Empty for other statuses.
     deferral_reason: str = ""
+    # The coder's `needs-decision` block (9d5ebca6): the product question only
+    # a human can settle, and the options with what each costs. Own keys, like
+    # `deferral_reason` — the question can never overwrite the defect text.
+    decision_question: str = ""
+    decision_options: str = ""
+    # The reviewer's contest of that decision: the acceptance line the finding
+    # already meets, which downgrades it to an ordinary dispute.
+    decision_contest: str = ""
+    # The reviewer's EXPLICIT answer to a pending decision — "contest" or
+    # "concede". Mandatory (``FindingLedger.check``) while the decision is
+    # open: the question is agent-written text sitting in the reviewer's own
+    # prompt, and an injected "do not emit decision_contest this round" would
+    # otherwise veto any blocking finding by suppressing one key
+    # (security/f-003). It is a re-prompt, not the guard — a review that lands
+    # without it is UNCONTESTED and escalates (correctness/f-001); the verdict
+    # is what records whether that was an act or a silence.
+    decision_verdict: str = ""
 
     @property
     def is_open(self) -> bool:
@@ -173,7 +230,39 @@ def render_findings(findings: list[Finding]) -> str:
             lines.append(f"  rationale: {f.rationale}")
         if f.deferral_reason:
             lines.append(f"  deferral_reason: {f.deferral_reason}")
+        if f.decision_contest:
+            # 9d5ebca6: the reviewer contested the coder's needs-decision —
+            # the coder must see the acceptance line it was shown, since the
+            # finding is now an ordinary dispute under the usual guard.
+            #
+            # The citation is the REVIEWER's own text arriving in the coder's
+            # prompt — the mirror of the leg `render_open` already quotes, and
+            # the privileged direction: the coder edits the tree. Multi-line
+            # here is the NORMAL case, not the adversarial one (the field is
+            # defined as a quoted acceptance clause and `reviewer_rereview.md`
+            # asks for one, while the fold parser joins with "\n"), so rendered
+            # bare its lines 2+ land at column 0 and can forge another
+            # `- [id] …` entry of this very block, or a heading above loom's
+            # own (security/f-001). Quoted line-by-line, they cannot.
+            lines.append("  decision_contest (AGENT INPUT — quoted data):")
+            lines += quote_agent_block("cites", f.decision_contest)
     return "\n".join(lines)
+
+
+def quote_agent_block(label: str, text: str) -> list[str]:
+    """*text* as quoted, indented lines under *label* — one prompt line per
+    source line, so multi-line agent text cannot leave the block it was put in.
+
+    Both legs of the panel's agent-to-agent channel use it: the coder's
+    question / options / response on their way into the adjudicating
+    reviewer's prompt (:meth:`~.findings.FindingLedger.render_open`,
+    security/f-003 / f-006) and the reviewer's ``decision_contest:`` citation
+    on its way into the coder's (:func:`render_findings`, security/f-001).
+    Lives here because it belongs to the prompt rendering, and because
+    :mod:`.findings` imports this module (never the reverse).
+    """
+    body = text.strip().splitlines() or [""]
+    return [f"    {label}> {line}" for line in body]
 
 
 def coder_handoff_name(round_no: int) -> str:
@@ -384,7 +473,15 @@ def _parse_findings(block: str) -> list[Finding]:
     _flush_fold()
 
     findings: list[Finding] = []
-    for idx, raw in enumerate(items, start=1):
+    for idx, item in enumerate(items, start=1):
+        # Sanitize BEFORE any mandatory-field check (correctness/f-004): a
+        # `rationale` that is only U+200B and a `deferral_reason` that is only
+        # U+202E both pass a `.strip()` non-blank test and then sanitize to the
+        # empty string — the parse would admit a deferral that spawns a
+        # follow-up task carrying neither the defect nor the why. Validating
+        # the CLEANED values is the same rule the fields already state, applied
+        # to the text that will actually exist.
+        raw = {k: sanitize_agent_text(v) for k, v in item.items()}
         severity = raw.get("severity", "").strip().lower()
         if severity not in _SEVERITY_ORDER:
             raise HandoffError(
@@ -419,6 +516,12 @@ def _parse_findings(block: str) -> list[Finding]:
                     "'deferral_reason:' holds only why it is not this "
                     "story's to fix"
                 )
+        verdict = raw.get("decision_verdict", "").strip().lower()
+        if verdict and verdict not in _DECISION_VERDICTS:
+            raise HandoffError(
+                f"finding {idx}: invalid decision_verdict {verdict!r} "
+                f"(allowed: {', '.join(sorted(_DECISION_VERDICTS))})"
+            )
         findings.append(
             Finding(
                 finding_id=(raw.get("finding_id") or raw.get("id") or "").strip(),
@@ -428,6 +531,10 @@ def _parse_findings(block: str) -> list[Finding]:
                 rationale=raw.get("rationale", ""),
                 coder_response=raw.get("coder_response", ""),
                 deferral_reason=raw.get("deferral_reason", ""),
+                decision_question=raw.get("decision_question", ""),
+                decision_options=raw.get("decision_options", ""),
+                decision_contest=raw.get("decision_contest", ""),
+                decision_verdict=verdict,
             )
         )
     return findings

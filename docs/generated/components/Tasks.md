@@ -11,7 +11,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.gates` | M | 3 | 11 |
+| `lithos_loom.gates` | L | 3 | 11 |
 | `lithos_loom.task_graph` | S | 1 | 1 |
 | `lithos_loom.task_line` | S | 0 | 4 |
 | `lithos_loom.task_line_parser` | S | 2 | 1 |

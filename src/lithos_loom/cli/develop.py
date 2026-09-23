@@ -150,8 +150,16 @@ _MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
 # once (count × ≤1 MiB) would balloon this process even with the per-file cap.
 # Overflow surfaces over subsequent polls (unprocessed files aren't marked seen).
 _MAX_HANDOFFS_PER_POLL = 64
-# C0 controls except TAB/LF, plus DEL and the C1 range (covers ESC 0x1b).
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# C0 controls except TAB/LF, plus DEL and the C1 range (covers ESC 0x1b) — and
+# the Unicode characters that reorder or hide text without being control codes:
+# bidi overrides / isolates (trojan source) and the zero-width formatters. Same
+# set as `_deliver_facts._CONTROL_CHARS_RE` and `handoff._AGENT_CONTROL_RE`:
+# a line on a screen the operator DECIDES on must not be able to render
+# differently from the text it carries, by either mechanism.
+_CONTROL_CHARS_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f"
+    "\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
 
 
 # ── run-dir model (pure; unit-tested) ──────────────────────────────────
@@ -435,6 +443,7 @@ _OUTCOME_PHRASES = {
     "interrupted": "interrupted (re-run to retry)",
     "stalled": "stopped (stalled)",
     "disputed": "stopped (dispute needs human arbitration)",
+    "needs_decision": "stopped (a product decision is needed)",
     "cost_exceeded": "stopped (cost ceiling reached)",
     "infra_failed": "stopped (infrastructure failure persisted; needs a human)",
 }
@@ -469,7 +478,7 @@ def _outcome_line(run_id: str, outcome: run_outcome.RunOutcome) -> str:
         if state and state.get("branch"):
             parts.append(f"on {state['branch']}")
         if outcome.failure_reason:
-            parts.append(f"— {outcome.failure_reason}")
+            parts.append(f"— {_sanitize(outcome.failure_reason)}")
         return " ".join(parts)
     if state and state.get("status"):
         status = str(state["status"])
@@ -485,7 +494,13 @@ def _outcome_line(run_id: str, outcome: run_outcome.RunOutcome) -> str:
         if status == "approved" and outcome.pr_url:
             parts.append(f"· {outcome.pr_url}")
         elif status != "approved" and outcome.failure_reason:
-            parts.append(f"— {outcome.failure_reason}")
+            # The reason is not always loom-authored (a `failed` run's is the
+            # agent's own error text, and a stop's may quote a finding), and
+            # this is the line the operator reads to decide whether to look —
+            # so it is stripped like any other echoed agent text. Forging an
+            # outcome line from inside the outcome line is exactly what
+            # `_sanitize` exists to stop (security/f-001).
+            parts.append(f"— {_sanitize(outcome.failure_reason)}")
         return " ".join(parts)
     if outcome.has_log:
         return f"── run {run_id} finished (status not recorded)"

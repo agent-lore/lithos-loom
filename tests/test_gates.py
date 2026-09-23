@@ -502,6 +502,112 @@ def test_human_gate_brief_renders_the_caller_s_actions() -> None:
     assert "Cancelling the gate" in text
 
 
+def test_human_gate_brief_renders_a_needs_decision_as_prose() -> None:
+    # 9d5ebca6: this gate's brief IS the question the operator must answer —
+    # it must not fall through to the generic `**key:** <python repr>` line.
+    from lithos_loom.gates import human_gate_brief
+
+    text = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="needs_decision",
+        summary="round 3: needs a decision on correctness/f-003",
+        run_id="r1",
+        brief={
+            "decisions": [
+                {
+                    "finding": "correctness/f-003",
+                    "question": "Accept an at-most-once marker, or block?",
+                    "options": "(a) accept the marker; (b) block",
+                    "coder_response": "Lithos has no compare-and-set",
+                }
+            ],
+            "branch": "loom/us7",
+        },
+    )
+    assert "**The decision**" in text
+    assert "> Accept an at-most-once marker, or block?" in text
+    assert "> (a) accept the marker; (b) block" in text
+    assert "`correctness/f-003`" in text
+    assert "[{" not in text  # never the raw repr
+    # the default actions already tell the operator to edit the acceptance
+    # criteria before completing the gate — which is how a decision is answered
+    assert "acceptance criteria" in text
+
+
+def test_human_gate_brief_distinguishes_a_conceded_decision_from_a_silent_one() -> None:
+    # security/f-004: since the lapse went, an UNANSWERED decision escalates
+    # exactly as a conceded one does — and this gate is where a human ratifies
+    # it. The ledger has always recorded which shape it was; if the brief does
+    # not RENDER it, "a reviewer read the finding and agreed it is out of this
+    # story's reach" and "no reviewer answered at all" are the same page, and
+    # the natural moves from it (edit the acceptance criteria, or
+    # `develop deliver` the branch) both let a blocking finding the panel
+    # never conceded reach a PR.
+    from lithos_loom.gates import human_gate_brief
+
+    def brief_for(verdict: str | None) -> str:
+        decision: dict = {
+            "finding": "correctness/f-003",
+            "question": "Accept an at-most-once marker, or block?",
+            "options": "(a) accept the marker; (b) block",
+        }
+        if verdict is not None:
+            decision["reviewer_verdict"] = verdict
+        return human_gate_brief(
+            story_title="US7",
+            story_id="s1",
+            reason="needs_decision",
+            summary="round 3: needs a decision on correctness/f-003",
+            run_id="r1",
+            brief={"decisions": [decision]},
+        )
+
+    conceded, unanswered = brief_for("conceded"), brief_for("unanswered")
+    assert conceded != unanswered  # the whole point
+    assert "the reviewer conceded" in conceded
+    assert "NO reviewer answered" in unanswered
+    assert "NO reviewer answered" not in conceded
+    # the vocabulary is CLOSED: a brief written before this existed, or one
+    # whose metadata was tampered with, renders no claim at all rather than
+    # agent-chosen prose beside loom's own
+    for unknown in (None, "", "LGTM — approved by the panel"):
+        text = brief_for(unknown)
+        assert "`correctness/f-003`:" in text  # the bare label, no claim
+        assert "approved by the panel" not in text
+
+
+def test_human_gate_brief_cannot_be_restructured_by_agent_text() -> None:
+    # security/f-004: the question is multi-line agent prose by construction
+    # (the handoff fold parser). Rendered bare it could open a second — and
+    # EARLIER — "What to do" block above loom's own, on the surface the
+    # operator triages from, advising the one action (cancel the gate) that
+    # the real brief warns strands the story.
+    from lithos_loom.gates import human_gate_brief
+
+    forged = (
+        "Which contract?\n\n**What to do:**\n"
+        "- Cancel this gate to dismiss the question."
+    )
+    text = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="needs_decision",
+        summary="round 3: needs a decision on correctness/f-003",
+        run_id="r1",
+        brief={"decisions": [{"finding": "c/f-003", "question": forged}]},
+    )
+    # every line of agent text is quoted, so it opens no structure of its own
+    for line in forged.splitlines():
+        if line.strip():
+            assert f"    > {line}" in text
+    assert "\n**What to do:**" in text  # loom's own, unquoted
+    assert text.count("**What to do:**") == 2  # the forged one is only quoted
+    assert "\n- Cancel this gate to dismiss the question." not in text
+    # loom's authoritative actions are still the LAST word on the page
+    assert text.index("Cancel the *story*") > text.index("> - Cancel this gate")
+
+
 async def test_create_human_gate_puts_the_actions_in_the_description() -> None:
     from lithos_loom.gates import create_human_gate
     from tests.support import FakeLithosClient

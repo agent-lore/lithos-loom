@@ -43,6 +43,7 @@ from .config import (
     parse_model,
     parse_reviewer_entry,
 )
+from .findings import not_admitted_note
 from .lithos_io import AGENT_ID, TaskContext
 from .model_policy import apply_panel_default_models
 from .panel import findings_by_severity
@@ -721,12 +722,21 @@ def escalation_block(
     August rescue needed by hand — branch, rounds, cost, gate verdict, open
     findings by severity, the worktree and conversation log. ``None`` for a
     delivered or ``interrupted`` run (interrupted has its own resume path).
+
+    A ``needs_decision`` stop (9d5ebca6) is the one shape whose brief is NOT
+    the run facts: the operator's next move is an acceptance-criteria edit, so
+    the brief is the DECISION — each un-contested question with its options,
+    the finding it answers, and the locators needed to carry the branch
+    forward (``develop deliver`` / ``converge --ac-file``). Rounds, cost and
+    findings-by-severity would only bury it.
     """
     if delivery_error is not None:
         reason = "delivery"
         summary = f"PR delivery failed: {delivery_error}"
     elif result.approved or result.status == "interrupted":
         return None
+    elif result.status == "needs_decision":
+        return _decision_escalation(result)
     else:
         summary = result.failure_reason or result.message
         if result.status in _STOP_STATUS_REASONS:
@@ -757,6 +767,51 @@ def escalation_block(
     if result.host_action:
         brief["host_action"] = result.host_action  # slice B: never truncated
     return {"reason": reason, "summary": summary, "brief": brief}
+
+
+def _decision_escalation(result: DevelopResult) -> dict[str, Any]:
+    """The ``needs_decision`` escalation: the decision, not the run facts.
+
+    ``summary`` is the run's own loom-authored reason line (the coder's prose
+    is deliberately NOT on this channel — it is published verbatim as an
+    `@operator` GitHub comment, security/f-002); the question and options ride
+    in the brief, which stays inside Lithos.
+
+    EVERY decision is carried **whole**: both its length and the size of the
+    collection were checked on ADMISSION (`findings._admits_decision` /
+    `findings.admitted_decisions`, before the run stopped), so the brief is
+    bounded — this is one unbounded metadata write (security/f-007) — without
+    the gate ever showing the operator a prefix of the decision it exists to
+    put to them, or an id in place of one (correctness/f-002). Only the
+    supporting context beside it is trimmed, at the record, saying so.
+    """
+    brief: dict[str, Any] = {
+        "decisions": [
+            {
+                "finding": d.label,
+                "severity": d.severity,
+                "question": d.question,
+                "options": d.options,
+                "finding_rationale": d.rationale,
+                "coder_response": d.coder_response,
+                # security/f-004: rendered by `gates.human_gate_brief`, so
+                # the operator can see whether a reviewer answered at all
+                "reviewer_verdict": d.reviewer_verdict,
+            }
+            for d in result.decisions
+        ],
+        "branch": result.branch,
+        "worktree": str(result.worktree),
+    }
+    if result.decisions_not_admitted:
+        brief["marks_not_admitted"] = not_admitted_note(result.decisions_not_admitted)
+    if result.conversation_log is not None:
+        brief["conversation_log"] = str(result.conversation_log)
+    return {
+        "reason": "needs_decision",
+        "summary": result.failure_reason or result.message,
+        "brief": brief,
+    }
 
 
 def build_result_payload(

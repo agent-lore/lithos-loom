@@ -1084,6 +1084,14 @@ def main(argv: list[str] | None = None) -> int:
             "log above;\n  re-run with a higher --max-rounds, or attach to the "
             "worktree to intervene."
         )
+    elif result.status == "needs_decision":
+        print(
+            "\n  Needs a decision: the coder holds a finding is out of this "
+            "story's reach and no\n  reviewer showed otherwise. Answer it by "
+            "editing the acceptance criteria, then re-run:"
+        )
+        for d in result.decisions:
+            print("\n  " + d.render().replace("\n", "\n  "))
     elif result.status == "disputed":
         print(
             "\n  Dispute deadlock: the coder formally disputes finding(s) the "
