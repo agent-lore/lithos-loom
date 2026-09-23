@@ -33,6 +33,7 @@ from lithos_loom.plugins.story_develop.pr_delivery import (
 )
 from lithos_loom.plugins.story_develop.publish_text import (
     MAX_SECTION_CHARS,
+    MIN_SECTION_CHARS,
     fence_untrusted,
 )
 
@@ -94,6 +95,12 @@ def test_build_pr_body_minimal() -> None:
 
 
 _FENCE_LINE_RE = re.compile(r"(`{3,}|~{3,})")
+
+
+def _interior(quoted: str) -> str:
+    """The quoted content of a `fence_untrusted` block — what *limit* bounds
+    (the fence's own two lines are loom's markup, not the author's)."""
+    return "\n".join(quoted.splitlines()[1:-1])
 
 
 def _outside_fences(body: str) -> str:
@@ -289,10 +296,46 @@ def test_a_section_clipped_to_nothing_still_says_so() -> None:
     """The input cut must not be able to publish an empty `## What` that reads
     as a story with no description: text that all sat past the slice leaves the
     truncation note behind, not silence."""
-    quoted = fence_untrusted("\u200b" * 400 + "the real text", limit=100)
+    quoted = fence_untrusted(" " * 400 + "the real text", limit=100)
 
     assert "(truncated" in quoted
     assert fence_untrusted("   ") == ""  # …while nothing at all stays nothing
+
+
+def test_invisible_padding_cannot_spend_the_whole_input_budget() -> None:
+    """security/f-009: the budget is for characters a reader can SEE. Stripped
+    after the input cut, a wall of zero-widths / tag characters / soft hyphens
+    would push every visible word past the slice and publish a section that is
+    nothing but the truncation note."""
+    for filler in ("\u200b", "\U000e0041", "\u00ad", "\u3164"):
+        quoted = fence_untrusted(filler * (MAX_SECTION_CHARS * 4) + "the real text")
+
+        assert "the real text" in quoted
+        assert "(truncated" not in quoted  # nothing visible was lost
+        assert filler not in quoted
+
+
+def test_fence_untrusted_publishes_no_more_than_its_limit() -> None:
+    """correctness/f-002: *limit* is a cap on the quoted content, marker
+    included — appending the note after the cut would publish 53 characters
+    more than the caller asked for, and a cap with no room for the note (or a
+    negative one, which Python's slicing reads as "keep nearly everything") is
+    a bug in the caller, not a section to publish anyway."""
+    for limit in (MIN_SECTION_CHARS, 100, MAX_SECTION_CHARS):
+        interior = _interior(fence_untrusted("x" * (limit * 4), limit=limit))
+        assert len(interior) <= limit
+        assert interior.endswith("(truncated — the whole text is on the Lithos story)")
+        assert interior.startswith("x")  # …and text still travels beside it
+
+    # the default cap, exactly at and one past the boundary
+    exact = _interior(fence_untrusted("x" * MAX_SECTION_CHARS))
+    assert len(exact) == MAX_SECTION_CHARS and "(truncated" not in exact
+    over = _interior(fence_untrusted("x" * (MAX_SECTION_CHARS + 1)))
+    assert len(over) <= MAX_SECTION_CHARS and "(truncated" in over
+
+    for unusable in (0, -1, -MAX_SECTION_CHARS, MIN_SECTION_CHARS - 1):
+        with pytest.raises(ValueError, match="at least"):
+            fence_untrusted("x" * 500, limit=unusable)
 
 
 def test_an_oversized_story_description_is_bounded() -> None:

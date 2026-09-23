@@ -34,6 +34,7 @@ import re
 __all__ = [
     "CONTROL_CHARS_RE",
     "MAX_SECTION_CHARS",
+    "MIN_SECTION_CHARS",
     "defang_markup",
     "fence_untrusted",
 ]
@@ -112,6 +113,9 @@ _BACKTICK_RUN_RE = re.compile(r"`+")
 MAX_SECTION_CHARS = 8000
 """Cap on one untrusted PR-body section (CWE-770).
 
+Counts the **quoted content**: the text plus the truncation marker, never more
+(the fence itself is loom's own two lines, and is not the author's to spend).
+
 A GitHub issue body may be 65536 characters and GitHub rejects a PR body over
 the same limit — so an unbounded section hands its author a repeatable way to
 make `gh pr create` fail for every delivery of that story (a burned run and an
@@ -120,12 +124,23 @@ travels whole; the Lithos story always carries the untruncated text."""
 
 _TRUNCATION_NOTE = "… (truncated — the whole text is on the Lithos story)"
 
+MIN_SECTION_CHARS = len(_TRUNCATION_NOTE) + 2
+"""The smallest cap :func:`fence_untrusted` can honour.
+
+A truncated section is the marker, a newline and whatever text fits before
+them, so a cap under this leaves the marker nowhere to go — and quietly
+publishing the marker ALONE (or, for a non-positive cap, letting Python's
+negative slicing publish nearly the whole input) would break the promise the
+cap is made of. Out-of-domain is a caller's bug, so it raises."""
+
 # How much of the input the rewrites are allowed to see, as a multiple of the
-# published bound. The rewrites only ever GROW text (bar the invisibles they
-# strip), so text past this slice could not have fitted under the bound anyway
-# — and `redact_for_publication` already makes the same trade for the same
-# reason: bound what the patterns ever see, rather than hand an external
-# author the size of the host's regex work (security/f-007).
+# published bound. The rewrites only ever GROW text, so text past this slice
+# could not have fitted under the bound anyway — and `redact_for_publication`
+# already makes the same trade for the same reason: bound what the patterns
+# ever see, rather than hand an external author the size of the host's regex
+# work (security/f-007). Measured in VISIBLE characters: the invisibles come
+# out before the slice is taken, so a wall of zero-widths cannot spend a budget
+# it puts nothing on the page for (security/f-009).
 _DEFANG_INPUT_SLACK = 2
 
 
@@ -189,22 +204,39 @@ def fence_untrusted(text: str, *, limit: int = MAX_SECTION_CHARS) -> str:
     re-ingested by machines as well as read (an LLM reviewer on the PR, the
     external-review sweep), and one of them may not honour the fence.
 
-    The bound is applied **twice**: once to the input, before a single pattern
-    runs (the author of this text picks its length, so it also picks how much
-    work the host does on it), and once to the result, so the published cap is
-    exact. Either cut says so in the body — a section that lost text never
-    reads as the whole story.
+    *limit* bounds the **quoted content** — the text plus the truncation marker
+    — and is applied **twice**: once to the input, before a single pattern runs
+    (the author of this text picks its length, so it also picks how much work
+    the host does on it), and once to the result. The marker's room is reserved
+    inside the cap rather than added on top of it, so the published section is
+    never longer than the caller asked for; the fence's own two lines are
+    loom's markup and sit outside the count. Either cut says so in the body — a
+    section that lost text never reads as the whole story. A cap too small to
+    hold the marker, or a non-positive one (which Python's negative slicing
+    would read as "keep nearly everything"), is a caller's bug: ``ValueError``.
+
+    The invisibles come out **before** the input slice, so the budget is spent
+    on characters a reader can actually see: a prefix of zero-widths or tag
+    characters would otherwise consume the whole allowance and leave a section
+    that is nothing but the truncation marker (security/f-009). The strip is a
+    fixed-width character class, linear in the input, which is what makes it
+    safe to run before the bound rather than behind it.
     """
-    clipped = text[: limit * _DEFANG_INPUT_SLACK]
+    if limit < MIN_SECTION_CHARS:
+        raise ValueError(
+            f"fence_untrusted limit must be at least {MIN_SECTION_CHARS} "
+            f"characters (the truncation marker's room), got {limit}"
+        )
+    visible = CONTROL_CHARS_RE.sub("", text)
+    clipped = visible[: limit * _DEFANG_INPUT_SLACK]
     body = defang_markup(clipped).strip()
-    truncated = len(clipped) < len(text)
-    if len(body) > limit:
-        body, truncated = body[:limit].rstrip(), True
-    if truncated:
-        # Before the emptiness check, not after: a section whose visible text
-        # all sat past the input slice would otherwise be published as an
-        # empty `## What`, which reads as "the story said nothing".
-        body = f"{body}\n{_TRUNCATION_NOTE}".lstrip()
+    if len(clipped) < len(visible) or len(body) > limit:
+        # The marker fits INSIDE the cap, and lands before the emptiness check:
+        # a section whose text all sat past the input slice would otherwise be
+        # published as an empty `## What`, which reads as "the story said
+        # nothing" rather than "there was more of this".
+        keep = limit - len(_TRUNCATION_NOTE) - 1
+        body = f"{body[:keep].rstrip()}\n{_TRUNCATION_NOTE}".lstrip()
     if not body:
         return ""
     longest = max(
