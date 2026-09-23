@@ -658,7 +658,14 @@ def deliver(
     # external issue's title, and a multi-commit PR's title becomes the
     # squash COMMIT SUBJECT — a raw-text channel no fence reaches, where
     # GitHub still honours closing keywords (security/f-001).
-    title = publish_title(config.description)
+    #
+    # `or result.branch` is the helper's documented fallback, the same one
+    # `develop deliver` takes (security/f-003): an issue titled with nothing
+    # but default-ignorable code points leaves no title at all, and
+    # `gh pr create --title ""` is rejected — which would fail EVERY delivery
+    # of that story, after the branch has already been pushed, burning the
+    # run's agent spend and an operator interrupt each time.
+    title = publish_title(config.description) or result.branch
     body = build_pr_body(
         description=config.description,
         acceptance_criteria=config.acceptance_criteria,

@@ -479,6 +479,58 @@ def test_publish_title_breaks_the_keyword_that_reaches_the_commit_subject() -> N
     assert len(publish_title("x" * 200)) == MAX_TITLE_CHARS
 
 
+def test_publish_title_never_falls_through_to_the_issue_body() -> None:
+    """correctness/f-002: *text* is the whole task text
+    (``f"{title}\n\n{body}"``), so the line has to be chosen BEFORE the text
+    is trimmed. Trimming first let a story whose issue title is empty — or
+    nothing but default-ignorable code points, which this helper strips — fall
+    through to the first line of the issue BODY, publishing as the PR title a
+    line the reporter wrote as prose and nobody chose as a subject."""
+    # an invisible-only title, with a body under it and with none
+    assert publish_title("\u200b\n\nBody becomes title") == ""
+    assert publish_title("\U000e0101\n\nBody becomes title") == ""
+    assert publish_title("\u200b") == ""
+    # …and a blank first line is not a licence to promote line two either
+    assert publish_title("\n\nBody becomes title") == ""
+    assert publish_title("   \n\nBody becomes title") == ""
+    # the well-formed case is unchanged: first line, trimmed, body ignored
+    assert publish_title("  Add a flag\n\nDetails.  ") == "Add a flag"
+
+
+def test_publish_title_rejects_a_limit_that_is_no_cap() -> None:
+    """correctness/f-003: *limit* is a character count, and Python's negative
+    slicing would read a negative one as "keep nearly everything" — five
+    characters for a cap of -1, which cannot satisfy a cap at all. Out of
+    domain is a caller's bug, the same contract `fence_untrusted` holds its
+    own limit to."""
+    for unusable in (0, -1, -MAX_TITLE_CHARS):
+        with pytest.raises(ValueError, match="at least 1 character"):
+            publish_title("abcdef", limit=unusable)
+
+    assert publish_title("abcdef", limit=1) == "a"  # …and 1 is honoured
+
+
+def test_delivery_falls_back_when_the_story_leaves_no_title(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """security/f-003 + correctness/f-002: `publish_title` documents `""` as
+    the caller's cue to fall back, and `develop deliver` takes it — the daemon
+    did not. An issue titled with nothing but default-ignorable code points
+    leaves no title, and `gh pr create --title ""` is rejected: a repeatable
+    way for the reporter to fail EVERY delivery of the story they filed, after
+    the branch has already been pushed. Both paths now fall back to the
+    branch."""
+    degenerate = replace(config, description="\u200b\U000e0101\u061c\n\n")
+    state = _install(monkeypatch, degenerate)
+    wt = _make_wt(degenerate)
+    result = _result(degenerate, wt)
+
+    deliver(degenerate, result)
+
+    assert state["pr_kwargs"]["title"] == result.branch
+    assert state["pr_kwargs"]["title"]  # …and above all, not empty
+
+
 def test_delivery_hands_gh_a_title_that_binds_nothing(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

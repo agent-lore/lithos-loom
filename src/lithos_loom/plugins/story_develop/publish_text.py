@@ -290,10 +290,31 @@ def publish_title(text: str, *, limit: int = MAX_TITLE_CHARS) -> str:
 
     Unlike a fenced section, a title has no whitespace to preserve: it is one
     plain-text line that GitHub trims itself, and the first line is all of it.
-    ``""`` when *text* holds no line, which is the caller's cue to fall back.
+
+    **The first line, and never a later one.** *text* is usually the whole
+    task text — ``f"{title}\n\n{body}"`` — so the line is chosen before the
+    text is trimmed, not after. Trimming first let a story whose issue title
+    is empty (or nothing but default-ignorable code points, which come out
+    here) fall through to the first line of the issue **body**, publishing as
+    the PR title a line the reporter wrote as prose and nobody chose as a
+    subject.
+
+    ``""`` when *text* holds no first line, which is the caller's cue to fall
+    back — **both** delivery paths take it, to the branch name.
+
+    *limit* is a character cap and must be at least one: a non-positive value
+    is a caller's bug, not a cap (Python's negative slicing would read it as
+    "keep nearly everything", which cannot satisfy a cap at all), so it
+    raises — the same contract :func:`fence_untrusted` holds its own limit to.
     """
-    flat = CONTROL_CHARS_RE.sub("", text).strip()
-    first = flat.splitlines()[0].strip() if flat else ""
+    if limit < 1:
+        raise ValueError(
+            f"publish_title limit must be at least 1 character, got {limit}"
+        )
+    # Split before trimming, and on `\n` alone: `CONTROL_CHARS_RE` has already
+    # taken every other character `str.splitlines` would break on (VT, FF, CR,
+    # U+0085, U+2028, U+2029), so this is exactly the line the author wrote.
+    first = CONTROL_CHARS_RE.sub("", text).split("\n", 1)[0].strip()
     defanged = _CLOSES_RE.sub(lambda m: f"{m.group(0)}\u2192 ", first)
     defanged = _MENTION_RE.sub(r"@ \1", defanged)
     # Cut last: the rewrites only ever grow the line, and dropping a suffix
