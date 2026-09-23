@@ -108,7 +108,7 @@ modules_over_800_lines = 11 # 8->6 via ARCH-9 slices 1-2; 6->7: rounds.py (821) 
                                # story, raise/adopt the pr gate, retire the human gates, post the finding
                                # — one responsibility read in order; the next change that grows it takes
                                # the gate step (gate_delivery + retirement) into its own module;
-                               # 10->11: github_models.py (880, was 762) — the weak approval floor
+                               # 10->11: github_models.py (939, was 762) — the weak approval floor
                                # now reads only AUTHORIAL text (quotes, code spans/fences,
                                # strike-through and value enumerations masked before the scan, PR
                                # #426 round-5 review f-001), and the masking rules belong beside the

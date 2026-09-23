@@ -721,6 +721,89 @@ def test_external_mode_an_approval_beside_a_rejection_stays_triage_rejected(
     assert "entry" not in captured
     by_id = {o.finding_id: o.disposition for o in result.external_outcomes}
     assert by_id == {"f-001": "rejected", "f-002": "nothing_to_remediate"}
+    # …and the message the operator reads on the story names both dispositions
+    # (round-5 panel correctness f-003): the approval was not refuted and has
+    # no evidence to cite, so "rejected every external finding" was untrue.
+    assert "every external finding" not in result.message
+    assert "1 finding(s) refuted with cited evidence" in result.message
+    assert "1 asking for nothing (an approval)" in result.message
+
+
+def test_external_mode_all_rejected_still_says_every_finding_was_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The unmixed wording is unchanged — the mixed summary above is the only
+    new shape."""
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=(),
+        rejections={"f-001": "src/x.py:12 refutes it", "f-002": "src/y.py:1 too"},
+    )
+    result = converge_pr(
+        _config(tmp_path),
+        _change(),
+        external_findings=(_ext_finding(7), _ext_finding(8)),
+    )
+    assert result.status == "triage_rejected"
+    assert result.message.startswith(
+        "triage rejected every external finding with cited evidence"
+    )
+
+
+def test_external_mode_a_no_survivor_batch_at_the_cost_ceiling_keeps_its_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-5 panel correctness f-001: the --max-cost guard stops the PAID
+    FOLLOW-UP, and a batch with no survivor has none — the triage spend has
+    already happened. `failed` there hid the run's real round-0 outcome behind
+    a status the watcher does not report-and-refund
+    (`REPORTED_NOT_REMEDIATED`), leaving the S5b round spent and, on the last
+    allowance, raising the human gate this path exists to avoid."""
+    config = dataclasses.replace(_config(tmp_path), max_cost_usd=5.0)
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=(),
+        nothing_to_remediate={"f-001": "the comment is an approval"},
+        cost=5.0,
+    )
+    approval = converge_pr(config, _change(), external_findings=(_ext_finding(7),))
+    assert approval.status == "already_clean" and approval.succeeded
+    assert approval.intake_cost_usd == 5.0
+    assert "entry" not in captured  # no coder either way
+
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(
+        monkeypatch,
+        captured,
+        proceed=(),
+        rejections={"f-001": "src/x.py:12 refutes it"},
+        cost=6.0,
+    )
+    rejected = converge_pr(config, _change(), external_findings=(_ext_finding(7),))
+    assert rejected.status == "triage_rejected" and rejected.succeeded
+    assert "entry" not in captured
+
+
+def test_external_mode_triage_exhausting_the_budget_stops_before_the_fix_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The guard still holds where it bites: a SURVIVING finding would enter
+    the paid fix loop, so a triage spend meeting the ceiling fails the run."""
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001",), cost=5.0)
+    result = converge_pr(
+        dataclasses.replace(_config(tmp_path), max_cost_usd=5.0),
+        _change(),
+        external_findings=(_ext_finding(7),),
+    )
+    assert result.status == "failed" and not result.succeeded
+    assert "entry" not in captured  # never built a coder
+    assert result.intake_cost_usd == 5.0
 
 
 def test_external_mode_an_approval_beside_a_real_claim_only_injects_the_claim(

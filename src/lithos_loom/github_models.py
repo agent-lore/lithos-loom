@@ -618,7 +618,18 @@ _UNIT_SPLIT_RE = re.compile(r"[\n.!;,:]|—|–|\s-\s")
 # bare approval word their authors never wrote as a verdict. Left unsplit, a
 # non-allowlisted shortcode falls to the decoration strip as intended and a
 # label line stays one unit that matches nothing.
-_WEAK_UNIT_SPLIT_RE = re.compile(r"[\n.!;,]|—|–|\s-\s")
+#
+# For the same reason a ``.`` BETWEEN two alphanumerics is not a boundary here
+# (PR #426 round-5 review, security f-002): a dotted identifier written in
+# ordinary prose without backticks — "The flag task.approved, so nothing
+# validates it" — split into the bare unit ``approved`` and handed the floor an
+# approval word its author never wrote as a verdict. That is the un-backticked
+# spelling of the label line above. A sentence-ending ``.`` (followed by a
+# space, a ``*``, a newline or nothing) still splits, so "**No findings.** …
+# Ready to merge." reads as before.
+_WEAK_UNIT_SPLIT_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9])\.|\.(?![A-Za-z0-9]))|[\n!;,]|—|–|\s-\s"
+)
 # Markdown decoration and emoji shortcodes are dropped before matching
 # ("**No findings**" → "no findings"). ASCII only — see the note above.
 _DECORATION_RE = re.compile(r"""[*_`~#>\[\]()"'|]|:[a-z0-9_+-]+:""")
@@ -696,9 +707,10 @@ def _units(body: str, split: re.Pattern[str] = _UNIT_SPLIT_RE) -> list[str]:
 # author wrote AS A VERDICT, IN THEIR OWN VOICE. Markdown has contexts that
 # are visibly not that (PR #426 round-5 review, f-001): a block quote is
 # someone else's comment, a code span is data (a field value, a log line, a
-# bot's output), a strike-through is retracted, and a list of values is an
-# enumeration. ``_DECORATION_RE`` stripped exactly those markers before
-# matching, so "> LGTM" quoted above a defect, a fence holding only ``LGTM``,
+# bot's output), a strike-through is retracted, an HTML comment is invisible on
+# the rendered PR, and a list under a lead-in is an enumeration.
+# ``_DECORATION_RE`` stripped exactly those markers before matching, so
+# "> LGTM" quoted above a defect, a fence holding only ``LGTM``,
 # "~~Approved~~" and "The `state` field accepts:\n- approved" each handed the
 # floor an approval word nobody asserted — and a mistaken (or talked-into)
 # ``NOTHING_TO_REMEDIATE`` verdict could then consume the real finding at
@@ -712,14 +724,47 @@ def _units(body: str, split: re.Pattern[str] = _UNIT_SPLIT_RE) -> list[str]:
 # the rest of the body, which is the conservative direction here: under an
 # any-unit floor, masking can only make a row LESS eligible.
 _MASK = " x "
-_CODE_SPAN_RE = re.compile(r"`+[^`]*(?:`+|\Z)")  # inline code AND ``` fences
-_STRIKE_SPAN_RE = re.compile(r"~~+[^~]*(?:~~+|\Z)")  # strike-through AND ~~~ fences
+# An HTML comment is not merely "not my verdict": it is INVISIBLE in GitHub's
+# rendered view (PR #426 round-5 review, security f-001), and templates and bot
+# metadata routinely carry one. `<!-- LGTM -->` used to leave a bare approval
+# unit behind (``!`` is a boundary, ``>`` is decoration, ``--`` is stripped),
+# so nothing a human can see on the PR approved anything.
+_HTML_COMMENT_RE = re.compile(r"<!--[\s\S]*?(?:-->|\Z)")
+_BACKTICK_RUN_RE = re.compile(r"`+")  # inline code AND ``` fences
+_TILDE_RUN_RE = re.compile(r"~~+")  # strike-through AND ~~~ fences
 _LIST_MARKER = r"(?:[-*+]|\d+[.)])"
 # A quoted line, with or without the bullet it hangs off ("- > LGTM"), and an
 # indented code block — the fence's other spelling.
 _QUOTE_LINE_RE = re.compile(rf"^[ \t]*(?:{_LIST_MARKER}[ \t]+)?>[^\n]*", re.MULTILINE)
 _INDENTED_LINE_RE = re.compile(r"^(?: {4,}|\t)[^\n]*", re.MULTILINE)
 _LIST_ITEM_RE = re.compile(rf"^[ \t]*{_LIST_MARKER}[ \t]+(?P<text>\S.*)$")
+
+
+def _mask_delimited(text: str, run: re.Pattern[str]) -> str:
+    """*text* with every ``run``-delimited span masked.
+
+    The closing delimiter must be **at least as long** as the opening one, as
+    CommonMark requires (PR #426 round-5 review, correctness f-002): the first
+    cut took ANY later run as the close, so a four-backtick fence
+    holding a three-backtick example left the fenced ``LGTM`` between them bare
+    — the closing ```` ```` ```` paired with the inner ``` instead. A shorter
+    run inside the span is content, not the end of it. An unclosed span masks
+    the rest of the body (the conservative direction under an any-unit floor).
+    """
+    out: list[str] = []
+    pos = 0
+    while (opener := run.search(text, pos)) is not None:
+        out.append(text[pos : opener.start()])
+        out.append(_MASK)
+        pos = opener.end()
+        while (closer := run.search(text, pos)) is not None:
+            pos = closer.end()
+            if len(closer.group()) >= len(opener.group()):
+                break
+        else:
+            return "".join(out)  # unclosed: the remainder is inside the span
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _reads_as_verdict(text: str) -> bool:
@@ -738,18 +783,22 @@ def _reads_as_verdict(text: str) -> bool:
 
 
 def _introduced_as_data(lines: list[str], first: int) -> bool:
-    """True when the list block starting at *first* is introduced by a
-    colon-terminated lead-in that is not itself an approval — the shape of an
-    enumeration ("The `state` field accepts:"), which a single-item list
-    cannot be told from any other way.
+    """True when the list block starting at *first* hangs off a lead-in that is
+    not itself a verdict — "The `state` field accepts:", but also the
+    colon-less "Allowed status" (PR #426 round-5 review, correctness f-002).
+
+    Keying on the colon alone left every other enumeration eligible, so the
+    test is inverted: a list under prose this vocabulary cannot read as an
+    approval is DATA, which is the only way to tell a one-item enum
+    (``- approved``) from a one-line verdict. A trailing colon is the lead-in's
+    own punctuation, not part of the verdict — "**No findings:**" over its
+    bullets still reads as one.
     """
     for line in reversed(lines[:first]):
         if not line.strip():
             continue
         lead = " ".join(_DECORATION_RE.sub("", line.translate(_CANONICAL)).split())
-        # The colon is the introducer's own punctuation, not part of the
-        # verdict: "**No findings:**" over its bullets is still an approval.
-        return lead.endswith(":") and not _reads_as_verdict(lead[:-1])
+        return not _reads_as_verdict(lead.rstrip(":"))
     return False
 
 
@@ -792,10 +841,12 @@ def _mask_data_lists(text: str) -> str:
 
 def _authorial_text(body: str) -> str:
     """*body* with every non-authorial span masked — the text the weak floor
-    reads. Code spans first: a fence may hold a ``>`` or a ``~~`` of its own.
+    reads. Code spans first: a fence may hold a ``>``, a ``~~`` or an
+    ``<!-- -->`` of its own, and inside one they are literal text.
     """
-    text = _CODE_SPAN_RE.sub(_MASK, body)
-    text = _STRIKE_SPAN_RE.sub(_MASK, text)
+    text = _mask_delimited(body, _BACKTICK_RUN_RE)
+    text = _HTML_COMMENT_RE.sub(_MASK, text)
+    text = _mask_delimited(text, _TILDE_RUN_RE)
     text = _QUOTE_LINE_RE.sub(_MASK, text)
     text = _INDENTED_LINE_RE.sub(_MASK, text)
     return _mask_data_lists(text)
@@ -821,11 +872,13 @@ def carries_approval(body: str) -> bool:
     rather than guarded.
 
     Being an any-unit rule, it reads only AUTHORIAL text: block quotes, code
-    spans and fences, strike-through, and enumerations of values are masked
-    first (:func:`_authorial_text`), so an approval word the author merely
-    QUOTED, showed as data or struck out cannot satisfy it (PR #426 round-5
-    review, f-001). The end-to-end rule deliberately keeps reading those
-    contexts: there EVERY unit must pass, so a defect inside a block quote —
+    spans and fences, strike-through, HTML comments, indented code and
+    enumerations of values are masked first (:func:`_authorial_text`), so an
+    approval word the author merely QUOTED, showed as data, struck out or hid
+    in an invisible comment cannot satisfy it (PR #426 round-5 review, f-001 +
+    round-5 panel security f-001 / correctness f-002). The end-to-end rule
+    deliberately keeps reading those contexts: there EVERY unit must pass, so
+    a defect inside a block quote —
     "> the token is logged at src/api.py:88" above an "LGTM" — is precisely
     what makes the body actionable, and masking it would read that row as a
     pure approval.

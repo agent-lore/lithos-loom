@@ -180,22 +180,6 @@ def converge_pr(
             approval_eligible=approval_eligible_ids(id_map),
             timeout=reviewer_timeout,
         )
-        if config.max_cost_usd is not None and triage.cost_usd >= config.max_cost_usd:
-            return ConvergeResult(
-                status="failed",
-                change=change,
-                intake_cost_usd=triage.cost_usd,
-                external_outcomes=outcomes_after_loop(
-                    id_map,
-                    triage.rejections,
-                    {},
-                    {},
-                    nothing_to_remediate=triage.nothing_to_remediate,
-                    loop_approved=False,
-                ),
-                message=f"triage spent ${triage.cost_usd:.2f}, meeting the "
-                f"--max-cost ${config.max_cost_usd:.2f} ceiling before the fix loop",
-            )
         surviving = [f for f in seed[0].findings if f.finding_id in set(triage.proceed)]
         if not surviving:
             # Nothing survives triage: no coder, nothing pushed. Either every
@@ -228,18 +212,66 @@ def converge_pr(
                     message="every external finding asks for nothing (an "
                     "approval) — nothing to remediate" + degraded,
                 )
+            # At least one claim was refuted with evidence, so the reviewer is
+            # owed a rejection reply and the status stays `triage_rejected`.
+            # The summary names every disposition rather than calling them all
+            # rejections (round-5 panel correctness f-003): an approval beside
+            # them was not refuted and has no evidence to cite, and this
+            # message is what the operator reads on the story.
+            refuted, approvals = (
+                len(triage.rejections),
+                len(triage.nothing_to_remediate),
+            )
+            if approvals:
+                summary = (
+                    f"triage left nothing to converge: {refuted} finding(s) "
+                    f"refuted with cited evidence, {approvals} asking for "
+                    "nothing (an approval)"
+                )
+            else:
+                summary = (
+                    "triage rejected every external finding with cited "
+                    "evidence — nothing to converge"
+                )
             logger.info(
-                "converge %s: triage rejected all %d external finding(s)",
+                "converge %s: nothing survives triage in %d external finding(s)"
+                " — %d refuted, %d asking for nothing",
                 config.run_id,
                 len(id_map),
+                refuted,
+                approvals,
             )
             return ConvergeResult(
                 status="triage_rejected",
                 change=change,
                 intake_cost_usd=triage.cost_usd,
                 external_outcomes=outcomes,
-                message="triage rejected every external finding with cited "
-                "evidence — nothing to converge" + degraded,
+                message=summary + degraded,
+            )
+        # Whole-command budget: the triage spend alone must not meet the
+        # ceiling. Checked AFTER the no-survivor terminal above (round-5 panel
+        # correctness f-001), unlike the local intake whose check precedes its
+        # clean return: the ceiling stops the PAID FOLLOW-UP, and with nothing
+        # surviving there is no fix loop to stop — the spend has happened
+        # either way. `failed` there would hide the run's real outcome (a
+        # round-0 disposition the watcher reports and refunds,
+        # REPORTED_NOT_REMEDIATED) behind a status that leaves the S5b round
+        # spent and can raise the very human gate this path exists to avoid.
+        if config.max_cost_usd is not None and triage.cost_usd >= config.max_cost_usd:
+            return ConvergeResult(
+                status="failed",
+                change=change,
+                intake_cost_usd=triage.cost_usd,
+                external_outcomes=outcomes_after_loop(
+                    id_map,
+                    triage.rejections,
+                    {},
+                    {},
+                    nothing_to_remediate=triage.nothing_to_remediate,
+                    loop_approved=False,
+                ),
+                message=f"triage spent ${triage.cost_usd:.2f}, meeting the "
+                f"--max-cost ${config.max_cost_usd:.2f} ceiling before the fix loop",
             )
         logger.info(
             "converge %s: %d/%d external finding(s) survive triage — entering fix loop",
