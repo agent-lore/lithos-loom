@@ -234,15 +234,64 @@ _TILDE_RUN_RE = re.compile(r"~~?")  # GFM strike-through
 # "```LGTM``` the token is logged" an inline span rather than a fence.
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^\n]*)$")
 _LIST_MARKER = r"(?:[-*+]|\d+[.)])"
-# A quoted line, with or without the bullet it hangs off ("- > LGTM"), and an
-# indented code block — the fence's other spelling.
-_QUOTE_LINE_RE = re.compile(rf"^[ \t]*(?:{_LIST_MARKER}[ \t]+)?>[^\n]*", re.MULTILINE)
-_INDENTED_LINE_RE = re.compile(r"^(?: {4,}|\t)[^\n]*", re.MULTILINE)
+# A quoted line, with or without the bullet it hangs off ("- > LGTM"); an
+# indented code block — the fence's other spelling — is below.
+_QUOTE_LINE_RE = re.compile(rf"^[ \t]*(?:{_LIST_MARKER}[ \t]+)?>[^\n]*")
 _LIST_ITEM_RE = re.compile(rf"^[ \t]*{_LIST_MARKER}[ \t]+(?P<text>\S.*)$")
+# A table row: the TABLE spelling of the enumeration ``_mask_data_lists`` masks
+# for bullets (round-6 panel correctness f-002 / security f-004). A row whose
+# only populated cell holds an approval word reduced to a bare verdict once
+# ``_DECORATION_RE`` stripped the pipes — "| verdict |\n| --- |\n| LGTM |" above
+# a defect satisfied the floor. Any line carrying a ``|`` is masked, not just
+# one that starts with it: GFM's leading and trailing pipes are optional
+# ("status | note" / "approved |" are rows too), and a table is an enumeration
+# by construction — nobody writes a verdict as a table, so there is nothing to
+# lose in the masking direction. Runs after the code-span masks, so a pipe
+# inside `code` is already gone.
+_TABLE_ROW_RE = re.compile(r"^[^\n]*\|[^\n]*$", re.MULTILINE)
+_INDENTED_LINE_RE = re.compile(r"^(?: {4,}|\t)[^\n]*", re.MULTILINE)
 # Lines that start a block of their own, so the line break before/after them is
-# a real boundary rather than a soft wrap (see :func:`_join_soft_wraps`):
-# headings, block quotes, table rows and thematic breaks.
+# a real boundary rather than a soft wrap (see :func:`_join_soft_wraps`) and
+# never a block quote's lazy continuation (see :func:`_mask_quotes`): headings,
+# block quotes, table rows and thematic breaks.
 _BLOCK_START_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]|>|\||-{3,}$|\*{3,}$|_{3,}$)")
+
+
+def _starts_a_block(line: str) -> bool:
+    """True when *line* opens a Markdown block of its own rather than
+    continuing the paragraph above it."""
+    return bool(
+        _LIST_ITEM_RE.match(line)
+        or _BLOCK_START_RE.match(line)
+        or _FENCE_OPEN_RE.match(line)
+    )
+
+
+def _mask_quotes(text: str) -> str:
+    """*text* with every block-quote line — and its **lazy continuation** —
+    masked.
+
+    CommonMark §5.1: a paragraph line directly after a quoted paragraph, with
+    no blank line and no ``>`` of its own, is folded INTO the quote, so GitHub
+    renders it as someone else's words (round-6 panel security f-005). Reading
+    it as the author's verdict let "> the token is logged at src/api.py:88"
+    followed immediately by "LGTM" satisfy the floor. The fold stops at the
+    first blank line — which really does end the quote, so the author's own
+    approval after one stays their verdict — and at any line that starts a
+    block of its own, which is not paragraph continuation text.
+    """
+    out: list[str] = []
+    quoted = False
+    for line in text.split("\n"):
+        if _QUOTE_LINE_RE.match(line):
+            quoted = True
+            out.append(_MASK)
+        elif quoted and line.strip() and not _starts_a_block(line):
+            out.append(_MASK)  # lazy continuation: still inside the quote
+        else:
+            quoted = False
+            out.append(line)
+    return "\n".join(out)
 
 
 def _mask_fenced_blocks(text: str) -> str:
@@ -322,9 +371,7 @@ def _join_soft_wraps(text: str) -> str:
     def prose(line: str) -> bool:
         stripped = line.strip()
         return (
-            bool(stripped)
-            and stripped != _MASK.strip()
-            and not (_LIST_ITEM_RE.match(line) or _BLOCK_START_RE.match(line))
+            bool(stripped) and stripped != _MASK.strip() and not _starts_a_block(line)
         )
 
     out: list[str] = []
@@ -421,7 +468,8 @@ def _authorial_text(body: str) -> str:
     text = _mask_inline_runs(text, _BACKTICK_RUN_RE)
     text = _HTML_COMMENT_RE.sub(_MASK, text)
     text = _mask_inline_runs(text, _TILDE_RUN_RE)
-    text = _QUOTE_LINE_RE.sub(_MASK, text)
+    text = _mask_quotes(text)
+    text = _TABLE_ROW_RE.sub(_MASK, text)
     text = _INDENTED_LINE_RE.sub(_MASK, text)
     return _join_soft_wraps(_mask_data_lists(text))
 
@@ -446,15 +494,16 @@ def carries_approval(body: str) -> bool:
     rather than guarded.
 
     Being an any-unit rule, it reads only AUTHORIAL text, at the granularity
-    GitHub renders: block quotes, code spans and fences (parsed structurally —
-    a fenced block ends only at a line holding nothing but its fence),
-    strike-through, HTML comments, indented code and enumerations of values are
-    masked, and hard-wrapped prose is rejoined into its paragraph, before the
-    split (:func:`_authorial_text`). So an approval word the author merely
-    QUOTED, showed as data, struck out, hid in an invisible comment or never
-    wrote at all (a line break landing in front of one) cannot satisfy it (PR
-    #426 round-5 review, f-001 + the round-5 panel's security f-001 / f-003 and
-    correctness f-002). The end-to-end rule
+    GitHub renders: block quotes with their lazy continuations, code spans and
+    fences (parsed structurally — a fenced block ends only at a line holding
+    nothing but its fence), strike-through, HTML comments, indented code and
+    enumerations of values (a list, or a table row) are masked, and
+    hard-wrapped prose is rejoined into its paragraph, before the split
+    (:func:`_authorial_text`). So an approval word the author merely QUOTED,
+    showed as data, struck out, hid in an invisible comment or never wrote at
+    all (a line break landing in front of one) cannot satisfy it (PR #426
+    round-5 review, f-001 + the panel's security f-001 / f-003 / f-004 / f-005
+    and correctness f-002). The end-to-end rule
     deliberately keeps reading those contexts: there EVERY unit must pass, so
     a defect inside a block quote —
     "> the token is logged at src/api.py:88" above an "LGTM" — is precisely

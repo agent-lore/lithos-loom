@@ -324,6 +324,25 @@ _NOT_AN_APPROVAL = [
     "logged at src/api.py:88.",
     "Nothing about this cookie handling looks\ngood. It has no Secure flag at "
     "src/api.py:20.",
+    # round-6 panel, correctness f-002 / security f-004: a GFM table is the
+    # table spelling of the enumeration the list rule already masks — a row
+    # whose only populated cell is an approval word reduced to a bare verdict
+    # once the decoration strip removed the pipes.
+    "Allowed values:\n\n| status |\n| --- |\n| approved |\n\nThe endpoint never "
+    "validates it at src/api.py:12.",
+    "| value |\n| --- |\n| approved |\n| pending |\nThe admin token is logged at "
+    "src/api.py:88.",
+    "| value | note |\n| --- | --- |\n| approved | |\nThe admin token is logged "
+    "at src/api.py:88.",
+    "| verdict |\n| --- |\n| LGTM |\nThe token is logged at src/api.py:88.",
+    # …and GFM's leading/trailing pipes are optional, so the pipeless spelling
+    # of the same row is a row too.
+    "status | note\n--- | ---\napproved |\n\nThe token is logged at src/api.py:88.",
+    # round-6 panel, security f-005: CommonMark §5.1 folds a paragraph line
+    # directly after a quote INTO the quote, so it renders as someone else's
+    # words — the blank-line case below is the one that is really the author's.
+    "> the token is logged at src/api.py:88\nLGTM",
+    "> the token is logged at src/api.py:88\n> and never redacted\napproved",
     # The control: undecorated defect prose, which was never eligible.
     "The query builder concatenates user input at src/db.py:44.",
 ]
@@ -371,6 +390,9 @@ def test_a_body_with_no_approval_verdict_is_never_eligible(body: str) -> None:
         "**No findings.** The three streams all look\nright to me. Ready to merge.",
         "No\nfindings. Ready to merge.",
         "## No findings\nReady to merge.",
+        # The author's own list after a quote is theirs: a blank line ends the
+        # quote, and a list item is not paragraph continuation text anyway.
+        "> LGTM\n\n- No findings.\n- Ready to merge.",
     ],
 )
 def test_an_approval_the_author_wrote_stays_eligible(body: str) -> None:
@@ -394,6 +416,19 @@ def test_the_end_to_end_rule_still_reads_quoted_and_fenced_text() -> None:
     # …and the floor still reads the author's own "LGTM" beside it: a quoted
     # claim with an approval of one's own is the mixed case triage judges.
     assert carries_approval(quoted) and carries_approval(fenced)
+
+
+def test_a_quotes_lazy_continuation_is_the_quote_not_the_authors_verdict() -> None:
+    """Round-6 panel security f-005: CommonMark §5.1 folds a paragraph line
+    directly after a quoted paragraph — no blank line, no ``>`` of its own —
+    into the quote, so GitHub renders it as someone else's words. A BLANK line
+    really does end the quote, and the approval after one really is the
+    author's: the fold must not swallow it."""
+    assert not carries_approval("> the token is logged at src/api.py:88\nLGTM")
+    assert carries_approval("> the token is logged at src/api.py:88\n\nLGTM")
+    # Neither may it swallow the whole rest of the body: the fold stops at the
+    # first blank line, so prose two paragraphs down is still the author's.
+    assert carries_approval("> not my words\nnor these\n\nLGTM")
 
 
 def test_review_state_policy_follows_the_body_not_just_the_state() -> None:

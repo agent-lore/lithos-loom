@@ -387,6 +387,8 @@ _NOT_THE_AUTHORS_VERDICT = [
     "````\n````` example\nLGTM\n````\nThe token is logged at src/api.py:88.",
     "The session is reused even when the user is not\napproved. The token is "
     "logged at src/api.py:88.",
+    "| verdict |\n| --- |\n| LGTM |\nThe token is logged at src/api.py:88.",
+    "> the token is logged at src/api.py:88\nLGTM",
 ]
 
 
