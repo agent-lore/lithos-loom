@@ -54,6 +54,7 @@ from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.plugins.story_develop import engines, handoff, run_outcome
 from lithos_loom.plugins.story_develop.idempotency import lookup_completed
+from lithos_loom.plugins.story_develop.publish_text import CONTROL_CHARS_RE
 from lithos_loom.plugins.story_develop.run_outcome import is_run_dir, resolve_run_dir
 from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_exit
 
@@ -150,16 +151,15 @@ _MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
 # once (count × ≤1 MiB) would balloon this process even with the per-file cap.
 # Overflow surfaces over subsequent polls (unprocessed files aren't marked seen).
 _MAX_HANDOFFS_PER_POLL = 64
-# C0 controls except TAB/LF, plus DEL and the C1 range (covers ESC 0x1b) — and
-# the Unicode characters that reorder or hide text without being control codes:
-# bidi overrides / isolates (trojan source) and the zero-width formatters. Same
-# set as `_deliver_facts._CONTROL_CHARS_RE` and `handoff._AGENT_CONTROL_RE`:
-# a line on a screen the operator DECIDES on must not be able to render
-# differently from the text it carries, by either mechanism.
-_CONTROL_CHARS_RE = re.compile(
-    "[\x00-\x08\x0b-\x1f\x7f-\x9f"
-    "\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
-)
+# A line on a screen the operator DECIDES on must not be able to render
+# differently from the text it carries — so the same class every other
+# publication boundary strips, from its ONE definition:
+# `plugins.story_develop.publish_text.CONTROL_CHARS_RE` (C0 controls except
+# TAB/LF, DEL and the C1 range that covers ESC 0x1b, and
+# `Default_Ignorable_Code_Point` in full). It was a third copy of that literal
+# until security/f-002; the copies had drifted from it, which is the whole
+# reason there is now one (`_deliver_facts.sanitize_for_terminal` and
+# `handoff.sanitize_agent_text` import the same name).
 
 
 # ── run-dir model (pure; unit-tested) ──────────────────────────────────
@@ -975,7 +975,7 @@ def _sanitize(text: str) -> str:
     handoff could otherwise inject ANSI escapes to forge a fake outcome line,
     clear the screen, or set the window title. Plain text is unaffected.
     """
-    return _CONTROL_CHARS_RE.sub("", text)
+    return CONTROL_CHARS_RE.sub("", text)
 
 
 def _read_handoff(path: Path) -> str:

@@ -31,7 +31,7 @@ from lithos_loom.github_models import (
 
 from . import run_outcome
 from .github_access import github_call, repo_name_with_owner
-from .publish_text import fence_untrusted
+from .publish_text import fence_untrusted, publish_title
 
 logger = logging.getLogger(__name__)
 
@@ -654,7 +654,11 @@ def deliver(
 
     push_branch(wt, result.branch)
     repo = repo_name_with_owner(wt)
-    title = config.description.strip().splitlines()[0][:90]
+    # `publish_title`, not a raw first line: for a mirrored story this IS the
+    # external issue's title, and a multi-commit PR's title becomes the
+    # squash COMMIT SUBJECT — a raw-text channel no fence reaches, where
+    # GitHub still honours closing keywords (security/f-001).
+    title = publish_title(config.description)
     body = build_pr_body(
         description=config.description,
         acceptance_criteria=config.acceptance_criteria,

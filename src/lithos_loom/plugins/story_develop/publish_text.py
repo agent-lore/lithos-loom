@@ -10,7 +10,8 @@ acceptance criteria**: those are the external issue body, mirrored into Lithos
 by :mod:`~lithos_loom.subscriptions._github_issue_sync` and re-read live at
 delivery time.
 
-Two tools, used together where the text is a whole document:
+Three tools. The first two are used together where the text is a whole
+document:
 
 * :func:`fence_untrusted` — bound the text and put it in a fenced code block
   **its own content cannot terminate** (the fence is measured against the
@@ -20,6 +21,15 @@ Two tools, used together where the text is a whole document:
   still reads the same and binds nothing. The sole defence where a fence will
   not do (the one-line provenance bullet), and belt-and-braces inside every
   fence, since a rule that never stands alone is a rule nobody maintains.
+
+…and the third is for the one string that is neither:
+
+* :func:`publish_title` — the PR **title**. Not markdown (GitHub renders it as
+  plain text, so the body's entity rewrites would show up literally) and not
+  inert either: with the repo default squash-merge message the title becomes
+  the **commit subject**, and GitHub honours closing keywords and ``@name`` in
+  commit messages on the default branch. A commit message is raw text, so no
+  fence reaches it.
 
 So the neutralising lives here rather than beside any one caller: the plugin's
 PR-body builder (:func:`~.pr_delivery.build_pr_body`) and the hand-delivery
@@ -34,9 +44,11 @@ import re
 __all__ = [
     "CONTROL_CHARS_RE",
     "MAX_SECTION_CHARS",
+    "MAX_TITLE_CHARS",
     "MIN_SECTION_CHARS",
     "defang_markup",
     "fence_untrusted",
+    "publish_title",
 ]
 
 # The characters a published line must not be able to carry: the C0 / C1
@@ -156,6 +168,9 @@ _LINK_DEF_RE = re.compile(r"\]:")
 # Backtick runs decide how long a fence must be to be unterminable.
 _BACKTICK_RUN_RE = re.compile(r"`+")
 
+MAX_TITLE_CHARS = 90
+"""Cap on a published PR title — the length both delivery paths already used."""
+
 MAX_SECTION_CHARS = 8000
 """Cap on one untrusted PR-body section (CWE-770).
 
@@ -247,6 +262,45 @@ def defang_markup(text: str) -> str:
     return _FENCE_RE.sub(lambda m: m.group(0)[0] * 2, out)
 
 
+def publish_title(text: str, *, limit: int = MAX_TITLE_CHARS) -> str:
+    """*text*'s first line as a PR title that reads the same and binds nothing.
+
+    The story's title is the external issue's title for a story the
+    github-issue watcher materialised (the mirror creates the task with
+    ``title=issue.title``), so it is the same weaker party's text as the
+    description — and it travels a channel the body's fence cannot reach.
+    With the repo default squash-merge message (``COMMIT_OR_PR_TITLE``) a
+    multi-commit PR takes its commit **subject** from the PR title, and loom's
+    PRs are deliberately multi-commit (:func:`~.pr_delivery.build_pr_body`
+    says so in the body it writes). GitHub honours closing keywords in commit
+    messages on the default branch, so an issue titled
+    ``Closes #1 parser crashes on empty input`` would close issue #1 under the
+    operator's account on merge, with nothing in the PR body to show why —
+    the same exploit as the unfenced description, on the other half of the
+    same boundary.
+
+    Neutralised with **separators, not entities**: a title is plain text, not
+    markdown, so `defang_markup`'s ``&#64;`` / ``&lt;`` would be published
+    literally instead of rendering as the character they stand for. The
+    keyword keeps its word and gains the same arrow the body gives it, a
+    mention keeps its name behind a space, and the invisibles come out
+    (:data:`CONTROL_CHARS_RE`) — they would otherwise reorder the PR list, the
+    notification email and the commit subject, none of which the
+    ``--dry-run`` screen's own sanitising covers.
+
+    Unlike a fenced section, a title has no whitespace to preserve: it is one
+    plain-text line that GitHub trims itself, and the first line is all of it.
+    ``""`` when *text* holds no line, which is the caller's cue to fall back.
+    """
+    flat = CONTROL_CHARS_RE.sub("", text).strip()
+    first = flat.splitlines()[0].strip() if flat else ""
+    defanged = _CLOSES_RE.sub(lambda m: f"{m.group(0)}\u2192 ", first)
+    defanged = _MENTION_RE.sub(r"@ \1", defanged)
+    # Cut last: the rewrites only ever grow the line, and dropping a suffix
+    # cannot rejoin a keyword with the ref the arrow was put between.
+    return defanged[:limit].strip()
+
+
 def _squeeze_for_budget(text: str) -> str:
     """*text* with everything the published section cannot carry taken out.
 
@@ -303,10 +357,16 @@ def fence_untrusted(text: str, *, limit: int = MAX_SECTION_CHARS) -> str:
     character classes, linear in the input, which is what makes them safe to
     run before the bound rather than behind it.
 
-    Whitespace is published exactly as written. A code block carries every
-    space, tab and blank line, so the story's indentation is its content — a
-    reporter padding with it spends a real budget and gets a visibly truncated
-    section, which is the honest outcome, not a silently reflowed one.
+    Whitespace is published exactly as written — **at the section's edges as
+    well as between its words**. A code block carries every space, tab and
+    blank line, so the story's indentation is its content: acceptance criteria
+    that OPEN on an indented exact-output line lose their meaning if the first
+    line is un-indented, and a final line's trailing spaces are as significant
+    as any other line's. Trimming them was the last place this function still
+    normalised silently. A reporter padding with whitespace spends a real
+    budget and gets a visibly truncated section, which is the honest outcome,
+    not a silently reflowed one. A section that is **nothing but** whitespace
+    carries nothing, and is the empty section it already was.
     """
     if limit < MIN_SECTION_CHARS:
         raise ValueError(
@@ -315,16 +375,21 @@ def fence_untrusted(text: str, *, limit: int = MAX_SECTION_CHARS) -> str:
         )
     carried = _squeeze_for_budget(text)
     clipped = carried[: limit * _DEFANG_INPUT_SLACK]
-    body = defang_markup(clipped).strip()
+    body = defang_markup(clipped)
     if len(clipped) < len(carried) or len(body) > limit:
         # The marker fits INSIDE the cap, and lands before the emptiness check
         # below: a section whose text all sat past the input slice would read
         # as "the story said nothing" rather than "there was more of this".
         # `_squeeze_for_budget` is what keeps that from being reachable by
         # padding; this ordering is the backstop if it ever stops being.
+        # The cut itself trims nothing either — it is announced, so it has no
+        # need to also tidy the edge it left behind.
         keep = limit - len(_TRUNCATION_NOTE) - 1
-        body = f"{body[:keep].rstrip()}\n{_TRUNCATION_NOTE}".lstrip()
-    if not body:
+        body = f"{body[:keep]}\n{_TRUNCATION_NOTE}"
+    # Emptiness is a question about the CONTENT, not a reason to rewrite it:
+    # `body.strip()` decides whether there is a section at all, and `body`
+    # itself is what gets published if there is.
+    if not body.strip():
         return ""
     longest = max(
         (len(run.group(0)) for run in _BACKTICK_RUN_RE.finditer(body)), default=0

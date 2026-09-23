@@ -610,6 +610,33 @@ def test_the_plan_screen_cannot_be_rewritten_by_the_text_it_shows(
     assert any("more line(s)" in line for line in plan)
 
 
+def test_the_pr_title_handed_to_gh_binds_no_issue(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """security/f-001: `develop deliver` composes the PR title independently
+    from `story.title`, which for a mirrored story IS the external issue's
+    title. With the repo default squash-merge message a multi-commit PR (and
+    loom's are deliberately multi-commit) takes its COMMIT SUBJECT from that
+    title, and GitHub honours closing keywords in commit messages on the
+    default branch — a raw-text channel the body's fence cannot reach."""
+    story = _get(lithos, _STORY)
+    lithos.add_task(
+        make_task(
+            _STORY,
+            title="Closes #1 parser crashes on empty input, cc @agent-lore/sec",
+            description=story.description,
+            metadata=dict(story.metadata),
+        )
+    )
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    title = gh["created"][-1]["title"]
+    assert "Closes #1" not in title and "Closes → #1" in title
+    assert "@agent-lore/sec" not in title and "@ agent-lore/sec" in title
+
+
 def test_a_padded_story_title_cannot_soft_wrap_into_a_plan_line(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:

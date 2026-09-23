@@ -34,9 +34,11 @@ from lithos_loom.plugins.story_develop.pr_delivery import (
 from lithos_loom.plugins.story_develop.publish_text import (
     CONTROL_CHARS_RE,
     MAX_SECTION_CHARS,
+    MAX_TITLE_CHARS,
     MIN_SECTION_CHARS,
     defang_markup,
     fence_untrusted,
+    publish_title,
 )
 
 # --- pure builders --------------------------------------------------------------
@@ -391,6 +393,32 @@ def test_the_stripped_class_tracks_the_unicode_property() -> None:
     assert defang_markup("a\tb\nc") == "a\tb\nc"
 
 
+def test_whitespace_at_a_section_boundary_is_published_too() -> None:
+    """correctness/f-001: the contract is that whitespace is published exactly
+    as written, and a section's EDGES are part of it. `.strip()` on the body
+    was the last place this function still normalised silently — acceptance
+    criteria that open on an indented exact-output line were published
+    un-indented, and a final line's significant trailing spaces vanished, both
+    with no truncation marker to say anything had gone."""
+    for fixture in (
+        "   expected   ",  # the reviewer's own repro
+        # an exact-output fixture that OPENS on its indented line
+        "    $ loom run --flag\n    ok\nthat is the whole output",
+        "run it and compare:\n    exact   ",  # trailing spaces on the last line
+        "\n\n  leading blank lines are a paragraph break\n\n",
+        "\ttab-indented first line",
+    ):
+        assert _interior(fence_untrusted(fixture)) == fixture
+        assert "(truncated" not in fence_untrusted(fixture)
+
+
+def test_a_section_of_nothing_but_whitespace_is_still_no_section() -> None:
+    """…while emptiness stays a question about the CONTENT: text that carries
+    nothing publishes no fenced block at all, rather than an empty one."""
+    for blank in ("", "   ", "\n\n", " \t \n \t "):
+        assert fence_untrusted(blank) == ""
+
+
 def test_fence_untrusted_publishes_no_more_than_its_limit() -> None:
     """correctness/f-002: *limit* is a cap on the quoted content, marker
     included — appending the note after the cut would publish 53 characters
@@ -412,6 +440,63 @@ def test_fence_untrusted_publishes_no_more_than_its_limit() -> None:
     for unusable in (0, -1, -MAX_SECTION_CHARS, MIN_SECTION_CHARS - 1):
         with pytest.raises(ValueError, match="at least"):
             fence_untrusted("x" * 500, limit=unusable)
+
+
+def test_publish_title_breaks_the_keyword_that_reaches_the_commit_subject() -> None:
+    """security/f-001: the story's title is the external issue's title for a
+    mirrored story, and with the repo default squash-merge message a
+    multi-commit PR (loom's always are) takes its COMMIT SUBJECT from the PR
+    title. GitHub honours closing keywords in commit messages on the default
+    branch — a raw-text channel no fence reaches — so `Closes #1 parser
+    crashes` would close issue #1 under the operator's account on merge."""
+    for live, dead in (
+        ("Closes #1 fix the parser", "Closes → #1 fix the parser"),
+        ("Fixes GH-9 in the lexer", "Fixes → GH-9 in the lexer"),
+        ("resolve agent-lore/other#3", "resolve → agent-lore/other#3"),
+        (
+            "Closes https://github.com/o/r/issues/5",
+            "Closes → https://github.com/o/r/issues/5",
+        ),
+    ):
+        assert publish_title(live) == dead
+
+    # …nobody is notified either: a commit message DOES link and notify a
+    # mention. Broken with a space, not an entity — a title is plain text, so
+    # `&#64;` would be published literally instead of rendering as `@`.
+    assert publish_title("crash, cc @agent-lore/security") == (
+        "crash, cc @ agent-lore/security"
+    )
+    assert "&#" not in publish_title("<img> & [a](b) stay readable")
+
+    # …and no formatter reorders the PR list, the notification email or the
+    # commit subject
+    assert publish_title("re\u202eorder me") == "reorder me"
+    assert publish_title("smuggle\U000e0001d") == "smuggled"
+
+    # the ordinary rules survive: first line only, trimmed, capped
+    assert publish_title("  Add a flag\n\nDetails.  ") == "Add a flag"
+    assert publish_title("") == ""  # the caller's cue to fall back
+    assert len(publish_title("x" * 200)) == MAX_TITLE_CHARS
+
+
+def test_delivery_hands_gh_a_title_that_binds_nothing(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """security/f-001, the daemon half: `deliver()` takes the PR title straight
+    off the task text, whose first line is the mirrored issue's title. The
+    suite only ever asserted about `build_pr_body`'s return value, so this
+    channel had no coverage at all."""
+    mirrored = replace(
+        config, description="Closes #1 parser crashes on empty input\n\nDetails."
+    )
+    state = _install(monkeypatch, mirrored)
+    wt = _make_wt(mirrored)
+
+    deliver(mirrored, _result(mirrored, wt))
+
+    title = state["pr_kwargs"]["title"]
+    assert title == "Closes → #1 parser crashes on empty input"
+    assert "Closes #1" not in title
 
 
 def test_an_oversized_story_description_is_bounded() -> None:

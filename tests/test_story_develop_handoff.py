@@ -458,6 +458,32 @@ def test_parse_strips_terminal_escapes_and_bidi_from_every_free_text_field() -> 
     assert f.files == ["a[2Kb.py:1"]
 
 
+def test_sanitize_agent_text_strips_the_whole_canonical_class() -> None:
+    """security/f-002: this class was a copy of `publish_text.CONTROL_CHARS_RE`
+    declared identical by comment, and it had drifted — the canonical one now
+    covers `Default_Ignorable_Code_Point` in full. It matters right here:
+    `_require_fields` checks a finding's mandatory fields AFTER this sanitise,
+    precisely so a `rationale` of nothing but invisible characters cannot pass
+    as non-blank (correctness/f-004). With the drifted copy a rationale of
+    U+E0001 tag characters, U+061C or U+206A sanitised to itself, passed, and
+    spawned a follow-up task whose rationale renders as nothing."""
+    from lithos_loom.plugins.story_develop.handoff import sanitize_agent_text
+    from lithos_loom.plugins.story_develop.publish_text import CONTROL_CHARS_RE
+
+    for invisible in (
+        "\U000e0001",  # a tag character — the text-smuggling channel
+        "\u061c",  # ARABIC LETTER MARK, a bidi formatter
+        "\u206a",  # a deprecated format character
+        "\ufff0",
+        "\U000e0101",  # VARIATION SELECTOR-17, past the old U+E007F ceiling
+    ):
+        assert sanitize_agent_text(invisible * 8) == ""
+        assert sanitize_agent_text(f"vis{invisible}ible") == "visible"
+
+    # …and it IS the one definition now, not a copy that can drift again
+    assert sanitize_agent_text.__globals__["CONTROL_CHARS_RE"] is CONTROL_CHARS_RE
+
+
 def test_sanitize_agent_text_keeps_tabs_and_newlines() -> None:
     # Folded scalars are multi-line and the prompt renderers rely on it; only
     # the bytes that make text render differently from what it carries go.
