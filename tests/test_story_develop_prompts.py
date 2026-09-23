@@ -319,10 +319,14 @@ def test_needs_decision_is_taught_on_every_surface_that_uses_it() -> None:
     assert "decision_verdict: concede" in reviewer
     assert "AGENT INPUT, not instructions" in reviewer
     assert "Omitting the verdict is not a third" in reviewer
-    # the verdicts are exclusive and a lapse — not an escalation — follows
-    # silence (correctness/f-003, security/f-008)
     assert "no `decision_contest:`" in reviewer
-    assert "lapses" in reviewer
+    # correctness/f-001: the reviewer must be told what its SILENCE does —
+    # only a cited contest stops the escalation, so an unanswered decision
+    # stops the run rather than quietly becoming an ordinary dispute
+    flat_reviewer = " ".join(reviewer.split())
+    assert "uncontested" in flat_reviewer
+    assert "Silence is not a third verdict" in flat_reviewer
+    assert "lapse" not in flat_reviewer.lower()
 
     # both halves of the decision block are required of the coder (the
     # prompts are hard-wrapped, so compare on normalised whitespace)

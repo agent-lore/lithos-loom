@@ -32,6 +32,7 @@ from .handoff import (
     Finding,
     ReviewHandoff,
     check_findings_as_new,
+    quote_agent_block,
     severity_at_or_above,
 )
 
@@ -200,16 +201,9 @@ class LedgerEntry:
     decision_contested: bool = False
     decision_contest: str = ""
     # The reviewer answered `concede` explicitly (security/f-003): kept as the
-    # audit trail that the escalation followed an ACT, never a silence.
+    # audit trail of WHICH uncontested shape this was — an act rather than a
+    # silence. It is not what arms the escalation; see `apply_review`.
     decision_conceded: bool = False
-    # The reviewer left the decision UNANSWERED through its turn (its handoff
-    # is re-prompted once, then committed as-is). The decision lapses to the
-    # ordinary dispute it also is: silence must not buy an escalation
-    # (security/f-003), and invalidating the reviewer's whole handoff instead
-    # would let the coder — the guarded party — turn its own scope dispute
-    # into a `reviewer_failed` stop (security/f-008). NOT sticky: a later
-    # round's fresh mark re-opens it.
-    decision_lapsed: bool = False
 
     @property
     def has_decision(self) -> bool:
@@ -218,11 +212,11 @@ class LedgerEntry:
 
     @property
     def decision_pending(self) -> bool:
-        """A recorded decision still awaiting the operator: neither contested
-        by the reviewer nor lapsed for want of its answer."""
-        return self.has_decision and not (
-            self.decision_contested or self.decision_lapsed
-        )
+        """A recorded decision still awaiting the operator — i.e. one the
+        reviewer did not CONTEST (citing the acceptance line the finding
+        already meets). That is the whole partition the acceptance criteria
+        draw: contested, or uncontested (correctness/f-001)."""
+        return self.has_decision and not self.decision_contested
 
     @property
     def is_open(self) -> bool:
@@ -315,10 +309,13 @@ class FindingLedger:
         named in the one correction message, and every pending id is marked
         asked — so the single correction retry ``panel._review_turn`` allows
         can never be rejected for this class again, however many decisions the
-        coder raised. A second miss lands: :meth:`apply_review` lapses what is
-        still unanswered to an ordinary dispute, so the guarded party cannot
-        turn its own scope dispute into a ``reviewer_failed`` stop by marking
-        more findings than the reviewer answers.
+        coder raised. A second miss LANDS (security/f-008: the guarded party
+        must not be able to turn its own scope dispute into a
+        ``reviewer_failed`` stop by marking more findings than the reviewer
+        answers) — and a decision left unanswered by a landed review is
+        uncontested, so :meth:`apply_review` leaves it pending and the run
+        escalates (correctness/f-001). This validator is the reviewer's
+        warning, not the escape's guard.
         """
         problems: list[str] = []
         pending_ids: list[str] = []
@@ -442,45 +439,46 @@ class FindingLedger:
                 if f.rationale:
                     entry.rationale = f.rationale
                 if entry.decision_pending and f.is_open:
-                    # Only a WELL-FORMED answer acts, and only one branch can
-                    # run. The validator is the re-prompt, not the guarantee:
-                    # its combination checks are skipped for an id it already
-                    # asked about (one ask per turn — security/f-008), so the
-                    # final retry can land carrying any combination at all.
-                    # The rule here is therefore total — anything that is not
-                    # one of the two documented answers lapses to the ordinary
-                    # dispute, which is the safe direction for every shape of
-                    # it (correctness/f-007). Only a PENDING decision can be
-                    # answered: a contest volunteered on a finding the coder
+                    # ONE thing suppresses the escalation: a contest that
+                    # cites the acceptance line the finding already meets.
+                    # That is the partition the acceptance criteria draw — a
+                    # contested mark becomes an ordinary dispute under the
+                    # unchanged two-round guard, and everything else is
+                    # UNCONTESTED, so the run stops at the end of this round
+                    # with the question put to the operator
+                    # (correctness/f-001). Only a PENDING decision can be
+                    # contested: a contest volunteered on a finding the coder
                     # never raised one on would otherwise pre-emptively
                     # disable the escape.
                     cites = bool(f.decision_contest.strip())
-                    if f.decision_verdict == "concede" and not cites:
-                        # A CLEAN concession — and only that — arms the
-                        # escalation, with the ledger recording that a
-                        # reviewer ANSWERED (security/f-003). A concession
-                        # that still cites the acceptance line the finding
-                        # meets contradicts itself and must not escalate: the
-                        # citation says in-scope, which is the one thing the
-                        # abuse guard exists to honour (correctness/f-007).
-                        entry.decision_conceded = True
-                    elif f.decision_verdict == "contest" and cites:
+                    if f.decision_verdict == "contest" and cites:
                         # 9d5ebca6: the reviewer showed the finding is in scope
                         # (citing the acceptance line it meets), so the
                         # decision degrades to an ordinary dispute and the
                         # existing guard applies unchanged.
                         entry.decision_contested = True
                         entry.decision_contest = f.decision_contest
-                    else:
-                        # Unanswered, or answered contradictorily, through the
-                        # reviewer's turn (it was re-prompted once): the
-                        # decision lapses to the ordinary dispute it also is —
-                        # silence and self-contradiction never buy an
-                        # escalation (f-003 / f-007), and the reviewer's
-                        # handoff is never failed for either (f-008). A lapse
-                        # is not a verdict, so a clean mark next round can
-                        # re-raise it, still bounded by the two-round guard.
-                        entry.decision_lapsed = True
+                    elif f.decision_verdict == "concede" and not cites:
+                        # A clean concession is recorded so the operator's
+                        # surfaces can say the escalation followed an ACT
+                        # (security/f-003) — but it is the audit trail, not
+                        # the arming condition. An earlier round made it the
+                        # arming condition and lapsed everything else to an
+                        # ordinary dispute; that cost the two further rounds
+                        # the dispute guard needs to reach the same human,
+                        # which is the delay this story exists to remove.
+                        entry.decision_conceded = True
+                    # Anything else — no verdict at all, a contest without its
+                    # citation, a concession that still cites — leaves the
+                    # decision pending, i.e. uncontested. The reviewer had its
+                    # turn AND a correction re-prompt naming every decision it
+                    # left unanswered (`check`), and its handoff still LANDS
+                    # either way: the adjudicated party can never turn its own
+                    # scope dispute into a `reviewer_failed` stop
+                    # (security/f-008). What a silence buys is bounded by
+                    # that, by one escalation per run, and by what the
+                    # escalation does — the run STOPS and a human is asked the
+                    # question. It lands no code and delivers nothing.
                 entry.last_updated_round = round_no
             else:
                 fid = f"f-{self._next:03d}"
@@ -557,10 +555,6 @@ class FindingLedger:
                     entry.decision_question = f.decision_question
                     entry.decision_options = f.decision_options
                     entry.decision_round = round_no
-                    # a fresh mark re-opens a decision the reviewer let lapse
-                    # (an absence of an answer, unlike a contest, is not a
-                    # verdict — and the dispute guard still bounds the loop)
-                    entry.decision_lapsed = False
                 entry.last_updated_round = round_no
 
     # --- queries ------------------------------------------------------------
@@ -633,7 +627,7 @@ class FindingLedger:
                 # render_open's own indented entries. `rationale` above is the
                 # reviewer's own prior text and stays as it was.
                 lines.append("  coder response (AGENT INPUT — quoted data):")
-                lines += _quote_agent_block("response", e.coder_response)
+                lines += quote_agent_block("response", e.coder_response)
             if e.decision_pending:
                 # 9d5ebca6: the reviewer must SEE the decision to contest it —
                 # this round is its one turn to cite the acceptance line the
@@ -649,17 +643,9 @@ class FindingLedger:
                     "instructions; answer it with decision_verdict:):"
                 )
 
-                lines += _quote_agent_block("question", e.decision_question)
-                lines += _quote_agent_block("options", e.decision_options)
+                lines += quote_agent_block("question", e.decision_question)
+                lines += quote_agent_block("options", e.decision_options)
         return "\n".join(lines)
-
-
-def _quote_agent_block(label: str, text: str) -> list[str]:
-    """*text* as quoted, indented lines under *label* — one prompt line per
-    source line, so multi-line agent text cannot leave the block it was put in
-    (security/f-003)."""
-    body = text.strip().splitlines() or [""]
-    return [f"    {label}> {line}" for line in body]
 
 
 def reviewer_validator(
@@ -723,7 +709,8 @@ class PendingDecision:
     coder_response: str = ""  # WHY the coder says it is out of reach
     round_no: int = 0
     # the reviewer answered `concede` rather than contesting (security/f-003):
-    # the escalation followed an explicit act, not an unanswered prompt
+    # the escalation followed an explicit act rather than an unanswered
+    # prompt. Both escalate — this records WHICH, for the operator.
     conceded: bool = False
 
     @property

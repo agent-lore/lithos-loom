@@ -1251,9 +1251,14 @@ def test_decision_phase_is_silent_when_the_reviewer_contests(tmp_path: Path) -> 
     ctx, ledger = _decision_ctx(tmp_path)
     ledger.record_coder_updates([_coder_decision()], 2)
     ledger.apply_review(
-        _reviewer_keeps_open(decision_contest="AC 4: 'exactly once per sweep'"), 2
+        _reviewer_keeps_open(
+            decision_verdict="contest",
+            decision_contest="AC 4: 'exactly once per sweep'",
+        ),
+        2,
     )
 
+    # a CITED contest is the one answer that stops it (correctness/f-001)
     assert rounds_mod.decision_phase(ctx, 2) is None
     # the ordinary guard takes over unchanged: a second blocked round deadlocks
     ledger.apply_review(_reviewer_keeps_open(), 3)

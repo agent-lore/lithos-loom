@@ -1388,14 +1388,14 @@ _REVIEW_CONTRADICTS_F001 = _FINDINGS_KEEP_F001.rstrip("\n") + (
 )
 
 
-def test_a_contradictory_answer_repeated_through_the_retry_does_not_escalate(
+def test_a_contradictory_answer_repeated_through_the_retry_is_uncontested(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    # correctness/f-007 end to end: a reviewer that concedes while still citing
-    # why the finding is in scope must not arm the early human escalation — a
-    # citation says in-scope, which is the case AC#4 sends to the ordinary
-    # dispute guard. It used to reach `needs_decision` because the retry skips
-    # combination validation and the apply path only looked at the verdict.
+    # correctness/f-007 + correctness/f-001 end to end: a reviewer that
+    # concedes while still citing why the finding is in scope has shown
+    # nothing — the verdict says it cannot demonstrate scope and the citation
+    # says it can. It is not a contest, so it does not stop the escalation;
+    # what it does NOT do is get recorded as a considered concession.
     _install_fakes(
         monkeypatch,
         config,
@@ -1406,13 +1406,15 @@ def test_a_contradictory_answer_repeated_through_the_retry_does_not_escalate(
                 "retry_text": _REVIEW_CONTRADICTS_F001,
             },
         ],
-        coder_handoffs={2: _CODER_NEEDS_DECISION, 3: _CODER_NEEDS_DECISION},
+        coder_handoffs={2: _CODER_NEEDS_DECISION},
     )
     result = develop_mod.develop(config)
 
-    assert result.status == "disputed"  # not needs_decision
-    assert result.decisions == ()
-    assert "dispute deadlock" in result.message
+    assert result.status == "needs_decision"
+    assert result.rounds == 2  # and no third coder turn was paid
+    (decision,) = result.decisions
+    assert decision.label == "code-quality/f-001"
+    assert decision.conceded is False  # a contradiction is not an act
 
 
 def test_two_unanswered_decisions_still_cost_only_one_correction(
@@ -1423,7 +1425,7 @@ def test_two_unanswered_decisions_still_cost_only_one_correction(
     # rejections — the second failed the handoff and the run stopped
     # `reviewer_failed`, telling the operator a reviewer broke when what
     # happened is the coder raised two questions. One ask per TURN names both;
-    # the retry lands and both decisions lapse to ordinary disputes.
+    # the retry LANDS, and both unanswered decisions are uncontested.
     _install_fakes(
         monkeypatch,
         config,
@@ -1431,12 +1433,12 @@ def test_two_unanswered_decisions_still_cost_only_one_correction(
             {"text": _FINDINGS_TWO},
             {"text": _REVIEW_KEEPS_BOTH, "retry_text": _REVIEW_KEEPS_BOTH},
         ],
-        coder_handoffs={2: _CODER_TWO_DECISIONS, 3: _CODER_TWO_DECISIONS},
+        coder_handoffs={2: _CODER_TWO_DECISIONS},
     )
     result = develop_mod.develop(config)
 
-    assert result.status == "disputed"  # NOT failed / reviewer_failed
-    assert result.decisions == ()
+    assert result.status == "needs_decision"  # NOT failed / reviewer_failed
+    assert [d.finding_id for d in result.decisions] == ["f-001", "f-002"]
     assert "f-001" in result.message and "f-002" in result.message
 
 
@@ -1463,28 +1465,37 @@ def test_two_conceded_decisions_are_both_carried_whole(
     assert "(b) drop it" in result.decisions[0].options
 
 
-def test_a_never_answered_decision_lapses_instead_of_failing_the_reviewer(
+def test_a_never_answered_decision_escalates_without_failing_the_reviewer(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    # security/f-008: the mandatory answer must not let the coder — the party
-    # the guard adjudicates — convert its own scope dispute into a
-    # `reviewer_failed` stop. The reviewer is re-prompted once; if it still
-    # does not answer, its review LANDS and the decision lapses to the
-    # ordinary dispute it also is, which the two-round guard then stops.
-    _install_fakes(
+    # The two rules meet end to end. security/f-008: the mandatory answer must
+    # not let the coder — the party the guard adjudicates — convert its own
+    # scope dispute into a `reviewer_failed` stop, so the reviewer is
+    # re-prompted once and its review then LANDS whatever it says.
+    # correctness/f-001: a landed review that did not contest is uncontested,
+    # and the acceptance criteria stop the run there. Previously the decision
+    # lapsed instead and the two-round dispute guard paid a third coder turn
+    # to reach the same human — the delay this story exists to remove.
+    state = _install_fakes(
         monkeypatch,
         config,
         reviews=[
             {"text": _FINDINGS_MAJOR},
             {"text": _FINDINGS_KEEP_F001, "retry_text": _FINDINGS_KEEP_F001},
         ],
-        coder_handoffs={2: _CODER_NEEDS_DECISION, 3: _CODER_NEEDS_DECISION},
+        coder_handoffs={2: _CODER_NEEDS_DECISION},
     )
     result = develop_mod.develop(config)
 
-    assert result.status == "disputed"  # NOT failed/reviewer_failed
-    assert result.decisions == ()  # and silence bought no escalation either
-    assert "dispute deadlock" in result.message
+    assert result.status == "needs_decision"  # NOT failed/reviewer_failed
+    assert result.rounds == 2
+    (decision,) = result.decisions
+    assert decision.label == "code-quality/f-001"
+    assert decision.conceded is False  # a silence, and recorded as one
+    # the reviewer WAS re-prompted before the run stopped on its silence
+    assert state["review_attempts"][(2, "code-quality")] == 2
+    # ...and no third coder turn was paid
+    assert [r for r, _ in state["coder_calls"]] == [1, 2]
 
 
 def test_cost_ceiling_stops_run(

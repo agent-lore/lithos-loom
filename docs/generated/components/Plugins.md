@@ -40,7 +40,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
 | `lithos_loom.plugins.story_develop.github_access` | S | 1 | 4 |
-| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 14 |
+| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 15 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
@@ -284,6 +284,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `load_prompt` — Read a packaged prompt template (e.g. ``coder_init.md``).
 - def `render_prompt` — Placeholder substitution that is safe against braces in the values.
 - def `render_findings` — Render a reviewer's findings as a compact block for the coder's prompt.
+- def `quote_agent_block` — *text* as quoted, indented lines under *label* — one prompt line per source line, so multi-line agent text cannot leave the block it was put in.
 - def `coder_handoff_name` — Filename for the coder's handoff in a given round (1-based).
 - def `reviewer_handoff_name` — Filename for a reviewer's handoff in a given round.
 - def `render_log_section` — Render one conversation-log section as a list of lines (the caller joins).
