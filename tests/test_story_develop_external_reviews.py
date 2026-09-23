@@ -226,7 +226,7 @@ def test_review_policy_and_handled_author_suppression(
         monkeypatch,
         reviews=[
             _review(500, author=_BOT, state="COMMENTED", body="generated 1 comment"),
-            _review(501, author="dave", state="APPROVED"),
+            _review(501, author="dave", state="APPROVED", body="LGTM"),
             _review(502, author="dave", state="CHANGES_REQUESTED", body="blockers"),
         ],
         comments=[
@@ -239,10 +239,36 @@ def test_review_policy_and_handled_author_suppression(
     trusted, _untrusted = fetch_external_findings(_REPO, 62, trusted_bots=(_BOT,))
 
     # The bot's COMMENTED summary is suppressed (its roots were handled); the
-    # APPROVED review is silent; the human CHANGES_REQUESTED survives.
+    # APPROVED review is a bare approval, so it asks for nothing and never
+    # reaches the coder; the human CHANGES_REQUESTED survives.
     assert [(f.author, f.activity_id) for f in trusted] == [("dave", 502)]
     assert trusted[0].reply_mode is ReplyMode.NONE
     assert "pullrequestreview-502" in trusted[0].thread_url
+
+
+def test_an_approved_review_that_asks_is_still_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #425 review, correctness f-001: `APPROVED` used to be silent
+    whatever the body said, so the acceptance guard's own "LGTM, but rename
+    X" was dropped on both the watcher and the converge side. Only a BARE
+    approval is silent now."""
+    _install_github(
+        monkeypatch,
+        reviews=[
+            _review(500, author="dave", state="APPROVED", body="LGTM"),
+            _review(
+                501, author="dave", state="APPROVED", body="LGTM, but rename `foo`"
+            ),
+        ],
+        permissions={"dave": "write"},
+    )
+
+    trusted, _untrusted = fetch_external_findings(_REPO, 62, trusted_bots=(_BOT,))
+
+    assert [(f.activity_id, f.body) for f in trusted] == [
+        (501, "LGTM, but rename `foo`")
+    ]
 
 
 # ── handoff rendering + injection ──────────────────────────────────────

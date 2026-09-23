@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "NOTHING_TO_REMEDIATE",
+    "NOTHING_TO_REMEDIATE_VERDICT",
     "TRIAGE_HANDOFF_NAME",
     "TriageVerdicts",
     "cited_locations",
@@ -74,8 +75,10 @@ LINE_NOTHING = "nothing-to-remediate"  # the claim asks for nothing (an approval
 # The verdict file the triage agent writes into the handoff mount.
 TRIAGE_HANDOFF_NAME = "round_00_triage.md"
 
-# The third verdict's token, as the prompt spells it.
+# The third verdict's token, as the prompt spells it, and its normalised form
+# (``_scan_verdict_lines`` folds ``_`` / ``-`` / spaces to one spelling).
 NOTHING_TO_REMEDIATE = "NOTHING_TO_REMEDIATE"
+NOTHING_TO_REMEDIATE_VERDICT = "NOTHING TO REMEDIATE"
 
 # One verdict per LINE: `- f-001: PROCEED`, `- f-001: REJECT — <evidence>` or
 # `- f-001: NOTHING_TO_REMEDIATE — <why it asks for nothing>`.
@@ -191,9 +194,11 @@ def parse_triage_verdicts(
     *repo_files* is supplied (the production step always passes the
     worktree's tracked-file snapshot), one that resolves to a real tracked
     file. It is dropped as nothing-to-remediate only by an explicit
-    ``NOTHING_TO_REMEDIATE`` line, which needs no citation (there is no
-    claim to refute); the S8 eval scores such a line on a must-proceed
-    finding as over-suppression, exactly like a rejection. Everything else
+    ``NOTHING_TO_REMEDIATE`` line **that states a reason**: there is no claim
+    to refute, so no citation is possible, and the reason is the guard in its
+    place (a bare drop leaves the operator nothing to check — security
+    f-002). The S8 eval scores such a line on a must-proceed finding as
+    over-suppression, exactly like a rejection. Everything else
     — PROCEED, bare REJECT, uncited prose, citation-shaped prose naming no
     repo file, unmentioned, garbled — proceeds. Ids the output invents are
     ignored. ``repo_files=None`` is the pure/unit-test mode: shape-only, no
@@ -260,10 +265,19 @@ def _scan_verdict_lines(
             continue  # sticky: an evidenced rejection is not undone by a later line
         elif verdict == "REJECT":
             kinds[fid] = LINE_REJECT_UNCITED
-        elif verdict != "PROCEED":  # NOTHING TO REMEDIATE — not a claim at all
+        elif verdict == NOTHING_TO_REMEDIATE_VERDICT and evidence:
+            # Not a claim at all. It carries no citation — there is nothing
+            # to refute — so the stated REASON is its corroborating guard
+            # (PR #425 review, security f-002): a bare drop names nothing an
+            # operator could check, and the outcome finding on the story
+            # quotes this line.
             kinds[fid] = LINE_NOTHING
             evidence_by_id[fid] = evidence
         else:
+            # Everything else PROCEEDS — a bare NOTHING_TO_REMEDIATE, and any
+            # token a later, wider `_VERDICT_RE` might admit. The default is
+            # explicit so widening that regex can never turn a new token into
+            # a silent suppression (security f-002).
             kinds[fid] = LINE_PROCEED
     return kinds, evidence_by_id
 

@@ -14,9 +14,17 @@ a known-false claim), the coder answered "NO CHANGE NEEDED — the finding is
 an explicit approval of head 21c041e, not a defect", and a full panel round
 then re-approved an unchanged head — about an hour of codex to learn what
 the comment already said, with the PR's merge-gate deferred behind it the
-whole time. f-001 is that comment verbatim. f-002 is the guard: an approval
-that carries an ask is a CLAIM, and suppressing it would lose real review
-material — the failure direction this whole arc exists to avoid.
+whole time.
+
+f-001 is that comment with one observation sentence added, which is what
+makes it worth a paid turn to measure: the deterministic ingestion
+classifier (`github_models.is_approval_text`) recognises the bare
+"**No findings.** … Ready to merge." and stops the dispatch for free, so the
+rows that actually REACH triage are the approvals it cannot read — an
+approval wrapped in prose. Measuring the naked form would measure a row
+production never sends here. f-002 is the guard: an approval that carries an
+ask is a CLAIM, and suppressing it would lose real review material — the
+failure direction this whole arc exists to avoid.
 
 THE TREE: loom at 81b2f0d (the commit the S2 ingestion module shipped at),
 with f-002 anchored in that module. The claims are deliberately about a tree

@@ -14,6 +14,7 @@ from lithos_loom.github_models import (
     AUTOMATED_REPLY_MARKER,
     LOOM_NOTICE_MARKER,
     IssueComment,
+    PullRequestReview,
     is_approval_text,
     is_automated_reply,
     is_landed_fix_reply,
@@ -21,6 +22,7 @@ from lithos_loom.github_models import (
     issue_comment_is_actionable,
     issue_comment_reply_body,
     issue_comment_reply_target,
+    review_is_actionable,
 )
 
 _URL = "https://github.com/o/r/pull/78#issuecomment-5551158842"
@@ -139,6 +141,11 @@ def test_genuine_loom_shapes_are_still_recognised_structurally() -> None:
         "👍",
         "Ship it 🚀",
         "All good",
+        "LGTM overall",  # correctness f-002: ordinary qualifiers cost a round
+        "overall LGTM",
+        "no findings from me",
+        "No further comments",
+        "Approving — all good",
         "I'm happy with this, ready to merge",
         "No findings.\n\nThanks again — great work!",
     ],
@@ -168,3 +175,51 @@ def test_pure_approvals_are_recognised(body: str) -> None:
 )
 def test_anything_carrying_an_ask_is_not_an_approval(body: str) -> None:
     assert not is_approval_text(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Security f-003's measured bypasses: the first cut deleted every
+        # non-ASCII codepoint before matching, so an ASCII approval token (or
+        # an approval emoji) beside an ask in any other script read as a bare
+        # approval — and was posted as "no actionable finding".
+        "✅ Нужно исправить",
+        "👍\nこの変更は脆弱です",
+        "LGTM 修复这个漏洞",
+        "LGTM. 请重命名变量",
+        "LGTM — 이 코드는 비밀번호를 로그에 남깁니다",
+        "LGTM Ｆｉｘ　ｔｈｅ　ａｕｔｈ　ｂｙｐａｓｓ",  # fullwidth ASCII is non-ASCII
+    ],
+)
+def test_an_ask_in_another_script_is_never_an_approval(body: str) -> None:
+    assert not is_approval_text(body)
+
+
+def test_typographic_punctuation_is_folded_not_deleted() -> None:
+    # Canonicalised, so the curly-quote and ellipsis spellings read like their
+    # ASCII twins…
+    assert is_approval_text("I’m happy with this")
+    assert is_approval_text("**No findings.** … Ready to merge.")
+    # …while a zero-width character cannot smuggle an ask past the matcher.
+    assert not is_approval_text("LGTM​ rename the handle")
+
+
+def test_review_state_policy_follows_the_body_not_just_the_state() -> None:
+    def review(state: str, body: str = "") -> PullRequestReview:
+        return PullRequestReview(author="dave", body=body, state=state)
+
+    # PR #425 review, correctness f-001: `APPROVED` was unconditionally
+    # silent, so an approval that also ASKED was dropped by every consumer.
+    assert review_is_actionable(review("APPROVED", "LGTM, but rename X"))
+    assert not review_is_actionable(review("APPROVED", "LGTM"))
+    assert not review_is_actionable(review("APPROVED"))
+    # A dismissal has had its say, whatever it says.
+    assert not review_is_actionable(review("DISMISSED", "rename X"))
+    # Unchanged: CHANGES_REQUESTED always, COMMENTED/unknown on content that
+    # is not a bare approval.
+    assert review_is_actionable(review("CHANGES_REQUESTED"))
+    assert review_is_actionable(review("COMMENTED", "rename X"))
+    assert not review_is_actionable(review("COMMENTED", "LGTM"))
+    assert not review_is_actionable(review("COMMENTED", "   "))
+    assert review_is_actionable(review("QUEUED", "rename X"))

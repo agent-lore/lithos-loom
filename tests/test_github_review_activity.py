@@ -350,6 +350,29 @@ def test_dispositions_splits_approvals_out_of_the_actionable_batch() -> None:
     assert [a.activity_id for a in appr] == [500, 20]
 
 
+def test_an_approved_review_that_asks_is_actionable_not_silent() -> None:
+    """PR #425 review, correctness f-001: it matched neither rule and was
+    consumed by the marker."""
+    rows = [
+        from_review(
+            _review(500, state="APPROVED", body="LGTM, but rename `foo`"),
+            repo=_REPO,
+            pr_number=_PR,
+        ),
+        from_review(
+            _review(501, state="APPROVED", body="LGTM"), repo=_REPO, pr_number=_PR
+        ),
+        from_review(
+            _review(502, state="DISMISSED", body="rename `foo`"),
+            repo=_REPO,
+            pr_number=_PR,
+        ),
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert [a.activity_id for a in act] == [500]
+    assert [a.activity_id for a in appr] == [501]  # 502 is silent, as ever
+
+
 def test_an_approval_that_asks_stays_in_the_actionable_batch() -> None:
     rows = [
         from_conversation_comment(_conversation(20, body="LGTM, but rename `foo`")),

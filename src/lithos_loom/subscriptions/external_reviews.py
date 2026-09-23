@@ -70,6 +70,7 @@ from lithos_loom.subscriptions._findings import post_finding_then_mark, write_ma
 __all__ = [
     "APPROVAL_NOTE",
     "EXTERNAL_REVIEW",
+    "UNVERIFIED_APPROVAL_NOTE",
     "REVIEW_SEEN_KEY",
     "IngestResult",
     "PendingMarkerProvider",
@@ -97,6 +98,19 @@ _MAX_LISTED = 20
 APPROVAL_NOTE = (
     "disposition: approval — this activity carries no actionable finding, so "
     "nothing was remediated and no remediation round was reserved or spent"
+)
+
+# The same disposition when NO approval in the batch came from an author loom
+# could verify as a repo write/admin collaborator (PR #425 review, security
+# f-003). Anyone who can comment on a public PR can leave an approval, and
+# this line is read while deciding to merge — loom must not lend a drive-by
+# account its own voice. Bots are labelled this way too: the allowlist that
+# trusts one lives in the remediation settings, which detection cannot see.
+UNVERIFIED_APPROVAL_NOTE = (
+    "disposition: approval — this activity carries no actionable finding, but "
+    "no approval in it comes from an author loom can verify as a repo "
+    "write/admin collaborator: it is recorded, not evidence the PR is ready. "
+    "Nothing was dispatched and no remediation round was reserved or spent"
 )
 
 
@@ -196,9 +210,18 @@ def _listed(
     return lines, hidden
 
 
-def _render_approval(a: ExternalReviewActivity) -> str:
-    """An approval row, tagged so the operator reads the disposition per row."""
-    return f"- [approval] {render_row(a).removeprefix('- ')}"
+def _approval_renderer(
+    verified: Mapping[str, bool],
+) -> Callable[[ExternalReviewActivity], str]:
+    """Render an approval row, tagged with its disposition AND whether loom
+    could verify the author (security f-003): the approval of an account that
+    merely *can* comment on the PR must not read like a collaborator's."""
+
+    def render(a: ExternalReviewActivity) -> str:
+        tag = "approval" if verified.get(a.author) else "approval, unverified author"
+        return f"- [{tag}] {render_row(a).removeprefix('- ')}"
+
+    return render
 
 
 def _render_summary(
@@ -206,6 +229,7 @@ def _render_summary(
     batch: list[ExternalReviewActivity],
     *,
     approvals: list[ExternalReviewActivity] | None = None,
+    verified: Mapping[str, bool] | None = None,
     story_id: str,
     gate_id: str,
     extra_note: str | None = None,
@@ -214,15 +238,22 @@ def _render_summary(
     lines = [f"{EXTERNAL_REVIEW} new review activity on delivered PR {pr_url}:"]
     rendered, hidden = _listed(batch, render_row)
     lines.extend(rendered)
-    rendered, elided = _listed(approvals or [], _render_approval)
+    verified = verified or {}
+    rendered, elided = _listed(approvals or [], _approval_renderer(verified))
     lines.extend(rendered)
     hidden += elided
     if hidden:
         lines.append(f"- …and {hidden} more (see the PR)")
     if not batch:
         # Nothing but approvals: say so where the operator reads it, and say
-        # that no round was spent (the whole point of the disposition).
-        lines.append(APPROVAL_NOTE)
+        # that no round was spent (the whole point of the disposition) — but
+        # only claim "no actionable finding" in loom's own voice when an
+        # author loom can verify said it.
+        lines.append(
+            APPROVAL_NOTE
+            if any(verified.get(a.author) for a in approvals or ())
+            else UNVERIFIED_APPROVAL_NOTE
+        )
     if extra_note:
         lines.append(extra_note)
     if post_merge:
@@ -270,14 +301,20 @@ def _new_marker(
 def _reply_author_trust(
     spec: PrGateSpec, github: GitHubClient, ctx: SubscriptionContext
 ) -> AuthorTrust:
-    """The sweep's trust for handled-proof: write/admin humans only (bots never
-    post replies), a probe failure logged as friction and treated as unproven."""
+    """The sweep's trust: write/admin humans only (bots never post replies, and
+    the bot allowlist lives in the remediation settings this module cannot
+    see), a probe failure logged as friction and treated as unverified.
+
+    Two readers, one probe budget per batch: the landed-fix proof, and the
+    label on an approval row (security f-003).
+    """
 
     def on_error(author: str, exc: Exception) -> None:
         ctx.logger.warning(
-            "[Friction] external-reviews: permission probe for reply "
+            "[Friction] external-reviews: permission probe for "
             "author %r on %s failed (%s: %s); treating their "
-            "landed-fix replies as unproven this sweep",
+            "landed-fix replies as unproven and their approvals as "
+            "unverified this sweep",
             author,
             spec.repo,
             type(exc).__name__,
@@ -352,7 +389,8 @@ async def ingest_external_reviews(
 
     # Handled-ness is proven over the whole fetched history (roots below the
     # marks still vouch for a review above them); the decision is on `new`.
-    handled = await proven_handled(activities, _reply_author_trust(spec, github, ctx))
+    trust = _reply_author_trust(spec, github, ctx)
+    handled = await proven_handled(activities, trust)
     batch, approvals = dispositions(new, handled, context=activities)
     marker: dict[str, Any] = {
         REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, activities)
@@ -388,6 +426,9 @@ async def ingest_external_reviews(
         )
         return IngestResult(failed=not marked)
 
+    # One probe per unseen approval author, on the batch's own cached trust:
+    # the row's label and the note's voice depend on it (security f-003).
+    verified = {a.author: await trust.is_trusted(a.author) for a in approvals}
     if batch and pending_marker_for is not None:
         # An approvals-only batch never parks a dispatch trigger: there is
         # nothing to remediate, so no round may be owed for it.
@@ -401,6 +442,7 @@ async def ingest_external_reviews(
             spec.pr_url,
             batch,
             approvals=approvals,
+            verified=verified,
             story_id=story_id,
             gate_id=gate.id,
             extra_note=extra_note,

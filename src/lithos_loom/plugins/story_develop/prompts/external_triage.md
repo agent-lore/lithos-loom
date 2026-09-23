@@ -78,7 +78,10 @@ Rules:
   citation).
 - `NOTHING_TO_REMEDIATE` is **only** for a claim that asks for nothing —
   an approval, a thank-you, a note that a previous round's fix looks right.
-  State in one line why it asks for nothing. If it contains any ask,
+  You **must** state, after an em-dash, why it asks for nothing (quote the
+  approving words); nothing here can be cited, so that one line is the only
+  thing an operator can check, and a bare `NOTHING_TO_REMEDIATE` is treated
+  as `PROCEED`. If it contains any ask,
   question about the code, or disagreement, however politely worded, it is
   a claim: use `PROCEED`. Never use it because you think the claim is wrong
   — that is what `REJECT` (with evidence) is for.

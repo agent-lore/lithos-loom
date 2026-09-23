@@ -181,15 +181,17 @@ def _review_approval(
 
     A review that OWNS inline comments is never the approval: its comments
     carry the asks and speak for it (they are judged on their own stream).
-    ``DISMISSED`` is not an approval either — a dismissal has had its say and
-    keeps the existing silent policy.
+    ``DISMISSED`` is not an approval either — a dismissal has had its say.
+
+    An `APPROVED` body that asks for something is not an approval, and it is
+    not silent either: :func:`review_is_actionable` reports it as the finding
+    it is (PR #425 review, correctness f-001 — the acceptance guard's own
+    "LGTM, but rename X" arrives on this stream too).
     """
     del handled, handled_reviews
     if a.activity_id in owns_comments or a.review_state == "DISMISSED":
         return False
     if a.review_state == "APPROVED":
-        # An APPROVED body that asks for something is not reported as an
-        # approval; it keeps the per-state silent policy (PRD S2).
         return not a.body.strip() or is_approval_text(a.body)
     return is_approval_text(a.body)
 

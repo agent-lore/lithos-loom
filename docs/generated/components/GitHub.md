@@ -49,7 +49,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - def `issue_comment_is_actionable` — The conversation-stream policy (#353): a non-empty body from anyone but loom. There is no review state to key on and no thread structure — every human comment on the conversation is a potential verdict.
 - def `issue_comment_reply_body` — Wrap a per-finding reply for the conversation tab, naming its target.
 - def `issue_comment_reply_target` — The conversation comment id a loom reply answers, or ``None``.
-- def `review_is_actionable` — The per-state external-review policy (PRD S2).
+- def `review_is_actionable` — The per-state external-review policy (PRD S2 + the 827cedf8 guard).
 - def `is_approval_text` — True when *body* carries an approval and **no ask** — nothing to remediate.
 
 ### `lithos_loom.github_review_activity`

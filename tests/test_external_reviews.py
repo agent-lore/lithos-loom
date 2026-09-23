@@ -37,6 +37,7 @@ from lithos_loom.subscriptions.external_reviews import (
     APPROVAL_NOTE,
     EXTERNAL_REVIEW,
     REVIEW_SEEN_KEY,
+    UNVERIFIED_APPROVAL_NOTE,
     ingest_external_reviews,
 )
 from tests.support import FakeLithosClient
@@ -199,23 +200,40 @@ async def test_summary_only_changes_requested_posts_exactly_once() -> None:
     assert len(_findings(client)) == 1
 
 
-async def test_dismissed_and_an_approval_that_asks_advance_the_marker_silently() -> (
-    None
-):
-    """A dismissal has had its say; an APPROVED review whose body still asks
-    for something keeps the per-state silent policy (it is not reported as an
-    approval, because it is not one)."""
+async def test_dismissed_activity_advances_the_marker_silently() -> None:
+    """A dismissal has had its say. (An `APPROVED` review is no longer here:
+    a bare one is an approval, one that asks is a finding — PR #425 review,
+    correctness f-001.)"""
     client = FakeLithosClient(agent_id="a")
     story, gate = await _gate_with_story(client)
-    github = _github(
-        reviews=[_review(500, state="APPROVED"), _review(501, state="DISMISSED")]
-    )
+    github = _github(reviews=[_review(501, state="DISMISSED")])
 
     await _run(client, gate, story, github)
 
     assert _findings(client) == []
     marker = await _marker(client, gate.id)
     assert marker["last_review_id"] == 501  # recorded, silent
+
+
+async def test_an_approved_review_that_asks_is_a_finding_not_a_silent_drop() -> None:
+    """The acceptance guard on the review stream (PR #425 review, correctness
+    f-001): `APPROVED` + "LGTM, but rename X" used to fall between both
+    buckets and be consumed by the high-water mark."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        reviews=[_review(500, state="APPROVED", body="LGTM, but rename `foo` first")]
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    (finding,) = _findings(client)
+    assert "[approval]" not in finding and APPROVAL_NOTE not in finding
+    assert "rename `foo`" in finding
+    assert [a.activity_id for a in result.actionable] == [500]
+    assert result.approvals == []
 
 
 # ── an approval is not a finding (827cedf8 / lens #100) ────────────────
@@ -322,6 +340,84 @@ async def test_an_approved_review_owning_inline_comments_is_not_an_approval() ->
     assert "[approval]" not in finding
     assert [a.activity_id for a in result.actionable] == [111]
     assert result.approvals == []
+
+
+async def test_an_approval_from_an_unverified_author_says_so() -> None:
+    """Security f-003: anyone who can comment on a public PR can leave an
+    approval, and this breadcrumb is read while deciding to merge. Loom must
+    not lend a drive-by account its own "no actionable finding" voice."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        issue_comments=[_issue_comment(9003, author="drive-by", body="LGTM")]
+    )
+    github.get_collaborator_permission.return_value = "read"
+
+    await _run(client, gate, story, github)
+
+    (finding,) = _findings(client)
+    assert "[approval, unverified author] comment by drive-by" in finding
+    assert UNVERIFIED_APPROVAL_NOTE in finding
+    assert APPROVAL_NOTE not in finding
+
+
+async def test_a_verified_approval_keeps_loom_s_plain_note() -> None:
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(issue_comments=[_issue_comment(9004, author="dave", body="LGTM")])
+    github.get_collaborator_permission.return_value = "admin"
+
+    await _run(client, gate, story, github)
+
+    (finding,) = _findings(client)
+    assert "[approval] comment by dave" in finding
+    assert APPROVAL_NOTE in finding
+    assert "unverified" not in finding
+
+
+async def test_an_unverified_approval_beside_a_verified_one_keeps_the_note() -> None:
+    """The note speaks for the BATCH: one verifiable approval makes "no
+    actionable finding" loom's own claim again, and the unverifiable row is
+    still labelled."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        issue_comments=[
+            _issue_comment(9005, author="drive-by", body="LGTM"),
+            _issue_comment(9006, author="dave", body="No findings."),
+        ]
+    )
+    perms = {"dave": "admin"}
+    github.get_collaborator_permission.side_effect = lambda repo, author: perms.get(
+        author, "none"
+    )
+
+    await _run(client, gate, story, github)
+
+    (finding,) = _findings(client)
+    assert "[approval, unverified author] comment by drive-by" in finding
+    assert "[approval] comment by dave" in finding
+    assert APPROVAL_NOTE in finding
+
+
+async def test_a_mixed_comment_reaches_the_batch_with_its_body_intact() -> None:
+    """The dispatchable row is the reviewer's comment VERBATIM: converge
+    re-fetches the live rows and hands that body to the coder, so trimming
+    the approval sentence here would change what the operator reads without
+    changing what the coder sees (see the round-2 handoff's dispute of
+    correctness f-002's extraction half)."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    body = "LGTM, but rename `foo` first"
+    github = _github(issue_comments=[_issue_comment(9007, body=body)])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    (row,) = result.actionable
+    assert row.body == body
+    assert body in _findings(client)[0]
 
 
 async def test_an_approval_parks_no_pending_dispatch_trigger() -> None:

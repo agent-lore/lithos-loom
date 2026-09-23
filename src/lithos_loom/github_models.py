@@ -439,9 +439,13 @@ def _has_marker_line(body: str, marker: str) -> bool:
     return any(line.strip() == marker for line in body.splitlines())
 
 
-# Review states recorded but never actionable: an approval is not an operator
-# action item, and a dismissal has already had its say.
-SILENT_REVIEW_STATES = frozenset({"APPROVED", "DISMISSED"})
+# Review states recorded but never actionable WHATEVER the body says: a
+# dismissal has already had its say. `APPROVED` left this set with the
+# 827cedf8 guard (PR #425 review, correctness f-001) — an approval is still
+# not an operator action item, but the sweep decides that from the BODY (a
+# bare approval is the `approval` disposition), so an `APPROVED` review that
+# also asks for something is a finding like any other.
+SILENT_REVIEW_STATES = frozenset({"DISMISSED"})
 
 # The reply line that names the conversation comment a loom reply answers —
 # the conversation-stream twin of ``in_reply_to_id`` (which issue comments do
@@ -506,18 +510,27 @@ def issue_comment_reply_target(body: str) -> int | None:
 
 
 def review_is_actionable(review: PullRequestReview) -> bool:
-    """The per-state external-review policy (PRD S2).
+    """The per-state external-review policy (PRD S2 + the 827cedf8 guard).
 
-    ``CHANGES_REQUESTED`` is always actionable; ``APPROVED`` / ``DISMISSED``
-    never are; ``COMMENTED`` — and any state GitHub adds later — only with a
-    non-empty body (conservative for unknown states, silent-drop only for the
-    two known non-actionable ones).
+    ``CHANGES_REQUESTED`` is always actionable; ``DISMISSED`` never is (it has
+    had its say); every other state — ``APPROVED``, ``COMMENTED``, and any
+    state GitHub adds later — is actionable when its body says something that
+    is **not** a bare approval.
+
+    `APPROVED` used to be silent unconditionally. That dropped the acceptance
+    guard's own example on the floor: an `APPROVED` review whose body reads
+    "LGTM, but rename X" carries an ask, and an ask is a finding whatever
+    state the reviewer clicked (PR #425 review, correctness f-001). The
+    approval half is not lost by this — the sweep classifies a bare approval
+    as an ``approval`` disposition BEFORE asking this question
+    (``github_review_streams.dispositions``), so what reaches here from an
+    `APPROVED` review is exactly the material that asks for something.
     """
     if review.state == "CHANGES_REQUESTED":
         return True
     if review.state in SILENT_REVIEW_STATES:
         return False
-    return bool(review.body.strip())
+    return bool(review.body.strip()) and not is_approval_text(review.body)
 
 
 # ── "an approval is not a finding" (the sibling of 8cfa3184) ───────────
@@ -538,36 +551,77 @@ def review_is_actionable(review: PullRequestReview) -> bool:
 # dropped. Hence a **unit** — one sentence, list item or line — must match a
 # known approval phrase END TO END: "LGTM, but rename X" is a single unit
 # that matches nothing, so it stays a finding.
+#
+# The body is author-controlled, so it is CANONICALISED, never deleted (PR
+# #425 review, security f-001): the first cut of this dropped every non-ASCII
+# codepoint before matching, so "LGTM. 请重命名变量" — an approval plus a
+# rename request — read as a bare approval, and so did an approval emoji
+# followed by "this leaks credentials" in any non-Latin script. Typographic
+# punctuation is folded to its ASCII equivalent and zero-width marks are
+# dropped; a unit that still holds a non-ASCII character after that is prose
+# this vocabulary cannot read, which is ACTIONABLE by definition.
 
 # Emoji / shortcodes that ARE the approval ("👍" alone is a verdict).
 _APPROVAL_EMOJI_RE = re.compile(
     r"👍|✅|🚀|🎉|:\+1:|:shipit:|:rocket:|:tada:|:white_check_mark:"
 )
+# Typographic punctuation folded to ASCII before matching — an author writing
+# "I’m happy with this" or Dave's "**No findings.** … Ready to merge." must
+# read the same as the ASCII spelling (the ellipsis folds to a full stop, so
+# it still ends a unit).
+_CANONICAL = str.maketrans(
+    {
+        "‘": "'",
+        "’": "'",
+        "“": '"',
+        "”": '"',
+        "…": ".",
+        " ": " ",
+        " ": " ",
+        " ": " ",
+        "​": "",
+        "‌": "",
+        "‍": "",
+        "﻿": "",
+    }
+)
 # Sentence / clause boundaries. Splitting hard is safe: an ask can only end up
 # in MORE units, and every unit must match on its own.
 _UNIT_SPLIT_RE = re.compile(r"[\n.!?;,:]|—|–|\s-\s")
-# Markdown decoration, emoji shortcodes and any non-ASCII left after the
-# approval emoji are dropped before matching ("**No findings**" → "no findings").
-_DECORATION_RE = re.compile(r"""[*_`~#>\[\]()"'|]|:[a-z0-9_+-]+:|[^\x00-\x7f]""")
+# Markdown decoration and emoji shortcodes are dropped before matching
+# ("**No findings**" → "no findings"). ASCII only — see the note above.
+_DECORATION_RE = re.compile(r"""[*_`~#>\[\]()"'|]|:[a-z0-9_+-]+:""")
 
-_APPROVAL_UNIT_RE = re.compile(
-    r"""^(?:
+# A qualifier / trailer an approval may carry without becoming an ask
+# ("LGTM overall", "no findings from me"). Factored out of the phrases so
+# every phrase accepts them uniformly.
+_QUALIFIER = r"(?:overall|otherwise|generally|in\ general|so\ far)"
+_TRAILER = (
+    r"(?:overall|here|now|again|found|to\ me|for\ me|from\ me|by\ me"
+    r"|from\ my\ side|on\ my\ end|in\ general|so\ far)"
+)
+_APPROVAL_PHRASE = r"""(?:
         lgtm
-      | (?:this\ )?looks?\ good(?:\ to\ me)?
+      | (?:this\ )?looks?\ good
       | (?:this\ )?(?:is\ )?(?:all\ )?good(?:\ to\ (?:go|merge))?
+      | (?:it\ |this\ )?all\ looks\ good
       | approved?|approving|approval
       | ship\ it
       | \+1
       | all\ clear
       | no\ (?:findings?|issues?|concerns?|comments?|blockers?|objections?
-            |problems?|notes?|nits?)(?:\ (?:here|found|from\ me))?
+            |problems?|notes?|nits?)
+      | no\ (?:further|other|more)\ (?:findings?|issues?|concerns?|comments?
+            |questions?|notes?)
       | nothing\ (?:to\ (?:flag|add|fix|change|remediate|do|address|report)
-            |further|blocking|else)(?:\ (?:here|from\ me))?
+            |further|blocking|else)
       | (?:ready|good|ok|okay|fine|safe)\ to\ merge
       | (?:merge|merging)\ (?:away|it|this)
       | (?:im\ |i\ am\ )?happy\ (?:with\ (?:this|it)|to\ merge)
       | (?:this\ )?(?:is\ )?fine(?:\ (?:by|with)\ me)?
-    )$""",
+    )"""
+_APPROVAL_UNIT_RE = re.compile(
+    rf"^(?:{_QUALIFIER}\ )?{_APPROVAL_PHRASE}(?:\ {_TRAILER})*$",
     re.IGNORECASE | re.VERBOSE,
 )
 # Neutral courtesy: allowed ALONGSIDE an approval, never an approval by itself
@@ -591,15 +645,21 @@ def is_approval_text(body: str) -> bool:
     Every unit of the body (sentence / list item / line) must be a known
     approval phrase or a neutral courtesy, and at least one must be an
     approval. Anything else — a request, a question, an observation, code,
-    prose the vocabulary does not know — makes the whole body a finding.
+    an emoji that is not an approval, prose in a script this vocabulary
+    cannot read — makes the whole body a finding.
     """
     approved = False
     # The emoji stands alone as its own unit: "Ship it 🚀" is two approvals,
     # never one unrecognised sentence.
-    for raw in _UNIT_SPLIT_RE.split(_APPROVAL_EMOJI_RE.sub(". lgtm .", body)):
+    text = _APPROVAL_EMOJI_RE.sub(". lgtm .", body).translate(_CANONICAL)
+    for raw in _UNIT_SPLIT_RE.split(text):
         unit = " ".join(_DECORATION_RE.sub("", raw).split()).strip("- ")
         if not unit:
             continue
+        if not unit.isascii():
+            # Not deleted, not skipped: text this vocabulary cannot read is
+            # an ask until something says otherwise (security f-001).
+            return False
         if _APPROVAL_UNIT_RE.match(unit):
             approved = True
         elif not _COURTESY_UNIT_RE.match(unit):

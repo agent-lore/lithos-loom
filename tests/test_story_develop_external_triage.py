@@ -111,11 +111,39 @@ def test_nothing_to_remediate_drops_the_finding_without_a_citation() -> None:
     }
 
 
-def test_nothing_to_remediate_tolerates_spacing_and_a_bare_line() -> None:
+def test_nothing_to_remediate_tolerates_spacing_but_needs_a_reason() -> None:
+    """Security f-002: the verdict carries no citation — there is nothing to
+    refute — so the stated reason is its guard. A bare drop names nothing an
+    operator could check, and PROCEEDS like every other unevidenced verdict."""
     text = "- f-001: nothing to remediate\n- f-002: Nothing-To-Remediate — praise\n"
     verdicts = parse_triage_verdicts(text, ["f-001", "f-002"])
-    assert verdicts.proceed == ()
-    assert verdicts.nothing_to_remediate == {"f-001": "", "f-002": "praise"}
+    assert verdicts.proceed == ("f-001",)
+    assert verdicts.nothing_to_remediate == {"f-002": "praise"}
+    assert classify_verdict_lines(text, ["f-001", "f-002"]) == {
+        "f-001": LINE_PROCEED,
+        "f-002": LINE_NOTHING,
+    }
+
+
+def test_a_verdict_token_the_scanner_does_not_know_proceeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Security f-002: the suppression branch is explicit, so widening
+    ``_VERDICT_RE`` can never turn a new token into a silent drop."""
+    import re
+
+    monkeypatch.setattr(
+        triage_mod,
+        "_VERDICT_RE",
+        re.compile(
+            r"^[ \t]*-[ \t]*(?P<fid>f-\d+)[ \t]*:[ \t]*(?P<verdict>PROCEED|SKIP)"
+            r"[ \t]*(?:[—–-]+[ \t]*(?P<evidence>.*\S))?[ \t]*$",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    )
+    verdicts = parse_triage_verdicts("- f-001: SKIP — not worth it\n", ["f-001"])
+    assert verdicts.proceed == ("f-001",)
+    assert verdicts.nothing_to_remediate == {} and verdicts.rejections == {}
 
 
 def test_an_evidenced_rejection_outranks_a_later_nothing_to_remediate() -> None:
