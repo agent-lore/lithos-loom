@@ -689,6 +689,118 @@ def _units(body: str, split: re.Pattern[str] = _UNIT_SPLIT_RE) -> list[str]:
     return units
 
 
+# ── Non-authorial text: what the WEAK scan must not read ───────────────
+#
+# The floor below asks one question — "did the author write an approving
+# word?" — and ANY unit passing answers it, so it must read only text the
+# author wrote AS A VERDICT, IN THEIR OWN VOICE. Markdown has contexts that
+# are visibly not that (PR #426 round-5 review, f-001): a block quote is
+# someone else's comment, a code span is data (a field value, a log line, a
+# bot's output), a strike-through is retracted, and a list of values is an
+# enumeration. ``_DECORATION_RE`` stripped exactly those markers before
+# matching, so "> LGTM" quoted above a defect, a fence holding only ``LGTM``,
+# "~~Approved~~" and "The `state` field accepts:\n- approved" each handed the
+# floor an approval word nobody asserted — and a mistaken (or talked-into)
+# ``NOTHING_TO_REMEDIATE`` verdict could then consume the real finding at
+# round 0, after its high-water mark had advanced and with no thread answered.
+#
+# Each such span is MASKED to a bare ``x``: a word that matches no phrase and
+# introduces no unit boundary. Deleting could fuse the two sides into a word
+# ("LG`x`TM"), and masking with punctuation would manufacture a boundary that
+# splits a negation off its approval word — the two failure modes the emoji
+# mask already learned (see :func:`carries_approval`). An unclosed span masks
+# the rest of the body, which is the conservative direction here: under an
+# any-unit floor, masking can only make a row LESS eligible.
+_MASK = " x "
+_CODE_SPAN_RE = re.compile(r"`+[^`]*(?:`+|\Z)")  # inline code AND ``` fences
+_STRIKE_SPAN_RE = re.compile(r"~~+[^~]*(?:~~+|\Z)")  # strike-through AND ~~~ fences
+_LIST_MARKER = r"(?:[-*+]|\d+[.)])"
+# A quoted line, with or without the bullet it hangs off ("- > LGTM"), and an
+# indented code block — the fence's other spelling.
+_QUOTE_LINE_RE = re.compile(rf"^[ \t]*(?:{_LIST_MARKER}[ \t]+)?>[^\n]*", re.MULTILINE)
+_INDENTED_LINE_RE = re.compile(r"^(?: {4,}|\t)[^\n]*", re.MULTILINE)
+_LIST_ITEM_RE = re.compile(rf"^[ \t]*{_LIST_MARKER}[ \t]+(?P<text>\S.*)$")
+
+
+def _reads_as_verdict(text: str) -> bool:
+    """True when *text* reads END TO END as approval / courtesy.
+
+    :func:`is_approval_text`'s rule applied to a fragment — used by the list
+    rule below to tell a verdict list ("- No findings.") from an enumeration
+    of values ("- approved").
+    """
+    units = _units(text, _WEAK_UNIT_SPLIT_RE)
+    return bool(units) and all(
+        unit.isascii()
+        and (_APPROVAL_UNIT_RE.match(unit) or _COURTESY_UNIT_RE.match(unit))
+        for unit in units
+    )
+
+
+def _introduced_as_data(lines: list[str], first: int) -> bool:
+    """True when the list block starting at *first* is introduced by a
+    colon-terminated lead-in that is not itself an approval — the shape of an
+    enumeration ("The `state` field accepts:"), which a single-item list
+    cannot be told from any other way.
+    """
+    for line in reversed(lines[:first]):
+        if not line.strip():
+            continue
+        lead = " ".join(_DECORATION_RE.sub("", line.translate(_CANONICAL)).split())
+        # The colon is the introducer's own punctuation, not part of the
+        # verdict: "**No findings:**" over its bullets is still an approval.
+        return lead.endswith(":") and not _reads_as_verdict(lead[:-1])
+    return False
+
+
+def _mask_data_lists(text: str) -> str:
+    """*text* with every list block that reads as DATA masked out.
+
+    A block is a verdict only when EVERY item reads as approval / courtesy and
+    it carries no data lead-in; anything else is an enumeration whose values
+    the author is naming, not asserting. The cost is borne in the safe
+    direction: a pure-ish approval with a non-approval bullet ("- Checked the
+    three streams.\n- No findings.") loses its eligibility and pays a
+    remediation round, while an enum listing ``approved`` beside a real defect
+    can no longer be dropped at round 0.
+    """
+    lines = text.split("\n")
+    out = list(lines)
+    run: list[int] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        items = [_LIST_ITEM_RE.match(lines[i]) for i in run]
+        if _introduced_as_data(lines, run[0]) or not all(
+            m is not None and _reads_as_verdict(m["text"]) for m in items
+        ):
+            for i in run:
+                out[i] = _MASK
+        run.clear()
+
+    for idx, line in enumerate(lines):
+        if _LIST_ITEM_RE.match(line):
+            run.append(idx)
+        elif run and not line.strip():
+            continue  # a blank line inside a loose list does not end it
+        else:
+            flush()
+    flush()
+    return "\n".join(out)
+
+
+def _authorial_text(body: str) -> str:
+    """*body* with every non-authorial span masked — the text the weak floor
+    reads. Code spans first: a fence may hold a ``>`` or a ``~~`` of its own.
+    """
+    text = _CODE_SPAN_RE.sub(_MASK, body)
+    text = _STRIKE_SPAN_RE.sub(_MASK, text)
+    text = _QUOTE_LINE_RE.sub(_MASK, text)
+    text = _INDENTED_LINE_RE.sub(_MASK, text)
+    return _mask_data_lists(text)
+
+
 def carries_approval(body: str) -> bool:
     """True when ANY unit of *body* is a recognised approval phrase.
 
@@ -707,6 +819,16 @@ def carries_approval(body: str) -> bool:
     out of the dispatched batch, so requiring it would leave the verdict
     unreachable in production (and the S8 approval fixture unscorable)
     rather than guarded.
+
+    Being an any-unit rule, it reads only AUTHORIAL text: block quotes, code
+    spans and fences, strike-through, and enumerations of values are masked
+    first (:func:`_authorial_text`), so an approval word the author merely
+    QUOTED, showed as data or struck out cannot satisfy it (PR #426 round-5
+    review, f-001). The end-to-end rule deliberately keeps reading those
+    contexts: there EVERY unit must pass, so a defect inside a block quote —
+    "> the token is logged at src/api.py:88" above an "LGTM" — is precisely
+    what makes the body actionable, and masking it would read that row as a
+    pure approval.
 
     An approval EMOJI counts only when it is the whole verdict (the
     ``or is_approval_text`` arm), never as decoration inside prose (PR #426
@@ -732,7 +854,9 @@ def carries_approval(body: str) -> bool:
     worst a deletion can do is fuse two fragments into a word, and a fused
     word matches nothing.
     """
-    scanned = _units(_APPROVAL_EMOJI_RE.sub("", body), _WEAK_UNIT_SPLIT_RE)
+    scanned = _units(
+        _authorial_text(_APPROVAL_EMOJI_RE.sub("", body)), _WEAK_UNIT_SPLIT_RE
+    )
     if any(unit.isascii() and _APPROVAL_UNIT_RE.match(unit) for unit in scanned):
         return True
     return is_approval_text(body)

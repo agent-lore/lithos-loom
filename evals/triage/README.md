@@ -57,8 +57,9 @@ approval-and-ask               5     5                    —            5/5 57-
   Strict: a `REJECT` also avoids the paid round, but it answers the reviewer
   as if they had made a claim, so it does not score. The verdict is measured
   as production honours it: only for a finding whose own body carries
-  recognised approving words and which is not a blocking `CHANGES_REQUESTED`
-  review (`approval_eligible_ids`), so a case body with no approval in it
+  recognised approving words in its author's own voice (never one merely
+  quoted, fenced, struck out or listed as a value) and which is not a blocking
+  `CHANGES_REQUESTED` review (`approval_eligible_ids`), so a case body with no approval in it
   cannot score here however the agent answers. `—` when the batch
   carries no approval, and the rate then gates nothing.
 - **over-supp** — must-proceed findings suppressed — by a cited `REJECT` **or**

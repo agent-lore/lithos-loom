@@ -371,6 +371,36 @@ def test_approval_eligibility_is_read_from_the_row_not_the_verdict() -> None:
     assert ids[claim] not in eligible
 
 
+def test_a_quoted_approval_is_ineligible_so_no_verdict_can_drop_it() -> None:
+    """Round-5 review, f-001 — the floor and the parser driven together: an
+    approval word the author only QUOTED is not their verdict, so a
+    ``NOTHING_TO_REMEDIATE`` line on that row falls through to PROCEED and the
+    defect behind the quote reaches the coder instead of being consumed at
+    round 0 with its high-water mark already advanced."""
+    quoted = _finding(
+        body="> LGTM\nNo: the token is logged at src/api.py:88.", activity_id=1
+    )
+    verdict = _finding(body="**No findings.** Ready to merge.", activity_id=2)
+    _, id_map = ext_mod.external_intake_reviews(
+        [quoted, verdict], current_head_sha=_HEAD
+    )
+    ids = {ext: fid for fid, ext in id_map.items()}
+    eligible = triage_mod.approval_eligible_ids(id_map)
+    assert ids[quoted] not in eligible
+    assert ids[verdict] in eligible
+
+    finding_ids = sorted(id_map)
+    text = "".join(
+        f"- {fid}: NOTHING_TO_REMEDIATE — the comment only approves\n"
+        for fid in finding_ids
+    )
+    verdicts = triage_mod.parse_triage_verdicts(
+        text, finding_ids, approval_eligible=eligible
+    )
+    assert verdicts.proceed == (ids[quoted],)
+    assert set(verdicts.nothing_to_remediate) == {ids[verdict]}
+
+
 def test_stale_head_sha_gets_a_reanchor_note() -> None:
     """A finding written against an older sha may already be fixed — the coder
     is told to verify before changing anything, never to re-fix blindly."""

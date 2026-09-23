@@ -262,6 +262,31 @@ _NOT_AN_APPROVAL = [
     ":approved: but the CSRF token is reused across sessions.",
     ":fine: the session cookie has no Secure flag.",
     "The state machine has: approved, pending, denied. None are authorized.",
+    # round-5 review, f-001: the decoration strip removed the very markers
+    # that say "this text is not my verdict", so an approval word the author
+    # only QUOTED from another comment, showed as code or struck out satisfied
+    # the floor — and a mistaken NOTHING_TO_REMEDIATE verdict could then
+    # consume the defect beside it at round 0.
+    "> LGTM\nNo: the token is logged at src/api.py:88.",
+    "> LGTM\n> Ready to merge.\n\nActually the query concatenates user input "
+    "at src/db.py:44.",
+    "```\nLGTM\n```\nThe token is logged at src/api.py:88 \u2014 redact it.",
+    "`LGTM`\nThe token is logged at src/api.py:88.",
+    "~~Approved~~\nThe session cookie has no Secure flag at src/api.py:20.",
+    "~~LGTM~~, the token is logged at src/api.py:88.",
+    # \u2026and a list of values is an enumeration the author is NAMING, not a
+    # verdict they are asserting — with or without its lead-in line.
+    "The `state` field accepts:\n- approved\n- pending\n- denied\n\n"
+    "None of them is checked at src/api.py:12.",
+    "- approved\n- pending\n\nThe token is logged at src/api.py:88.",
+    "The field accepts one value:\n- approved\n\nIt is never validated at "
+    "src/api.py:12.",
+    "1. approved\n2. pending\n\nNeither is authorized at src/api.py:9.",
+    # …and the same markers still say "not my voice" when they hang off a
+    # bullet, or spell a code block with an indent instead of a fence.
+    "- > LGTM\n\nThe token is logged at src/api.py:88.",
+    "    LGTM\nThe token is logged at src/api.py:88.",
+    "\tApproved\nThe token is logged at src/api.py:88.",
     # The control: undecorated defect prose, which was never eligible.
     "The query builder concatenates user input at src/db.py:44.",
 ]
@@ -295,10 +320,33 @@ def test_a_body_with_no_approval_verdict_is_never_eligible(body: str) -> None:
         "LGTM overall, but the finding's last line names the story before the "
         "gate — the operator reads the blocker second. Please put the gate id "
         "first.",
+        # A verdict written AS a list is still a verdict: every item approves,
+        # and no lead-in line makes it an enumeration of values.
+        "- No findings.\n- Ready to merge.",
+        "**No findings:**\n- Ready to merge.",
+        "- LGTM",
+        # An indented continuation of a verdict list is not a code block:
+        # masking it costs the sub-item, never the verdict beside it.
+        "- No findings.\n    - the three streams look right\n- Ready to merge.",
     ],
 )
 def test_an_approval_the_author_wrote_stays_eligible(body: str) -> None:
     assert carries_approval(body)
+
+
+def test_the_end_to_end_rule_still_reads_quoted_and_fenced_text() -> None:
+    """The non-authorial masking belongs to the WEAK floor alone (round-5
+    review, f-001). The end-to-end rule needs EVERY unit to pass, so a defect
+    the author put in a quote or a fence is precisely what makes the body
+    actionable — masking it there would read the row as a pure approval and
+    skip the dispatch the defect is owed."""
+    quoted = "> the token is logged at src/api.py:88\n\nLGTM"
+    fenced = "```\nthe token is logged at src/api.py:88\n```\nLGTM"
+    assert not is_approval_text(quoted)
+    assert not is_approval_text(fenced)
+    # …and the floor still reads the author's own "LGTM" beside it: a quoted
+    # claim with an approval of one's own is the mixed case triage judges.
+    assert carries_approval(quoted) and carries_approval(fenced)
 
 
 def test_review_state_policy_follows_the_body_not_just_the_state() -> None:
