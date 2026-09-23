@@ -608,6 +608,17 @@ _CANONICAL = str.maketrans(
 # it. Left inside its unit, the anchored match fails and the whole body is
 # actionable, which is what a question is.
 _UNIT_SPLIT_RE = re.compile(r"[\n.!;,:]|—|–|\s-\s")
+# The WEAK scan's splitter (``carries_approval``): the same boundaries MINUS
+# ``:``. The divergence is principled, not drift — the two rules want opposite
+# granularity (PR #426 round-4 review, security f-004). A finer split is
+# CONSERVATIVE end to end, where every unit must pass, and PERMISSIVE under an
+# any-unit floor, where one unit passing is enough: splitting on ``:`` runs
+# before ``_DECORATION_RE`` strips shortcodes, so "Field: `approved`. It is
+# never validated" and ":lgtm: the token is logged" each handed the floor a
+# bare approval word their authors never wrote as a verdict. Left unsplit, a
+# non-allowlisted shortcode falls to the decoration strip as intended and a
+# label line stays one unit that matches nothing.
+_WEAK_UNIT_SPLIT_RE = re.compile(r"[\n.!;,]|—|–|\s-\s")
 # Markdown decoration and emoji shortcodes are dropped before matching
 # ("**No findings**" → "no findings"). ASCII only — see the note above.
 _DECORATION_RE = re.compile(r"""[*_`~#>\[\]()"'|]|:[a-z0-9_+-]+:""")
@@ -659,9 +670,10 @@ _COURTESY_UNIT_RE = re.compile(
 )
 
 
-def _units(body: str) -> list[str]:
+def _units(body: str, split: re.Pattern[str] = _UNIT_SPLIT_RE) -> list[str]:
     """*body* as canonicalised units (sentence / list item / line), blanks
-    dropped — the one splitting rule both classifiers below read.
+    dropped — the one splitting rule both classifiers below read, at the
+    granularity *split* asks for.
 
     Splitting only: the approval-emoji rewrite is NOT done here. It belongs to
     the whole-body reading (:func:`is_approval_text`), where every other unit
@@ -670,7 +682,7 @@ def _units(body: str) -> list[str]:
     """
     text = body.translate(_CANONICAL)
     units = []
-    for raw in _UNIT_SPLIT_RE.split(text):
+    for raw in split.split(text):
         unit = " ".join(_DECORATION_RE.sub("", raw).split()).strip("- ")
         if unit:
             units.append(unit)
@@ -707,14 +719,20 @@ def carries_approval(body: str) -> bool:
     anyway.
 
     So the weak scan **erases** every approval emoji and shortcode first,
-    leaving a unit boundary where it stood. Dropping the rewrite was not
-    enough on its own (PR #426 round-3 review, correctness f-002): ``:`` is a
-    unit boundary, so the raw ``:+1:`` shortcode split into the bare unit
-    ``+1`` — itself a recognised approval phrase — and ":+1: Checked the auth
-    path. The token is logged at src/api.py:88" satisfied the floor by the
-    very decoration the rule above excludes.
+    leaving nothing where it stood. Dropping the rewrite was not enough on its
+    own (PR #426 round-3 review, correctness f-002): ``:`` was a unit
+    boundary, so the raw ``:+1:`` shortcode split into the bare unit ``+1`` —
+    itself a recognised approval phrase — and ":+1: Checked the auth path. The
+    token is logged at src/api.py:88" satisfied the floor by the very
+    decoration the rule above excludes. Nor was erasing it to a ``.``: that
+    manufactured a SENTENCE boundary the author never wrote, so "This is not
+    👍 good." and "Not :+1: approved." split their negations off and handed
+    the floor the approval word alone (round-4 review, correctness f-002).
+    The mask must be invisible to the splitter, which is why it deletes: the
+    worst a deletion can do is fuse two fragments into a word, and a fused
+    word matches nothing.
     """
-    scanned = _units(_APPROVAL_EMOJI_RE.sub(".", body))
+    scanned = _units(_APPROVAL_EMOJI_RE.sub("", body), _WEAK_UNIT_SPLIT_RE)
     if any(unit.isascii() and _APPROVAL_UNIT_RE.match(unit) for unit in scanned):
         return True
     return is_approval_text(body)

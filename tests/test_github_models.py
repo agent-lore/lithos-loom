@@ -229,32 +229,76 @@ def test_carries_approval_is_the_floor_not_the_whole_rule() -> None:
     assert not carries_approval("Ready to merge?")  # a question is not a verdict
 
 
-def test_a_decorative_approval_emoji_does_not_satisfy_the_eligibility_floor() -> None:
-    """Security f-003: the emoji rewrite turns "👍" into an approval UNIT,
-    which is safe under the end-to-end rule (every other unit must still
-    pass) but let a checkmark-bulleted defect report satisfy the any-unit
-    floor — and an eligible row is one a `NOTHING_TO_REMEDIATE` verdict may
-    drop at round 0, with no coder, no panel and no thread reply."""
-    decorated = [
-        "✅ Checked the auth path.\n"
-        "❌ The token is logged at src/api.py:88 — redact it.",
-        "Nice 🚀 but the session cookie has no Secure flag.",
-        ":white_check_mark: tests\nThe password hash uses md5 at src/auth.py:12.",
-        # Correctness f-002: `:` is a unit boundary, so dropping the emoji
-        # rewrite was not enough — the raw shortcode split into the bare unit
-        # `+1`, itself a recognised approval phrase, and let the decoration
-        # back in through the splitter.
-        ":+1: Checked the auth path. The token is logged at src/api.py:88 — redact it.",
-        ":shipit: but the session cookie has no Secure flag.",
-    ]
-    for body in decorated:
-        assert not carries_approval(body), body
-        assert not is_approval_text(body), body
+# Bodies that must NEVER be eligible: the author wrote no approval verdict in
+# them. Each line is a mechanism by which a unit boundary — real, or one the
+# scan manufactured — handed the floor an approval word on its own. The floor
+# is what a `NOTHING_TO_REMEDIATE` verdict may drop at round 0, with no coder,
+# no panel and no thread reply, so a new decoration that splits into an
+# approval word must fail here loudly rather than widen it.
+_NOT_AN_APPROVAL = [
+    # security f-003: the emoji rewrite made "👍" an approval UNIT — safe end
+    # to end, where every other unit must still pass, but enough on its own
+    # under an any-unit floor.
+    "✅ Checked the auth path.\n❌ The token is logged at src/api.py:88 — redact it.",
+    "Nice 🚀 but the session cookie has no Secure flag.",
+    ":white_check_mark: tests\nThe password hash uses md5 at src/auth.py:12.",
+    # round-3 review, correctness f-002: `:` split the raw `:+1:` shortcode
+    # into the bare unit `+1`, itself a recognised approval phrase.
+    ":+1: Checked the auth path. The token is logged at src/api.py:88 — redact it.",
+    ":shipit: but the session cookie has no Secure flag.",
+    # round-4 review, correctness f-002: masking the decoration with a `.`
+    # manufactured a sentence boundary, splitting the NEGATION off its
+    # approval word.
+    "This is not 👍 good. Please redact the token.",
+    "Not :+1: approved. The token is logged at src/api.py:88 — redact it.",
+    # round-4 review, security f-004: `:` ran before the decoration strip, so
+    # a label line, a citation, a non-allowlisted shortcode and an enum each
+    # yielded a bare approval word.
+    "Field: `approved`. It is never validated, so anyone can set it.",
+    "Status: good. The endpoint still skips the authz check at src/api.py:12.",
+    "Ref: LGTM.com flagged this. The query builder concatenates user input.",
+    ":lgtm: The token is logged at src/api.py:88 - redact it.",
+    ":good: The password hash uses md5 at src/auth.py:12.",
+    ":approved: but the CSRF token is reused across sessions.",
+    ":fine: the session cookie has no Secure flag.",
+    "The state machine has: approved, pending, denied. None are authorized.",
+    # The control: undecorated defect prose, which was never eligible.
+    "The query builder concatenates user input at src/db.py:44.",
+]
 
-    # An emoji that IS the whole verdict still is one — that is what the
-    # rewrite exists for, and the end-to-end rule carries it.
-    for body in ("👍", ":+1:", "Ship it 🚀", "🚀", ":+1: LGTM"):
-        assert carries_approval(body) and is_approval_text(body), body
+
+@pytest.mark.parametrize("body", _NOT_AN_APPROVAL)
+def test_a_body_with_no_approval_verdict_is_never_eligible(body: str) -> None:
+    assert not carries_approval(body)
+    assert not is_approval_text(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # An approval emoji or shortcode that IS the whole verdict — what the
+        # rewrite exists for; the end-to-end rule carries it.
+        "👍",
+        ":+1:",
+        "🚀",
+        "Ship it 🚀",
+        ":+1: LGTM",
+        ":lgtm:",
+        # Plain approvals, and the mixed shape the model is left to judge.
+        "LGTM",
+        "LGTM, but rename `foo`",
+        "**No findings.** … Ready to merge.",
+        # Both `evals/triage/cases/approval-and-ask` bodies: the fixture is
+        # only scorable while its rows stay eligible.
+        "**No findings.** The three streams and the marker scoping all look "
+        "right to me. Ready to merge.",
+        "LGTM overall, but the finding's last line names the story before the "
+        "gate — the operator reads the blocker second. Please put the gate id "
+        "first.",
+    ],
+)
+def test_an_approval_the_author_wrote_stays_eligible(body: str) -> None:
+    assert carries_approval(body)
 
 
 def test_review_state_policy_follows_the_body_not_just_the_state() -> None:
