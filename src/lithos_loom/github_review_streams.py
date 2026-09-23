@@ -176,23 +176,28 @@ def _review_approval(
     handled_reviews: frozenset[int],
     owns_comments: frozenset[int],
 ) -> bool:
-    """An APPROVED review with no inline comments of its own, or any summary
-    whose whole body is approval prose.
+    """A bare ``APPROVED`` click, or any summary whose whole body is approval
+    prose.
 
-    A review that OWNS inline comments is never the approval: its comments
-    carry the asks and speak for it (they are judged on their own stream).
-    ``DISMISSED`` is not an approval either — a dismissal has had its say.
+    ``DISMISSED`` is never an approval — a dismissal has had its say. An
+    `APPROVED` body that asks for something is not an approval, and it is not
+    silent either: :func:`review_is_actionable` reports it as the finding it
+    is (PR #425 review, correctness f-001 — the acceptance guard's own "LGTM,
+    but rename X" arrives on this stream too).
 
-    An `APPROVED` body that asks for something is not an approval, and it is
-    not silent either: :func:`review_is_actionable` reports it as the finding
-    it is (PR #425 review, correctness f-001 — the acceptance guard's own
-    "LGTM, but rename X" arrives on this stream too).
+    Ownership only decides the WORDLESS case (the AC's "``APPROVED`` and no
+    inline comments"): a review that clicked approve and wrote nothing while
+    leaving inline comments has nothing of its own to report — its comments
+    speak for it. A review that WROTE approval prose is always reported as an
+    approval, whatever it owns: it is the one row both buckets used to refuse,
+    and a body no bucket takes is a body the operator never sees (PR #425
+    re-review, security f-004).
     """
     del handled, handled_reviews
-    if a.activity_id in owns_comments or a.review_state == "DISMISSED":
+    if a.review_state == "DISMISSED":
         return False
-    if a.review_state == "APPROVED":
-        return not a.body.strip() or is_approval_text(a.body)
+    if not a.body.strip():
+        return a.review_state == "APPROVED" and a.activity_id not in owns_comments
     return is_approval_text(a.body)
 
 
@@ -541,10 +546,13 @@ def actionable(
     review-ownership suppression is computed over — the sweep passes
     everything it fetched while deciding only on the rows above its marks.
 
-    Approval-only rows are deliberately NOT filtered here: the converge
-    intake feeds them to the S5a triage step, whose ``NOTHING_TO_REMEDIATE``
-    verdict is the model-driven half of the answer. The watcher sweep, which
-    decides whether to spend a round at all, splits them out with
+    Approval-only rows are deliberately NOT filtered here — on ANY stream
+    (PR #425 re-review, security f-004: for one round the review stream was
+    filtered by body here too, which made the hand-written vocabulary the
+    sole and final arbiter for it). The converge intake feeds them to the
+    S5a triage step, whose ``NOTHING_TO_REMEDIATE`` verdict is the
+    model-driven half of the answer. Only the watcher sweep, which decides
+    whether to spend a round at all, splits them out — with
     :func:`dispositions`.
     """
     handled_reviews = handled_review_ids(

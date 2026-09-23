@@ -19,10 +19,11 @@ whole time.
 f-001 is that comment with one observation sentence added, which is what
 makes it worth a paid turn to measure: the deterministic ingestion
 classifier (`github_models.is_approval_text`) recognises the bare
-"**No findings.** … Ready to merge." and stops the dispatch for free, so the
-rows that actually REACH triage are the approvals it cannot read — an
-approval wrapped in prose. Measuring the naked form would measure a row
-production never sends here. f-002 is the guard: an approval that carries an
+"**No findings.** … Ready to merge." and stops the dispatch for free. An
+approval still reaches triage two ways — riding along in a batch that
+dispatched for something else, or, like this one, because the classifier
+could not read it — and the second is the shape the verdict exists for: a
+batch that is ONLY a recognised approval never gets here. f-002 is the guard: an approval that carries an
 ask is a CLAIM, and suppressing it would lose real review material — the
 failure direction this whole arc exists to avoid.
 

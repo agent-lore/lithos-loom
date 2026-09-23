@@ -300,6 +300,24 @@ async def test_an_approval_that_also_asks_is_a_finding() -> None:
     assert result.approvals == []
 
 
+async def test_a_question_is_a_finding_not_an_approval() -> None:
+    """Correctness f-002: "Ready to merge?" is the reviewer ASKING. It used to
+    match the approval phrase behind the discarded `?`, so it was posted as an
+    approval, dispatched nothing, and was consumed by the high-water mark."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(issue_comments=[_issue_comment(9008, body="Ready to merge?")])
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    (finding,) = _findings(client)
+    assert "[approval]" not in finding and APPROVAL_NOTE not in finding
+    assert [a.activity_id for a in result.actionable] == [9008]
+    assert result.approvals == []
+
+
 async def test_a_mixed_batch_reports_the_approval_and_dispatches_the_rest() -> None:
     """One sweep, both dispositions: the real finding is the batch, the
     approval rides along as a breadcrumb."""
@@ -322,9 +340,33 @@ async def test_a_mixed_batch_reports_the_approval_and_dispatches_the_rest() -> N
     assert [a.activity_id for a in result.approvals] == [500]
 
 
-async def test_an_approved_review_owning_inline_comments_is_not_an_approval() -> None:
-    """Its own comments carry the asks and speak for it — the review is not
-    reported as "nothing to remediate" (and stays silent, as it always was)."""
+async def test_a_wordless_approval_owning_inline_comments_reports_only_them() -> None:
+    """The AC's "`APPROVED` and no inline comments": a reviewer who clicked
+    approve and wrote nothing while leaving comments has nothing of its own to
+    report — the comments speak for it."""
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    github = _github(
+        reviews=[_review(500, state="APPROVED", body="")],
+        comments=[_comment(111, pull_request_review_id=500)],
+    )
+    spec = parse_pr_gate(gate)
+    assert spec is not None
+
+    result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
+
+    (finding,) = _findings(client)
+    assert "[approval]" not in finding
+    assert [a.activity_id for a in result.actionable] == [111]
+    assert result.approvals == []
+
+
+async def test_an_approval_body_on_a_review_that_owns_comments_is_still_posted() -> (
+    None
+):
+    """Security f-004: both buckets refused this row, so a body the classifier
+    read as approval left the sweep with no `[approval]` line and no finding —
+    the one case where a misread showed the operator nothing at all."""
     client = FakeLithosClient(agent_id="a")
     story, gate = await _gate_with_story(client)
     github = _github(
@@ -337,9 +379,13 @@ async def test_an_approved_review_owning_inline_comments_is_not_an_approval() ->
     result = await ingest_external_reviews(gate, spec, story, github, _ctx(client))
 
     (finding,) = _findings(client)
-    assert "[approval]" not in finding
+    assert "[approval] review by reviewer-human (APPROVED" in finding
+    assert "LGTM overall" in finding
     assert [a.activity_id for a in result.actionable] == [111]
-    assert result.approvals == []
+    assert [a.activity_id for a in result.approvals] == [500]
+    # Something IS actionable here, so the batch still dispatches and the
+    # "nothing to remediate" note is not claimed.
+    assert APPROVAL_NOTE not in finding
 
 
 async def test_an_approval_from_an_unverified_author_says_so() -> None:

@@ -196,6 +196,16 @@ def test_an_ask_in_another_script_is_never_an_approval(body: str) -> None:
     assert not is_approval_text(body)
 
 
+@pytest.mark.parametrize(
+    "body", ["Ready to merge?", "LGTM?", "No findings?", "Approved?"]
+)
+def test_a_question_is_never_an_approval(body: str) -> None:
+    """Correctness f-002: `?` used to be a unit boundary, so it was thrown
+    away and "Ready to merge?" — a reviewer ASKING — matched the phrase
+    behind it."""
+    assert not is_approval_text(body)
+
+
 def test_typographic_punctuation_is_folded_not_deleted() -> None:
     # Canonicalised, so the curly-quote and ellipsis spellings read like their
     # ASCII twins…
@@ -212,14 +222,17 @@ def test_review_state_policy_follows_the_body_not_just_the_state() -> None:
     # PR #425 review, correctness f-001: `APPROVED` was unconditionally
     # silent, so an approval that also ASKED was dropped by every consumer.
     assert review_is_actionable(review("APPROVED", "LGTM, but rename X"))
-    assert not review_is_actionable(review("APPROVED", "LGTM"))
     assert not review_is_actionable(review("APPROVED"))
     # A dismissal has had its say, whatever it says.
     assert not review_is_actionable(review("DISMISSED", "rename X"))
-    # Unchanged: CHANGES_REQUESTED always, COMMENTED/unknown on content that
-    # is not a bare approval.
+    # Unchanged: CHANGES_REQUESTED always, every other state on content.
     assert review_is_actionable(review("CHANGES_REQUESTED"))
     assert review_is_actionable(review("COMMENTED", "rename X"))
-    assert not review_is_actionable(review("COMMENTED", "LGTM"))
     assert not review_is_actionable(review("COMMENTED", "   "))
     assert review_is_actionable(review("QUEUED", "rename X"))
+    # This rule does NOT read the body for approval prose (security f-004):
+    # that is the watcher's dispatch question, decided once in
+    # `dispositions()`, so the converge intake keeps feeding approval rows to
+    # the S5a backstop on every stream alike.
+    assert review_is_actionable(review("APPROVED", "LGTM"))
+    assert review_is_actionable(review("COMMENTED", "LGTM"))

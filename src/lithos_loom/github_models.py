@@ -514,23 +514,28 @@ def review_is_actionable(review: PullRequestReview) -> bool:
 
     ``CHANGES_REQUESTED`` is always actionable; ``DISMISSED`` never is (it has
     had its say); every other state — ``APPROVED``, ``COMMENTED``, and any
-    state GitHub adds later — is actionable when its body says something that
-    is **not** a bare approval.
+    state GitHub adds later — is actionable on a non-empty body.
 
-    `APPROVED` used to be silent unconditionally. That dropped the acceptance
-    guard's own example on the floor: an `APPROVED` review whose body reads
-    "LGTM, but rename X" carries an ask, and an ask is a finding whatever
-    state the reviewer clicked (PR #425 review, correctness f-001). The
-    approval half is not lost by this — the sweep classifies a bare approval
-    as an ``approval`` disposition BEFORE asking this question
-    (``github_review_streams.dispositions``), so what reaches here from an
-    `APPROVED` review is exactly the material that asks for something.
+    `APPROVED` used to be silent unconditionally, which dropped the acceptance
+    guard's own example on the floor: an `APPROVED` review reading "LGTM, but
+    rename X" carries an ask, and an ask is a finding whatever state the
+    reviewer clicked (PR #425 review, correctness f-001). The state no longer
+    silences a body.
+
+    What this rule deliberately does NOT do is read the body for approval
+    prose. Whether a row is a bare approval is a question about *dispatch*,
+    answered once by :func:`~lithos_loom.github_review_streams.dispositions`
+    on the watcher's side. Keeping it out of here keeps all three streams on
+    one rule and leaves the converge intake (``actionable``) feeding approval
+    rows to the S5a triage step — the model-driven backstop behind the
+    hand-written vocabulary, which must not become the sole and final arbiter
+    for one stream (PR #425 re-review, security f-004).
     """
     if review.state == "CHANGES_REQUESTED":
         return True
     if review.state in SILENT_REVIEW_STATES:
         return False
-    return bool(review.body.strip()) and not is_approval_text(review.body)
+    return bool(review.body.strip())
 
 
 # ── "an approval is not a finding" (the sibling of 8cfa3184) ───────────
@@ -587,7 +592,13 @@ _CANONICAL = str.maketrans(
 )
 # Sentence / clause boundaries. Splitting hard is safe: an ask can only end up
 # in MORE units, and every unit must match on its own.
-_UNIT_SPLIT_RE = re.compile(r"[\n.!?;,:]|—|–|\s-\s")
+#
+# ``?`` is deliberately NOT a boundary (PR #425 re-review, correctness
+# f-002): splitting on it threw the question mark away and "Ready to merge?"
+# — a reviewer ASKING whether to merge — matched the approval phrase behind
+# it. Left inside its unit, the anchored match fails and the whole body is
+# actionable, which is what a question is.
+_UNIT_SPLIT_RE = re.compile(r"[\n.!;,:]|—|–|\s-\s")
 # Markdown decoration and emoji shortcodes are dropped before matching
 # ("**No findings**" → "no findings"). ASCII only — see the note above.
 _DECORATION_RE = re.compile(r"""[*_`~#>\[\]()"'|]|:[a-z0-9_+-]+:""")

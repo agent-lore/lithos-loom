@@ -239,11 +239,16 @@ def test_review_policy_and_handled_author_suppression(
     trusted, _untrusted = fetch_external_findings(_REPO, 62, trusted_bots=(_BOT,))
 
     # The bot's COMMENTED summary is suppressed (its roots were handled); the
-    # APPROVED review is a bare approval, so it asks for nothing and never
-    # reaches the coder; the human CHANGES_REQUESTED survives.
-    assert [(f.author, f.activity_id) for f in trusted] == [("dave", 502)]
-    assert trusted[0].reply_mode is ReplyMode.NONE
-    assert "pullrequestreview-502" in trusted[0].thread_url
+    # human's APPROVED and CHANGES_REQUESTED reviews both survive. The
+    # approval reaches the intake on purpose (security f-004): this fetch is
+    # what feeds the S5a backstop, and only the WATCHER's `dispositions()`
+    # decides that a bare approval is not worth dispatching for.
+    assert [(f.author, f.activity_id) for f in trusted] == [
+        ("dave", 501),
+        ("dave", 502),
+    ]
+    assert trusted[1].reply_mode is ReplyMode.NONE
+    assert "pullrequestreview-502" in trusted[1].thread_url
 
 
 def test_an_approved_review_that_asks_is_still_injected(
@@ -251,15 +256,16 @@ def test_an_approved_review_that_asks_is_still_injected(
 ) -> None:
     """PR #425 review, correctness f-001: `APPROVED` used to be silent
     whatever the body said, so the acceptance guard's own "LGTM, but rename
-    X" was dropped on both the watcher and the converge side. Only a BARE
-    approval is silent now."""
+    X" was dropped on both the watcher and the converge side. Only a state
+    with nothing written, or a dismissal, is silent now."""
     _install_github(
         monkeypatch,
         reviews=[
-            _review(500, author="dave", state="APPROVED", body="LGTM"),
+            _review(500, author="dave", state="APPROVED", body=""),
             _review(
                 501, author="dave", state="APPROVED", body="LGTM, but rename `foo`"
             ),
+            _review(502, author="dave", state="DISMISSED", body="rename `foo`"),
         ],
         permissions={"dave": "write"},
     )

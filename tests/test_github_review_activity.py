@@ -383,20 +383,29 @@ def test_an_approval_that_asks_stays_in_the_actionable_batch() -> None:
     assert [a.activity_id for a in appr] == [7]  # a bare "looks good" inline root
 
 
-def test_an_approved_review_owning_comments_is_neither_approval_nor_actionable() -> (
-    None
-):
-    """Its own inline comments carry the asks and speak for it — the summary
-    is not reported as "nothing to remediate"."""
-    rows = [
+def test_a_review_that_owns_comments_still_reports_what_it_WROTE() -> None:
+    """Security f-004: an approval-prose body on a review that owns inline
+    roots was refused by both buckets and left the sweep unreported. Only the
+    WORDLESS approve-and-comment case has nothing of its own to say."""
+    wrote = [
         from_review(
-            _review(500, state="APPROVED", body="LGTM"), repo=_REPO, pr_number=_PR
+            _review(500, state="APPROVED", body="LGTM overall"),
+            repo=_REPO,
+            pr_number=_PR,
         ),
         from_inline_comment(_inline(7, review_id=500)),
     ]
-    act, appr = dispositions(rows, frozenset())
+    act, appr = dispositions(wrote, frozenset())
     assert [a.activity_id for a in act] == [7]
-    assert appr == []
+    assert [a.activity_id for a in appr] == [500]  # never silently dropped
+
+    wordless = [
+        from_review(_review(501, state="APPROVED", body=""), repo=_REPO, pr_number=_PR),
+        from_inline_comment(_inline(8, review_id=501)),
+    ]
+    act, appr = dispositions(wordless, frozenset())
+    assert [a.activity_id for a in act] == [8]
+    assert appr == []  # its comments speak for it (the AC's "no inline comments")
 
 
 def test_dismissals_replies_and_loom_replies_are_neither() -> None:

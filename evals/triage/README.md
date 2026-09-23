@@ -193,9 +193,11 @@ first K=5 run.
 `approval-and-ask` (2026-09-23) — the 827cedf8 fixture, two claims by one
 reviewer on loom at 81b2f0d: Dave's "**No findings.** … Ready to merge."
 from lens PR #100, wrapped in one observation sentence so the deterministic
-ingestion classifier cannot read it (`expected = "nothing"` — the rows that
-reach triage at all are exactly the approvals `is_approval_text` misses),
-beside a synthetic approval that carries an ask — "LGTM overall, but … please put the gate id
+ingestion classifier cannot read it (`expected = "nothing"` — an approval
+reaches triage either riding along in a batch that dispatched for something
+else, or, like this one, because `is_approval_text` could not read it; a
+batch that is ONLY a recognised approval never dispatches at all), beside a
+synthetic approval that carries an ask — "LGTM overall, but … please put the gate id
 first" (`expected = "proceed"`, ambiguous: it is a judgement about naming
 the coder and the panel dispose of, not something triage adjudicates). The
 pair is the whole measurement: the first must stop the run at round 0, and
