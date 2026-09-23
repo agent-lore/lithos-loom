@@ -138,10 +138,29 @@ cap is made of. Out-of-domain is a caller's bug, so it raises."""
 # could not have fitted under the bound anyway — and `redact_for_publication`
 # already makes the same trade for the same reason: bound what the patterns
 # ever see, rather than hand an external author the size of the host's regex
-# work (security/f-007). Measured in VISIBLE characters: the invisibles come
-# out before the slice is taken, so a wall of zero-widths cannot spend a budget
-# it puts nothing on the page for (security/f-009).
+# work (security/f-007).
 _DEFANG_INPUT_SLACK = 2
+
+# The budget is spent on what the published section can actually carry, so
+# everything this pipeline was going to drop or collapse ANYWAY is dropped or
+# collapsed BEFORE the slice is taken — otherwise the cheapest way to suppress
+# a section is to pad it with something that never reaches the page: the
+# invisibles (security/f-009), a fence run `_FENCE_RE` shortens to two
+# characters, or runaway whitespace (security/f-010 — a run of spaces, a line
+# that is only spaces, a wall of blank lines; markdown collapses them where the
+# reporter's own issue is rendered, and inside the fence they are blank).
+# The caps are far wider than any layout a story description carries: deeper
+# than any indentation, and more blank lines than a paragraph break.
+_MAX_SPACE_RUN = 40
+_MAX_NEWLINE_RUN = 3
+_SPACE_RUN_RE = re.compile(rf"[^\S\n]{{{_MAX_SPACE_RUN},}}")
+# AFTER the run collapse, never before. A whitespace run that never reaches a
+# line end (`" " * n + "x"`) makes this pattern quadratic — it rescans the rest
+# of the run from every position in it, 0.25 s at 10 KiB and 4× per doubling —
+# and the author of this text chooses n. With runs already capped at
+# `_MAX_SPACE_RUN` it scans at most that many characters per position.
+_LINE_TRAILING_RE = re.compile(r"(?m)[^\S\n]+$")
+_NEWLINE_RUN_RE = re.compile(rf"\n{{{_MAX_NEWLINE_RUN},}}")
 
 
 def defang_markup(text: str) -> str:
@@ -188,6 +207,28 @@ def defang_markup(text: str) -> str:
     return _FENCE_RE.sub(lambda m: m.group(0)[0] * 2, out)
 
 
+def _squeeze_for_budget(text: str) -> str:
+    """*text* with everything the published section cannot carry taken out.
+
+    Not a defence in itself — every rule here is one the pipeline applies
+    anyway (the invisibles are stripped by :func:`defang_markup`, the fence
+    runs are collapsed by it, and whitespace runs are blank wherever the text
+    is read). Running them FIRST is what stops a weaker party from spending a
+    section's whole budget on characters that reach no reader: the collapse is
+    the difference between a `## What` that carries the story and one that is
+    only a truncation marker.
+
+    Order matters twice: the run collapse precedes the trailing-whitespace
+    strip (which would otherwise rescan a long run from every position), and
+    both precede the slice they exist to protect.
+    """
+    out = CONTROL_CHARS_RE.sub("", text)
+    out = _FENCE_RE.sub(lambda m: m.group(0)[0] * 2, out)
+    out = _SPACE_RUN_RE.sub(lambda m: m.group(0)[0] * _MAX_SPACE_RUN, out)
+    out = _LINE_TRAILING_RE.sub("", out)
+    return _NEWLINE_RUN_RE.sub("\n" * _MAX_NEWLINE_RUN, out)
+
+
 def fence_untrusted(text: str, *, limit: int = MAX_SECTION_CHARS) -> str:
     """*text* as a fenced block it cannot break out of, or ``""`` if empty.
 
@@ -215,26 +256,30 @@ def fence_untrusted(text: str, *, limit: int = MAX_SECTION_CHARS) -> str:
     hold the marker, or a non-positive one (which Python's negative slicing
     would read as "keep nearly everything"), is a caller's bug: ``ValueError``.
 
-    The invisibles come out **before** the input slice, so the budget is spent
-    on characters a reader can actually see: a prefix of zero-widths or tag
-    characters would otherwise consume the whole allowance and leave a section
-    that is nothing but the truncation marker (security/f-009). The strip is a
-    fixed-width character class, linear in the input, which is what makes it
-    safe to run before the bound rather than behind it.
+    What the published section cannot carry is dropped **before** the input
+    slice (:func:`_squeeze_for_budget`), so the budget is spent on what a
+    reader will actually see. Otherwise the cheapest way to suppress a section
+    is to pad it with something that never reaches the page — zero-widths and
+    tag characters (security/f-009), a fence run, sixteen thousand spaces or a
+    wall of blank lines (security/f-010) — and what gets published is nothing
+    but the truncation marker. Those passes are fixed-width classes and
+    capped-run matches, linear in the input, which is what makes them safe to
+    run before the bound rather than behind it.
     """
     if limit < MIN_SECTION_CHARS:
         raise ValueError(
             f"fence_untrusted limit must be at least {MIN_SECTION_CHARS} "
             f"characters (the truncation marker's room), got {limit}"
         )
-    visible = CONTROL_CHARS_RE.sub("", text)
-    clipped = visible[: limit * _DEFANG_INPUT_SLACK]
+    carried = _squeeze_for_budget(text)
+    clipped = carried[: limit * _DEFANG_INPUT_SLACK]
     body = defang_markup(clipped).strip()
-    if len(clipped) < len(visible) or len(body) > limit:
-        # The marker fits INSIDE the cap, and lands before the emptiness check:
-        # a section whose text all sat past the input slice would otherwise be
-        # published as an empty `## What`, which reads as "the story said
-        # nothing" rather than "there was more of this".
+    if len(clipped) < len(carried) or len(body) > limit:
+        # The marker fits INSIDE the cap, and lands before the emptiness check
+        # below: a section whose text all sat past the input slice would read
+        # as "the story said nothing" rather than "there was more of this".
+        # `_squeeze_for_budget` is what keeps that from being reachable by
+        # padding; this ordering is the backstop if it ever stops being.
         keep = limit - len(_TRUNCATION_NOTE) - 1
         body = f"{body[:keep].rstrip()}\n{_TRUNCATION_NOTE}".lstrip()
     if not body:

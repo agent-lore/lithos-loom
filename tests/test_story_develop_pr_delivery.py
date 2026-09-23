@@ -281,38 +281,47 @@ def test_an_untrusted_section_is_bounded_before_the_rewrites_run() -> None:
     already cuts its own. 64 KiB of `[]` (GitHub's issue-body ceiling, and the
     shape that made a label-scanning lookahead quadratic) cost ~2s of delivery
     CPU per section; the cut plus a fixed-width pattern make it milliseconds."""
-    payload = "[]" * 32768
+    for payload in (
+        "[]" * 32768,
+        # …and the shape the budget passes themselves invite: a run of spaces
+        # that never reaches a line end, which the trailing-whitespace strip
+        # rescans from every position in — quadratic (0.25 s at 10 KiB, 4x per
+        # doubling) unless the run collapse has already capped it
+        " " * 100_000 + "still here",
+    ):
+        start = time.perf_counter()
+        quoted = fence_untrusted(payload)
+        elapsed = time.perf_counter() - start
 
-    start = time.perf_counter()
-    quoted = fence_untrusted(payload)
-    elapsed = time.perf_counter() - start
-
-    assert elapsed < 1.0
-    assert len(quoted) < MAX_SECTION_CHARS + 200
-    assert "(truncated" in quoted
-
-
-def test_a_section_clipped_to_nothing_still_says_so() -> None:
-    """The input cut must not be able to publish an empty `## What` that reads
-    as a story with no description: text that all sat past the slice leaves the
-    truncation note behind, not silence."""
-    quoted = fence_untrusted(" " * 400 + "the real text", limit=100)
-
-    assert "(truncated" in quoted
-    assert fence_untrusted("   ") == ""  # …while nothing at all stays nothing
+        assert elapsed < 1.0
+        assert len(quoted) < MAX_SECTION_CHARS + 200
 
 
-def test_invisible_padding_cannot_spend_the_whole_input_budget() -> None:
-    """security/f-009: the budget is for characters a reader can SEE. Stripped
-    after the input cut, a wall of zero-widths / tag characters / soft hyphens
-    would push every visible word past the slice and publish a section that is
-    nothing but the truncation note."""
-    for filler in ("\u200b", "\U000e0041", "\u00ad", "\u3164"):
-        quoted = fence_untrusted(filler * (MAX_SECTION_CHARS * 4) + "the real text")
+def test_padding_cannot_spend_the_whole_input_budget() -> None:
+    """security/f-009 + f-010: the budget buys characters the published section
+    can actually carry. Anything this pipeline drops or collapses anyway —
+    invisibles, a fence run, runaway spaces, lines that are only a space, a
+    wall of blank lines — must be taken out BEFORE the input cut, or padding
+    with it pushes every visible word past the slice and the section is
+    published as nothing but the truncation note."""
+    story = "The parser crashes on empty input."
+    wall = MAX_SECTION_CHARS * 4
+    for filler in (
+        "\u200b" * wall,  # zero-widths, the tag block, a soft hyphen, a filler
+        "\U000e0041" * wall,
+        "\u00ad" * wall,
+        "\u3164" * wall,
+        " " * wall + "\n\n",  # …and the ones a reader could see if they carried
+        "\t" * wall,
+        "\n" * wall,
+        " \n" * wall,
+        "`" * wall + "\n",
+    ):
+        quoted = fence_untrusted(filler + story)
 
-        assert "the real text" in quoted
-        assert "(truncated" not in quoted  # nothing visible was lost
-        assert filler not in quoted
+        assert story in quoted
+        assert "(truncated" not in quoted  # nothing the section carries was lost
+        assert len(_interior(quoted)) < 100  # …and the padding is not it
 
 
 def test_fence_untrusted_publishes_no_more_than_its_limit() -> None:
