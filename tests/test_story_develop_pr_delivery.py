@@ -32,8 +32,10 @@ from lithos_loom.plugins.story_develop.pr_delivery import (
     reply_body,
 )
 from lithos_loom.plugins.story_develop.publish_text import (
+    CONTROL_CHARS_RE,
     MAX_SECTION_CHARS,
     MIN_SECTION_CHARS,
+    defang_markup,
     fence_untrusted,
 )
 
@@ -299,11 +301,15 @@ def test_an_untrusted_section_is_bounded_before_the_rewrites_run() -> None:
 
 def test_padding_cannot_spend_the_whole_input_budget() -> None:
     """security/f-009 + f-010: the budget buys characters the published section
-    can actually carry. Anything this pipeline drops or collapses anyway —
-    invisibles, a fence run, runaway spaces, lines that are only a space, a
-    wall of blank lines — must be taken out BEFORE the input cut, or padding
-    with it pushes every visible word past the slice and the section is
-    published as nothing but the truncation note."""
+    can actually carry. What this pipeline drops or collapses anyway — the
+    invisibles and a fence run — must be taken out BEFORE the input cut, or
+    padding with it pushes every visible word past the slice and the section
+    is published as nothing but the truncation note.
+
+    Whitespace is NOT in that set and has its own test below: a fenced block
+    carries it, so it is content, and padding with it earns an honest
+    truncation rather than a silent reflow.
+    """
     story = "The parser crashes on empty input."
     wall = MAX_SECTION_CHARS * 4
     for filler in (
@@ -311,10 +317,8 @@ def test_padding_cannot_spend_the_whole_input_budget() -> None:
         "\U000e0041" * wall,
         "\u00ad" * wall,
         "\u3164" * wall,
-        " " * wall + "\n\n",  # …and the ones a reader could see if they carried
-        "\t" * wall,
-        "\n" * wall,
-        " \n" * wall,
+        "\u061c" * wall,  # …and the blocks the hand-written ranges had missed
+        "\U000e0101" * wall,
         "`" * wall + "\n",
     ):
         quoted = fence_untrusted(filler + story)
@@ -322,6 +326,69 @@ def test_padding_cannot_spend_the_whole_input_budget() -> None:
         assert story in quoted
         assert "(truncated" not in quoted  # nothing the section carries was lost
         assert len(_interior(quoted)) < 100  # …and the padding is not it
+
+
+def test_in_budget_whitespace_is_published_exactly_as_written() -> None:
+    """[davesnowdon] Medium: a fenced code block preserves every space, tab and
+    blank line in it, so the story's whitespace is CONTENT — deeply indented
+    code, an exact-output fixture, an ASCII diagram, a whitespace-sensitive
+    example. Silently capping space runs at 40, rewriting a mixed space/tab run
+    as repetitions of its first character, stripping every line's trailing
+    whitespace and cutting newline runs to three altered technical
+    requirements while still presenting them as complete — and with no
+    truncation marker to say anything had been touched."""
+    fixture = (
+        "Expected output:\n"
+        + " " * 48  # deeper than any cap: the reporter's real indentation
+        + "child\n"
+        + "\t" * 12  # …and a mixed run, which the collapse rewrote to one char
+        + " \t mixed\n"
+        + "trailing   \n"  # …trailing whitespace, significant in a fixture
+        + "\n" * 6  # …and more blank lines than the collapse allowed
+        + "end"
+    )
+
+    assert _interior(fence_untrusted(fixture)) == fixture
+    # the whole story still travels — nothing was lost, so nothing claims to be
+    assert "(truncated" not in fence_untrusted(fixture)
+
+
+def test_whitespace_padding_truncates_honestly_rather_than_silently() -> None:
+    """[davesnowdon] Medium, the other half: whitespace is not free, so a
+    reporter CAN still spend a section's budget on it — but the outcome is the
+    explicit marker, never a section quietly squeezed to fit."""
+    quoted = fence_untrusted(" " * (MAX_SECTION_CHARS * 4) + "story")
+
+    assert "(truncated" in quoted
+    assert len(_interior(quoted)) <= MAX_SECTION_CHARS
+
+
+def test_the_stripped_class_tracks_the_unicode_property() -> None:
+    """[davesnowdon] Low: the class is measured against Unicode's
+    Default_Ignorable_Code_Point property rather than hand-listed, so it does
+    not drift from it. U+061C (a bidi formatter, which also changes bidi
+    rendering), U+2065, the deprecated U+206A–U+206F, U+FFF0–U+FFF8 and every
+    tag / variation selector past U+E007F all survived the earlier ranges into
+    a published body — and, since the budget is counted AFTER the strip, each
+    was also a character an external author could pad a section down to its
+    truncation marker with."""
+    for missed in (
+        "\u061c",
+        "\u2065",
+        "\u206a",
+        "\u206f",
+        "\ufff0",
+        "\ufff8",
+        "\U000e0101",
+        "\U000e0fff",
+        "\U0001bca0",
+        "\U0001d173",
+    ):
+        assert CONTROL_CHARS_RE.sub("", missed) == ""
+        assert defang_markup(f"vis{missed}ible") == "visible"
+
+    # …and the only two whitespace characters a PR body renders stay untouched
+    assert defang_markup("a\tb\nc") == "a\tb\nc"
 
 
 def test_fence_untrusted_publishes_no_more_than_its_limit() -> None:

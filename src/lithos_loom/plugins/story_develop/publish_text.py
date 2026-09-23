@@ -39,21 +39,67 @@ __all__ = [
     "fence_untrusted",
 ]
 
-# C0 / C1 *and* every Unicode character that reorders text or renders as
-# nothing: bidi overrides + isolates (trojan source — GitHub warns about it in
-# diffs), the zero-width / invisible formatters, the invisible fillers
-# (U+00AD soft hyphen, the hangul fillers), the interlinear annotators, and the
-# **tag block** (U+E0000–U+E007F — wholly invisible, the standard
-# text-smuggling channel). A line must not be able to render differently from
-# the text it carries — on a PR strangers read, on the `--dry-run` screen the
-# operator decides on, and in the bytes a later LLM reviewer re-ingests: text
-# the operator cannot see is an instruction channel only its author knows is
-# there.
+# The characters a published line must not be able to carry: the C0 / C1
+# controls (tab and newline excepted — the only two a PR body renders), the
+# Unicode line / paragraph separators, every Default_Ignorable_Code_Point
+# (the bidi formatters — trojan source, which GitHub warns about in diffs —
+# the zero-width and invisible formatters, the invisible fillers, the
+# variation selectors and the **tag block**, the standard text-smuggling
+# channel), and the interlinear annotators. A line must not be able to render
+# differently from the text it carries — on a PR strangers read, on the
+# `--dry-run` screen the operator decides on, and in the bytes a later LLM
+# reviewer re-ingests: text the operator cannot see is an instruction channel
+# only its author knows is there.
+#
+# A table of named code-point blocks rather than a handful of wide literal
+# ranges, for the two things a wide range cost this class. It hid what it
+# took: U+000B-U+001F swept the whitespace controls (VT, FF, CR) in with the
+# rest without ever saying so — CodeQL's "overly permissive range"
+# (code-scanning/10) is exactly that complaint. And it could not be checked
+# against the property it tracks, so it had drifted from it: U+061C, U+2065,
+# the deprecated U+206A-U+206F, U+FFF0-U+FFF8 and everything past U+E007F were
+# all missing, each of them surviving into a published body — and since the
+# budget below is counted AFTER the strip, each was also a character an
+# external author could spend a whole section's allowance on.
+_STRIPPED_RANGES: tuple[tuple[int, int], ...] = (
+    (0x0000, 0x0008),  # NUL..BS — the C0 controls before TAB
+    (0x000B, 0x000C),  # VT, FF
+    (0x000D, 0x000D),  # CR
+    (0x000E, 0x001F),  # SO..US — the C0 controls after LF
+    (0x007F, 0x009F),  # DEL and the C1 controls
+    (0x2028, 0x2029),  # LINE / PARAGRAPH SEPARATOR (Zl / Zp)
+    # Default_Ignorable_Code_Point (DerivedCoreProperties.txt), in full.
+    (0x00AD, 0x00AD),  # SOFT HYPHEN
+    (0x034F, 0x034F),  # COMBINING GRAPHEME JOINER
+    (0x061C, 0x061C),  # ARABIC LETTER MARK — a bidi formatter
+    (0x115F, 0x1160),  # HANGUL CHOSEONG / JUNGSEONG FILLER
+    (0x17B4, 0x17B5),  # KHMER VOWEL INHERENT AQ / AA
+    (0x180B, 0x180F),  # MONGOLIAN free variation selectors + vowel separator
+    (0x200B, 0x200F),  # ZWSP..RLM
+    (0x202A, 0x202E),  # the bidi embeddings and overrides
+    (0x2060, 0x206F),  # word joiner, the invisible operators, U+2065, the
+    #                    bidi isolates, the deprecated format characters
+    (0x3164, 0x3164),  # HANGUL FILLER
+    (0xFE00, 0xFE0F),  # VARIATION SELECTOR-1..16
+    (0xFEFF, 0xFEFF),  # ZERO WIDTH NO-BREAK SPACE (the BOM)
+    (0xFFA0, 0xFFA0),  # HALFWIDTH HANGUL FILLER
+    (0xFFF0, 0xFFF8),  # unassigned, reserved default-ignorable
+    (0x1BCA0, 0x1BCA3),  # SHORTHAND FORMAT controls
+    (0x1D173, 0x1D17A),  # MUSICAL SYMBOL BEGIN/END formatters
+    (0xE0000, 0xE0FFF),  # the tag block + VARIATION SELECTOR-17..256
+    # Not Default_Ignorable (Unicode excludes these three), but they hide the
+    # text they annotate from the reader while leaving it in the body.
+    (0xFFF9, 0xFFFB),  # INTERLINEAR ANNOTATION ANCHOR / SEPARATOR / TERMINATOR
+)
 CONTROL_CHARS_RE = re.compile(
-    "[\x00-\x08\x0b-\x1f\x7f-\x9f\u00ad\u034f\u115f\u1160\u17b4\u17b5"
-    "\u180b-\u180f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064"
-    "\u2066-\u2069\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb"
-    "\U000e0000-\U000e007f]"
+    "["
+    + "".join(
+        re.escape(chr(first))
+        if first == last
+        else f"{re.escape(chr(first))}-{re.escape(chr(last))}"
+        for first, last in _STRIPPED_RANGES
+    )
+    + "]"
 )
 # The closing keyword and the issue ref it binds to, with everything GitHub
 # tolerates between them. `GH-123` is a closing ref exactly like `#123`
@@ -142,25 +188,19 @@ cap is made of. Out-of-domain is a caller's bug, so it raises."""
 _DEFANG_INPUT_SLACK = 2
 
 # The budget is spent on what the published section can actually carry, so
-# everything this pipeline was going to drop or collapse ANYWAY is dropped or
-# collapsed BEFORE the slice is taken — otherwise the cheapest way to suppress
+# what this pipeline drops or collapses ANYWAY comes out BEFORE the slice is
+# taken (:func:`_squeeze_for_budget`) — otherwise the cheapest way to suppress
 # a section is to pad it with something that never reaches the page: the
-# invisibles (security/f-009), a fence run `_FENCE_RE` shortens to two
-# characters, or runaway whitespace (security/f-010 — a run of spaces, a line
-# that is only spaces, a wall of blank lines; markdown collapses them where the
-# reporter's own issue is rendered, and inside the fence they are blank).
-# The caps are far wider than any layout a story description carries: deeper
-# than any indentation, and more blank lines than a paragraph break.
-_MAX_SPACE_RUN = 40
-_MAX_NEWLINE_RUN = 3
-_SPACE_RUN_RE = re.compile(rf"[^\S\n]{{{_MAX_SPACE_RUN},}}")
-# AFTER the run collapse, never before. A whitespace run that never reaches a
-# line end (`" " * n + "x"`) makes this pattern quadratic — it rescans the rest
-# of the run from every position in it, 0.25 s at 10 KiB and 4× per doubling —
-# and the author of this text chooses n. With runs already capped at
-# `_MAX_SPACE_RUN` it scans at most that many characters per position.
-_LINE_TRAILING_RE = re.compile(r"(?m)[^\S\n]+$")
-_NEWLINE_RUN_RE = re.compile(rf"\n{{{_MAX_NEWLINE_RUN},}}")
+# invisibles above (security/f-009), or a fence run `_FENCE_RE` shortens to
+# two characters.
+#
+# Whitespace is NOT such a thing, and nothing here touches it. The section is
+# published inside a code block, which preserves every space, tab and blank
+# line in it — so a deep indent, an exact-output fixture, an ASCII diagram or
+# a whitespace-sensitive example is the author's CONTENT, and capping runs of
+# it rewrote technical requirements while still publishing them as whole.
+# Padding with whitespace therefore buys its author nothing but a section that
+# is honestly truncated, with the `(truncated …)` marker on it to say so.
 
 
 def defang_markup(text: str) -> str:
@@ -210,23 +250,21 @@ def defang_markup(text: str) -> str:
 def _squeeze_for_budget(text: str) -> str:
     """*text* with everything the published section cannot carry taken out.
 
-    Not a defence in itself — every rule here is one the pipeline applies
-    anyway (the invisibles are stripped by :func:`defang_markup`, the fence
-    runs are collapsed by it, and whitespace runs are blank wherever the text
-    is read). Running them FIRST is what stops a weaker party from spending a
-    section's whole budget on characters that reach no reader: the collapse is
-    the difference between a `## What` that carries the story and one that is
-    only a truncation marker.
+    Not a defence in itself — both rules here are ones the pipeline applies
+    anyway: the invisibles are stripped by :func:`defang_markup`, and the
+    fence runs are collapsed by it, so neither reaches a reader whatever the
+    budget does. Running them FIRST is what stops a weaker party from spending
+    a section's whole budget on characters that reach no reader — the
+    difference between a `## What` that carries the story and one that is only
+    a truncation marker.
 
-    Order matters twice: the run collapse precedes the trailing-whitespace
-    strip (which would otherwise rescan a long run from every position), and
-    both precede the slice they exist to protect.
+    Nothing else is normalised. Whitespace survives a fenced block, so it is
+    the author's content and not this function's to collapse: text that
+    exceeds the budget is cut and SAYS so instead of being quietly squeezed
+    into it.
     """
     out = CONTROL_CHARS_RE.sub("", text)
-    out = _FENCE_RE.sub(lambda m: m.group(0)[0] * 2, out)
-    out = _SPACE_RUN_RE.sub(lambda m: m.group(0)[0] * _MAX_SPACE_RUN, out)
-    out = _LINE_TRAILING_RE.sub("", out)
-    return _NEWLINE_RUN_RE.sub("\n" * _MAX_NEWLINE_RUN, out)
+    return _FENCE_RE.sub(lambda m: m.group(0)[0] * 2, out)
 
 
 def fence_untrusted(text: str, *, limit: int = MAX_SECTION_CHARS) -> str:
@@ -260,11 +298,15 @@ def fence_untrusted(text: str, *, limit: int = MAX_SECTION_CHARS) -> str:
     slice (:func:`_squeeze_for_budget`), so the budget is spent on what a
     reader will actually see. Otherwise the cheapest way to suppress a section
     is to pad it with something that never reaches the page — zero-widths and
-    tag characters (security/f-009), a fence run, sixteen thousand spaces or a
-    wall of blank lines (security/f-010) — and what gets published is nothing
-    but the truncation marker. Those passes are fixed-width classes and
-    capped-run matches, linear in the input, which is what makes them safe to
+    tag characters (security/f-009), or a fence run — and what gets published
+    is nothing but the truncation marker. Both passes are fixed-width
+    character classes, linear in the input, which is what makes them safe to
     run before the bound rather than behind it.
+
+    Whitespace is published exactly as written. A code block carries every
+    space, tab and blank line, so the story's indentation is its content — a
+    reporter padding with it spends a real budget and gets a visibly truncated
+    section, which is the honest outcome, not a silently reflowed one.
     """
     if limit < MIN_SECTION_CHARS:
         raise ValueError(
