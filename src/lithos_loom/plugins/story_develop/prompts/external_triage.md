@@ -29,7 +29,11 @@ merge" — praise, an acknowledgement, an approval. There is nothing there to
 verify and nothing to change, so it gets `NOTHING_TO_REMEDIATE` and no coder
 is paid to rediscover it. This is **not** a soft REJECT: a claim that asks
 for anything at all — "LGTM, but rename `foo`" — keeps its ask and
-PROCEEDs.
+PROCEEDs. A claim is also shown with its author's **review state** where it
+has one (`[dave, CHANGES_REQUESTED review] …`): a `CHANGES_REQUESTED`
+review blocks the PR on GitHub until it is dismissed, so it is never
+"nothing to remediate" however approving its words are — that contradiction
+is the reviewer's to resolve, and it PROCEEDs.
 
 ## Acceptance criteria (the change's intent, for context)
 
@@ -81,7 +85,9 @@ Rules:
   You **must** state, after an em-dash, why it asks for nothing (quote the
   approving words); nothing here can be cited, so that one line is the only
   thing an operator can check, and a bare `NOTHING_TO_REMEDIATE` is treated
-  as `PROCEED`. If it contains any ask,
+  as `PROCEED`. The verdict is also refused in code for a claim whose body
+  carries no approving words at all, and for a `CHANGES_REQUESTED` review —
+  such a line is read as `PROCEED`, so do not spend it there. If it contains any ask,
   question about the code, or disagreement, however politely worded, it is
   a claim: use `PROCEED`. Never use it because you think the claim is wrong
   — that is what `REJECT` (with evidence) is for.

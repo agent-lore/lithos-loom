@@ -26,6 +26,15 @@ said. It is NOT a cheap REJECT: an approval that also asks ("LGTM, but
 rename X") is a claim and PROCEEDs, and a verdict that suppresses a
 must-proceed finding is scored as over-suppression by the S8 eval either
 way.
+
+That verdict carries no citation — there is nothing to refute — so its
+guard is a different checkable thing: the row must be ELIGIBLE, decided
+from the row itself by :func:`approval_eligible_ids` below
+(the body carries approving words; the row is not a blocking
+``CHANGES_REQUESTED`` review) and passed in. An id the caller did not name
+proceeds however confidently the verdict file drops it — the same
+default-to-act direction as an uncited ``REJECT`` (PR #426 re-review,
+security f-001 + correctness f-001).
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ...github_models import BLOCKING_REVIEW_STATES, carries_approval
 from ...runner import worktree
 from . import containers, engines, handoff, turns
 from .agent_session import build_run_cmd
@@ -45,6 +55,9 @@ from .config import HANDOFF_MOUNT_NAME, DevelopConfig
 from .sandbox_facts import for_prompt as _sandbox_section
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from .external_reviews import ExternalFinding
     from .panel import ReviewOutcome
     from .review_resolve import ResolvedChange
 
@@ -55,6 +68,7 @@ __all__ = [
     "NOTHING_TO_REMEDIATE_VERDICT",
     "TRIAGE_HANDOFF_NAME",
     "TriageVerdicts",
+    "approval_eligible_ids",
     "cited_locations",
     "classify_verdict_lines",
     "parse_triage_verdicts",
@@ -181,11 +195,50 @@ class TriageVerdicts:
     verdict_text: str = ""
 
 
+def approval_eligible_ids(
+    id_map: Mapping[str, ExternalFinding],
+) -> frozenset[str]:
+    """The injected ids a triage ``NOTHING_TO_REMEDIATE`` verdict may drop.
+
+    The machine-checkable floor under S5a's third verdict (PR #426
+    re-review, security f-001 + correctness f-001). Triage reads
+    third-party prose on a prompt path, and unlike ``REJECT`` — whose
+    evidence must cite a file that resolves in the repo — an approval has
+    nothing to cite, so without this the verdict would drop ANY id on one
+    unverifiable line, including ids nobody mistook for an approval. Two
+    checks, both decided here from the row itself rather than from the
+    model's sentence:
+
+    - the body must actually carry approving words
+      (:func:`~lithos_loom.github_models.carries_approval`) — "this leaks
+      the token" can never be read as an approval. The weak classifier, not
+      the end-to-end one: the ingestion side already keeps every body it
+      recognises whole out of the dispatched batch, so requiring the strong
+      one would delete the verdict instead of guarding it (the mixed case —
+      approval prose the vocabulary cannot read end to end — is exactly what
+      the model is for);
+    - the row must not be a **blocking** review: a ``CHANGES_REQUESTED``
+      review blocks the PR whatever its body says, so "LGTM" under that
+      state is a contradiction to resolve, never a row that asks for nothing
+      (the same ``BLOCKING_REVIEW_STATES`` the watcher's approval rule
+      reads).
+
+    Everything else falls through to ``PROCEED``, the module's
+    default-to-act direction.
+    """
+    return frozenset(
+        fid
+        for fid, f in id_map.items()
+        if f.review_state not in BLOCKING_REVIEW_STATES and carries_approval(f.body)
+    )
+
+
 def parse_triage_verdicts(
     text: str,
     finding_ids: list[str],
     *,
     repo_files: frozenset[str] | None = None,
+    approval_eligible: frozenset[str] | None = None,
 ) -> TriageVerdicts:
     """Parse the verdict file, applying default-to-act per finding.
 
@@ -194,17 +247,23 @@ def parse_triage_verdicts(
     *repo_files* is supplied (the production step always passes the
     worktree's tracked-file snapshot), one that resolves to a real tracked
     file. It is dropped as nothing-to-remediate only by an explicit
-    ``NOTHING_TO_REMEDIATE`` line **that states a reason**: there is no claim
-    to refute, so no citation is possible, and the reason is the guard in its
-    place (a bare drop leaves the operator nothing to check — security
-    f-002). The S8 eval scores such a line on a must-proceed finding as
-    over-suppression, exactly like a rejection. Everything else
+    ``NOTHING_TO_REMEDIATE`` line **that states a reason** (there is no claim
+    to refute, so no citation is possible, and the reason is what the
+    operator reads — security f-002) **on an id named in
+    *approval_eligible***: the row's own body must carry approving words and
+    must not be a blocking review, checked in code rather than taken from the
+    verdict sentence (PR #426 re-review, security f-001). ``None`` names NO
+    eligible id — a caller that supplies no eligibility gets no suppression,
+    never a free pass. The S8 eval scores such a line on a must-proceed
+    finding as over-suppression, exactly like a rejection. Everything else
     — PROCEED, bare REJECT, uncited prose, citation-shaped prose naming no
     repo file, unmentioned, garbled — proceeds. Ids the output invents are
     ignored. ``repo_files=None`` is the pure/unit-test mode: shape-only, no
     filesystem coupling.
     """
-    kinds, evidence = _scan_verdict_lines(text, finding_ids, repo_files=repo_files)
+    kinds, evidence = _scan_verdict_lines(
+        text, finding_ids, repo_files=repo_files, approval_eligible=approval_eligible
+    )
     rejections = {
         fid: evidence[fid] for fid in finding_ids if kinds[fid] == LINE_REJECT
     }
@@ -228,6 +287,7 @@ def classify_verdict_lines(
     finding_ids: list[str],
     *,
     repo_files: frozenset[str] | None = None,
+    approval_eligible: frozenset[str] | None = None,
 ) -> dict[str, str]:
     """Per-id class of the verdict line the file carries (``LINE_*``).
 
@@ -237,12 +297,18 @@ def classify_verdict_lines(
     uncited REJECT for the same id does not undo it (the parse has always
     accumulated rejections; a contradictory file keeps the evidenced verdict).
     """
-    kinds, _ = _scan_verdict_lines(text, finding_ids, repo_files=repo_files)
+    kinds, _ = _scan_verdict_lines(
+        text, finding_ids, repo_files=repo_files, approval_eligible=approval_eligible
+    )
     return kinds
 
 
 def _scan_verdict_lines(
-    text: str, finding_ids: list[str], *, repo_files: frozenset[str] | None
+    text: str,
+    finding_ids: list[str],
+    *,
+    repo_files: frozenset[str] | None,
+    approval_eligible: frozenset[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     known = set(finding_ids)
     kinds: dict[str, str] = dict.fromkeys(finding_ids, LINE_MISSING)
@@ -265,16 +331,24 @@ def _scan_verdict_lines(
             continue  # sticky: an evidenced rejection is not undone by a later line
         elif verdict == "REJECT":
             kinds[fid] = LINE_REJECT_UNCITED
-        elif verdict == NOTHING_TO_REMEDIATE_VERDICT and evidence:
+        elif (
+            verdict == NOTHING_TO_REMEDIATE_VERDICT
+            and evidence
+            and fid in (approval_eligible or frozenset())
+        ):
             # Not a claim at all. It carries no citation — there is nothing
-            # to refute — so the stated REASON is its corroborating guard
-            # (PR #425 review, security f-002): a bare drop names nothing an
-            # operator could check, and the outcome finding on the story
-            # quotes this line.
+            # to refute — so the stated REASON is what the operator reads
+            # (PR #425 review, security f-002; the outcome finding on the
+            # story quotes this line) and ELIGIBILITY is the check: the row
+            # itself must carry approving words and must not be a blocking
+            # review (PR #426 re-review, security f-001 + correctness
+            # f-001). A drop the row does not support falls through to
+            # PROCEED below, like an uncited REJECT.
             kinds[fid] = LINE_NOTHING
             evidence_by_id[fid] = evidence
         else:
-            # Everything else PROCEEDS — a bare NOTHING_TO_REMEDIATE, and any
+            # Everything else PROCEEDS — a bare NOTHING_TO_REMEDIATE, one
+            # on an ineligible row, and any
             # token a later, wider `_VERDICT_RE` might admit. The default is
             # explicit so widening that regex can never turn a new token into
             # a silent suppression (security f-002).
@@ -287,13 +361,17 @@ def triage_external_findings(
     change: ResolvedChange,
     outcome: ReviewOutcome,
     *,
+    approval_eligible: frozenset[str] | None = None,
     timeout: int = 1800,
 ) -> TriageVerdicts:
     """Run the one-turn read-only triage pass over *outcome*'s findings.
 
     Builds a throwaway worktree at the PR head (the tree the claims are
     about), runs a single fresh coder-engine turn against it with the repo
-    mounted read-only, and parses the verdict file. Every degraded path —
+    mounted read-only, and parses the verdict file. *approval_eligible* is
+    the caller's set of ids a ``NOTHING_TO_REMEDIATE`` verdict may drop
+    (``approval_eligible_ids`` over the batch); omitted, no id may be
+    dropped that way. Every degraded path —
     turn failure, missing/unreadable verdict file — returns all-proceed with
     a ``note`` explaining the degradation; this function never raises for
     those, and never blocks the remediation it guards.
@@ -363,7 +441,12 @@ def triage_external_findings(
         logger.warning("triage %s: %s", config.run_id, note)
         return TriageVerdicts(proceed=tuple(finding_ids), cost_usd=cost, note=note)
 
-    verdicts = parse_triage_verdicts(text, finding_ids, repo_files=repo_files)
+    verdicts = parse_triage_verdicts(
+        text,
+        finding_ids,
+        repo_files=repo_files,
+        approval_eligible=approval_eligible,
+    )
     logger.info(
         "triage %s: %d proceed / %d rejected / %d nothing-to-remediate (cost $%.2f)",
         config.run_id,

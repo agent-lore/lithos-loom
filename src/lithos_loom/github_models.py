@@ -37,6 +37,7 @@ __all__ = [
     "parse_pull_request_review",
     "parse_pull_request_review_comment",
     "strip_marker",
+    "carries_approval",
     "is_approval_text",
     "is_automated_reply",
     "is_landed_fix_reply",
@@ -658,6 +659,44 @@ _COURTESY_UNIT_RE = re.compile(
 )
 
 
+def _units(body: str) -> list[str]:
+    """*body* as canonicalised units (sentence / list item / line), blanks
+    dropped — the one splitting rule both classifiers below read."""
+    # The emoji stands alone as its own unit: "Ship it 🚀" is two approvals,
+    # never one unrecognised sentence.
+    text = _APPROVAL_EMOJI_RE.sub(". lgtm .", body).translate(_CANONICAL)
+    units = []
+    for raw in _UNIT_SPLIT_RE.split(text):
+        unit = " ".join(_DECORATION_RE.sub("", raw).split()).strip("- ")
+        if unit:
+            units.append(unit)
+    return units
+
+
+def carries_approval(body: str) -> bool:
+    """True when ANY unit of *body* is a recognised approval phrase.
+
+    The weak half of :func:`is_approval_text`: necessary for "this asks for
+    nothing", never sufficient — "LGTM, but rename `foo`" carries an approval
+    AND an ask, so this is True while :func:`is_approval_text` is False.
+
+    It exists as the machine-checkable floor under S5a's
+    ``NOTHING_TO_REMEDIATE`` verdict (PR #426 re-review, security f-001): the
+    triage agent reads third-party prose, so its "this row is just an
+    approval" judgement is honoured only for a row whose body actually
+    contains approving words. A body with none — "this leaks the token" —
+    can never be dropped as an approval, whatever a model was talked into
+    writing about it. The strong half is not usable as that floor: the
+    ingestion classifier already keeps every body it recognises end to end
+    out of the dispatched batch, so requiring it would leave the verdict
+    unreachable in production (and the S8 approval fixture unscorable)
+    rather than guarded.
+    """
+    return any(
+        unit.isascii() and _APPROVAL_UNIT_RE.match(unit) for unit in _units(body)
+    )
+
+
 def is_approval_text(body: str) -> bool:
     """True when *body* carries an approval and **no ask** — nothing to remediate.
 
@@ -668,13 +707,7 @@ def is_approval_text(body: str) -> bool:
     cannot read — makes the whole body a finding.
     """
     approved = False
-    # The emoji stands alone as its own unit: "Ship it 🚀" is two approvals,
-    # never one unrecognised sentence.
-    text = _APPROVAL_EMOJI_RE.sub(". lgtm .", body).translate(_CANONICAL)
-    for raw in _UNIT_SPLIT_RE.split(text):
-        unit = " ".join(_DECORATION_RE.sub("", raw).split()).strip("- ")
-        if not unit:
-            continue
+    for unit in _units(body):
         if not unit.isascii():
             # Not deleted, not skipped: text this vocabulary cannot read is
             # an ask until something says otherwise (security f-001).

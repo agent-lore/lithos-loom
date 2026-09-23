@@ -42,6 +42,7 @@ from ...plugins.story_develop.external_reviews import (
 )
 from ...plugins.story_develop.external_triage import (
     TriageVerdicts,
+    approval_eligible_ids,
     cited_locations,
     triage_external_findings,
 )
@@ -424,9 +425,19 @@ def live_triage(
             head_ref=f"{case.id}@{sha[:12]}",
             body=case.acceptance_criteria,
         )
-        seed, _ = external_intake_reviews(
+        seed, id_map = external_intake_reviews(
             external_findings_for(case, sha), current_head_sha=sha
         )
-        return triage_external_findings(config, change, seed[0], timeout=timeout)
+        # The eval runs the production step, guard included: the third
+        # verdict is honoured only for rows the batch itself makes eligible
+        # (security f-001), so a case's approval rate is measured against
+        # what converge would actually do with it.
+        return triage_external_findings(
+            config,
+            change,
+            seed[0],
+            approval_eligible=approval_eligible_ids(id_map),
+            timeout=timeout,
+        )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

@@ -28,6 +28,7 @@ from lithos_loom.github_models import AUTOMATED_REPLY_MARKER, issue_comment_repl
 from lithos_loom.github_review_activity import ExternalReviewActivity, ReviewStream
 from lithos_loom.github_review_streams import ReplyMode
 from lithos_loom.plugins.story_develop import external_reviews as ext_mod
+from lithos_loom.plugins.story_develop import external_triage as triage_mod
 from lithos_loom.plugins.story_develop.external_reviews import (
     CoderAck,
     ExternalFinding,
@@ -325,6 +326,49 @@ def test_handoff_text_parses_and_attributes_the_author() -> None:
     assert parsed.findings[0].files == ["src/x.py:12"]
     assert "[dave]" in parsed.findings[0].rationale
     assert parsed.findings[1].files == []
+
+
+def test_a_blocking_review_state_survives_the_fetch_and_reaches_triage() -> None:
+    """PR #426 re-review, correctness f-001: the watcher refuses to call a
+    ``CHANGES_REQUESTED`` review an approval, but the subprocess re-fetches
+    the row — and the state was dropped on the way in, so triage saw a bare
+    ``[dave] LGTM`` and could answer it ``NOTHING_TO_REMEDIATE``."""
+    row = ExternalReviewActivity(
+        stream=ReviewStream.REVIEW,
+        activity_id=500,
+        author="dave",
+        body="LGTM",
+        url="https://example/review",
+        review_state="CHANGES_REQUESTED",
+    )
+    finding = ext_mod.finding_from_activity(row, source="human", trusted=True)
+    assert finding.review_state == "CHANGES_REQUESTED"
+
+    text = findings_to_handoff_text([finding], current_head_sha=_HEAD)
+    rationale = parse_review_handoff(text).findings[0].rationale
+    assert "[dave, CHANGES_REQUESTED review]" in rationale
+    assert "LGTM" in rationale  # the body reaches the batch intact
+
+    # ...and it is ineligible for the third verdict however it reads.
+    _, id_map = ext_mod.external_intake_reviews([finding], current_head_sha=_HEAD)
+    assert triage_mod.approval_eligible_ids(id_map) == frozenset()
+
+
+def test_approval_eligibility_is_read_from_the_row_not_the_verdict() -> None:
+    """Security f-001: a ``NOTHING_TO_REMEDIATE`` verdict may only drop a row
+    whose own body carries approving words — a real claim never becomes an
+    approval because a line of triage prose says so."""
+    approval = _finding(body="**No findings.** Ready to merge.", activity_id=1)
+    mixed = _finding(body="LGTM, but rename `foo`", activity_id=2)
+    claim = _finding(body="this leaks the token", activity_id=3)
+    _, id_map = ext_mod.external_intake_reviews(
+        [approval, mixed, claim], current_head_sha=_HEAD
+    )
+    ids = {ext: fid for fid, ext in id_map.items()}
+    eligible = triage_mod.approval_eligible_ids(id_map)
+    assert ids[approval] in eligible
+    assert ids[mixed] in eligible  # carries an approval AND an ask — triage's call
+    assert ids[claim] not in eligible
 
 
 def test_stale_head_sha_gets_a_reanchor_note() -> None:

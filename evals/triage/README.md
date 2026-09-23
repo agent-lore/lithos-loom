@@ -55,7 +55,11 @@ approval-and-ask               5     5                    —            5/5 57-
 - **approval** — `expected = "nothing"` findings answered
   `NOTHING_TO_REMEDIATE`, over every such opportunity (the same `--bar`).
   Strict: a `REJECT` also avoids the paid round, but it answers the reviewer
-  as if they had made a claim, so it does not score. `—` when the batch
+  as if they had made a claim, so it does not score. The verdict is measured
+  as production honours it: only for a finding whose own body carries
+  recognised approving words and which is not a blocking `CHANGES_REQUESTED`
+  review (`approval_eligible_ids`), so a case body with no approval in it
+  cannot score here however the agent answers. `—` when the batch
   carries no approval, and the rate then gates nothing.
 - **over-supp** — must-proceed findings suppressed — by a cited `REJECT` **or**
   by a `NOTHING_TO_REMEDIATE` — over every such opportunity

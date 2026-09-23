@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.plugins.story_develop.merge_gate.run_merge_gate"
       }
     ],
-    "total_functions": 1780
+    "total_functions": 1783
   },
   "domain": {
     "associations": 2,
@@ -262,7 +262,7 @@
       }
     },
     "cross_component_edges": 70,
-    "cross_component_module_edges": 374,
+    "cross_component_module_edges": 375,
     "longest_component_chain": 6,
     "module_cycle_count": 1,
     "module_cycles": [
@@ -418,20 +418,20 @@
         "functions": 201,
         "largest_module": "lithos_loom.evals.resolve.harness",
         "largest_module_lines": 796,
-        "lines": 6732,
+        "lines": 6743,
         "modules": 23,
         "public_symbols": 100,
-        "sloc": 5634
+        "sloc": 5641
       },
       "GitHub": {
         "classes": 18,
-        "functions": 83,
+        "functions": 85,
         "largest_module": "lithos_loom.github_models",
-        "largest_module_lines": 686,
-        "lines": 2031,
+        "largest_module_lines": 719,
+        "lines": 2064,
         "modules": 4,
-        "public_symbols": 48,
-        "sloc": 1555
+        "public_symbols": 49,
+        "sloc": 1582
       },
       "LithosClient": {
         "classes": 14,
@@ -455,13 +455,13 @@
       },
       "Plugins": {
         "classes": 78,
-        "functions": 483,
+        "functions": 484,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1123,
-        "lines": 19824,
+        "lines": 19916,
         "modules": 51,
-        "public_symbols": 318,
-        "sloc": 15857
+        "public_symbols": 319,
+        "sloc": 15934
       },
       "ProjectContext": {
         "classes": 0,
@@ -558,13 +558,13 @@
       "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 69623,
+    "total_lines": 69759,
     "total_modules": 187,
-    "total_sloc": 56253
+    "total_sloc": 56364
   },
   "tests": {
     "ratio": 1.57,
-    "src_lines": 69623,
-    "test_lines": 109188
+    "src_lines": 69759,
+    "test_lines": 109300
   }
 }

@@ -576,8 +576,9 @@ def _install_triage(
 ):
     from lithos_loom.plugins.story_develop.external_triage import TriageVerdicts
 
-    def fake_triage(config, change, outcome, *, timeout=1800):
+    def fake_triage(config, change, outcome, *, approval_eligible=None, timeout=1800):
         captured["triage_findings"] = [f.finding_id for f in outcome.findings]
+        captured["approval_eligible"] = approval_eligible
         return TriageVerdicts(
             proceed=proceed,
             rejections=rejections or {},

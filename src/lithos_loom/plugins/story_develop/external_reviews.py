@@ -5,9 +5,8 @@ delivered PR's external review material (reviews + inline comments +
 Conversation-tab comments, #353), split it by the ADR 0011 trust line, and
 render the trusted findings as a synthetic ``external`` reviewer outcome that
 seeds converge's coder via ``LoopEntry.intake_reviews`` — bypassing the
-local-panel intake whose
-``already_clean`` short-circuit is exactly the panel that missed the defects
-(ADR 0011 decision 1 / 7).
+local-panel intake whose ``already_clean`` short-circuit is exactly the
+panel that missed the defects (ADR 0011 decision 1 / 7).
 
 **Trust (decision 8):** allowlisted bot logins and humans with repo
 write/admin may seed the coder; everyone else's findings are returned in the
@@ -16,14 +15,13 @@ An author whose permission cannot be verified is untrusted (fail closed for
 the prompt path).
 
 **Suppression parity with the sweep (#355):** what is still live — the
-per-stream actionability rules and the authenticated landed-fix proof (PR
-#344 re-reviews 1+2, PR #345 F3) — is decided by the shared
-:mod:`lithos_loom.github_review_activity`, so the operator-triggered path and
-the watcher sweep cannot disagree.
+per-stream actionability rules and the authenticated landed-fix proof (PR #344
+re-reviews 1+2, PR #345 F3) — is decided by the shared
+:mod:`lithos_loom.github_review_activity`, so the two paths cannot disagree.
 
-**Severity:** external reviewers state none; every finding enters at
-``minor`` (the loop's own panel and gate judge the *result* — the external
-reviewer proposes, loom's gate disposes).
+**Severity:** external reviewers state none; every finding enters at ``minor``
+(the loop's panel and gate judge the *result* — the reviewer proposes,
+loom's gate disposes).
 """
 
 from __future__ import annotations
@@ -86,13 +84,12 @@ class ExternalFinding:
 
     ``head_sha`` is the commit the reviewer actually read (load-bearing: a
     finding written against a sha the branch has moved past may already be
-    fixed and must be re-anchored, never re-fixed blindly; empty for a
-    conversation comment, which reviews the PR, not a hunk). ``stream`` +
+    fixed and must be re-anchored, never blindly; empty for a conversation
+    comment, which reviews the PR, not a hunk). ``stream`` +
     ``activity_id`` are the row's identity; ``reply_mode`` is the reply
     capability its stream's adapter chose (PR #356 re-review) — the epilogue
-    routes on the mode, never on the stream, so a new stream picks an
-    existing capability in its adapter row and is answered without touching
-    the epilogue.
+    routes on the mode, never on the stream, so a new stream picks an existing
+    capability in its adapter row and is answered without touching it.
     """
 
     author: str
@@ -107,6 +104,9 @@ class ExternalFinding:
     line: int | None = None
     body: str = ""
     severity: str = "minor"
+    # The REVIEW stream's state, empty on the comment streams: load-bearing
+    # at triage, where `CHANGES_REQUESTED` is never an approval (f-001).
+    review_state: str = ""
 
 
 def finding_from_activity(
@@ -126,6 +126,7 @@ def finding_from_activity(
         path=a.path,
         line=a.line,
         body=a.body,
+        review_state=a.review_state,
     )
 
 
@@ -182,7 +183,9 @@ def findings_to_handoff_text(
         "## Findings",
     ]
     for f in findings:
-        rationale = f"[{f.author}] " + " ".join(f.body.split())
+        # The state rides in the attribution (correctness f-001).
+        state = f", {f.review_state} review" if f.review_state else ""
+        rationale = f"[{f.author}{state}] " + " ".join(f.body.split())
         if f.head_sha and f.head_sha != current_head_sha:
             rationale += (
                 f" (written against {f.head_sha[:12]}, older than the current "
@@ -235,8 +238,8 @@ class ExternalOutcome:
     evidence), ``nothing_to_remediate`` (triage found no claim to act on —
     the "finding" was an approval; ``detail`` = why. No thread is answered:
     a reviewer who said "LGTM" is not told their approval was processed),
-    ``fixed`` / ``disputed`` / ``reverted`` / ``no_change_needed``
-    (#380: not a defect — the coder agrees nothing should change) (the coder's per-id
+    ``fixed`` / ``disputed`` / ``reverted`` / ``no_change_needed`` (#380: not
+    a defect — the coder agrees nothing should change) (the coder's per-id
     acknowledgement in its FINAL handoff, ``detail`` = its one-line response
     — ``reverted`` is a fix a later round undid, #387: the reviewer and the
     story's acceptance criteria disagree, an operator decision), or

@@ -99,13 +99,18 @@ def test_nothing_to_remediate_drops_the_finding_without_a_citation() -> None:
         "- f-001: NOTHING_TO_REMEDIATE — the comment is an approval, no ask\n"
         "- f-002: PROCEED\n"
     )
-    verdicts = parse_triage_verdicts(text, ["f-001", "f-002"])
+    eligible = frozenset({"f-001"})
+    verdicts = parse_triage_verdicts(
+        text, ["f-001", "f-002"], approval_eligible=eligible
+    )
     assert verdicts.proceed == ("f-002",)
     assert verdicts.rejections == {}
     assert verdicts.nothing_to_remediate == {
         "f-001": "the comment is an approval, no ask"
     }
-    assert classify_verdict_lines(text, ["f-001", "f-002"]) == {
+    assert classify_verdict_lines(
+        text, ["f-001", "f-002"], approval_eligible=eligible
+    ) == {
         "f-001": LINE_NOTHING,
         "f-002": LINE_PROCEED,
     }
@@ -116,13 +121,45 @@ def test_nothing_to_remediate_tolerates_spacing_but_needs_a_reason() -> None:
     refute — so the stated reason is its guard. A bare drop names nothing an
     operator could check, and PROCEEDS like every other unevidenced verdict."""
     text = "- f-001: nothing to remediate\n- f-002: Nothing-To-Remediate — praise\n"
-    verdicts = parse_triage_verdicts(text, ["f-001", "f-002"])
+    eligible = frozenset({"f-001", "f-002"})
+    verdicts = parse_triage_verdicts(
+        text, ["f-001", "f-002"], approval_eligible=eligible
+    )
     assert verdicts.proceed == ("f-001",)
     assert verdicts.nothing_to_remediate == {"f-002": "praise"}
-    assert classify_verdict_lines(text, ["f-001", "f-002"]) == {
+    assert classify_verdict_lines(
+        text, ["f-001", "f-002"], approval_eligible=eligible
+    ) == {
         "f-001": LINE_PROCEED,
         "f-002": LINE_NOTHING,
     }
+
+
+def test_a_nothing_verdict_on_an_ineligible_row_proceeds() -> None:
+    """Security f-001: the third verdict carries no citation, so eligibility
+    is its checkable guard — the row's own body must carry approving words
+    and it must not be a blocking review. Without that, one line of
+    unverifiable prose ("- f-001: NOTHING_TO_REMEDIATE — x") dropped ANY id,
+    including one nobody mistook for an approval: the batch's marks are
+    already consumed, no coder or panel runs, and the reviewer's thread is
+    never answered."""
+    text = (
+        "- f-001: NOTHING_TO_REMEDIATE — x\n"
+        "- f-002: NOTHING_TO_REMEDIATE — the comment only approves\n"
+    )
+    ids = ["f-001", "f-002"]
+    verdicts = parse_triage_verdicts(text, ids, approval_eligible=frozenset({"f-002"}))
+    assert verdicts.proceed == ("f-001",)
+    assert verdicts.nothing_to_remediate == {"f-002": "the comment only approves"}
+    assert classify_verdict_lines(
+        text, ids, approval_eligible=frozenset({"f-002"})
+    ) == {
+        "f-001": LINE_PROCEED,
+        "f-002": LINE_NOTHING,
+    }
+    # No eligibility supplied at all names NO eligible id — a caller that
+    # cannot say which rows approve gets no suppression, never a free pass.
+    assert parse_triage_verdicts(text, ids).proceed == ("f-001", "f-002")
 
 
 def test_a_verdict_token_the_scanner_does_not_know_proceeds(
@@ -322,6 +359,36 @@ def test_triage_runs_read_only_and_returns_verdicts(
     assert captured["removed"] == captured["wt"]
     # The citation referent check reads the snapshot of THIS worktree.
     assert captured["tracked_wt"] == captured["wt"]
+
+
+def test_step_honours_eligibility_for_the_nothing_to_remediate_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Security f-001, at the step level: the same verdict file drops the row
+    the batch says carries an approval and PROCEEDS on the one it does not —
+    the guard is in the production step, not only in the pure parser."""
+    config = _config(tmp_path)
+    captured = _install(
+        monkeypatch,
+        tmp_path,
+        verdict_text=(
+            "- f-001: NOTHING_TO_REMEDIATE — an approval\n"
+            "- f-002: NOTHING_TO_REMEDIATE — an approval\n"
+        ),
+    )
+    captured["config"] = config
+
+    result = triage_external_findings(
+        config,
+        _change(),
+        _outcome(),
+        approval_eligible=frozenset({"f-002"}),
+        timeout=600,
+    )
+
+    assert result.proceed == ("f-001",)
+    assert set(result.nothing_to_remediate) == {"f-002"}
+    assert result.line_kinds == {"f-001": LINE_PROCEED, "f-002": LINE_NOTHING}
 
 
 def test_step_rejection_citing_unknown_file_proceeds(

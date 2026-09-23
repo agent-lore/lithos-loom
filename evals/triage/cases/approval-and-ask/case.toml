@@ -50,8 +50,14 @@ the third verdict at all and the detection-side classifier
 mixed case stays expensive. ANY over-suppression (f-002 answered
 `NOTHING_TO_REMEDIATE` or rejected) is the failing reading, and is the one
 that would change S5a's posture: it says the third verdict is being used as
-a cheap REJECT, and it should then be narrowed to rows the ingestion side
-already classified `approval` rather than left to the agent's judgement. A
+a cheap REJECT, and it should then be narrowed further — to rows the
+ingestion side already classified `approval` end to end, rather than to
+today's floor. That floor (PR #426 re-review, security f-001) is already
+narrower than "the agent's judgement": the verdict is honoured only for a
+row whose body carries recognised approving words and which is not a
+blocking `CHANGES_REQUESTED` review, so f-001 here is eligible (its "**No
+findings.**" unit is recognised even though the body as a whole is not) and
+a claim carrying no approval at all cannot be dropped this way. A
 mid-band approval rate with 0 over-suppression is not decisive at K=5.
 
 UNMEASURED: no paid run yet.

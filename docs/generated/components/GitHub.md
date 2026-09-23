@@ -12,7 +12,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.github_client` | M | 7 | 0 |
-| `lithos_loom.github_models` | M | 6 | 17 |
+| `lithos_loom.github_models` | L | 6 | 18 |
 | `lithos_loom.github_review_activity` | S | 2 | 3 |
 | `lithos_loom.github_review_streams` | M | 3 | 10 |
 
@@ -50,6 +50,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - def `issue_comment_reply_body` — Wrap a per-finding reply for the conversation tab, naming its target.
 - def `issue_comment_reply_target` — The conversation comment id a loom reply answers, or ``None``.
 - def `review_is_actionable` — The per-state external-review policy (PRD S2 + the 827cedf8 guard).
+- def `carries_approval` — True when ANY unit of *body* is a recognised approval phrase.
 - def `is_approval_text` — True when *body* carries an approval and **no ask** — nothing to remediate.
 
 ### `lithos_loom.github_review_activity`

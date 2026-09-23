@@ -59,7 +59,7 @@ from .external_reviews import (
     render_external_context,
     undecided_note,
 )
-from .external_triage import triage_external_findings
+from .external_triage import approval_eligible_ids, triage_external_findings
 from .findings import DeferredFinding
 from .generated import post_commit_regenerate
 from .loop_entry import LoopEntry
@@ -172,7 +172,13 @@ def converge_pr(
             external_findings, current_head_sha=change.head_sha
         )
         triage = triage_external_findings(
-            config, change, seed[0], timeout=reviewer_timeout
+            config,
+            change,
+            seed[0],
+            # Which ids triage's third verdict may drop is decided from the
+            # rows, not from the verdict sentence (security f-001).
+            approval_eligible=approval_eligible_ids(id_map),
+            timeout=reviewer_timeout,
         )
         if config.max_cost_usd is not None and triage.cost_usd >= config.max_cost_usd:
             return ConvergeResult(
