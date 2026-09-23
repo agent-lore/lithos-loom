@@ -535,6 +535,48 @@ def test_human_gate_brief_renders_a_needs_decision_as_prose() -> None:
     assert "acceptance criteria" in text
 
 
+def test_human_gate_brief_distinguishes_a_conceded_decision_from_a_silent_one() -> None:
+    # security/f-004: since the lapse went, an UNANSWERED decision escalates
+    # exactly as a conceded one does — and this gate is where a human ratifies
+    # it. The ledger has always recorded which shape it was; if the brief does
+    # not RENDER it, "a reviewer read the finding and agreed it is out of this
+    # story's reach" and "no reviewer answered at all" are the same page, and
+    # the natural moves from it (edit the acceptance criteria, or
+    # `develop deliver` the branch) both let a blocking finding the panel
+    # never conceded reach a PR.
+    from lithos_loom.gates import human_gate_brief
+
+    def brief_for(verdict: str | None) -> str:
+        decision: dict = {
+            "finding": "correctness/f-003",
+            "question": "Accept an at-most-once marker, or block?",
+            "options": "(a) accept the marker; (b) block",
+        }
+        if verdict is not None:
+            decision["reviewer_verdict"] = verdict
+        return human_gate_brief(
+            story_title="US7",
+            story_id="s1",
+            reason="needs_decision",
+            summary="round 3: needs a decision on correctness/f-003",
+            run_id="r1",
+            brief={"decisions": [decision]},
+        )
+
+    conceded, unanswered = brief_for("conceded"), brief_for("unanswered")
+    assert conceded != unanswered  # the whole point
+    assert "the reviewer conceded" in conceded
+    assert "NO reviewer answered" in unanswered
+    assert "NO reviewer answered" not in conceded
+    # the vocabulary is CLOSED: a brief written before this existed, or one
+    # whose metadata was tampered with, renders no claim at all rather than
+    # agent-chosen prose beside loom's own
+    for unknown in (None, "", "LGTM — approved by the panel"):
+        text = brief_for(unknown)
+        assert "`correctness/f-003`:" in text  # the bare label, no claim
+        assert "approved by the panel" not in text
+
+
 def test_human_gate_brief_cannot_be_restructured_by_agent_text() -> None:
     # security/f-004: the question is multi-line agent prose by construction
     # (the handoff fold parser). Rendered bare it could open a second — and

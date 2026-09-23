@@ -308,6 +308,46 @@ def test_post_results_needs_decision_posts_the_question(
     assert "acceptance criteria" in body  # how the operator answers it
 
 
+def test_post_results_needs_decision_says_whether_a_reviewer_answered(
+    fake_client: FakeLithosClient,
+) -> None:
+    # security/f-004: the `[ReviewDispute]` post is the other surface the
+    # operator reads before acting. Its header used to claim "the reviewer did
+    # not show otherwise" for BOTH shapes — adjudication-flavoured prose over
+    # a run where no reviewer may have answered at all.
+    from lithos_loom.plugins.story_develop.findings import PendingDecision
+
+    def body_for(conceded: bool) -> str:
+        # `.findings` is a copy of the store, so read the tail rather than
+        # clearing it: each call appends [DevelopResult] then [ReviewDispute]
+        lithos_io.post_results(
+            "http://x",
+            "task-1",
+            _result(
+                status="needs_decision",
+                decisions=(
+                    PendingDecision(
+                        reviewer="correctness",
+                        finding_id="f-003",
+                        severity="critical",
+                        question="Accept an at-most-once marker, or block?",
+                        options="(a) accept; (b) block",
+                        conceded=conceded,
+                    ),
+                ),
+            ),
+        )
+        return fake_client.findings[-1]["summary"]
+
+    conceded, silent = body_for(True), body_for(False)
+    assert conceded != silent
+    assert "(reviewer conceded)" in conceded
+    assert "(no reviewer answer recorded)" in silent
+    # ...and the header no longer reads as an adjudication for both shapes
+    assert "did not show otherwise" not in silent
+    assert "what the reviewer actually DID" in silent
+
+
 def test_post_results_needs_decision_cannot_be_restructured_by_agent_text(
     fake_client: FakeLithosClient,
 ) -> None:

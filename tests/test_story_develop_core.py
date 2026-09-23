@@ -1243,6 +1243,9 @@ def test_needs_decision_stops_after_the_same_review_round(
     assert reason and "code-quality/f-001" in reason
     assert "Add the effective-config display" not in reason
     assert "[ReviewDispute]" in reason
+    # security/f-004: and it names what the reviewer did — this run's reviewer
+    # conceded, so the operator is not left reading a silence as an answer
+    assert "code-quality/f-001 (reviewer: conceded)" in reason
 
 
 def _converge_entry(config: DevelopConfig):

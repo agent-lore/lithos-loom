@@ -794,7 +794,9 @@ def _decision_escalation(result: DevelopResult) -> dict[str, Any]:
                 "options": d.options,
                 "finding_rationale": d.rationale,
                 "coder_response": d.coder_response,
-                "reviewer_verdict": "conceded" if d.conceded else "unanswered",
+                # security/f-004: rendered by `gates.human_gate_brief`, so
+                # the operator can see whether a reviewer answered at all
+                "reviewer_verdict": d.reviewer_verdict,
             }
             for d in result.decisions
         ],

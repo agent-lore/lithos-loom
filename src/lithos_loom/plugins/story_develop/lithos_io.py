@@ -174,8 +174,10 @@ def _decision_breadcrumb(result: DevelopResult) -> str:
     lines = [
         f"{DISPUTE_PREFIX} story-develop run {result.run_id} stopped for a "
         f"product decision after {result.rounds} round(s) — the coder holds "
-        "the finding(s) below are out of this story's reach, and the reviewer "
-        "did not show otherwise:",
+        "the finding(s) below are out of this story's reach, and no reviewer "
+        "contested that. Each one names what the reviewer actually DID: a "
+        "concession is an adjudicated answer, 'no reviewer answer recorded' "
+        "means the question reached nobody (security/f-004):",
         "",
     ]
     for d in result.decisions:

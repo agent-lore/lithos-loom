@@ -875,13 +875,19 @@ def decision_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     # channel, and it does not need to be — it reaches the operator whole on
     # the `[ReviewDispute]` finding and in the gate's brief, both Lithos-only.
     # Naming the finding(s) is what the summary is for: where to look.
+    marked = ", ".join(f"{d.label} (reviewer: {d.reviewer_verdict})" for d in decisions)
     return CycleExit(
         status="needs_decision",
         failure_reason=(
+            # security/f-004: the per-decision verdict token rides here too.
+            # This line is `escalation_summary` — the one the `gates` CLI
+            # shows and the only one reaching the GitHub `@mention` — so it is
+            # the cheapest place to say whether a reviewer answered at all,
+            # and it stays loom-authored (the tokens are a closed vocabulary).
             f"round {round_no}: the coder marked "
-            f"{', '.join(d.label for d in decisions)} needs-decision and the "
-            "reviewer did not contest it — the question is on the story's "
-            "[ReviewDispute] finding and in the gate brief"
+            f"{marked} "
+            "needs-decision and no reviewer contested it — the question is on "
+            "the story's [ReviewDispute] finding and in the gate brief"
         ),
         resume_after=None,
     )

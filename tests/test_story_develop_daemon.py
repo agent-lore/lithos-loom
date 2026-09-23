@@ -1506,9 +1506,9 @@ def test_needs_decision_summary_carries_no_agent_prose(tmp_path: Path) -> None:
     from lithos_loom.plugins.story_develop.findings import PendingDecision
 
     reason = (
-        "round 2: the coder marked correctness/f-001 needs-decision and the "
-        "reviewer did not contest it — the question is on the story's "
-        "[ReviewDispute] finding and in the gate brief"
+        "round 2: the coder marked correctness/f-001 (reviewer: unanswered) "
+        "needs-decision and no reviewer contested it — the question is on the "
+        "story's [ReviewDispute] finding and in the gate brief"
     )
     payload, _ = build_result_payload(
         _result(

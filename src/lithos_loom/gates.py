@@ -408,6 +408,20 @@ def _truncate_summary(summary: str) -> str:
     return text[: ESCALATION_SUMMARY_MAX_CHARS - 1] + "…"
 
 
+# security/f-004: how a `needs_decision` brief's per-decision
+# `reviewer_verdict` token reads to the operator. Since the lapse went, an
+# UNANSWERED decision escalates exactly as a conceded one does, and the gate
+# is where a human ratifies it — so the description has to say which it is,
+# or "a reviewer agreed this is out of reach" and "no reviewer answered at
+# all" look identical on the surface the decision is made from. Closed: an
+# unrecognised token (a brief written before this existed, or a tampered
+# metadata write) renders nothing rather than agent-chosen prose.
+_REVIEWER_VERDICTS = {
+    "conceded": " — the reviewer conceded it is out of this story's reach",
+    "unanswered": " — NO reviewer answered; the question stands unchallenged",
+}
+
+
 def _quoted_block(label: str, text: str) -> list[str]:
     """Agent-authored *text* as an indented markdown blockquote.
 
@@ -479,7 +493,8 @@ def human_gate_brief(
         lines += ["", "**The decision** (quoted from the coder's handoff):"]
         for raw in b["decisions"]:
             d = raw if isinstance(raw, Mapping) else {}
-            lines.append(f"- finding `{d.get('finding') or '(unnamed)'}`:")
+            answered = _REVIEWER_VERDICTS.get(str(d.get("reviewer_verdict") or ""), "")
+            lines.append(f"- finding `{d.get('finding') or '(unnamed)'}`{answered}:")
             lines += _quoted_block("question", d.get("question") or "(none recorded)")
             for label, key in (
                 ("options", "options"),

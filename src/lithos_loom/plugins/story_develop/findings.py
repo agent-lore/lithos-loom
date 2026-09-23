@@ -709,9 +709,19 @@ class PendingDecision:
     coder_response: str = ""  # WHY the coder says it is out of reach
     round_no: int = 0
     # the reviewer answered `concede` rather than contesting (security/f-003):
-    # the escalation followed an explicit act rather than an unanswered
-    # prompt. Both escalate — this records WHICH, for the operator.
+    # an explicit act rather than an unanswered prompt. Both escalate — this
+    # records WHICH, and `reviewer_verdict` publishes it (security/f-004).
     conceded: bool = False
+
+    @property
+    def reviewer_verdict(self) -> str:
+        """``conceded`` | ``unanswered`` — a loom-authored, closed-vocabulary
+        token for what the reviewer DID. Since the lapse went
+        (correctness/f-001) both shapes escalate, so the operator ratifying
+        the gate can tell an adjudicated concession from "no reviewer answered
+        at all" only if loom says which (security/f-004). Single source: every
+        surface that publishes a decision renders it from here."""
+        return "conceded" if self.conceded else "unanswered"
 
     @property
     def label(self) -> str:
@@ -728,11 +738,14 @@ class PendingDecision:
         how to answer — so a field labelled only on its FIRST line would let
         the rest start at column 0 and open structure of its own
         (correctness/f-003). Every line is therefore quoted as data, as
-        :func:`gates._quoted_block` already does for the gate brief; the
+        :func:`gates._quoted_block` already does for the gate brief. The
         header is loom-composed from validated values (configured reviewer
-        name, ledger-assigned id, closed-vocabulary severity).
-        """
-        lines = [f"[{self.label}] {self.severity}:"]
+        name, ledger-assigned id, closed-vocabulary severity) and names what
+        the reviewer DID — both shapes escalate (security/f-004)."""
+        answered = (
+            "reviewer conceded" if self.conceded else "no reviewer answer recorded"
+        )
+        lines = [f"[{self.label}] {self.severity} ({answered}):"]
         lines += _quoted_field("question", self.question or "(none recorded)")
         for label, text in (
             ("options", self.options),

@@ -1243,8 +1243,30 @@ def test_decision_phase_stops_the_run_on_an_uncontested_decision(
     # published as an `@operator` GitHub comment by the needs-human notifier)
     assert "Accept an at-most-once marker" not in exit_.failure_reason
     assert "[ReviewDispute]" in exit_.failure_reason
+    # security/f-004: it also says WHICH uncontested shape this was. This line
+    # is `escalation_summary` — the `gates` CLI's `↳` and the GitHub
+    # `@mention` — so it is the cheapest place to keep an unanswered decision
+    # from reading like an adjudicated one, and the token stays loom-authored.
+    assert "correctness/f-001 (reviewer: conceded)" in exit_.failure_reason
     # ... and it stops BEFORE the dispute guard would have paid two more rounds
     assert rounds_mod.deadlock_phase(ctx, 2) is None
+
+
+def test_decision_phase_reason_names_a_decision_no_reviewer_answered(
+    tmp_path: Path,
+) -> None:
+    # security/f-004, the other shape: the reviewer was re-prompted and still
+    # said nothing, which escalates exactly as a concession does. The summary
+    # must not claim an adjudication that never happened.
+    ctx, ledger = _decision_ctx(tmp_path)
+    ledger.record_coder_updates([_coder_decision()], 2)
+    ledger.apply_review(_reviewer_keeps_open(), 2)  # committed with no answer
+
+    exit_ = rounds_mod.decision_phase(ctx, 2)
+
+    assert exit_ is not None and exit_.status == "needs_decision"
+    assert "correctness/f-001 (reviewer: unanswered)" in exit_.failure_reason
+    assert "conceded" not in exit_.failure_reason
 
 
 def test_decision_phase_is_silent_when_the_reviewer_contests(tmp_path: Path) -> None:
