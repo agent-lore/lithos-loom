@@ -31,6 +31,7 @@ from lithos_loom.github_models import (
 
 from . import run_outcome
 from .github_access import github_call, repo_name_with_owner
+from .publish_text import defang_markup
 
 logger = logging.getLogger(__name__)
 
@@ -118,17 +119,33 @@ def build_pr_body(
     *provenance_quote* is untrusted text (an agent's handoff) rendered as a
     fenced block so none of it is active markup.
 
+    *description* and *acceptance_criteria* are untrusted too, and unfenced:
+    for a story the github-issue watcher materialised they ARE the GitHub
+    issue body an outside reporter wrote (the mirror copies it into the task,
+    and delivery re-reads it live), so they go through
+    :func:`~.publish_text.defang_markup` — otherwise a `Closes #1` buried in
+    an issue body would close an unrelated issue when this PR merges, an
+    `@mention` would ping strangers and an HTML comment would hide text, all
+    under the operator's `gh` identity. They stay markdown, just inert; the
+    *issue_closes* line loom composes itself is the one live closing keyword
+    in the body, and it is added AFTER the description is defanged.
+
     *provenance* is an optional block of extra lines about where the branch
     came from — empty for a run that delivered itself (the Review section
     already says), one section for a branch delivered by hand afterwards
     (``lithos-loom develop deliver``: the run id and why that run stopped).
     One body builder, so a hand delivery's PR reads like every other.
     """
-    parts = ["## What", "", description.strip(), ""]
+    parts = ["## What", "", defang_markup(description.strip()), ""]
     if issue_closes:
         parts += [issue_closes, ""]
     if acceptance_criteria:
-        parts += ["## Acceptance criteria", "", acceptance_criteria.strip(), ""]
+        parts += [
+            "## Acceptance criteria",
+            "",
+            defang_markup(acceptance_criteria.strip()),
+            "",
+        ]
     parts += [
         "## Review",
         "",

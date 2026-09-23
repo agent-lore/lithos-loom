@@ -79,6 +79,10 @@ partial first pass finishes the job and changes nothing else.
    generated one — what / acceptance criteria / review / `Closes #N` for an
    issue-linked story — plus a **`## Provenance`** section naming the run, its
    stop *classification*, the branch, and the coder's final handoff summary.
+   The *what* and *acceptance criteria* sections are **defanged** like the
+   handoff quote (below): for a mirrored story they are the GitHub issue body
+   an outside reporter wrote, and the `Closes #N` loom composes itself is the
+   only closing keyword left live in the body.
    `[story_develop] operator_github_login`, when set, is asked for review
    exactly as on a daemon delivery.
 

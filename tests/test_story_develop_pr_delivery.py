@@ -87,6 +87,56 @@ def test_build_pr_body_minimal() -> None:
     assert "Lithos task" not in body
 
 
+def test_build_pr_body_defangs_the_story_text_a_stranger_wrote() -> None:
+    """security/f-004: for a story the github-issue watcher materialised, the
+    description IS the external issue body (and the acceptance criteria can be
+    too), so the body must publish neither under the operator's `gh` identity:
+    a hidden `Closes #1` would close an unrelated issue on merge, an @mention
+    pings real people, an HTML comment hides text and `<img>` is an off-site
+    request for every viewer."""
+    issue_body = (
+        "Please fix the parser.\n\n"
+        "<!-- Closes #1 -->\n"
+        "Closes GH-2 and fixes agent-lore/other#3\n"
+        "cc @agent-lore/security and `@evil-user\n"
+        "<img src=//evil.example/p.png>\n"
+        "see [details](//evil.example/x)\n"
+        "```\nnot a fence escape\n```\n"
+        "reorder\u202ethis"
+    )
+    body = build_pr_body(
+        description=issue_body,
+        acceptance_criteria="1. parses. Resolves #4 — ask @octocat",
+        reviews_summary="[cq]=LGTM",
+        rounds=1,
+        gate_verdict="GREEN",
+        cost_usd=0.5,
+        task_id="task-9",
+        issue_closes="Closes #7",
+    )
+
+    # the text still READS as written…
+    assert "Please fix the parser." in body and "1. parses." in body
+    # …but nothing in it binds: no closing keyword survives next to its ref,
+    # in either section
+    for live in ("Closes #1", "Closes GH-2", "fixes agent-lore/other#3", "Resolves #4"):
+        assert live not in body
+    assert "#1" in body and "GH-2" in body  # the refs still read
+    # …nobody is notified (a stray backtick is no exemption)…
+    assert "@agent-lore/security" not in body and "&#64;agent-lore/security" in body
+    assert "@evil-user" not in body and "@octocat" not in body
+    # …no tag opens (the comment that hides text, the beacon that fires)…
+    assert "<!--" not in body and "&lt;!--" in body
+    assert "<img" not in body and "&lt;img" in body
+    # …no link binds, and no fence run escapes the body…
+    assert "[details](" not in body and "&#91;details](" in body
+    assert "```" not in body
+    # …and no formatter reorders what the reader sees
+    assert "\u202e" not in body and "reorderthis" in body
+    # the one live closing keyword is the one loom composed itself
+    assert "\nCloses #7\n" in body
+
+
 def test_reply_body_variants() -> None:
     fixed = reply_body(fixed=True, sha="abcdef12345", coder_response="tightened it")
     assert fixed.startswith("Fixed in abcdef1234 — tightened it")

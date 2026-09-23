@@ -44,6 +44,7 @@ from lithos_loom.gates import (
     WAITS_ON_GATE,
 )
 from lithos_loom.plugins.story_develop.github_access import OpenPullRequest
+from lithos_loom.plugins.story_develop.publish_text import _CLOSES_RE
 from lithos_loom.runner import pidfile
 from tests.support import FakeLithosClient, make_task
 
@@ -2216,7 +2217,7 @@ def test_live_github_constructs_survive_no_backtick_trick() -> None:
     for keyword in ("Closes GH-1337", "fixes gh-1337"):
         out = cli_facts.defang_markup(keyword)
         assert out != keyword and "1337" in out
-        assert not cli_facts._CLOSES_RE.search(out)
+        assert not _CLOSES_RE.search(out)
     # a backtick before the mention used to exempt it entirely
     quoted = cli_facts.defang_markup("cc `@evil-user please approve")
     assert "@evil-user" not in quoted and "&#64;evil-user" in quoted

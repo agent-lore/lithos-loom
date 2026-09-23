@@ -12,7 +12,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
-| `lithos_loom.cli._deliver_facts` | M | 2 | 10 |
+| `lithos_loom.cli._deliver_facts` | M | 2 | 9 |
 | `lithos_loom.cli._deliver_lithos` | L | 7 | 4 |
 | `lithos_loom.cli._deliver_output` | M | 0 | 4 |
 | `lithos_loom.cli._deliver_preflight` | S | 0 | 4 |
@@ -39,7 +39,6 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - class `RunFacts` — What the stopped run left on disk, for the PR body and the finding.
 - def `sanitize_for_terminal` — Strip terminal control / escape bytes (keeping TAB + LF) from text before it is echoed to the operator's terminal.
 - def `coder_summary` — The last round's coder handoff ``## Summary``, as one bounded line.
-- def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
 - def `run_facts` — Read a run dir into :class:`RunFacts` (pure, tolerant of every absence).
 - def `redact_for_publication` — A bounded, markup-inert rendering of host text that is about to be published.
 - class `StoredReason` — The stop reason as the story will carry it, plus what had to be done to it to get it there.

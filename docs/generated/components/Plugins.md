@@ -53,6 +53,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
+| `lithos_loom.plugins.story_develop.publish_text` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
@@ -385,6 +386,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `get_profile` — The canonical :class:`ReviewProfile` for *name* — the single known-name seam.
 - class `ProfileResolution` — The outcome of :func:`resolve_profile`.
 - def `resolve_profile` — Resolve the selected Review Profile (ADR §2).
+
+### `lithos_loom.plugins.story_develop.publish_text`
+- def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
 
 ### `lithos_loom.plugins.story_develop.review_only`
 - def `panel_incomplete` — Whether the panel produced no usable review this pass.
