@@ -169,9 +169,11 @@ def _decision_breadcrumb(result: DevelopResult) -> str:
 
     The header states what each shape MEANS, and states it accurately
     (correctness/f-002): every decision here was quoted into the reviewer's
-    own prompt (`findings.FindingLedger.render_open`, filling
-    `reviewer_rereview.md`'s `{open_findings}`) before that round's review,
-    and an omitted `decision_verdict:` is re-prompted once
+    own prompt (`findings.FindingLedger.render_open`, filling the
+    `{open_findings}` slot of `reviewer_rereview.md` AND of the
+    `reviewer_reseed.md` a usage limit builds — security/f-005: the claim is
+    only true while BOTH carry it) before that round's review, and an omitted
+    `decision_verdict:` is re-prompted once
     (`findings.FindingLedger.check`) before the review is allowed to land. So
     an unanswered decision is a reviewer that was ASKED — twice, normally —
     and supplied no valid answer, never a question that reached nobody. The

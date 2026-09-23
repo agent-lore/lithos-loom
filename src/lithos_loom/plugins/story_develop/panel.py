@@ -56,6 +56,7 @@ from .handoff import (
 from .model_policy import active_model
 from .panel_prompts import (
     context_block,
+    decision_answer_block,
     reviewer_brief,
     round_prompt,
 )
@@ -567,6 +568,13 @@ def _run_reviewer_with_reaction(
                 acceptance_criteria=config.effective_acceptance_criteria,
                 base_sha=base[:12],
                 coder_handoff_file=handoff.coder_handoff_name(round_no),
+                # security/f-005: the reseed runs under the SAME validator,
+                # so a pending `needs-decision` is this fresh reviewer's to
+                # answer — `render_open` is the one call that puts the coder's
+                # question in front of it quoted and labelled as agent input,
+                # and `decision_answer_block` is the contract it is held to.
+                open_findings=rstate.ledger.render_open(),
+                decision_answer=decision_answer_block(),
                 prior_findings=render_findings(
                     rstate.outcome.findings if rstate.outcome else []
                 ),

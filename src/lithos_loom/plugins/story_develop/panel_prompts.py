@@ -61,6 +61,25 @@ Assign the honest severity — do not inflate to force a block or deflate to dod
 one. The threshold decision is the orchestrator's, not yours."""
 
 
+def decision_answer_block() -> str:
+    """The reviewer's ``needs-decision`` answering contract, for the prompts
+    that can be asked for a ``decision_verdict:``.
+
+    ONE paragraph, TWO consumers (security/f-005): ``reviewer_rereview.md``
+    and the reseed ``panel`` builds when a reviewer's tool hits a provider
+    usage limit. The reseed is a fresh session but runs under the SAME
+    ``FindingLedger.check``, so a replacement reviewer owes the same verdict —
+    and used to be asked for one its prompt never mentioned, on a path where
+    the coder's question reached it (if at all) unquoted and unlabelled. A
+    shared fragment rather than a second copy: a copy is exactly how this
+    prompt got left out of the shared sections before (see
+    ``test_every_agent_template_carries_the_sandbox_facts_slot``). Round 1's
+    ``reviewer_round.md`` is the one re-review-shaped prompt that does NOT
+    take it — no coder finding exists yet, so no decision can be pending.
+    """
+    return handoff.load_prompt("reviewer_decision_answer.md").rstrip("\n")
+
+
 def reviewer_brief(spec) -> str:
     """The optional per-reviewer focus paragraph + lane discipline for its prompts.
 
@@ -202,6 +221,7 @@ def round_prompt(
         base_sha=fork[:12],
         coder_handoff_file=handoff.coder_handoff_name(round_no),
         open_findings=rstate.ledger.render_open(),
+        decision_answer=decision_answer_block(),
         diff_stat=git.diff_stat(wt, fork),
         gate_summary=gate_summary,
         artifacts_note=artifacts_note,

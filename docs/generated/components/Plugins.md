@@ -48,7 +48,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
-| `lithos_loom.plugins.story_develop.panel_prompts` | S | 0 | 4 |
+| `lithos_loom.plugins.story_develop.panel_prompts` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
@@ -348,6 +348,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.panel_prompts`
 - def `context_block` — The ``{review_context}`` slot's value: the block padded onto its own lines, or nothing — every reviewer template (round, re-review, artifact pass, reseed) renders it the same way.
+- def `decision_answer_block` — The reviewer's ``needs-decision`` answering contract, for the prompts that can be asked for a ``decision_verdict:``.
 - def `reviewer_brief` — The optional per-reviewer focus paragraph + lane discipline for its prompts.
 - def `artifact_reviewer_brief` — The reviewer's responsibility on the ARTIFACT pass (#308 review).
 - def `round_prompt` — Render one reviewer's prompt for this round: ``(prompt, resume, review file override)``. *rstate* is the panel's ``ReviewerState`` (its ``spec``, ``ledger`` and last ``outcome`` are read).
