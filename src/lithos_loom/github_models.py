@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 __all__ = [
     "AUTOMATED_REPLY_MARKER",
+    "BLOCKING_REVIEW_STATES",
     "FIXED_REPLY_PREFIX",
     "SILENT_REVIEW_STATES",
     "LOOM_NOTICE_MARKER",
@@ -447,6 +448,13 @@ def _has_marker_line(body: str, marker: str) -> bool:
 # also asks for something is a finding like any other.
 SILENT_REVIEW_STATES = frozenset({"DISMISSED"})
 
+# The mirror image: review states actionable WHATEVER the body says. A
+# `CHANGES_REQUESTED` review blocks the PR on GitHub until it is dismissed or
+# superseded, so its body never speaks for it — neither to silence it (below)
+# nor to classify it as a bare approval (PR #426 review, f-001: the two rules
+# read the same state and must not drift, so both read it from here).
+BLOCKING_REVIEW_STATES = frozenset({"CHANGES_REQUESTED"})
+
 # The reply line that names the conversation comment a loom reply answers —
 # the conversation-stream twin of ``in_reply_to_id`` (which issue comments do
 # not have). Anchored to this exact line so a coder's prose quoting some other
@@ -531,7 +539,7 @@ def review_is_actionable(review: PullRequestReview) -> bool:
     hand-written vocabulary, which must not become the sole and final arbiter
     for one stream (PR #425 re-review, security f-004).
     """
-    if review.state == "CHANGES_REQUESTED":
+    if review.state in BLOCKING_REVIEW_STATES:
         return True
     if review.state in SILENT_REVIEW_STATES:
         return False

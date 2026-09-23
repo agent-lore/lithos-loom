@@ -28,6 +28,7 @@ from enum import StrEnum
 
 from .github_client import GitHubClient
 from .github_models import (
+    BLOCKING_REVIEW_STATES,
     IssueComment,
     PullRequestReview,
     is_approval_text,
@@ -167,7 +168,9 @@ def _review_actionable(
         return False
     # CHANGES_REQUESTED is never suppressed — a reply does not prove the
     # requested changes were accepted.
-    return a.review_state == "CHANGES_REQUESTED" or a.activity_id not in handled_reviews
+    return (
+        a.review_state in BLOCKING_REVIEW_STATES or a.activity_id not in handled_reviews
+    )
 
 
 def _review_approval(
@@ -179,11 +182,17 @@ def _review_approval(
     """A bare ``APPROVED`` click, or any summary whose whole body is approval
     prose.
 
-    ``DISMISSED`` is never an approval — a dismissal has had its say. An
-    `APPROVED` body that asks for something is not an approval, and it is not
-    silent either: :func:`review_is_actionable` reports it as the finding it
-    is (PR #425 review, correctness f-001 — the acceptance guard's own "LGTM,
-    but rename X" arrives on this stream too).
+    ``DISMISSED`` is never an approval — a dismissal has had its say. Nor is
+    ``CHANGES_REQUESTED``, whatever its body says: the state itself blocks the
+    PR on GitHub until it is dismissed or superseded, so a contradictory
+    "No findings. Ready to merge." body cannot make it a row that asks for
+    nothing — :func:`review_is_actionable` holds it always actionable, and
+    reading the same state from ``BLOCKING_REVIEW_STATES`` keeps the two rules
+    from drifting (PR #426 review, f-001). An `APPROVED` body that asks for
+    something is not an approval either, and it is not silent:
+    :func:`review_is_actionable` reports it as the finding it is (PR #425
+    review, correctness f-001 — the acceptance guard's own "LGTM, but rename
+    X" arrives on this stream too).
 
     Ownership only decides the WORDLESS case (the AC's "``APPROVED`` and no
     inline comments"): a review that clicked approve and wrote nothing while
@@ -194,7 +203,7 @@ def _review_approval(
     re-review, security f-004).
     """
     del handled, handled_reviews
-    if a.review_state == "DISMISSED":
+    if a.review_state == "DISMISSED" or a.review_state in BLOCKING_REVIEW_STATES:
         return False
     if not a.body.strip():
         return a.review_state == "APPROVED" and a.activity_id not in owns_comments

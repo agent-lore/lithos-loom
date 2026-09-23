@@ -422,6 +422,30 @@ def test_dismissals_replies_and_loom_replies_are_neither() -> None:
     assert act == [] and appr == []
 
 
+def test_changes_requested_is_never_an_approval_whatever_its_body_says() -> None:
+    """PR #426 review, f-001: the approval rule is asked BEFORE the actionable
+    one and excluded only DISMISSED, so a blocking review whose body reads
+    like an approval landed in the approvals bucket — nothing dispatched, and
+    the operator told the review that blocks the PR asks for nothing."""
+    rows = [
+        from_review(
+            _review(
+                500, state="CHANGES_REQUESTED", body="**No findings.** Ready to merge."
+            ),
+            repo=_REPO,
+            pr_number=_PR,
+        ),
+        from_review(
+            _review(501, state="CHANGES_REQUESTED", body="LGTM"),
+            repo=_REPO,
+            pr_number=_PR,
+        ),
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert [a.activity_id for a in act] == [500, 501]
+    assert appr == []
+
+
 def test_a_handled_root_is_suppressed_rather_than_reported_as_an_approval() -> None:
     root = from_inline_comment(_inline(7, body="LGTM"))
     act, appr = dispositions([root], frozenset({root.key}))

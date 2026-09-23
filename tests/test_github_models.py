@@ -225,8 +225,11 @@ def test_review_state_policy_follows_the_body_not_just_the_state() -> None:
     assert not review_is_actionable(review("APPROVED"))
     # A dismissal has had its say, whatever it says.
     assert not review_is_actionable(review("DISMISSED", "rename X"))
-    # Unchanged: CHANGES_REQUESTED always, every other state on content.
+    # Unchanged: CHANGES_REQUESTED always, every other state on content —
+    # including a body that reads like an approval, which the watcher's
+    # approval rule refuses for the same reason (PR #426 review, f-001).
     assert review_is_actionable(review("CHANGES_REQUESTED"))
+    assert review_is_actionable(review("CHANGES_REQUESTED", "LGTM"))
     assert review_is_actionable(review("COMMENTED", "rename X"))
     assert not review_is_actionable(review("COMMENTED", "   "))
     assert review_is_actionable(review("QUEUED", "rename X"))
