@@ -59,7 +59,8 @@ approval-and-ask               5     5                    —            5/5 57-
   as production honours it: only for a finding whose own body carries
   recognised approving words in its author's own voice (never one merely
   quoted, fenced, struck out, hidden in an HTML comment, listed as a value in a
-  list or a table, or left in front of a hard wrap) and which is not a blocking
+  list or a table — their lazy continuations included — or left in front of a
+  hard wrap) and which is not a blocking
   `CHANGES_REQUESTED` review (`approval_eligible_ids`), so a case body with no approval in it
   cannot score here however the agent answers. `—` when the batch
   carries no approval, and the rate then gates nothing.

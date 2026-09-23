@@ -343,6 +343,25 @@ _NOT_AN_APPROVAL = [
     # words — the blank-line case below is the one that is really the author's.
     "> the token is logged at src/api.py:88\nLGTM",
     "> the token is logged at src/api.py:88\n> and never redacted\napproved",
+    # round-7 panel, correctness f-002: a pipe does not make a table. Without a
+    # delimiter row GitHub renders these as ONE paragraph, so masking the
+    # pipe-bearing line — a masked line stands for a block — stopped the rejoin
+    # and handed the floor the bare unit behind it: the inverse of the hard-wrap
+    # bug, and the reason tables are now recognised structurally.
+    "This is not |\nLGTM\n\nThe token is logged at src/api.py:88.",
+    "Expected states are pending |\napproved\n\nThe endpoint never validates it "
+    "at src/api.py:12.",
+    "| this is not\nLGTM\n\nThe token is logged at src/api.py:88.",
+    # round-7 panel, security f-006: the laziness rule holds for the other two
+    # blocks too — a paragraph line straight after a bullet renders INSIDE that
+    # item, and a pipeless line after a table is still one of its rows.
+    "- the token is logged at src/api.py:88\nLGTM",
+    "1. the token is logged at src/api.py:88\nApproved",
+    "- the token is logged at src/api.py:88\n- the cookie has no Secure flag\n"
+    "No findings overall",
+    "| check | result |\n| --- | --- |\n| authz | missing at src/api.py:12 |\napproved",
+    "| check | result |\n| --- | --- |\n| authz | ok |\napproved\n\nThe token is "
+    "logged at src/api.py:88.",
     # The control: undecorated defect prose, which was never eligible.
     "The query builder concatenates user input at src/db.py:44.",
 ]
@@ -393,6 +412,15 @@ def test_a_body_with_no_approval_verdict_is_never_eligible(body: str) -> None:
         # The author's own list after a quote is theirs: a blank line ends the
         # quote, and a list item is not paragraph continuation text anyway.
         "> LGTM\n\n- No findings.\n- Ready to merge.",
+        # A blank line ends a list and a table too, so the approval after one is
+        # the author's own paragraph — the control on both folds (round-7 panel
+        # security f-006).
+        "- the token is logged at src/api.py:88\n\nLGTM",
+        "| a |\n| --- |\n| x |\n\nLGTM",
+        # A setext underline is not a delimiter row: this renders as an H2 and a
+        # paragraph, and the paragraph is the author's verdict (which is why
+        # table detection requires a pipe as well as the dashes).
+        "This is not\n---\nLGTM",
     ],
 )
 def test_an_approval_the_author_wrote_stays_eligible(body: str) -> None:
@@ -429,6 +457,19 @@ def test_a_quotes_lazy_continuation_is_the_quote_not_the_authors_verdict() -> No
     # Neither may it swallow the whole rest of the body: the fold stops at the
     # first blank line, so prose two paragraphs down is still the author's.
     assert carries_approval("> not my words\nnor these\n\nLGTM")
+
+
+def test_a_list_or_tables_continuation_belongs_to_the_block() -> None:
+    """Round-7 panel security f-006: CommonMark's laziness rule is not special
+    to quotes. A paragraph line straight after a bullet renders inside that
+    list item, and GFM keeps a table open until a blank line or a new block, so
+    a pipeless line under one is still a row. Both fold; a blank line ends both
+    blocks and the approval after one is the author's own paragraph."""
+    assert not carries_approval("- the token is logged at src/api.py:88\nLGTM")
+    assert carries_approval("- the token is logged at src/api.py:88\n\nLGTM")
+    table = "| check |\n| --- |\n| missing at src/api.py:12 |\n"
+    assert not carries_approval(table + "approved")
+    assert carries_approval(table + "\napproved")
 
 
 def test_review_state_policy_follows_the_body_not_just_the_state() -> None:

@@ -238,23 +238,30 @@ _LIST_MARKER = r"(?:[-*+]|\d+[.)])"
 # indented code block — the fence's other spelling — is below.
 _QUOTE_LINE_RE = re.compile(rf"^[ \t]*(?:{_LIST_MARKER}[ \t]+)?>[^\n]*")
 _LIST_ITEM_RE = re.compile(rf"^[ \t]*{_LIST_MARKER}[ \t]+(?P<text>\S.*)$")
-# A table row: the TABLE spelling of the enumeration ``_mask_data_lists`` masks
-# for bullets (round-6 panel correctness f-002 / security f-004). A row whose
-# only populated cell holds an approval word reduced to a bare verdict once
-# ``_DECORATION_RE`` stripped the pipes — "| verdict |\n| --- |\n| LGTM |" above
-# a defect satisfied the floor. Any line carrying a ``|`` is masked, not just
-# one that starts with it: GFM's leading and trailing pipes are optional
-# ("status | note" / "approved |" are rows too), and a table is an enumeration
-# by construction — nobody writes a verdict as a table, so there is nothing to
-# lose in the masking direction. Runs after the code-span masks, so a pipe
-# inside `code` is already gone.
-_TABLE_ROW_RE = re.compile(r"^[^\n]*\|[^\n]*$", re.MULTILINE)
+# A GFM table's DELIMITER row — the thing that makes the lines around it a
+# table at all (round-7 panel correctness f-002). Cells of hyphens with
+# optional alignment colons, pipes optional at either end. A table is an
+# enumeration of values, the table spelling of what ``_mask_data_lists`` masks
+# for bullets (round-6 correctness f-002 / security f-004): a row whose only
+# populated cell holds an approval word reduced to a bare verdict once
+# ``_DECORATION_RE`` stripped the pipes. But only a REAL table may be masked:
+# keying on "any line carrying a ``|``" masked pipe-bearing PROSE, and because
+# a masked line stands for a block, the mask then stopped
+# :func:`_join_soft_wraps` from rejoining the paragraph GitHub renders — so
+# "This is not |\nLGTM" handed the floor the bare unit ``LGTM``, the inverse of
+# the hard-wrap bug. Hence the structural rule in :func:`_mask_tables`.
+_TABLE_DELIM_RE = re.compile(
+    r"^ {0,3}\|?(?:[ \t]*:?-+:?[ \t]*\|)*[ \t]*:?-+:?[ \t]*\|?[ \t]*$"
+)
 _INDENTED_LINE_RE = re.compile(r"^(?: {4,}|\t)[^\n]*", re.MULTILINE)
 # Lines that start a block of their own, so the line break before/after them is
 # a real boundary rather than a soft wrap (see :func:`_join_soft_wraps`) and
-# never a block quote's lazy continuation (see :func:`_mask_quotes`): headings,
-# block quotes, table rows and thematic breaks.
-_BLOCK_START_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]|>|\||-{3,}$|\*{3,}$|_{3,}$)")
+# never another block's lazy continuation (see :func:`_mask_quotes`): headings,
+# block quotes and thematic breaks. A pipe-leading line is NOT one of them: a
+# table is recognised structurally and masked whole by :func:`_mask_tables`,
+# and outside a table a leading ``|`` is ordinary paragraph text that must
+# rejoin its paragraph (round-7 panel correctness f-002).
+_BLOCK_START_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]|>|-{3,}$|\*{3,}$|_{3,}$)")
 
 
 def _starts_a_block(line: str) -> bool:
@@ -291,6 +298,40 @@ def _mask_quotes(text: str) -> str:
         else:
             quoted = False
             out.append(line)
+    return "\n".join(out)
+
+
+def _mask_tables(text: str) -> str:
+    """*text* with every GFM table — header, delimiter row, body rows and the
+    **pipeless continuation rows** after them — masked.
+
+    Structural, like the fence parser: a table exists only where a line is
+    followed by a delimiter row (:data:`_TABLE_DELIM_RE`) and one of the two
+    carries a ``|`` — the pipe requirement is what keeps a setext underline
+    ("This is not\n---") from reading as a table. GFM ends the table at a
+    blank line or a new block, so a following line with NO pipe is still a row
+    (round-7 panel security f-006: ``approved`` under a table of defects
+    renders as a cell) and is folded in, exactly as
+    :func:`_mask_quotes` folds a quote's lazy continuation.
+    """
+    lines = text.split("\n")
+    out = list(lines)
+    i = 0
+    while i < len(lines):
+        header, delim = lines[i], lines[i + 1] if i + 1 < len(lines) else None
+        if (
+            delim is not None
+            and header.strip()
+            and _TABLE_DELIM_RE.match(delim)
+            and ("|" in header or "|" in delim)
+        ):
+            out[i] = _MASK
+            i += 1
+            while i < len(lines) and lines[i].strip() and not _starts_a_block(lines[i]):
+                out[i] = _MASK
+                i += 1
+            continue
+        i += 1
     return "\n".join(out)
 
 
@@ -442,6 +483,18 @@ def _mask_data_lists(text: str) -> str:
         ):
             for i in run:
                 out[i] = _MASK
+            # …and the last item's LAZY CONTINUATION: a paragraph line straight
+            # after a bullet, with no blank line, renders INSIDE that item
+            # (round-7 panel security f-006 — the same CommonMark laziness
+            # :func:`_mask_quotes` folds for quotes; forgetting the blank line
+            # after a list is the commoner slip). It is counted from the last
+            # ITEM, not from the line that flushed the run: a blank line inside
+            # a loose list keeps the run open, and folding from there would
+            # swallow the author's own approval two blocks down.
+            for j in range(run[-1] + 1, len(lines)):
+                if not lines[j].strip() or _starts_a_block(lines[j]):
+                    break
+                out[j] = _MASK
         run.clear()
 
     for idx, line in enumerate(lines):
@@ -469,7 +522,7 @@ def _authorial_text(body: str) -> str:
     text = _HTML_COMMENT_RE.sub(_MASK, text)
     text = _mask_inline_runs(text, _TILDE_RUN_RE)
     text = _mask_quotes(text)
-    text = _TABLE_ROW_RE.sub(_MASK, text)
+    text = _mask_tables(text)
     text = _INDENTED_LINE_RE.sub(_MASK, text)
     return _join_soft_wraps(_mask_data_lists(text))
 
@@ -494,10 +547,11 @@ def carries_approval(body: str) -> bool:
     rather than guarded.
 
     Being an any-unit rule, it reads only AUTHORIAL text, at the granularity
-    GitHub renders: block quotes with their lazy continuations, code spans and
-    fences (parsed structurally — a fenced block ends only at a line holding
-    nothing but its fence), strike-through, HTML comments, indented code and
-    enumerations of values (a list, or a table row) are masked, and
+    GitHub renders: block quotes, code spans and fences (parsed structurally —
+    a fenced block ends only at a line holding nothing but its fence),
+    strike-through, HTML comments, indented code and enumerations of values (a
+    list, or a table recognised by its delimiter row) are masked — each with the
+    lazy continuation its block swallows — and
     hard-wrapped prose is rejoined into its paragraph, before the split
     (:func:`_authorial_text`). So an approval word the author merely QUOTED,
     showed as data, struck out, hid in an invisible comment or never wrote at

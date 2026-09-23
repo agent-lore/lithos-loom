@@ -389,6 +389,9 @@ _NOT_THE_AUTHORS_VERDICT = [
     "logged at src/api.py:88.",
     "| verdict |\n| --- |\n| LGTM |\nThe token is logged at src/api.py:88.",
     "> the token is logged at src/api.py:88\nLGTM",
+    "This is not |\nLGTM\n\nThe token is logged at src/api.py:88.",
+    "- the token is logged at src/api.py:88\nLGTM",
+    "| check | result |\n| --- | --- |\n| authz | missing at src/api.py:12 |\napproved",
 ]
 
 
