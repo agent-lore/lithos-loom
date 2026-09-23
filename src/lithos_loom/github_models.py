@@ -705,8 +705,17 @@ def carries_approval(body: str) -> bool:
     src/api.py:88" — satisfy the floor. Nothing is lost in production: a body
     the strong classifier reads end to end is never in a dispatched batch
     anyway.
+
+    So the weak scan **erases** every approval emoji and shortcode first,
+    leaving a unit boundary where it stood. Dropping the rewrite was not
+    enough on its own (PR #426 round-3 review, correctness f-002): ``:`` is a
+    unit boundary, so the raw ``:+1:`` shortcode split into the bare unit
+    ``+1`` — itself a recognised approval phrase — and ":+1: Checked the auth
+    path. The token is logged at src/api.py:88" satisfied the floor by the
+    very decoration the rule above excludes.
     """
-    if any(unit.isascii() and _APPROVAL_UNIT_RE.match(unit) for unit in _units(body)):
+    scanned = _units(_APPROVAL_EMOJI_RE.sub(".", body))
+    if any(unit.isascii() and _APPROVAL_UNIT_RE.match(unit) for unit in scanned):
         return True
     return is_approval_text(body)
 

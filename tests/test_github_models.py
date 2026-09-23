@@ -240,6 +240,12 @@ def test_a_decorative_approval_emoji_does_not_satisfy_the_eligibility_floor() ->
         "❌ The token is logged at src/api.py:88 — redact it.",
         "Nice 🚀 but the session cookie has no Secure flag.",
         ":white_check_mark: tests\nThe password hash uses md5 at src/auth.py:12.",
+        # Correctness f-002: `:` is a unit boundary, so dropping the emoji
+        # rewrite was not enough — the raw shortcode split into the bare unit
+        # `+1`, itself a recognised approval phrase, and let the decoration
+        # back in through the splitter.
+        ":+1: Checked the auth path. The token is logged at src/api.py:88 — redact it.",
+        ":shipit: but the session cookie has no Secure flag.",
     ]
     for body in decorated:
         assert not carries_approval(body), body
@@ -247,7 +253,7 @@ def test_a_decorative_approval_emoji_does_not_satisfy_the_eligibility_floor() ->
 
     # An emoji that IS the whole verdict still is one — that is what the
     # rewrite exists for, and the end-to-end rule carries it.
-    for body in ("👍", ":+1:", "Ship it 🚀", "🚀"):
+    for body in ("👍", ":+1:", "Ship it 🚀", "🚀", ":+1: LGTM"):
         assert carries_approval(body) and is_approval_text(body), body
 
 
