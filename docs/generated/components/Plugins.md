@@ -59,7 +59,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
-| `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 27 |
+| `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 28 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
@@ -447,6 +447,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `write_state` — Write the run's ``state.json``, MERGING over whatever is already there.
 - def `is_converge_run_dir` — Whether *run_dir* is a ``develop converge`` run's (``<work_dir>/converge/<id>``).
 - def `record_converge_intake` — Record the PR a converge run is converging, at INTAKE.
+- def `record_converge_cost` — Record what the WHOLE converge command spent, not just its loop.
 - def `converge_intake` — The PR facts :func:`record_converge_intake` wrote, or ``None``.
 - def `record_converge_push` — Record that ``develop converge-push`` put *pushed_sha* on the PR.
 - def `converge_pushed_sha` — The sha ``develop converge-push`` pushed for this run, or ``None``.

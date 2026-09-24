@@ -690,6 +690,41 @@ def _post_external_replies(
     )
 
 
+def reply_for(outcome: ExternalOutcome, *, pushed: bool, pushed_sha: str) -> str | None:
+    """The reply body owed for one disposition, or ``None`` for none.
+
+    The posting rule itself, pure and single-sourced: only what actually
+    happened is asserted — a *fixed* reply needs the branch to have been
+    pushed (its sha is the proof), while rejections, disputes and
+    no-change-needed stand on their own.
+
+    ``develop converge-push`` reads it a second way: run it with this run's
+    OWN outcome (``pushed=False``) to learn which threads the run already
+    answered when it exited, so the push's replay answers only the ones the
+    push newly makes true instead of duplicating them on a public thread.
+    """
+    if outcome.disposition == "rejected":
+        return reply_body(
+            fixed=False, sha=None, coder_response=f"triage: {outcome.detail}"
+        )
+    if outcome.disposition == "disputed":
+        return reply_body(fixed=False, sha=None, coder_response=outcome.detail)
+    if outcome.disposition == "no_change_needed":
+        # #380: the coder agreed nothing should change — say so, in words
+        why = outcome.detail.strip() or "(no further detail given)"
+        return reply_body(
+            fixed=False, sha=None, coder_response=f"no change needed: {why}"
+        )
+    if outcome.disposition == "reverted":
+        # #387: a fix the loop made and then undid — never "Fixed in"
+        return reply_body(
+            fixed=False, sha=None, coder_response=outcome.detail, reverted=True
+        )
+    if outcome.disposition == "fixed" and pushed:
+        return reply_body(fixed=True, sha=pushed_sha, coder_response=outcome.detail)
+    return None
+
+
 def post_external_replies(
     outcomes: Sequence[ExternalOutcome],
     *,
@@ -717,26 +752,8 @@ def post_external_replies(
         transport = _reply_transport(o.finding.reply_mode)
         if transport is None:
             continue
-        if o.disposition == "rejected":
-            body = reply_body(
-                fixed=False, sha=None, coder_response=f"triage: {o.detail}"
-            )
-        elif o.disposition == "disputed":
-            body = reply_body(fixed=False, sha=None, coder_response=o.detail)
-        elif o.disposition == "no_change_needed":
-            # #380: the coder agreed nothing should change — say so, in words
-            why = o.detail.strip() or "(no further detail given)"
-            body = reply_body(
-                fixed=False, sha=None, coder_response=f"no change needed: {why}"
-            )
-        elif o.disposition == "reverted":
-            # #387: a fix the loop made and then undid — never "Fixed in"
-            body = reply_body(
-                fixed=False, sha=None, coder_response=o.detail, reverted=True
-            )
-        elif o.disposition == "fixed" and pushed:
-            body = reply_body(fixed=True, sha=pushed_sha, coder_response=o.detail)
-        else:
+        body = reply_for(o, pushed=pushed, pushed_sha=pushed_sha)
+        if body is None:
             continue  # unaddressed, or a fix that never landed — assert nothing
         if transport(repo, pr_number, o.finding, body):
             posted += 1

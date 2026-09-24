@@ -1,0 +1,467 @@
+"""What ``develop converge-push`` reads before it decides: the run, the PR, the plan.
+
+The read-only half of the command (:mod:`cli.converge_push` is the deciding
+half), split out for the same reason ``develop deliver``'s preflight is: the
+refusals are what make the command safe, and they are easier to read — and to
+test — apart from the sequence they guard.
+
+Three reads, in order, each of which can refuse on its own:
+
+* **the run dir** — what an exhausted converge run left behind, and whether it
+  is a run this command may act on at all;
+* **the PR** — one live GitHub read, because the run dir's record of it is an
+  intake-time snapshot and a branch name is not a PR;
+* **the ref** — the worktree tip against the PR's live head, which is the
+  verdict the operator authorises the push from.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from lithos_loom.errors import LithosLoomError
+from lithos_loom.plugins.story_develop import run_outcome
+from lithos_loom.plugins.story_develop.github_access import (
+    GitHubError,
+    PullRequest,
+    github_call,
+)
+from lithos_loom.plugins.story_develop.github_access import (
+    repo_name_with_owner as origin_repo_name,
+)
+from lithos_loom.plugins.story_develop.pr_delivery import remote_head_sha
+from lithos_loom.runner import git
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "ALREADY_PUSHED",
+    "FAST_FORWARD",
+    "REFUSED",
+    "ConvergePushRefused",
+    "ConvergeRun",
+    "NotAConvergeRun",
+    "PrCheck",
+    "PushPlan",
+    "fetch_pull_request",
+    "plan_push",
+    "read_run",
+    "resolve_converge_run",
+    "verify_pr",
+]
+
+FAST_FORWARD = "fast-forward"
+ALREADY_PUSHED = "already pushed"
+REFUSED = "refused"
+
+# The statuses a converge loop can stop at without pushing. `approved` is not
+# among them: converge pushes on approval, so an approved run either delivered
+# or failed its own push — and the ancestry check below reports that honestly.
+_TERMINAL = frozenset(
+    {
+        "max_rounds",
+        "disputed",
+        "stalled",
+        "cost_exceeded",
+        "needs_decision",
+        "infra_failed",
+        "interrupted",
+        "failed",
+        run_outcome.APPROVED,
+    }
+)
+
+
+class ConvergePushRefused(LithosLoomError):
+    """A precondition failed; nothing was written."""
+
+
+class NotAConvergeRun(LithosLoomError):
+    """The key names a run that is not a converge run (or no run at all)."""
+
+
+# ── the facts ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ConvergeRun:
+    """What the run dir says about an exhausted converge run."""
+
+    run_id: str
+    run_dir: Path
+    status: str
+    failure_reason: str
+    rounds: int | None
+    cost_usd: float | None
+    branch: str
+    worktree: Path
+    pr_url: str
+    pr_number: int | None
+    pr_head_branch: str
+    intake_head_sha: str
+    base_sha: str
+    repo: str
+    story_id: str
+    test_gate: dict[str, Any] | None
+    blocking_checks: tuple[dict[str, Any], ...]
+    open_findings: tuple[dict[str, Any], ...]
+    pushed_sha: str | None
+    """A previous ``converge-push`` of this run — the offline ``already
+    pushed`` answer, still proved against the remote before anything is done."""
+
+
+def read_run(run_dir: Path) -> ConvergeRun:
+    """Read *run_dir* into :class:`ConvergeRun`, refusing what cannot be pushed.
+
+    Two refusals live here because they are facts about the run, not about the
+    remote: a run with no recorded outcome may be mid-round right now (pushing
+    its tip would put commits the loop is still writing onto a live PR), and a
+    run with no recorded PR has nothing to push onto — the intake record
+    (:func:`run_outcome.record_converge_intake`) is what names it, and a run
+    predating that record must be pushed by hand.
+    """
+    state = run_outcome.read_state(run_dir) or {}
+    status = str(state.get("status") or "")
+    if not status:
+        raise ConvergePushRefused(
+            f"run {run_dir.name} has recorded no outcome — there is no terminal "
+            f"{run_outcome.STATE_FILE} in {run_dir}, which the loop writes only "
+            "at run end, so this run may be mid-round right now. Watch it with "
+            f"`lithos-loom develop attach {run_dir.name}`"
+        )
+    if status not in _TERMINAL:
+        raise ConvergePushRefused(
+            f"run {run_dir.name} is {status!r}, which is not a terminal converge "
+            "outcome; nothing to push"
+        )
+    intake = run_outcome.converge_intake(run_dir) or {}
+    pr_head_branch = str(intake.get("pr_head_branch") or "")
+    if not pr_head_branch:
+        raise ConvergePushRefused(
+            f"run {run_dir.name} recorded no PR (its {run_outcome.STATE_FILE} has "
+            f"no {run_outcome.CONVERGE_KEY!r} block — a run from before converge "
+            "recorded one). There is no head branch to push onto: find the PR, "
+            "check `git -C <worktree> log`, and push by hand"
+        )
+    worktree = Path(str(state.get("worktree") or (run_dir / "worktree")))
+    return ConvergeRun(
+        run_id=str(state.get("run_id") or run_dir.name),
+        run_dir=run_dir,
+        status=status,
+        failure_reason=str(state.get("failure_reason") or ""),
+        rounds=state.get("rounds") if isinstance(state.get("rounds"), int) else None,
+        # The WHOLE command's spend (converge's intake / triage turn + the
+        # loop), which converge merges in after the loop; a run from before
+        # that falls back to the loop-only figure develop() writes, which is
+        # the most this run can honestly claim.
+        cost_usd=_opt_cost(state.get("total_cost_usd"), state.get("cost_usd")),
+        branch=str(state.get("branch") or ""),
+        worktree=worktree,
+        pr_url=str(intake.get("pr_url") or ""),
+        pr_number=(
+            intake.get("pr_number")
+            if isinstance(intake.get("pr_number"), int)
+            else None
+        ),
+        pr_head_branch=pr_head_branch,
+        intake_head_sha=str(intake.get("intake_head_sha") or ""),
+        base_sha=str(intake.get("base_sha") or ""),
+        repo=str(intake.get("repo") or ""),
+        story_id=str(intake.get("story_id") or ""),
+        test_gate=state.get("test_gate")
+        if isinstance(state.get("test_gate"), dict)
+        else None,
+        blocking_checks=tuple(
+            c for c in state.get("blocking_checks") or () if isinstance(c, dict)
+        ),
+        open_findings=tuple(
+            f for f in state.get("open_findings") or () if isinstance(f, dict)
+        ),
+        pushed_sha=run_outcome.converge_pushed_sha(run_dir),
+    )
+
+
+def _opt_cost(*values: Any) -> float | None:
+    """The first finite, non-negative number among *values*, else ``None``.
+
+    ``json.loads`` accepts ``NaN`` / ``Infinity``, and a spend is published to
+    the operator as the basis of a decision — "unknown" is the only honest
+    rendering of a number that is not one.
+    """
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            continue
+        try:
+            number = float(value)
+        except (OverflowError, ValueError):
+            continue  # an arbitrary-precision int is outside the float domain
+        if math.isfinite(number) and number >= 0:
+            return number
+    return None
+
+
+def resolve_converge_run(work_dir: Path, key: str) -> Path:
+    """Resolve *key* — a converge run id, or a PR number (its newest run).
+
+    The same operator-typed key shape as ``attach`` / ``dump`` / ``deliver``,
+    narrowed to converge: a run id that names a story-develop run is refused
+    here rather than acted on, because that run has no PR and ``deliver`` is
+    its command.
+    """
+    converge_dir = work_dir / run_outcome.CONVERGE_DIR
+    run_dir = run_outcome.resolve_run_dir(work_dir, key)
+    if run_dir is not None:
+        if not run_outcome.is_converge_run_dir(run_dir):
+            raise NotAConvergeRun(
+                f"run {key!r} is a story-develop run ({run_dir}), not a converge "
+                "run: it has no PR to push onto. Deliver its branch with "
+                f"`lithos-loom develop deliver {key}`"
+            )
+        return run_dir
+    number = _pr_number(key)
+    if number is not None and converge_dir.is_dir():
+        candidates = [
+            d
+            for d in converge_dir.iterdir()
+            if run_outcome.is_run_dir(d)
+            and (run_outcome.converge_intake(d) or {}).get("pr_number") == number
+        ]
+        if candidates:
+            # newest by its last on-disk activity, the same rule `resolve_run_dir`
+            # uses when a task id names several runs
+            return max(candidates, key=lambda p: p.stat().st_mtime)
+    raise NotAConvergeRun(
+        f"no converge run for {key!r} under {converge_dir} "
+        "(`lithos-loom develop list` shows what is there)"
+    )
+
+
+def _pr_number(key: str) -> int | None:
+    raw = key.strip().lstrip("#")
+    return int(raw) if raw.isdigit() else None
+
+
+# ── is the PR still the PR we recorded? (the live read) ────────────────
+
+
+def fetch_pull_request(repo: str, number: int) -> PullRequest | None:
+    """The PR as GitHub has it now (``None`` when it was deleted).
+
+    A seam of its own so the verification below is one stubbable call, like
+    every other ``gh`` read in this package.
+    """
+    return github_call(lambda c: c.get_pull_request(repo, number))
+
+
+@dataclass(frozen=True)
+class PrCheck:
+    """Whether the recorded PR facts still describe reality."""
+
+    ok: bool
+    problem: str = ""
+    head_ref: str = ""
+    state: str = ""
+
+
+def verify_pr(run: ConvergeRun) -> PrCheck:
+    """Re-read the PR before the verdict is printed — the pin every other
+    write path in this system carries.
+
+    The run dir's `converge` block was written at intake, possibly days ago,
+    and the only other live read (``ls-remote``) answers "what sha is on that
+    branch NAME now" — not "is that branch still the head of PR #N, in this
+    repository, and is that PR still open". Without this, an exhausted run's
+    rounds can land on a **merged** PR's undeleted branch (``converge_pr``
+    refuses a merged PR for exactly this reason), or on a branch deleted and
+    recreated under the same deterministic name, while the thread replies and
+    the ``[ConvergePushed]`` provenance assert a landing somewhere it did not
+    happen.
+
+    Fails **closed**: a read that does not answer is not a pass, because the
+    same stale record addresses the replies and the audit finding. The caller
+    turns a non-``ok`` check into a refusal the REPORT states too — the report
+    is what the operator authorises the push from, so it may not look
+    pushable when it is not.
+    """
+    if run.pr_number is None:
+        return PrCheck(False, "the run recorded no PR number — nothing to verify")
+    if run.repo:
+        # The push goes to the worktree's `origin`; the replies and the finding
+        # are addressed to the recorded repo. They must be the same place.
+        try:
+            origin = origin_repo_name(run.worktree)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            return PrCheck(False, f"could not read the worktree's origin ({exc})")
+        if origin.lower() != run.repo.lower():
+            return PrCheck(
+                False,
+                f"the worktree's origin is {origin!r}, not the {run.repo!r} this "
+                "run recorded — the PR, the thread replies and the push would "
+                "not be the same repository",
+            )
+    try:
+        pr = fetch_pull_request(run.repo, run.pr_number)
+    except (GitHubError, RuntimeError, OSError) as exc:
+        return PrCheck(False, f"could not read {run.repo}#{run.pr_number} ({exc})")
+    if pr is None:
+        return PrCheck(False, f"{run.repo}#{run.pr_number} no longer exists")
+    if pr.merged:
+        return PrCheck(
+            False,
+            f"{run.repo}#{run.pr_number} has already MERGED — a fix commit "
+            "pushed to its branch can never land; nothing to push",
+            head_ref=pr.head_ref,
+            state="merged",
+        )
+    if pr.state != "open":
+        return PrCheck(
+            False,
+            f"{run.repo}#{run.pr_number} is {pr.state}, not open — pushing to "
+            "its branch would land nothing a reviewer will read",
+            head_ref=pr.head_ref,
+            state=pr.state,
+        )
+    if pr.head_ref and pr.head_ref != run.pr_head_branch:
+        return PrCheck(
+            False,
+            f"{run.repo}#{run.pr_number} now heads {pr.head_ref!r}, not the "
+            f"{run.pr_head_branch!r} this run recorded — the branch under that "
+            "name is no longer this PR's",
+            head_ref=pr.head_ref,
+            state=pr.state,
+        )
+    if pr.head_repo and pr.base_repo and pr.head_repo != pr.base_repo:
+        return PrCheck(
+            False,
+            f"{run.repo}#{run.pr_number} heads a fork ({pr.head_repo}) — loom "
+            "cannot push to it under origin credentials",
+            head_ref=pr.head_ref,
+            state=pr.state,
+        )
+    return PrCheck(True, head_ref=pr.head_ref, state=pr.state)
+
+
+# ── the plan ───────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class PushPlan:
+    """What a push would do, decided against the PR's LIVE remote head."""
+
+    verdict: str  # FAST_FORWARD | ALREADY_PUSHED | REFUSED
+    detail: str
+    tip: str
+    remote_sha: str
+    commits: tuple[str, ...] = ()
+    log: str = ""
+    diffstat: str = ""
+
+    @property
+    def pushable(self) -> bool:
+        return self.verdict == FAST_FORWARD
+
+
+def plan_push(run: ConvergeRun) -> PushPlan:
+    """Read the worktree tip + the PR's live head and decide the verdict.
+
+    Read-only, and the decision is git's: the remote head must be an ancestor
+    of the tip (the update can then only ADD commits). Anything else — the
+    head moved under the run, the branch is gone — is refused, here and in
+    the push seam, which re-checks under a lease.
+    """
+    if not run.worktree.is_dir():
+        raise ConvergePushRefused(
+            f"run {run.run_id}'s worktree {run.worktree} is gone — its commits "
+            "are not on this host any more; nothing can be pushed"
+        )
+    try:
+        tip = git.commit_sha(run.worktree)
+        remote_sha = remote_head_sha(run.worktree, run.pr_head_branch)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        raise ConvergePushRefused(f"could not read the PR's head: {exc}") from exc
+    if remote_sha:
+        # The ancestry question is only answerable about commits this clone
+        # HAS: a head someone else pushed while the run was working is not in
+        # the worktree's object store, and `--is-ancestor` on it errors rather
+        # than answering "no". Fetch the ref first (read-only), so the verdict
+        # below is git's real answer about the real commits.
+        problem = git.fetch_refspecs(run.worktree, [f"refs/heads/{run.pr_head_branch}"])
+        if problem:
+            logger.info(
+                "converge-push %s: could not fetch %s (%s); judging on what "
+                "this clone already has",
+                run.run_id,
+                run.pr_head_branch,
+                problem,
+            )
+
+    if not remote_sha:
+        return PushPlan(
+            verdict=REFUSED,
+            detail=(
+                f"the PR head branch {run.pr_head_branch!r} is not on origin "
+                "(deleted, or a fork PR) — nothing to push onto"
+            ),
+            tip=tip,
+            remote_sha="",
+        )
+    # The base the push is LEASED against is the live remote head, so that is
+    # what the report must measure — never the intake head. They differ
+    # whenever the PR head moved: a rewind to an ancestor (the standard way to
+    # take an accidentally-committed secret back off a branch) still passes the
+    # ancestry guard, and measuring from the intake head would show the
+    # operator "2 commits" while the push silently restores the removed ones.
+    # `intake_head_sha` stays a reported fact of its own.
+    commits = tuple(git.commits_since(run.worktree, remote_sha))
+    log = git.log_between(run.worktree, remote_sha)
+    diffstat = git.diff_stat(run.worktree, remote_sha)
+    if remote_sha == tip:
+        return PushPlan(
+            verdict=ALREADY_PUSHED,
+            detail=(
+                f"the PR head is already this run's tip {tip[:12]} — nothing to push"
+            ),
+            tip=tip,
+            remote_sha=remote_sha,
+            commits=commits,
+            log=log,
+            diffstat=diffstat,
+        )
+    try:
+        descends = git.is_ancestor(run.worktree, remote_sha, tip)
+    except (RuntimeError, OSError) as exc:
+        # The head is a commit this clone does not have even after the fetch:
+        # unprovable is REFUSED, never assumed safe.
+        logger.info("converge-push %s: ancestry check failed: %s", run.run_id, exc)
+        descends = False
+    if not descends:
+        return PushPlan(
+            verdict=REFUSED,
+            detail=(
+                f"PR head moved to {remote_sha[:12]}, which is not an ancestor "
+                f"of this run's tip {tip[:12]} — pushing would drop whoever "
+                "moved it. Re-converge the PR at its current head"
+            ),
+            tip=tip,
+            remote_sha=remote_sha,
+            commits=commits,
+            log=log,
+            diffstat=diffstat,
+        )
+    return PushPlan(
+        verdict=FAST_FORWARD,
+        detail=(
+            f"{len(commits)} commit(s) would fast-forward {run.pr_head_branch} "
+            f"from {remote_sha[:12]} to {tip[:12]}"
+        ),
+        tip=tip,
+        remote_sha=remote_sha,
+        commits=commits,
+        log=log,
+        diffstat=diffstat,
+    )

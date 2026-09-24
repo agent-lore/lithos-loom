@@ -20,9 +20,16 @@ This is that decision as a command, in two halves:
 * **Push** (``--yes``) — the same append-only, ancestry-proved seam ``converge``
   itself uses (:func:`~.pr_delivery.push_to_pr_ref`: exact-ref ``ls-remote``,
   ``--is-ancestor``, an atomic lease, never a force), then the per-finding
-  thread replies the run would have posted had it converged, then
-  ``[ConvergePushed]`` on the story — which names the findings left open, so
-  that the decision is on the record rather than implied by a green PR.
+  thread replies **the push newly makes true** (the run answered the rest when
+  it exited; :func:`replay_outcomes`), then ``[ConvergePushed]`` on the story —
+  which names the findings left open, so that the decision is on the record
+  rather than implied by a green PR.
+
+Both halves rest on two live reads, not on the run dir alone: the PR itself
+(:func:`verify_pr` — a record written at intake does not know that the PR has
+since merged, closed, changed head branch or moved repository) and the head
+ref. And a push that reports failure is **read back** before it is called one:
+the lease proves atomicity, not observability (:func:`_classify_failed_push`).
 
 **The push is the OPERATOR's, not loom's.** It is deliberately not recorded on
 the S5b remediation budget as loom's own push: the watcher reads the new head
@@ -45,12 +52,23 @@ import dataclasses
 import json
 import logging
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import typer
 
+from lithos_loom.cli._converge_push_facts import (
+    REFUSED,
+    ConvergePushRefused,
+    ConvergeRun,
+    NotAConvergeRun,
+    PushPlan,
+    plan_push,
+    read_run,
+    resolve_converge_run,
+    verify_pr,
+)
+from lithos_loom.cli._deliver_facts import sanitize_for_terminal
 from lithos_loom.cli._deliver_lithos import read_story
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosClientError, LithosLoomError
@@ -79,297 +97,11 @@ by the operator's decision (``develop converge-push``), naming the sha, the
 rounds and the findings the run left open."""
 
 # 0 reported / pushed / already pushed; 1 a refusal the operator must resolve
-# (a moved PR head, a run still in flight, a run with no PR on record); 2 bad
-# input (no such run, not a converge run). Never a partial: the push is one
-# atomic leased update, and everything after it degrades into a note.
-EXIT_CODES = {"ok": 0, "refused": 1, "bad_input": 2}
-
-FAST_FORWARD = "fast-forward"
-ALREADY_PUSHED = "already pushed"
-REFUSED = "refused"
-
-# The statuses a converge loop can stop at without pushing. `approved` is not
-# among them: converge pushes on approval, so an approved run either delivered
-# or failed its own push — and the ancestry check below reports that honestly.
-_TERMINAL = frozenset(
-    {
-        "max_rounds",
-        "disputed",
-        "stalled",
-        "cost_exceeded",
-        "needs_decision",
-        "infra_failed",
-        "interrupted",
-        "failed",
-        run_outcome.APPROVED,
-    }
-)
-
-
-class ConvergePushRefused(LithosLoomError):
-    """A precondition failed; nothing was written."""
-
-
-class NotAConvergeRun(LithosLoomError):
-    """The key names a run that is not a converge run (or no run at all)."""
-
-
-# ── the facts ──────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class ConvergeRun:
-    """What the run dir says about an exhausted converge run."""
-
-    run_id: str
-    run_dir: Path
-    status: str
-    failure_reason: str
-    rounds: int | None
-    cost_usd: float | None
-    branch: str
-    worktree: Path
-    pr_url: str
-    pr_number: int | None
-    pr_head_branch: str
-    intake_head_sha: str
-    base_sha: str
-    repo: str
-    story_id: str
-    test_gate: dict[str, Any] | None
-    blocking_checks: tuple[dict[str, Any], ...]
-    open_findings: tuple[dict[str, Any], ...]
-    pushed_sha: str | None
-    """A previous ``converge-push`` of this run — the offline ``already
-    pushed`` answer, still proved against the remote before anything is done."""
-
-
-def read_run(run_dir: Path) -> ConvergeRun:
-    """Read *run_dir* into :class:`ConvergeRun`, refusing what cannot be pushed.
-
-    Two refusals live here because they are facts about the run, not about the
-    remote: a run with no recorded outcome may be mid-round right now (pushing
-    its tip would put commits the loop is still writing onto a live PR), and a
-    run with no recorded PR has nothing to push onto — the intake record
-    (:func:`run_outcome.record_converge_intake`) is what names it, and a run
-    predating that record must be pushed by hand.
-    """
-    state = run_outcome.read_state(run_dir) or {}
-    status = str(state.get("status") or "")
-    if not status:
-        raise ConvergePushRefused(
-            f"run {run_dir.name} has recorded no outcome — there is no terminal "
-            f"{run_outcome.STATE_FILE} in {run_dir}, which the loop writes only "
-            "at run end, so this run may be mid-round right now. Watch it with "
-            f"`lithos-loom develop attach {run_dir.name}`"
-        )
-    if status not in _TERMINAL:
-        raise ConvergePushRefused(
-            f"run {run_dir.name} is {status!r}, which is not a terminal converge "
-            "outcome; nothing to push"
-        )
-    intake = run_outcome.converge_intake(run_dir) or {}
-    pr_head_branch = str(intake.get("pr_head_branch") or "")
-    if not pr_head_branch:
-        raise ConvergePushRefused(
-            f"run {run_dir.name} recorded no PR (its {run_outcome.STATE_FILE} has "
-            f"no {run_outcome.CONVERGE_KEY!r} block — a run from before converge "
-            "recorded one). There is no head branch to push onto: find the PR, "
-            "check `git -C <worktree> log`, and push by hand"
-        )
-    worktree = Path(str(state.get("worktree") or (run_dir / "worktree")))
-    return ConvergeRun(
-        run_id=str(state.get("run_id") or run_dir.name),
-        run_dir=run_dir,
-        status=status,
-        failure_reason=str(state.get("failure_reason") or ""),
-        rounds=state.get("rounds") if isinstance(state.get("rounds"), int) else None,
-        cost_usd=(
-            float(state["cost_usd"])
-            if isinstance(state.get("cost_usd"), int | float)
-            else None
-        ),
-        branch=str(state.get("branch") or ""),
-        worktree=worktree,
-        pr_url=str(intake.get("pr_url") or ""),
-        pr_number=(
-            intake.get("pr_number")
-            if isinstance(intake.get("pr_number"), int)
-            else None
-        ),
-        pr_head_branch=pr_head_branch,
-        intake_head_sha=str(intake.get("intake_head_sha") or ""),
-        base_sha=str(intake.get("base_sha") or ""),
-        repo=str(intake.get("repo") or ""),
-        story_id=str(intake.get("story_id") or ""),
-        test_gate=state.get("test_gate")
-        if isinstance(state.get("test_gate"), dict)
-        else None,
-        blocking_checks=tuple(
-            c for c in state.get("blocking_checks") or () if isinstance(c, dict)
-        ),
-        open_findings=tuple(
-            f for f in state.get("open_findings") or () if isinstance(f, dict)
-        ),
-        pushed_sha=run_outcome.converge_pushed_sha(run_dir),
-    )
-
-
-def resolve_converge_run(work_dir: Path, key: str) -> Path:
-    """Resolve *key* — a converge run id, or a PR number (its newest run).
-
-    The same operator-typed key shape as ``attach`` / ``dump`` / ``deliver``,
-    narrowed to converge: a run id that names a story-develop run is refused
-    here rather than acted on, because that run has no PR and ``deliver`` is
-    its command.
-    """
-    converge_dir = work_dir / run_outcome.CONVERGE_DIR
-    run_dir = run_outcome.resolve_run_dir(work_dir, key)
-    if run_dir is not None:
-        if not run_outcome.is_converge_run_dir(run_dir):
-            raise NotAConvergeRun(
-                f"run {key!r} is a story-develop run ({run_dir}), not a converge "
-                "run: it has no PR to push onto. Deliver its branch with "
-                f"`lithos-loom develop deliver {key}`"
-            )
-        return run_dir
-    number = _pr_number(key)
-    if number is not None and converge_dir.is_dir():
-        candidates = [
-            d
-            for d in converge_dir.iterdir()
-            if run_outcome.is_run_dir(d)
-            and (run_outcome.converge_intake(d) or {}).get("pr_number") == number
-        ]
-        if candidates:
-            # newest by its last on-disk activity, the same rule `resolve_run_dir`
-            # uses when a task id names several runs
-            return max(candidates, key=lambda p: p.stat().st_mtime)
-    raise NotAConvergeRun(
-        f"no converge run for {key!r} under {converge_dir} "
-        "(`lithos-loom develop list` shows what is there)"
-    )
-
-
-def _pr_number(key: str) -> int | None:
-    raw = key.strip().lstrip("#")
-    return int(raw) if raw.isdigit() else None
-
-
-# ── the plan ───────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class PushPlan:
-    """What a push would do, decided against the PR's LIVE remote head."""
-
-    verdict: str  # FAST_FORWARD | ALREADY_PUSHED | REFUSED
-    detail: str
-    tip: str
-    remote_sha: str
-    commits: tuple[str, ...] = ()
-    log: str = ""
-    diffstat: str = ""
-
-    @property
-    def pushable(self) -> bool:
-        return self.verdict == FAST_FORWARD
-
-
-def plan_push(run: ConvergeRun) -> PushPlan:
-    """Read the worktree tip + the PR's live head and decide the verdict.
-
-    Read-only, and the decision is git's: the remote head must be an ancestor
-    of the tip (the update can then only ADD commits). Anything else — the
-    head moved under the run, the branch is gone — is refused, here and in
-    the push seam, which re-checks under a lease.
-    """
-    if not run.worktree.is_dir():
-        raise ConvergePushRefused(
-            f"run {run.run_id}'s worktree {run.worktree} is gone — its commits "
-            "are not on this host any more; nothing can be pushed"
-        )
-    try:
-        tip = git.commit_sha(run.worktree)
-        remote_sha = remote_head_sha(run.worktree, run.pr_head_branch)
-    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
-        raise ConvergePushRefused(f"could not read the PR's head: {exc}") from exc
-    if remote_sha:
-        # The ancestry question is only answerable about commits this clone
-        # HAS: a head someone else pushed while the run was working is not in
-        # the worktree's object store, and `--is-ancestor` on it errors rather
-        # than answering "no". Fetch the ref first (read-only), so the verdict
-        # below is git's real answer about the real commits.
-        problem = git.fetch_refspecs(run.worktree, [f"refs/heads/{run.pr_head_branch}"])
-        if problem:
-            logger.info(
-                "converge-push %s: could not fetch %s (%s); judging on what "
-                "this clone already has",
-                run.run_id,
-                run.pr_head_branch,
-                problem,
-            )
-
-    if not remote_sha:
-        return PushPlan(
-            verdict=REFUSED,
-            detail=(
-                f"the PR head branch {run.pr_head_branch!r} is not on origin "
-                "(deleted, or a fork PR) — nothing to push onto"
-            ),
-            tip=tip,
-            remote_sha="",
-        )
-    since = run.intake_head_sha or remote_sha
-    commits = tuple(git.commits_since(run.worktree, since))
-    log = git.log_between(run.worktree, since)
-    diffstat = git.diff_stat(run.worktree, since)
-    if remote_sha == tip:
-        return PushPlan(
-            verdict=ALREADY_PUSHED,
-            detail=(
-                f"the PR head is already this run's tip {tip[:12]} — nothing to push"
-            ),
-            tip=tip,
-            remote_sha=remote_sha,
-            commits=commits,
-            log=log,
-            diffstat=diffstat,
-        )
-    try:
-        descends = git.is_ancestor(run.worktree, remote_sha, tip)
-    except (RuntimeError, OSError) as exc:
-        # The head is a commit this clone does not have even after the fetch:
-        # unprovable is REFUSED, never assumed safe.
-        logger.info("converge-push %s: ancestry check failed: %s", run.run_id, exc)
-        descends = False
-    if not descends:
-        return PushPlan(
-            verdict=REFUSED,
-            detail=(
-                f"PR head moved to {remote_sha[:12]}, which is not an ancestor "
-                f"of this run's tip {tip[:12]} — pushing would drop whoever "
-                "moved it. Re-converge the PR at its current head"
-            ),
-            tip=tip,
-            remote_sha=remote_sha,
-            commits=commits,
-            log=log,
-            diffstat=diffstat,
-        )
-    return PushPlan(
-        verdict=FAST_FORWARD,
-        detail=(
-            f"{len(commits)} commit(s) would fast-forward {run.pr_head_branch} "
-            f"from {remote_sha[:12]} to {tip[:12]}"
-        ),
-        tip=tip,
-        remote_sha=remote_sha,
-        commits=commits,
-        log=log,
-        diffstat=diffstat,
-    )
-
+# (a moved PR head, a PR that is no longer the one recorded, a run still in
+# flight, a run with no PR on record); 2 either bad input (no such run, not a
+# converge run) or an UNCERTAIN push — "nothing was written" is the one thing
+# that cannot be asserted there, so it never shares the refusal's code.
+EXIT_CODES = {"ok": 0, "refused": 1, "bad_input": 2, "uncertain": 2}
 
 # ── rendering ──────────────────────────────────────────────────────────
 
@@ -492,16 +224,28 @@ def finding_summary(run: ConvergeRun, *, pushed_sha: str) -> str:
 
 
 def replay_outcomes(run: ConvergeRun) -> tuple[ExternalOutcome, ...]:
-    """The dispositions this run's threads are owed, or ``()``.
+    """The threads this push newly owes an answer — never the ones the run
+    already answered when it exited.
 
-    The epilogue a converged run would have run, replayed from what the run
-    recorded at intake plus the coder handoffs on disk — the same
-    acknowledgement rules (#387 / #399), read by the same function. It is run
-    with ``loop_approved=True`` because the operator's ``--yes`` IS the
-    approval the loop never gave: they have read the open findings above and
-    decided the rounds should land. Everything else is unchanged, so a
-    ``Fixed in <sha>`` still needs the coder's own ``FIXED`` acknowledgement
-    for that id in its final handoff.
+    Two readings of the same recorded batch (the intake record plus the coder
+    handoffs on disk, through the same ``final_round_outcomes`` and the same
+    #387 / #399 acknowledgement rules):
+
+    * **as the run exited** — its own ``loop_approved`` and nothing pushed.
+      ``converge`` posts its epilogue for every status but ``infra_failed``,
+      so whatever *that* reading answers is already on the reviewers' threads:
+      a triage rejection, a dispute, a reverted fix. Re-posting them would
+      duplicate on a public thread that nobody can tidy up.
+    * **as the push makes it** — ``loop_approved=True`` (the operator's
+      ``--yes`` IS the approval the loop never gave: they have read the open
+      findings and decided the rounds should land) and pushed. This is what
+      turns an acknowledged ``FIXED`` from an unassertable claim into
+      ``Fixed in <sha>``.
+
+    What is returned is the second reading minus every id the first one
+    answered. An ``infra_failed`` run answered nothing (``converge`` skips its
+    epilogue there, since the host is to be fixed and the run retried), so for
+    that one the whole batch is owed.
 
     ``()`` for a local-panel run (no external material was injected) and for
     one whose record is missing or unreadable — there is then no thread this
@@ -510,19 +254,35 @@ def replay_outcomes(run: ConvergeRun) -> tuple[ExternalOutcome, ...]:
     intake = read_external_intake(run.run_dir)
     if intake is None or not intake.id_map:
         return ()
-    return final_round_outcomes(
-        handoff_dir=run.run_dir / "handoff",
-        run_id=run.run_id,
-        rounds=run.rounds or 1,
-        loop_approved=True,
-        worktree=run.worktree,
-        head_sha=run.intake_head_sha,
-        generated_paths=intake.generated_paths,
-        id_map=intake.id_map,
-        rejections=intake.rejections,
-        nothing_to_remediate=intake.nothing_to_remediate,
-        surviving_ids=intake.surviving_ids,
-    )
+
+    def _outcomes(*, loop_approved: bool) -> tuple[ExternalOutcome, ...]:
+        return final_round_outcomes(
+            handoff_dir=run.run_dir / "handoff",
+            run_id=run.run_id,
+            rounds=run.rounds or 1,
+            loop_approved=loop_approved,
+            worktree=run.worktree,
+            head_sha=run.intake_head_sha,
+            generated_paths=intake.generated_paths,
+            id_map=intake.id_map,
+            rejections=intake.rejections,
+            nothing_to_remediate=intake.nothing_to_remediate,
+            surviving_ids=intake.surviving_ids,
+        )
+
+    owed = _outcomes(loop_approved=True)
+    if run.status == "infra_failed":
+        return owed
+    # The reply rule is the converge command's own (imported where it is used,
+    # so this module does not depend on the whole converge CLI to report).
+    from lithos_loom.cli.converge import reply_for
+
+    already = {
+        o.finding_id
+        for o in _outcomes(loop_approved=run.status == run_outcome.APPROVED)
+        if reply_for(o, pushed=False, pushed_sha="") is not None
+    }
+    return tuple(o for o in owed if o.finding_id not in already)
 
 
 # ── the Lithos epilogue ────────────────────────────────────────────────
@@ -619,14 +379,23 @@ def converge_push_command(
             facts = dataclasses.replace(facts, story_id=story)
         plan = plan_push(facts)
     except NotAConvergeRun as exc:
-        typer.secho(f"error: {exc}", err=True, fg=typer.colors.RED)
+        _error(str(exc))
         raise typer.Exit(EXIT_CODES["bad_input"]) from exc
     except (ConvergePushRefused, LithosLoomError) as exc:
-        typer.secho(f"error: {exc}", err=True, fg=typer.colors.RED)
+        _error(str(exc))
         raise typer.Exit(EXIT_CODES["refused"]) from exc
+
+    # The live read, BEFORE the verdict is printed: the report is what the
+    # operator authorises the push from, so a PR that has merged, closed,
+    # changed head branch or moved repository must read as refused there too,
+    # not only under --yes.
+    check = verify_pr(facts)
+    if not check.ok:
+        plan = dataclasses.replace(plan, verdict=REFUSED, detail=check.problem)
 
     notes: list[str] = []
     pushed_sha = ""
+    exit_code = EXIT_CODES["refused"] if plan.verdict == REFUSED else EXIT_CODES["ok"]
     if yes and plan.pushable:
         try:
             pushed_sha = push_to_pr_ref(
@@ -636,11 +405,15 @@ def converge_push_command(
                 expected_remote_sha=plan.remote_sha,
             )
         except (MergeRaceDetected, ForkPushUnsupported, RuntimeError, OSError) as exc:
-            # Nothing landed (the lease is atomic), so this is a refusal like
-            # any other — the report above already told the operator what the
-            # run holds.
-            typer.secho(f"error: push refused: {exc}", err=True, fg=typer.colors.RED)
-            raise typer.Exit(EXIT_CODES["refused"]) from exc
+            # A nonzero push is NOT proof that nothing landed: the server can
+            # accept the update and the connection drop before the client sees
+            # the answer. The lease proves atomicity, not observability — so
+            # read the ref back and classify.
+            pushed_sha, problem, code = _classify_failed_push(facts, plan, exc)
+            if not pushed_sha:
+                _error(problem)
+                raise typer.Exit(code) from exc
+            notes.append(problem)
         try:
             run_outcome.record_converge_push(
                 facts.run_dir, pushed_sha=pushed_sha, pr_url=facts.pr_url
@@ -653,12 +426,22 @@ def converge_push_command(
             cfg, facts, pushed_sha=pushed_sha, complete_gate=complete_gate
         )
 
+    # Everything printed below carries text loom did not author — the agent's
+    # `failure_reason`, commit subjects (a converge run's are built from the
+    # PR title), git / gh stderr, Lithos error text. An ANSI escape in any of
+    # them could erase or forge the two lines the operator decides from
+    # (CWE-117 / CWE-150), so every line goes through the same stripper
+    # `develop deliver` uses.
     for line in report(facts, plan):
-        typer.echo(line)
+        typer.echo(sanitize_for_terminal(line))
     if pushed_sha:
-        typer.echo(f"  pushed {pushed_sha[:12]} → {facts.pr_head_branch}")
+        typer.echo(
+            sanitize_for_terminal(
+                f"  pushed {pushed_sha[:12]} → {facts.pr_head_branch}"
+            )
+        )
     for note in notes:
-        typer.echo(f"  note: {note}")
+        typer.echo(sanitize_for_terminal(f"  note: {note}"))
     if json_out is not None:
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(
@@ -668,9 +451,94 @@ def converge_push_command(
             + "\n",
             encoding="utf-8",
         )
-    if plan.verdict == REFUSED:
-        raise typer.Exit(EXIT_CODES["refused"])
-    raise typer.Exit(EXIT_CODES["ok"])
+    raise typer.Exit(exit_code)
+
+
+def _error(message: str) -> None:
+    """One refusal line on stderr, stripped: these messages carry `git` / `gh`
+    stderr (remote- and server-supplied bytes) and agent text, and an escape
+    on the REFUSAL path could erase the `error:` line and forge a success line
+    under this process's authority."""
+    typer.secho(
+        f"error: {sanitize_for_terminal(message)}", err=True, fg=typer.colors.RED
+    )
+
+
+def _classify_failed_push(
+    run: ConvergeRun, plan: PushPlan, exc: Exception
+) -> tuple[str, str, int]:
+    """Read the ref back after a failed push: ``(pushed_sha, message, exit)``.
+
+    A nonzero ``git push`` means the client did not see a success — not that
+    the server did not apply the update. The three answers are kept apart, as
+    ``develop deliver``'s own push does:
+
+    * the ref is **at our tip** — the push landed and only the acknowledgement
+      was lost; the epilogue (the record, the replies, the finding) is owed
+      exactly as on a clean push, with a note saying what happened;
+    * the ref is **exactly where it was** — a proven non-landing, and the
+      refusal is the truth (exit 1, nothing written);
+    * **anything else** — a third sha, or a ref that cannot be read. If that
+      sha contains our tip, our commits ARE on the PR (someone appended after
+      us) and the epilogue is owed; otherwise "nothing was written" is the one
+      thing that cannot be asserted, so it is an UNCERTAIN exit (2) naming
+      what to check, never a clean refusal.
+    """
+    try:
+        observed = remote_head_sha(run.worktree, run.pr_head_branch)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as read_exc:
+        return (
+            "",
+            f"git push reported failure ({exc}) and {run.pr_head_branch} could "
+            f"not then be read ({read_exc}), so it is not known whether "
+            f"{plan.tip[:12]} reached the PR. Nothing else was attempted; "
+            "re-run when the remote answers — the push is append-only, so a "
+            "second run is safe either way",
+            EXIT_CODES["uncertain"],
+        )
+    if observed == plan.tip:
+        return (
+            plan.tip,
+            f"git push reported failure ({exc}) but {run.pr_head_branch} is at "
+            f"{plan.tip[:12]}: the update LANDED and only its acknowledgement "
+            "was lost, so the replies and the finding below were posted",
+            EXIT_CODES["ok"],
+        )
+    if observed == plan.remote_sha:
+        return ("", f"push refused: {exc}", EXIT_CODES["refused"])
+    if _remote_contains(run, tip=plan.tip, observed=observed):
+        return (
+            plan.tip,
+            f"git push reported failure ({exc}) and {run.pr_head_branch} is now "
+            f"at {observed[:12]}, which contains {plan.tip[:12]}: the update "
+            "landed and another actor appended to the branch after it",
+            EXIT_CODES["ok"],
+        )
+    return (
+        "",
+        f"git push reported failure ({exc}) and {run.pr_head_branch} is now at "
+        f"{observed[:12] or '(absent)'} — neither the "
+        f"{plan.remote_sha[:12]} it held before nor the {plan.tip[:12]} this "
+        "push sent, so another actor moved the branch and it is not known "
+        "whether the push landed first. Nothing else was attempted; reconcile "
+        "the branch and re-run — the push is append-only, so a second run is "
+        "safe either way",
+        EXIT_CODES["uncertain"],
+    )
+
+
+def _remote_contains(run: ConvergeRun, *, tip: str, observed: str) -> bool:
+    """Whether the tip the read-back actually SAW has our commit in its
+    history. ``False`` for anything that could not be established — "I could
+    not look" must never be reported as "your commit is there"."""
+    git.fetch_refspecs(run.worktree, [f"refs/heads/{run.pr_head_branch}"])
+    try:
+        # asked of the OBSERVED object, never of a ref name: another fetch
+        # landing meanwhile would answer this push's question about a tip
+        # nobody here read.
+        return git.is_ancestor(run.worktree, tip, observed)
+    except (RuntimeError, OSError):
+        return False
 
 
 def _post_epilogue(

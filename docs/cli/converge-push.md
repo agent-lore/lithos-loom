@@ -51,11 +51,39 @@ write. It prints, from the run dir and one read-only `ls-remote` / `fetch`:
 |---|---|---|
 | `fast-forward` | The PR's remote head is an ancestor of the worktree tip — `--yes` will push. | 0 |
 | `already pushed` | The remote head **is** the tip. `--yes` writes nothing. | 0 |
-| `refused` | The remote head is not an ancestor of the tip (someone else pushed), or the head branch is gone. `--yes` writes nothing. | 1 |
+| `refused` | The remote head is not an ancestor of the tip (someone else pushed), the head branch is gone, or the PR is no longer the one recorded (below). `--yes` writes nothing. | 1 |
 
 The remote ref is fetched before the ancestry question is asked, because
 `--is-ancestor` can only answer about commits this clone *has*; a head that
 still cannot be resolved is **refused**, never assumed safe.
+
+The commit list, the log and the diffstat are measured from the **live remote
+head** — the base the push is actually leased against — not from
+`intake_head_sha`, which is reported separately. They differ whenever the PR
+head moved, and the difference matters: a rewind to an ancestor (how an
+accidentally-committed secret is taken back off a branch) still passes the
+ancestry guard, so the push would *restore* those commits. The report names
+them.
+
+### Is it still the PR the run recorded?
+
+The `converge` block was written at intake, possibly days ago, and `ls-remote`
+answers about a branch **name**, not about a PR. So one live read happens
+before the verdict is printed — `gh`'s PR payload plus the worktree's `origin`
+— and the verdict is `refused` when:
+
+- the PR has **merged** (a fix commit pushed to its branch can never land — the
+  same guard `converge` itself applies) or is otherwise not open;
+- its head branch is no longer the recorded one (deleted and recreated under
+  the same deterministic name is the realistic case);
+- the head is on a fork, which loom cannot push to under origin credentials;
+- the worktree's `origin` is not the repository the run recorded — the push,
+  the thread replies and the `[ConvergePushed]` provenance must all be the
+  same place;
+- **or the read did not answer at all.** It fails closed: the same stale record
+  addresses the replies and the audit finding, so "could not verify" is not a
+  pass. The refusal is stated in the **report**, not only under `--yes` — the
+  report is what the operator authorises the push from.
 
 ## `--yes`
 
@@ -64,14 +92,19 @@ still cannot be resolved is **refused**, never assumed safe.
    `--force-with-lease` against the head just read — never a force, never a
    non-descendant. The lease makes the push atomic: a head that moves between
    the report and the push is rejected, and nothing lands.
-2. **Answer the reviewers.** The per-finding thread replies the run would have
-   posted had it converged, under the existing acknowledgement rules (#387 /
-   #399): `Fixed in <sha>` only for an id the coder acknowledged `FIXED` in its
-   final handoff; rejections, disputes and `no change needed` as ever; every
-   reply ends with the automated marker so the watcher's trust filter ignores
-   it. The dispositions are replayed from what the run recorded at intake
-   (`external.json`) plus the handoffs on disk — with `loop_approved=True`,
-   because the operator's `--yes` **is** the approval the loop never gave.
+2. **Answer the reviewers — the threads the push newly answers, and only
+   those.** An exhausted `--from-github` run already replied to part of its
+   batch when it exited: a triage rejection and a coder dispute stand without a
+   push, and `converge` posts them. What it could *not* assert is a fix. So the
+   recorded batch (`external.json`) plus the handoffs on disk are read twice —
+   once as the run left it, once with `loop_approved=True` and pushed (the
+   operator's `--yes` **is** the approval the loop never gave) — and only the
+   difference is posted. Nothing is replied to twice. The rules themselves are
+   unchanged (#387 / #399): `Fixed in <sha>` needs the coder's own `FIXED`
+   acknowledgement for that id in its final handoff, and every reply ends with
+   the automated marker so the watcher's trust filter ignores it. (An
+   `infra_failed` run answered nothing — `converge` skips its epilogue there —
+   so its whole batch is owed.)
 3. **Record the decision.** `[ConvergePushed]` on the story, naming the pushed
    sha, the rounds, the gate verdict and **the findings it was pushed with**.
    A run with an unapproved last round is still pushed — the operator has read
@@ -83,6 +116,17 @@ still cannot be resolved is **refused**, never assumed safe.
 Everything after the push is best-effort and degrades into a `note:` line (and
 into `notes` in `--json`): the commits are on the PR, and no later failure may
 be reported as a failure to push.
+
+**A failed push is read back before it is called one.** A nonzero `git push` is
+not proof that the server did not apply the update — it can accept it and the
+connection drop before the client sees the answer. So the ref is re-read and
+the three answers kept apart: at our tip (or at a third sha that *contains* it)
+→ the push **landed**, and the record, the replies and the finding are owed
+exactly as on a clean push, with a note saying the acknowledgement was lost;
+exactly where it was → a proven non-landing, exit 1 with nothing written;
+anything else, including a ref that cannot be read → **uncertain**, exit 2,
+naming what to reconcile. "Nothing was written" is the one thing that cannot be
+asserted there, so it never shares the refusal's exit code.
 
 ### Budget semantics
 
@@ -134,8 +178,17 @@ intake, before the first paid turn**, so a run killed at any point after it
 | `repo` | `owner/name` of the origin the PR lives on. |
 | `story_id` | The `--story` the run was dispatched with, when any. |
 
+The record also seeds the run's `handoff/` dir, because that — not the file —
+is what every run lookup recognises a run by (`develop list`, `converge-push`,
+`deliver`), and converge's own first paid phase seeds only the sibling
+`<run>-intake`'s. A run killed *during* the intake review is therefore found,
+not treated as nonexistent.
+
 The loop's own exit **merges** into the same file rather than overwriting it,
-so the block survives a finished run. External mode additionally writes
+so the block survives a finished run — and converge merges the whole-command
+spend in beside it (`total_cost_usd` = its intake / triage turn + the loop;
+`develop()` persists only the loop's `cost_usd`), since that is the figure the
+report puts in front of the push decision. External mode additionally writes
 `external.json` (the injected id→row map, triage's verdicts, the surviving ids)
 — what the thread replies are replayed from.
 
@@ -156,7 +209,7 @@ marker while the worktree tip is ahead of the recorded intake head.
 |---|---|
 | 0 | Reported, pushed, or already pushed. |
 | 1 | A refusal — nothing was written. |
-| 2 | Bad input: no such run, or a run this command does not own. |
+| 2 | Bad input (no such run, or a run this command does not own), **or** an uncertain push (above). |
 
 Host-only (`git` + `gh` credentials + Lithos); not part of the hermetic
 `make check`.

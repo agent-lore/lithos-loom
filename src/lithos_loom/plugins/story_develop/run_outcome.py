@@ -198,8 +198,16 @@ def record_converge_intake(
 
     Written before the first paid turn, so a run killed at any point after
     intake (SIGTERM, exit 143) is still resolvable — which is exactly the
-    run an operator most wants to salvage.
+    run an operator most wants to salvage. "Resolvable" needs the ``handoff/``
+    dir too, not just the file: :func:`is_run_dir` — which every lookup here,
+    in ``develop list`` and in ``develop deliver`` goes through — recognises a
+    run BY that dir, and converge's own first paid phase seeds only the
+    sibling ``<run>-intake``'s. So this seeds it (``develop()`` later adds to
+    it; nothing clears it), and a run killed during the intake review is found
+    rather than treated as nonexistent.
     """
+    with contextlib.suppress(OSError):
+        (run_dir / "handoff").mkdir(parents=True, exist_ok=True)
     write_state(
         run_dir,
         {
@@ -212,6 +220,27 @@ def record_converge_intake(
                 "repo": repo,
                 "story_id": story_id,
             }
+        },
+    )
+
+
+def record_converge_cost(
+    run_dir: Path, *, intake_cost_usd: float, total_cost_usd: float
+) -> None:
+    """Record what the WHOLE converge command spent, not just its loop.
+
+    ``develop()`` writes the loop's own ``cost_usd`` at its exit; converge's
+    pre-loop phase — the local-panel intake review, or external mode's triage
+    turn — is converge's own and lives only in its process. Merged in here so
+    the run dir carries the figure ``develop converge-push`` puts in front of
+    the operator's push decision; a run from before this records neither key
+    and the reader falls back to the loop-only figure.
+    """
+    write_state(
+        run_dir,
+        {
+            "intake_cost_usd": round(intake_cost_usd, 4),
+            "total_cost_usd": round(total_cost_usd, 4),
         },
     )
 

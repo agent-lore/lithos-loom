@@ -113,9 +113,14 @@ watcher reads that push as a **human** one, so the remediation budget re-arms.
 To make that possible, converge writes a `converge` block into the run dir's
 `state.json` **at intake, before the first paid turn** — `pr_url`, `pr_number`,
 `pr_head_branch` (the PR's head branch, *not* the run's own local branch),
-`intake_head_sha`, `base_sha`, `repo`, and the `--story` id when given — so a
-run killed after intake (SIGTERM, exit 143) is still resolvable. The loop's own
-exit merges into the same file rather than overwriting it. In `--from-github`
+`intake_head_sha`, `base_sha`, `repo`, and the `--story` id when given — and
+seeds the run's `handoff/` dir in the same step, since that is what every run
+lookup recognises a run by and the intake review seeds only `<run>-intake`'s.
+A run killed during intake (SIGTERM, exit 143) is therefore still resolvable.
+The loop's own exit merges into the same file rather than overwriting it, and
+converge merges the **whole-command** spend in beside the loop's own
+(`total_cost_usd` = the intake / triage turn + the loop; `develop()` records
+only `cost_usd`). In `--from-github`
 mode the run also records the injected batch (`external.json`: the id→row map,
 triage's verdicts, the surviving ids), which is what the replayed thread replies
 are composed from.

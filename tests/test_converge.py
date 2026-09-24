@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from lithos_loom.plugins.story_develop import converge as converge_mod
-from lithos_loom.plugins.story_develop import review_only
+from lithos_loom.plugins.story_develop import review_only, run_outcome
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.converge import converge_pr
 from lithos_loom.plugins.story_develop.develop import DevelopResult
@@ -1698,3 +1698,37 @@ def test_an_intake_panel_that_died_on_infra_is_infra_failed(
     assert "INFRA FAILURE during the intake review" in result.message
     assert result.to_json()["host_action"] == _HOST_ACTION
     assert "develop_ran" not in captured
+
+
+def test_the_run_dir_records_the_whole_commands_spend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """correctness/f-001: develop() persists the LOOP's spend; converge's own
+    intake / triage turn is held in memory. `develop converge-push` reads the
+    run dir, not this process, so the whole-command figure must land there —
+    it is the number the operator's push decision rests on."""
+    _install(monkeypatch, blocking=True, intake_cost=1.5)
+    config = _config(tmp_path)
+
+    result = converge_pr(config, _change())
+
+    state = run_outcome.read_state(config.run_dir) or {}
+    # 1.5 intake + 1.0 loop (0.6 coder + 0.4 review), as the in-memory verdict
+    assert state["total_cost_usd"] == pytest.approx(result.total_cost_usd)
+    assert state["total_cost_usd"] == pytest.approx(2.5)
+    assert state["intake_cost_usd"] == pytest.approx(1.5)
+
+
+def test_the_whole_command_spend_survives_an_unapproved_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # the exhausted run is the one `converge-push` exists for
+    captured = _install(monkeypatch, blocking=True, intake_cost=2.0)
+    captured["develop_status"] = "max_rounds"
+    config = _config(tmp_path)
+
+    result = converge_pr(config, _change())
+
+    assert result.status == "not_converged"
+    state = run_outcome.read_state(config.run_dir) or {}
+    assert state["total_cost_usd"] == pytest.approx(3.0)

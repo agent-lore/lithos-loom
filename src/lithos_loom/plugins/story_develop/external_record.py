@@ -1,19 +1,22 @@
 """What a ``converge --from-github`` run injected, kept on disk for later.
 
 An external-mode converge run answers each reviewer where they raised their
-finding — but only at the end of a run that *finished*. A run that stops
-exhausted (``max_rounds`` / ``stalled`` / ``disputed`` / ``cost_exceeded``)
-answers nobody: its rounds sit on a local branch, and the material they were
-about — which rows were injected, under which ids, and what triage had
-already refuted — lives only in the process that died.
+finding — but a run that stops exhausted (``max_rounds`` / ``stalled`` /
+``disputed`` / ``cost_exceeded``) can only answer *part* of the batch: it says
+what triage refuted and what the coder disputed, and it cannot assert a fix,
+because it pushed nothing. Its rounds sit on a local branch, and the material
+they were about — which rows were injected, under which ids, and what triage
+had already refuted — lives only in the process that died.
 
 ``develop converge-push`` is the operator's decision to keep those rounds, and
-it owes the reviewers the replies the run would have posted. So the intake is
-written here, beside the handoffs the epilogue already reads, the moment
-triage has settled and before the fix loop starts: the id→row map, triage's
-verdicts, and the generated paths the tree comparison must ignore. Everything
-else the epilogue needs (the acknowledgements, the worktree, the round count)
-is already durable.
+the push makes the rest of that batch answerable. So the intake is written
+here, beside the handoffs the epilogue already reads, the moment triage has
+settled and before the fix loop starts: the id→row map, triage's verdicts, and
+the generated paths the tree comparison must ignore. Everything else the
+epilogue needs (the acknowledgements, the worktree, the round count) is
+already durable. ``converge-push`` reads the batch twice — as the run left it
+and as the push makes it — and answers only the difference, so no thread is
+replied to twice.
 
 Best-effort on write — a converge run that cannot record this still converges
 and still answers its threads itself; only the salvage path loses the replies,

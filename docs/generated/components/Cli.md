@@ -12,6 +12,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
+| `lithos_loom.cli._converge_push_facts` | M | 5 | 5 |
 | `lithos_loom.cli._deliver_converge` | S | 1 | 3 |
 | `lithos_loom.cli._deliver_facts` | M | 2 | 9 |
 | `lithos_loom.cli._deliver_lithos` | L | 8 | 4 |
@@ -23,8 +24,8 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
-| `lithos_loom.cli.converge` | L | 0 | 2 |
-| `lithos_loom.cli.converge_push` | L | 4 | 8 |
+| `lithos_loom.cli.converge` | L | 0 | 3 |
+| `lithos_loom.cli.converge_push` | M | 0 | 5 |
 | `lithos_loom.cli.deliver` | L | 0 | 1 |
 | `lithos_loom.cli.develop` | XL | 4 | 6 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
@@ -36,6 +37,18 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli.task` | M | 1 | 1 |
 
 ## Public API
+
+### `lithos_loom.cli._converge_push_facts`
+- class `ConvergePushRefused` — A precondition failed; nothing was written.
+- class `NotAConvergeRun` — The key names a run that is not a converge run (or no run at all).
+- class `ConvergeRun` — What the run dir says about an exhausted converge run.
+- def `read_run` — Read *run_dir* into :class:`ConvergeRun`, refusing what cannot be pushed.
+- def `resolve_converge_run` — Resolve *key* — a converge run id, or a PR number (its newest run).
+- def `fetch_pull_request` — The PR as GitHub has it now (``None`` when it was deleted).
+- class `PrCheck` — Whether the recorded PR facts still describe reality.
+- def `verify_pr` — Re-read the PR before the verdict is printed — the pin every other write path in this system carries.
+- class `PushPlan` — What a push would do, decided against the PR's LIVE remote head.
+- def `plan_push` — Read the worktree tip + the PR's live head and decide the verdict.
 
 ### `lithos_loom.cli._deliver_converge`
 - class `ConvergeChain` — What ``--converge`` runs once the delivery has landed.
@@ -147,20 +160,14 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 ### `lithos_loom.cli.converge`
 - def `converge_command` — Converge an existing PR to review-green (panel + gate), then push.
+- def `reply_for` — The reply body owed for one disposition, or ``None`` for none.
 - def `post_external_replies` — Answer each external finding where it was raised, by its reply mode. Returns how many replies were posted.
 
 ### `lithos_loom.cli.converge_push`
-- class `ConvergePushRefused` — A precondition failed; nothing was written.
-- class `NotAConvergeRun` — The key names a run that is not a converge run (or no run at all).
-- class `ConvergeRun` — What the run dir says about an exhausted converge run.
-- def `read_run` — Read *run_dir* into :class:`ConvergeRun`, refusing what cannot be pushed.
-- def `resolve_converge_run` — Resolve *key* — a converge run id, or a PR number (its newest run).
-- class `PushPlan` — What a push would do, decided against the PR's LIVE remote head.
-- def `plan_push` — Read the worktree tip + the PR's live head and decide the verdict.
 - def `report` — The operator-facing report — every fact the decision rests on.
 - def `json_record` — The same facts as a stable object.
 - def `finding_summary` — ``[ConvergePushed]`` — what landed, and what it landed WITH.
-- def `replay_outcomes` — The dispositions this run's threads are owed, or ``()``.
+- def `replay_outcomes` — The threads this push newly owes an answer — never the ones the run already answered when it exited.
 - def `converge_push_command` — Report an exhausted converge run's unpushed rounds — and push them.
 
 ### `lithos_loom.cli.deliver`

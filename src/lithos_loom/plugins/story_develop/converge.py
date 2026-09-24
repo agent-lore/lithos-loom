@@ -36,7 +36,7 @@ import math
 from collections.abc import Callable
 
 from ...runner import git, worktree
-from . import review_only
+from . import review_only, run_outcome
 from .config import DevelopConfig
 from .conflict_resolve import (
     StaleTrigger,
@@ -633,6 +633,13 @@ def _loop_and_deliver(
         coder_timeout=coder_timeout,
         reviewer_timeout=reviewer_timeout,
         entry=entry,
+    )
+    # The whole command's spend, not just the loop's (`develop()` wrote that):
+    # what `develop converge-push` reports to the operator deciding on a push.
+    run_outcome.record_converge_cost(
+        config.run_dir,
+        intake_cost_usd=pre_loop_cost,
+        total_cost_usd=pre_loop_cost + result.total_cost_usd,
     )
     external_outcomes = (
         external_epilogue(result) if external_epilogue is not None else ()
