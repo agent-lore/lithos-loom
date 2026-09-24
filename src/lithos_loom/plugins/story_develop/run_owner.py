@@ -50,13 +50,25 @@ from ...runner.orphans import ProcessIdentity, process_identity
 #: The marker filename, in the run dir beside ``state.json`` / ``conversation.md``.
 OWNER_FILE = "owner.json"
 
-#: A marker is three small fields; anything larger is not one. Capped for the
+#: A marker is a few small fields; anything larger is not one. Capped for the
 #: same reason every other agent-adjacent read here is (``_MAX_HANDOFF_BYTES``).
 _MAX_MARKER_BYTES = 4096
 
+#: The marker field naming the run's largest agent-turn timeout, in seconds.
+TURN_TIMEOUT_KEY = "turn_timeout_seconds"
 
-def record_owner(run_dir: Path) -> None:
-    """Stamp *run_dir* with the identity of the process running this run.
+
+def record_owner(run_dir: Path, *, turn_timeout_seconds: int | None = None) -> None:
+    """Stamp *run_dir* with the identity of the process running this run —
+    and, when given, the run's **largest agent-turn timeout**.
+
+    The timeout is the other half of what prune needs (PR #428 round-5
+    correctness): its idle window is "longer than one agent turn", and a run
+    launched with ``--coder-timeout 7200`` can legitimately go 7200 s without
+    writing, so the window has to be THIS run's, read back by
+    :func:`read_turn_timeout`; the host default is only a floor. Recorded here,
+    with the owner, because this is the one stamp every producer makes before
+    any slow work.
 
     Idempotent (a re-stamp by the same process rewrites the same identity).
     Temp file + ``os.replace`` so a crash mid-write cannot leave a half-written
@@ -84,6 +96,8 @@ def record_owner(run_dir: Path) -> None:
         # window, which would delete this run while it is still fetching.
         else {"pid": os.getpid(), "unverifiable": True}
     )
+    if turn_timeout_seconds is not None and turn_timeout_seconds > 0:
+        payload[TURN_TIMEOUT_KEY] = int(turn_timeout_seconds)
     tmp = run_dir / f".{OWNER_FILE}.tmp.{secrets.token_hex(4)}"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -141,6 +155,30 @@ def read_owner(run_dir: Path) -> ProcessIdentity | None:
     if not isinstance(boot, str) or not boot:
         return None
     return ProcessIdentity(pid=pid, start_ticks=start, host_boot=boot)
+
+
+def read_turn_timeout(run_dir: Path) -> int | None:
+    """The run's recorded largest agent-turn timeout in seconds, or ``None``.
+
+    ``None`` covers "no marker", "a marker predating the field" and "a value
+    that is not a positive integer" — prune then falls back to the host
+    default. Read from the same bounded, symlink-refusing marker as
+    :func:`read_owner`, and independently of the identity's validity: a host
+    that could not identify its own process still recorded its timeout.
+    """
+    raw = _read_marker(run_dir)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get(TURN_TIMEOUT_KEY)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
 
 
 def _read_marker(run_dir: Path) -> bytes | None:

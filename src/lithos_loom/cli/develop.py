@@ -450,7 +450,11 @@ _NO_SIGNAL = "no signal"
 # second half of the rule, never a substitute for the first — a live run is
 # recognised by its containers or its owner marker (``story_develop.run_owner``)
 # — and it doubles as the grace window a just-stopped run gets, so a crash stays
-# on disk long enough to be looked at.
+# on disk long enough to be looked at. This is the FLOOR: a run records its own
+# largest agent-turn timeout with its owner marker (``--coder-timeout 7200`` is
+# a legal turn that writes nothing for two hours — PR #428 round-5
+# correctness), and :func:`_idle_window` takes the larger of the two; a run
+# that recorded a shorter one still gets the default grace window.
 _DEFAULT_IDLE_SECONDS = float(DEFAULT_CODER_TIMEOUT)
 
 # A converge run's intake pass runs under its own run id (``<run>-intake``, see
@@ -767,6 +771,14 @@ def _run_liveness(run_dir: Path) -> _Liveness:
     return _Liveness(_NO_SIGNAL, "")
 
 
+def _idle_window(run_dir: Path, *, floor: float) -> float:
+    """The idle window for *run_dir*: its own recorded largest agent-turn
+    timeout when it has one, never less than *floor* (the host default, which
+    is also the grace window every just-stopped run gets)."""
+    recorded = run_owner.read_turn_timeout(run_dir)
+    return max(floor, float(recorded)) if recorded is not None else floor
+
+
 def _prune_verdict(
     run_dir: Path,
     *,
@@ -778,7 +790,9 @@ def _prune_verdict(
 
     Finished is the run's epilogue (:func:`_has_terminal_log`), or **both**
     halves of the liveness rule: nothing is alive for it *and* nothing anywhere
-    under it has been written for longer than one agent turn. The second half
+    under it has been written for longer than one agent turn — the run's OWN
+    largest turn timeout, recorded with its owner marker, with *idle_seconds*
+    (the host default) as the floor (:func:`_idle_window`). The second half
     is not a proxy for the first — it is the grace window a just-stopped run
     gets, so a crash stays on disk long enough to be looked at (and long enough
     for the route-runner to finish reading its result). Neither half alone
@@ -834,6 +848,7 @@ def _prune_verdict(
             ),
         )
     written = _format_mtime(scan.newest_mtime)
+    idle_seconds = _idle_window(run_dir, floor=idle_seconds)
     if now - scan.newest_mtime <= idle_seconds:
         # Both halves of the rule must hold, so a run that stopped moments ago
         # is kept even once liveness has settled: that window is the operator's

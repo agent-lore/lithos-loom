@@ -169,3 +169,34 @@ def test_a_reused_pid_is_not_the_recorded_owner(tmp_path: Path) -> None:
     identity = run_owner.read_owner(tmp_path)
     assert identity is not None
     assert orphans.identity_alive(identity) is False
+
+
+def test_the_marker_carries_the_runs_largest_turn_timeout(tmp_path: Path) -> None:
+    """PR #428 round-5 correctness: prune's idle window must be THIS run's
+    largest agent-turn timeout, not the host default — so the run records it
+    with its owner, before any slow work. Absent (a marker predating the
+    field) reads as None, and an unusable value reads as None too, never as a
+    number prune would trust."""
+    run_owner.record_owner(tmp_path, turn_timeout_seconds=7200)
+    assert run_owner.read_turn_timeout(tmp_path) == 7200
+    assert run_owner.read_owner(tmp_path) is not None  # the identity is intact
+    run_owner.record_owner(tmp_path)
+    assert run_owner.read_turn_timeout(tmp_path) is None
+    for bad in (
+        '{"pid": 1, "turn_timeout_seconds": -5}',
+        '{"turn_timeout_seconds": true}',
+        '{"turn_timeout_seconds": "7200"}',
+        "{not json",
+    ):
+        (tmp_path / run_owner.OWNER_FILE).write_text(bad)
+        assert run_owner.read_turn_timeout(tmp_path) is None
+    assert run_owner.read_turn_timeout(tmp_path / "nowhere") is None
+
+
+def test_an_unidentifiable_host_still_records_the_turn_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run_owner, "process_identity", lambda pid: None)
+    run_owner.record_owner(tmp_path, turn_timeout_seconds=5400)
+    assert run_owner.read_owner(tmp_path) is None
+    assert run_owner.read_turn_timeout(tmp_path) == 5400

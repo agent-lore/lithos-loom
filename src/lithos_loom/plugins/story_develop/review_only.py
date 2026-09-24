@@ -204,7 +204,7 @@ def review_head(
     # Before the worktree checkout: the run dir must name its owner while it
     # still has no container, or `develop prune` cannot tell it from a corpse.
     config.run_dir.mkdir(parents=True, exist_ok=True)
-    run_owner.record_owner(config.run_dir)
+    run_owner.record_owner(config.run_dir, turn_timeout_seconds=reviewer_timeout)
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
     for spec in specs:
         config.reviewer_config_dir(spec.name).mkdir(parents=True, exist_ok=True)

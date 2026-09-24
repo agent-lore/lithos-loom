@@ -832,6 +832,45 @@ def test_prune_idle_window_boundary_is_one_agent_turn(
     assert not outside.exists()
 
 
+def _dead_owner(run_dir: Path, **extra: object) -> None:
+    (run_dir / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "start_ticks": 1,  # not this process's start time: positively gone
+                "host_boot": orphans.host_boot_id(),
+                **extra,
+            }
+        )
+    )
+
+
+def test_prune_idle_window_is_the_runs_own_largest_turn_timeout(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #428 round-5 correctness: a run launched with `--coder-timeout 7200`
+    can legitimately go 7200 s without writing, so the window prune waits out
+    is THAT run's largest turn timeout (recorded with its owner marker), and
+    the host default is only the floor — a run that recorded a SHORTER timeout
+    still gets the default grace window, so a crash stays inspectable."""
+    long_recent = _make_run(patched, task_id="t-1", run_id="lr", rounds={1: ["cq"]})
+    long_old = _make_run(patched, task_id="t-2", run_id="lo", rounds={1: ["cq"]})
+    short = _make_run(patched, task_id="t-3", run_id="sh", rounds={1: ["cq"]})
+    for run_dir in (long_recent, long_old):
+        _dead_owner(run_dir, turn_timeout_seconds=7200)
+    _dead_owner(short, turn_timeout_seconds=600)
+    _backdate(long_recent, 3601)  # past the default, inside its own window
+    _backdate(long_old, 7201)  # past its own window
+    _backdate(short, 3599)  # past its own 600 s, inside the default floor
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    assert long_recent.exists() and long_old.exists() and short.exists()
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert long_recent.exists()
+    assert not long_old.exists()
+    assert short.exists()
+
+
 def test_prune_keeps_run_whose_owner_marker_is_alive(
     patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

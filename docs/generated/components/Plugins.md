@@ -59,7 +59,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 17 |
-| `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 3 |
+| `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
@@ -453,9 +453,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `is_clean_success` — Whether the run reached the only success status (``approved``) **and** fully delivered.
 
 ### `lithos_loom.plugins.story_develop.run_owner`
-- def `record_owner` — Stamp *run_dir* with the identity of the process running this run.
+- def `record_owner` — Stamp *run_dir* with the identity of the process running this run — and, when given, the run's **largest agent-turn timeout**.
 - def `owner_recorded` — Whether *run_dir* carries an owner marker at all.
 - def `read_owner` — The recorded owner identity, or ``None`` when there is no usable one.
+- def `read_turn_timeout` — The run's recorded largest agent-turn timeout in seconds, or ``None``.
 
 ### `lithos_loom.plugins.story_develop.sandbox_facts`
 - class `ToolFact` — One probed tool.

@@ -242,7 +242,8 @@ def triage_external_findings(
     finding_ids = [f.finding_id for f in outcome.findings]
 
     config.run_dir.mkdir(parents=True, exist_ok=True)
-    run_owner.record_owner(config.run_dir)  # prune's liveness stamp
+    # prune's liveness stamp, with this run's one agent-turn timeout
+    run_owner.record_owner(config.run_dir, turn_timeout_seconds=timeout)
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     handoff.seed_handoff_dir(config.handoff_dir)

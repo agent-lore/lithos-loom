@@ -431,7 +431,9 @@ def develop(
     # it cannot stamp — a run dir prune can only guess about is worse than a
     # run that never started, and __main__ turns the raise into a failed result.
     config.run_dir.mkdir(parents=True, exist_ok=True)
-    run_owner.record_owner(config.run_dir)
+    run_owner.record_owner(
+        config.run_dir, turn_timeout_seconds=max(coder_timeout, reviewer_timeout)
+    )
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     for spec in specs:
         config.reviewer_config_dir(spec.name).mkdir(parents=True, exist_ok=True)
