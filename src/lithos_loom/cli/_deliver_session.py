@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from lithos_loom.cli._deliver_lithos import (
@@ -30,6 +31,8 @@ from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import LithosClient
 
 __all__ = [
+    "Claim",
+    "DispatchHold",
     "claim_story",
     "post_finding",
     "read_story_sync",
@@ -103,14 +106,16 @@ async def _post_coro(
             )
 
 
-async def _claim_coro(url: str, agent: str, story_id: str, aspect: str) -> bool:
+async def _claim_coro(
+    url: str, agent: str, story_id: str, aspect: str, ttl_minutes: int
+) -> bool:
     async with LithosClient(url, agent_id=agent) as client:
         try:
             await client.task_claim(
                 task_id=story_id,
                 aspect=aspect,
                 agent=agent,
-                ttl_minutes=DELIVER_CLAIM_TTL_MINUTES,
+                ttl_minutes=ttl_minutes,
             )
         except LithosClientError as exc:
             if exc.code == "claim_failed":
@@ -195,16 +200,23 @@ def post_finding(
 
 
 def claim_story(
-    url: str, agent: str, story_id: str, *, aspect: str = DELIVER_ASPECT
+    url: str,
+    agent: str,
+    story_id: str,
+    *,
+    aspect: str = DELIVER_ASPECT,
+    ttl_minutes: int = DELIVER_CLAIM_TTL_MINUTES,
 ) -> bool:
     """Claim *aspect* of the story; ``False`` when another agent holds it.
 
     Two aspects are claimed by this command: its own ``deliver`` lease (two
     deliveries of one story must not interleave), and — under the dispatch
     hold's own identity — each configured route, so no dispatch can start
-    while the delivery runs (:class:`~lithos_loom.cli.deliver._DispatchHold`).
+    while the delivery runs (:class:`DispatchHold`). *ttl_minutes* is the
+    lease's length: the short default, or the chain's long one
+    (:data:`~lithos_loom.cli._deliver_lithos.DELIVER_CHAIN_CLAIM_TTL_MINUTES`).
     """
-    return run_lithos(_claim_coro(url, agent, story_id, aspect))
+    return run_lithos(_claim_coro(url, agent, story_id, aspect, ttl_minutes))
 
 
 def renew_story(url: str, agent: str, story_id: str) -> bool:
@@ -231,3 +243,90 @@ def release_story(
     story behind the ``pr`` gate this delivery just raised."""
     with contextlib.suppress(DeliverRefused):
         run_lithos(_release_coro(url, agent, story_id, aspect))
+
+
+# ── the two exclusions a delivery holds ────────────────────────────────
+
+
+@dataclass
+class DispatchHold:
+    """The story's route claims, held for the length of one delivery.
+
+    The exclusion against a **dispatch**, as opposed to :class:`Claim`'s
+    exclusion against another delivery. Every configured dispatch route is
+    claimed before the push and released after the gate work, so a daemon
+    that boots (or bootstraps this story) mid-delivery cannot take the story
+    into a fresh run behind our back: the route-runner claims the same aspect
+    before it dispatches, finds it held by another agent, logs the lost race
+    and defers. The identity is :func:`dispatch_hold_agent`'s, not the host's
+    — a claim only excludes another *agent*.
+
+    Taken route by route and released the same way, so a refusal leaves
+    nothing behind (the caller releases in its ``finally``).
+    """
+
+    url: str
+    agent: str
+    story_id: str
+    routes: Sequence[str]
+    ttl_minutes: int = DELIVER_CLAIM_TTL_MINUTES
+    held: list[str] = field(default_factory=list)
+
+    def take(self) -> str | None:
+        """Claim every route. Returns the first route already held by someone
+        else (nothing was written), or ``None`` when the story is ours."""
+        for route in self.routes:
+            if not claim_story(
+                self.url,
+                self.agent,
+                self.story_id,
+                aspect=route,
+                ttl_minutes=self.ttl_minutes,
+            ):
+                return route
+            self.held.append(route)
+        return None
+
+    def release(self) -> None:
+        for route in self.held:
+            release_story(self.url, self.agent, self.story_id, aspect=route)
+        self.held.clear()
+
+
+@dataclass
+class Claim:
+    """The story's ``deliver`` lease for the length of one delivery.
+
+    Exclusivity is only ever *asserted* while the lease is provably ours, so
+    the handle remembers whether a renewal failed: a lease that would not renew
+    may already belong to another delivery, and then this process must neither
+    mutate gate state (:func:`_deliver_claimed` skips it) nor **release** —
+    releasing would hand the other holder's own claim away, since deliveries on
+    one host share the configured agent id.
+    """
+
+    url: str
+    agent: str
+    story_id: str
+    ttl_minutes: int = DELIVER_CLAIM_TTL_MINUTES
+    held: bool = False
+    lost: bool = False
+
+    def take(self) -> bool:
+        self.held = claim_story(
+            self.url, self.agent, self.story_id, ttl_minutes=self.ttl_minutes
+        )
+        return self.held
+
+    def renew(self) -> bool:
+        if not self.held:
+            return False
+        if renew_story(self.url, self.agent, self.story_id):
+            return True
+        # Not ours to release either: another delivery may hold it now.
+        self.lost = True
+        return False
+
+    def release(self) -> None:
+        if self.held and not self.lost:
+            release_story(self.url, self.agent, self.story_id)

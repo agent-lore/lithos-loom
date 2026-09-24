@@ -43,23 +43,28 @@ files via :func:`story_develop.handoff.conversation_log`.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
-from dataclasses import asdict, dataclass
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import typer
 
+from lithos_loom.cli._deliver_lithos import DELIVERY_MARKER_KEY
 from lithos_loom.config import load_config
-from lithos_loom.errors import LithosLoomError
+from lithos_loom.errors import LithosClientError, LithosLoomError
+from lithos_loom.gates import GATE_TYPE_PR, STORY_GATE_ID_KEY
+from lithos_loom.lithos_client import LithosClient
 from lithos_loom.plugins.story_develop import engines, handoff, run_outcome, run_owner
 from lithos_loom.plugins.story_develop.config import DEFAULT_CODER_TIMEOUT
 from lithos_loom.plugins.story_develop.idempotency import lookup_completed
@@ -67,6 +72,8 @@ from lithos_loom.plugins.story_develop.publish_text import CONTROL_CHARS_RE
 from lithos_loom.plugins.story_develop.run_outcome import is_run_dir, resolve_run_dir
 from lithos_loom.runner.orphans import PID_LABEL, identity_alive, pid_alive
 from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_exit
+
+logger = logging.getLogger(__name__)
 
 develop_app = typer.Typer(
     name="develop",
@@ -185,6 +192,11 @@ class RunInfo:
     round: int  # highest round with any handoff (0 = no handoff yet)
     reviewers: tuple[str, ...]
     run_dir: str
+    # The PR this run's branch is behind — its own delivery (#188) or a hand
+    # one (`develop deliver`); "" while the run has none. A stopped run whose
+    # branch has since been delivered is a different thing from one still
+    # waiting on its gate, and only this tells them apart.
+    pr: str = ""
 
 
 def _latest_mtime(run_dir: Path) -> float:
@@ -274,6 +286,7 @@ def _run_info(run_dir: Path) -> RunInfo:
         round=round_no,
         reviewers=reviewers,
         run_dir=str(run_dir),
+        pr=run_outcome.run_pr_url(run_dir) or "",
     )
 
 
@@ -434,6 +447,202 @@ def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
         time.sleep(_ATTACH_POLL_SECONDS)
 
 
+# ── the authoritative delivery record: the story's own `pr` gate ───────
+
+
+@dataclass(frozen=True)
+class GateDelivery:
+    """A story's delivered PR, as its own state records it.
+
+    *run_id* is which run's branch that PR carries — the story's
+    ``manual_delivery`` marker, when it names this very PR. ``""`` when the
+    story does not say (the `pr` gate itself records none): the delivery is
+    real but unattributed, and the caller must not guess.
+    """
+
+    pr_url: str
+    run_id: str = ""
+
+
+def gate_delivered_prs(cfg: Any, task_ids: Sequence[str]) -> dict[str, GateDelivery]:
+    """``{task_id: GateDelivery}`` from each story's OPEN ``pr`` gate
+    (best-effort).
+
+    The run dir's own markers are the fast path, but they are not the record:
+    a hand delivery made before the marker existed has none, and the marker
+    write is deliberately best-effort (a full disk costs a column, never the
+    delivery). The **gate** is what actually says a story's work is a
+    monitored PR — it is the thing that withholds the story — so it is the
+    fallback both `list` and `prune` fall back to, exactly as the acceptance
+    asks (`pr_gate_id` → that gate's `pr_url`).
+
+    Four guards, all in the conservative direction:
+
+    * the gate must still be **open**. ``pr_gate_id`` is provenance and
+      outlives the gate it names, so a story whose PR closed unmerged, was
+      re-escalated and re-developed would otherwise have its live run read as
+      delivered — and `prune` DELETES on that answer.
+    * it must really be a ``pr`` gate.
+    * the answer is about a **story**, and a story can have several retained
+      runs. The gate names no run, so the ``manual_delivery`` marker is read
+      beside it and its ``run_id`` travels — but only when the marker is about
+      THIS PR (a re-delivered story's marker names the current one). What to
+      do with an unattributed delivery is :func:`delivered_runs`' decision.
+    * any failure — unreachable Lithos, a missing task, a transport error —
+      yields nothing at all. `list` then shows what the run dir knows and
+      `prune` keeps the run: neither command may depend on a server being up
+      to avoid deleting live work.
+    """
+    orchestrator = getattr(cfg, "orchestrator", None)
+    url = getattr(orchestrator, "lithos_url", "") or ""
+    agent = getattr(orchestrator, "agent_id", "") or ""
+    if not url or not task_ids:
+        return {}
+
+    async def _read() -> dict[str, GateDelivery]:
+        found: dict[str, GateDelivery] = {}
+        async with LithosClient(url, agent_id=agent) as client:
+            for task_id in task_ids:
+                story = await client.task_get(task_id=task_id)
+                story_meta = getattr(story, "metadata", None) or {}
+                gate_id = story_meta.get(STORY_GATE_ID_KEY)
+                if not isinstance(gate_id, str) or not gate_id:
+                    continue
+                gate = await client.task_get(task_id=gate_id)
+                meta = getattr(gate, "metadata", None) or {}
+                if getattr(gate, "status", None) != "open":
+                    continue
+                if meta.get("gate_type") != GATE_TYPE_PR:
+                    continue
+                pr_url = meta.get("pr_url")
+                if not isinstance(pr_url, str) or not pr_url:
+                    continue
+                found[task_id] = GateDelivery(
+                    pr_url=pr_url, run_id=_marked_run(story_meta, pr_url)
+                )
+        return found
+
+    try:
+        return asyncio.run(_read())
+    except (LithosClientError, OSError, ExceptionGroup) as exc:
+        # `LithosClient.__aenter__` surfaces a connect failure as a plain
+        # OSError, or as an ExceptionGroup wrapping one inside a task group
+        # (the `gates` command's rationale). ExceptionGroup, not
+        # BaseExceptionGroup, so KeyboardInterrupt / SystemExit propagate.
+        logger.debug("develop: could not read delivery gates from Lithos: %s", exc)
+        return {}
+
+
+def _marked_run(story_meta: Mapping[str, Any], pr_url: str) -> str:
+    """The run the story's ``manual_delivery`` marker says is behind *pr_url*.
+
+    ``""`` when there is no marker, when it is about a different PR, or when
+    its ``run_id`` is missing — every one of which means "the story does not
+    attribute this PR to a run", not "attribute it to whatever is left".
+    """
+    marker = story_meta.get(DELIVERY_MARKER_KEY)
+    if not isinstance(marker, Mapping) or marker.get("pr_url") != pr_url:
+        return ""
+    run_id = marker.get("run_id")
+    return run_id if isinstance(run_id, str) else ""
+
+
+def delivered_runs(
+    cfg: Any, runs: Sequence[tuple[str, str, str]]
+) -> dict[tuple[str, str], str]:
+    """``{(task_id, run_id): pr_url}`` for the runs a story's open ``pr`` gate
+    can be attributed to.
+
+    *runs* is ``(task_id, run_id, local_pr_url)`` for **every** run on disk —
+    not only the ones missing a PR. A story's delivery is a fact about ONE
+    run's branch, and a task can retain several runs: attributing it to all of
+    them would show an older run behind a PR it never produced and — worse —
+    let `prune` delete that older run because a *different* run of the task
+    was delivered. Two facts decide, in order:
+
+    * the story's ``manual_delivery`` marker, when it names a run for this PR;
+    * otherwise the runs' OWN records. A sibling that already records this
+      exact PR locally **is** the delivery — the gate is accounted for, and
+      nothing unresolved may claim it as well. (Without this the sole
+      remaining candidate is not "the only run it could be" but "the only run
+      we happened to ask about": a daemon-delivered run whose `result.json`
+      survived a failed reap answers for itself, and the hard-killed sibling
+      beside it would inherit its PR and be pruned for it.)
+
+    Only when neither says anything is the delivery applied to a candidate,
+    and then only if exactly one unresolved run could be its subject.
+    """
+    needs_lookup = sorted({task for task, _, pr in runs if not pr})
+    gated = gate_delivered_prs(cfg, needs_lookup)
+    if not gated:
+        return {}
+    candidates: dict[str, list[str]] = {}
+    claimed: dict[str, set[str]] = {}
+    for task_id, run_id, local_pr in runs:
+        if local_pr:
+            claimed.setdefault(task_id, set()).add(local_pr)
+        else:
+            candidates.setdefault(task_id, []).append(run_id)
+    attributed: dict[tuple[str, str], str] = {}
+    for task_id, delivery in gated.items():
+        unresolved = candidates.get(task_id, [])
+        if delivery.run_id:
+            if delivery.run_id in unresolved:
+                attributed[(task_id, delivery.run_id)] = delivery.pr_url
+        elif delivery.pr_url in claimed.get(task_id, set()):
+            continue  # a sibling records this PR: the gate is already placed
+        elif len(unresolved) == 1:
+            attributed[(task_id, unresolved[0])] = delivery.pr_url
+    return attributed
+
+
+def _with_delivery(cfg: Any, infos: Sequence[RunInfo]) -> list[RunInfo]:
+    """*infos* with the ``pr`` column filled in for every run the run dir
+    could not answer for — one Lithos session, only for the stories that need
+    it (a run whose own delivery record is on disk costs nothing)."""
+    attributed = delivered_runs(cfg, [(i.task_id, i.run_id, i.pr) for i in infos])
+    if not attributed:
+        return list(infos)
+    return [
+        i if i.pr else replace(i, pr=attributed.get((i.task_id, i.run_id), ""))
+        for i in infos
+    ]
+
+
+def _delivered_pr(
+    run_dir: Path, delivered: Mapping[tuple[str, str], str] | None = None
+) -> str:
+    """The PR this run's branch is delivered behind — ``""`` when it is not.
+
+    A delivery is a finished lifecycle by construction — ``develop deliver``
+    refuses a run a live dispatch still claims, and the runner's readiness
+    check defers a story behind an OPEN ``pr`` gate, so nothing is developing
+    it — and it is what makes a run killed before its ``conversation.md``
+    prunable once its work is a monitored PR, whatever the liveness rule
+    would say. Read from the run dir first (the daemon's own delivery record,
+    or a hand delivery that FINISHED — PR #427 review, Medium 2: the marker
+    records the PR the moment it exists, for ``list``, and its completion bit
+    only when the gate swap and the provenance landed; a partial delivery's
+    exit-2 text tells the operator to re-run the command on this very run
+    dir, so the dir must outlive the partial) and, for what the run dir
+    cannot answer, from the story's own gate (*delivered*, keyed by
+    ``(task_id, run_id)`` — see :func:`delivered_runs`, which attributes a
+    story's delivery to the ONE run that produced it and yields nothing at
+    all when Lithos cannot be reached, so neither a sibling run nor an outage
+    can make this one deletable).
+    """
+    return (
+        run_outcome.delivered_pr_url(run_dir, None)
+        or (
+            run_outcome.manual_delivery_pr(run_dir)
+            if run_outcome.manual_delivery_complete(run_dir)
+            else None
+        )
+        or (delivered or {}).get((run_dir.parent.name, run_dir.name))
+        or ""
+    )
+
+
 # ── prune: finished = nothing is alive for this run ────────────────────
 
 _FINISHED = "finished"
@@ -462,6 +671,9 @@ _DEFAULT_IDLE_SECONDS = float(DEFAULT_CODER_TIMEOUT)
 # conversation.md, so the terminal-log rule alone would keep its worktree
 # forever. It is finished with its parent run.
 _INTAKE_SUFFIX = "-intake"
+# The on-demand work-dir subtrees (`develop converge` / `review` / `merge-gate`
+# runs): their parent dir is not a story id, so they take no gate attribution.
+_ON_DEMAND_DIRS = frozenset({"converge", "review", "merge-gate"})
 
 # What ``prune`` recognises as a run dir — deliberately wider than
 # :func:`~story_develop.run_outcome.is_run_dir` (which the observability
@@ -785,6 +997,7 @@ def _prune_verdict(
     scans: dict[Path, _TreeScan],
     idle_seconds: float,
     now: float,
+    delivered: Mapping[tuple[str, str], str] | None = None,
 ) -> PruneVerdict:
     """Classify *run_dir* for ``prune``: finished, in flight, or unclassifiable.
 
@@ -816,6 +1029,10 @@ def _prune_verdict(
         return PruneVerdict(_IN_FLIGHT, live.reason)
     if _has_terminal_log(run_dir):
         return PruneVerdict(_FINISHED, "terminal log written")
+    if pr := _delivered_pr(run_dir, delivered):
+        # A delivered branch is a finished lifecycle whatever the tree's age
+        # says (:func:`_delivered_pr`); only a live container above outranks it.
+        return PruneVerdict(_FINISHED, f"delivered as {pr}")
     if run_dir.name.endswith(_INTAKE_SUFFIX):
         parent = run_dir.parent / run_dir.name[: -len(_INTAKE_SUFFIX)]
         if not parent.is_symlink() and _looks_like_a_run_dir(parent):
@@ -823,7 +1040,11 @@ def _prune_verdict(
             # (and, while the parent lives, held with it — its own worktree is
             # the parent run's intake export).
             verdict = _prune_verdict(
-                parent, scans=scans, idle_seconds=idle_seconds, now=now
+                parent,
+                scans=scans,
+                idle_seconds=idle_seconds,
+                now=now,
+                delivered=delivered,
             )
             prefix = f"intake pass of run {parent.name}"
             if verdict.state == _FINISHED:
@@ -1068,14 +1289,17 @@ def develop_list(
 ) -> None:
     """List inspectable story-develop runs (in-flight + failed/interrupted).
 
-    Succeeded runs are reaped by the route-runner, so they won't appear.
+    Succeeded runs are reaped by the route-runner, so they won't appear. The
+    ``pr`` column names the PR a run's branch is behind — its own delivery, or
+    a hand one (``develop deliver``) — so a stopped run whose work is already
+    on the maintained path is distinguishable from one still waiting.
     """
     try:
         cfg = load_config(config)
     except LithosLoomError as exc:
         _fail(str(exc))
     work_dir = cfg.orchestrator.work_dir
-    infos = [_run_info(d) for d in _iter_run_dirs(work_dir)]
+    infos = _with_delivery(cfg, [_run_info(d) for d in _iter_run_dirs(work_dir)])
 
     if output_format == _FORMAT_JSON:
         typer.echo(
@@ -1104,24 +1328,33 @@ def develop_list(
         )
         return
     rows = [
-        (
-            i.run_id,
-            i.task_id,
-            (i.title[:40] + "…") if len(i.title) > 41 else i.title,
-            f"r{i.round}",
-            _agent_state(i),
-            _format_mtime(_latest_mtime(Path(i.run_dir))),
+        tuple(
+            _cell(value)
+            for value in (
+                i.run_id,
+                i.task_id,
+                (i.title[:40] + "…") if len(i.title) > 41 else i.title,
+                f"r{i.round}",
+                _agent_state(i),
+                _format_mtime(_latest_mtime(Path(i.run_dir))),
+                # the delivered PR, or `—` for a run still waiting on its gate
+                # — the one column that says whether a stopped run's work is on
+                # the maintained path or still only on a branch
+                i.pr or _UNKNOWN,
+            )
         )
         for i in infos
     ]
-    headers = ("run", "task", "title", "round", "active", "updated")
+    headers = ("run", "task", "title", "round", "active", "updated", "pr")
+    # Widths off the SHAPED cells: measuring the raw text would let an escape
+    # run that renders as nothing still pad every other row (security/f-001).
     widths = [
         max(len(h), max((len(r[c]) for r in rows), default=0))
         for c, h in enumerate(headers)
     ]
     typer.echo("  ".join(h.ljust(widths[c]) for c, h in enumerate(headers)))
     for row in rows:
-        typer.echo("  ".join(str(v).ljust(widths[c]) for c, v in enumerate(row)))
+        typer.echo("  ".join(v.ljust(widths[c]) for c, v in enumerate(row)))
 
 
 @develop_app.command("prune")
@@ -1145,8 +1378,11 @@ def develop_prune(
     liveness rule hold: nothing is alive for it — no running agent container,
     and the process it stamped into its run dir at start provably gone — *and*
     nothing anywhere under it written for longer than one agent turn (the grace
-    window a just-stopped run gets). A converge ``-intake`` pass, which never
-    writes an epilogue, is finished with its parent run; a ``merge-gate``
+    window a just-stopped run gets) — **or** once its branch is delivered as a
+    PR (the daemon's own delivery, a ``develop deliver`` that finished, or the
+    story's ``pr`` gate attributing the delivery to this run). A converge
+    ``-intake`` pass, which never writes an epilogue, is finished with its
+    parent run; a ``merge-gate``
     worktree, which has no handoff dir either, is judged by the same rule. Every
     in-flight run — including one still in its startup window — is left
     untouched, and so is any dir the rule cannot classify (docker unavailable,
@@ -1177,11 +1413,26 @@ def develop_prune(
         run_dir: _scan_tree(run_dir, now=now)
         for run_dir in _iter_prunable_dirs(work_dir)
     }
+    # The story-gate attribution, read ONCE for every story run on disk (the
+    # on-demand `converge` / `review` / `merge-gate` dirs have no story, and a
+    # pseudo task id in the batch would fail the whole best-effort read).
+    delivered = delivered_runs(
+        cfg,
+        [
+            (run_dir.parent.name, run_dir.name, run_outcome.run_pr_url(run_dir) or "")
+            for run_dir in scans
+            if run_dir.parent.name not in _ON_DEMAND_DIRS
+        ],
+    )
     verdicts = [
         (
             run_dir,
             _prune_verdict(
-                run_dir, scans=scans, idle_seconds=_DEFAULT_IDLE_SECONDS, now=now
+                run_dir,
+                scans=scans,
+                idle_seconds=_DEFAULT_IDLE_SECONDS,
+                now=now,
+                delivered=delivered,
             ),
         )
         for run_dir in sorted(scans, key=lambda d: scans[d].newest_mtime, reverse=True)
@@ -1549,6 +1800,23 @@ def _sanitize(text: str) -> str:
     clear the screen, or set the window title. Plain text is unaffected.
     """
     return CONTROL_CHARS_RE.sub("", text)
+
+
+def _cell(value: str) -> str:
+    """One table cell, shaped so it can only render as the text it carries.
+
+    `develop list` is the screen an operator decides on — since the `pr`
+    column it is the "delivered vs still waiting" inventory — and the `title`
+    cell is a mirrored story's **GitHub issue title**, i.e. anyone's to write.
+    The whole row is emitted as ONE echo, so a bare `\r` rewrites it from
+    column 0 and an embedded LF starts a forged row: :func:`_sanitize` removes
+    the escape class every publication boundary strips (see the comment above
+    `_MAX_HANDOFF_BYTES`), and folding the remaining whitespace — LF and TAB
+    survive that class by design — keeps a cell to the single visual line the
+    table lays out (security/f-001; the `--format json` path is escape-safe
+    via `json.dumps`).
+    """
+    return " ".join(_sanitize(str(value)).split()) or ""
 
 
 def _read_handoff(path: Path) -> str:

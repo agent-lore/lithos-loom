@@ -3,9 +3,11 @@
 The fourth piece of the command (beside :mod:`cli._deliver_facts`,
 :mod:`cli._deliver_repo` and :mod:`cli._deliver_lithos`): the ``--dry-run``
 plan, the end-of-run render, and the ``[ManualDelivery]`` summary posted on the
-story. All three are pure functions of the facts and the record, so what the
+story. The first three are pure functions of the facts and the record, so what the
 operator is told has tests of its own and the command module stays the five
-steps and their flags.
+steps and their flags; :func:`file_record` is the fourth surface — the
+``--json`` record the operator scripts against, whose absence is itself
+reported as a partial result.
 
 One rule runs through them: **say what was actually done**. A gate attempt that
 failed is not a hand-off the operator chose; a gate kept open says whose it is;
@@ -18,6 +20,7 @@ reaches the terminal.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -25,6 +28,7 @@ from typing import Any
 
 import typer
 
+from lithos_loom.cli._deliver_converge import ConvergeChain
 from lithos_loom.cli._deliver_facts import (
     RunFacts,
     approval_unbound,
@@ -39,13 +43,18 @@ from lithos_loom.cli._deliver_repo import (
     PUSH_UP_TO_DATE,
     PRPlan,
     RemoteState,
+    pr_plan,
+    remote_state,
 )
 from lithos_loom.plugins.story_develop import run_outcome
 
 __all__ = [
     "MANUAL_DELIVERY",
     "delivery_finding",
+    "converge_lines",
     "echo_plan",
+    "file_record",
+    "preview",
     "quoted_block",
     "render",
 ]
@@ -208,6 +217,25 @@ def quoted_block(
     return out
 
 
+def converge_lines(chain: ConvergeChain, *, pr: str, verb: str) -> list[str]:
+    """``<verb> <pr> under <source>`` plus **the criteria themselves**.
+
+    A chained converge spends money and pushes commits against this text, and
+    for a mirrored story it is the GitHub issue body — anyone's to write, and
+    re-synchronised by the mirror after an operator's own edit. Naming only
+    the *source* ("under the story's description") would have the operator
+    approve a hand-off they have never read, under a UI that tells them they
+    are re-reviewing under the acceptance THEY revised. So the head of the
+    text travels with the headline, bounded and shaped like every other quote
+    on this screen (security/f-004) — including an ``--ac-file``'s, since the
+    chain carries ONE snapshot whatever the source, so the text shown here is
+    the text ``--ac`` hands converge rather than a second read of a path.
+    """
+    lines = [f"{verb} {pr} under {chain.ac_source}"]
+    lines.extend(f"{_BLOCK_MARKER}{line}" for line in quoted_block(chain.acceptance))
+    return lines
+
+
 def echo_plan(
     *,
     facts: RunFacts,
@@ -219,6 +247,7 @@ def echo_plan(
     title: str,
     no_gate: bool,
     retirement: GateRetirement,
+    converge: Sequence[str] = (),
 ) -> None:
     push_words = {
         PUSH_CREATE: f"create origin/{facts.branch} at {state.local_sha[:12]}",
@@ -325,6 +354,81 @@ def echo_plan(
         for described in retirement.retained:
             echo(f"          leaving {described} open")
     echo(f"  5 post: {MANUAL_DELIVERY} on {story.story_id}")
+    if converge:
+        # `echo` strips and shapes: after the loom-authored headline these are
+        # the story's own text, which for a mirrored story is an outside
+        # issue body
+        # runs BETWEEN steps 2 and 3 — before the pr gate exists, so nothing
+        # the watcher dispatches can see the PR while it works
+        echo(f"  2c converge (before step 3): {converge[0]}")
+        for line in converge[1:]:
+            echo(f"              {line}")
+
+
+def preview(
+    *,
+    facts: RunFacts,
+    story: StoryState,
+    repo: Path,
+    repo_name: str,
+    base: str | None,
+    title: str,
+    no_gate: bool,
+    routes: Sequence[str],
+    converge: ConvergeChain | None,
+) -> None:
+    """The ``--dry-run`` screen: every fact RESOLVED, and nothing written.
+
+    The base and the adopt / open / refuse decision come from the SAME reads
+    step 2 makes (:func:`pr_plan`), so the screen the operator approves is the
+    decision the delivery takes — not a placeholder base and a generic "adopt
+    or open". The plan is skipped only when the push above is refused, which
+    is where the real invocation stops too: a decision it would never reach is
+    not a fact about this delivery.
+    """
+    state = remote_state(repo, facts.branch)
+    plan = (
+        None
+        if state.action == PUSH_DIVERGED
+        else pr_plan(
+            repo,
+            branch=facts.branch,
+            repo_name=repo_name,
+            base=base,
+            head_sha=state.local_sha,
+            # the preview runs BEFORE the push, and a PR's head is whatever
+            # origin/<branch> points at: a fast-forward carries an open PR at
+            # the current remote sha to the delivered one, so the plan reads
+            # it as the adoption the real step 2 makes
+            moves_to_ours=(
+                state.remote_sha if state.action == PUSH_FAST_FORWARD else ""
+            ),
+        )
+    )
+    # the PR number only when the plan already knows it (an adoption); a PR
+    # this run would OPEN has none yet, and inventing one would be the guess
+    # the whole plan exists to avoid
+    pr_label = (
+        f"#{plan.existing.number}"
+        if plan is not None and plan.existing is not None
+        else "the PR opened above"
+    )
+    echo_plan(
+        facts=facts,
+        story=story,
+        repo=repo,
+        repo_name=repo_name,
+        plan=plan,
+        state=state,
+        title=title,
+        no_gate=no_gate,
+        retirement=story.retirement(run_id=facts.run_id, dispatch_routes=routes),
+        converge=(
+            ()
+            if converge is None
+            else converge_lines(converge, pr=pr_label, verb="would converge")
+        ),
+    )
 
 
 def render(record: Mapping[str, Any]) -> list[str]:
@@ -378,6 +482,13 @@ def render(record: Mapping[str, Any]) -> list[str]:
             f"  left needs-human gate {described} open — a different "
             "escalation, not this delivery's to retire"
         )
+    converge = record.get("converge")
+    if converge is not None:
+        lines.append(
+            f"  converge: CRASHED — {converge['error']}"
+            if converge.get("error")
+            else f"  converge: exit {converge['exit_code']}"
+        )
     if not record["changed"]:
         lines.append("  nothing changed — this branch was already delivered")
     for note in record["notes"]:
@@ -387,3 +498,28 @@ def render(record: Mapping[str, Any]) -> list[str]:
         lines.append(f"  [Friction] {shaped[0] if shaped else ''}")
         lines.extend(f"    {_BLOCK_MARKER}{line}" for line in shaped[1:])
     return lines
+
+
+def file_record(
+    json_out: Path | None, record: dict[str, Any], notes: list[str]
+) -> None:
+    """Write the ``--json`` record, if one was asked for.
+
+    A record the operator asked for and did not get is a partial result, not a
+    footnote: the delivery stands, but the output they will script against is
+    missing, so it lowers ``complete`` (exit 2) as well as leaving a note.
+    """
+    if json_out is None:
+        return
+    try:
+        _write_json(json_out, record)
+    except OSError as exc:
+        notes.append(f"could not write the JSON record to {json_out} ({exc})")
+        record["complete"] = False
+
+
+def _write_json(json_out: Path | None, record: Mapping[str, Any]) -> None:
+    if json_out is None:
+        return
+    json_out.parent.mkdir(parents=True, exist_ok=True)
+    json_out.write_text(json.dumps(dict(record), indent=2), encoding="utf-8")

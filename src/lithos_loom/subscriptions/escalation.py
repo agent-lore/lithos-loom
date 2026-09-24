@@ -12,7 +12,8 @@ exit end to end:
    failed-attempt marker naming the gate (which then abstains — see
    :mod:`.dispatch_guards`);
 3. a ``[NeedsHuman]`` finding on the story: reason, summary, the run facts
-   every August rescue needed by hand, the gate id, and the two actions;
+   every August rescue needed by hand, the gate id, the two actions — and the
+   third (``develop deliver <run>``) when the run left a branch to keep;
 4. the push sinks (:mod:`lithos_loom.notifications`), best-effort;
 5. release the claim.
 
@@ -36,6 +37,8 @@ from lithos_loom.gates import (
     ESCALATION_REASONS,
     STORY_HUMAN_GATE_ID_KEY,
     create_human_gate_best_effort,
+    deliver_action,
+    deliver_command_line,
 )
 from lithos_loom.notifications import (
     REDISPATCH_ACTIONS,
@@ -188,9 +191,15 @@ def _needs_human_summary(
     run_id: str | None,
     gate_id: str,
     actions: str = REDISPATCH_ACTIONS,
+    deliver_action_text: str | None = None,
 ) -> str:
     """The ``[NeedsHuman]`` finding: reason, summary, the run facts every
-    August rescue needed, the gate, and the actions open to the operator."""
+    August rescue needed, the gate, and the actions open to the operator —
+    including the third one (``develop deliver``) when the run left a branch.
+    The finding is a surface the operator acts FROM, so it carries the third
+    action WHOLE (:func:`~lithos_loom.gates.deliver_action`) — what the
+    command does and that the re-review is one flag away — not just the
+    command, which would leave the reader to guess both."""
     b = escalation.brief
     facts: list[str] = []
     if run_id:
@@ -205,9 +214,10 @@ def _needs_human_summary(
     if b.get("worktree"):
         facts.append(f"worktree {b['worktree']}")
     facts_part = f"; {', '.join(facts)}" if facts else ""
+    keep = f"; {deliver_action_text}" if deliver_action_text else ""
     return (
         f"[NeedsHuman] route {route}: {escalation.reason} — {escalation.summary}"
-        f"{facts_part}; gate {gate_id} — {actions}"
+        f"{facts_part}; gate {gate_id} — {actions}{keep}"
     )
 
 
@@ -234,7 +244,10 @@ async def raise_needs_human(
 
     The shared core of every in-daemon escalation: a fresh story read (title,
     project, GitHub link) → the gate (best-effort) → the caller's *record*
-    hook → the push sinks → the ``[NeedsHuman]`` finding with *actions*.
+    hook → the push sinks → the ``[NeedsHuman]`` finding with *actions*. A
+    stopped run that left a branch (the brief's ``branch``, under the default
+    *actions*) also carries the ``develop deliver`` command into the finding
+    and both push sinks, so the third choice is copy-pasteable from either.
     Returns ``(gate_id, problem)``: on a gate failure nothing else runs and
     the caller applies its own fallback with *problem*. Never raises.
     """
@@ -252,6 +265,16 @@ async def raise_needs_human(
             story_meta = fresh_meta
     project = story_meta.get("project")
     project_slug = project if isinstance(project, str) else None
+    # The third choice, on exactly the gates that have one: a dispatch route's
+    # stop whose brief names the branch the rounds landed on. A caller that
+    # passes its own *actions* is a decision gate (a stranded PR, an exhausted
+    # remediation) — there is no stopped run's branch to keep there, so it is
+    # never offered one.
+    offers_delivery = bool(
+        run_id and escalation.brief.get("branch") and actions == REDISPATCH_ACTIONS
+    )
+    deliver_text = deliver_action(run_id or "") if offers_delivery else None
+    deliver_command = deliver_command_line(run_id or "") if offers_delivery else None
 
     gate_id, gate_problem = await create_human_gate_best_effort(
         lithos,
@@ -294,6 +317,7 @@ async def raise_needs_human(
             run_id=run_id,
             github_ref=notice_github_ref(dict(story_meta)),
             actions=actions,
+            deliver_command=deliver_command,
         )
         try:
             problems.extend(await notifier.needs_human(notice))
@@ -306,6 +330,7 @@ async def raise_needs_human(
         run_id=run_id,
         gate_id=gate_id,
         actions=actions,
+        deliver_action_text=deliver_text,
     )
     if problems:
         summary += " [Friction] " + "; ".join(problems)

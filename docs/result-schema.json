@@ -30,7 +30,9 @@
     },
     "run_id": {
       "type": "string",
-      "description": "Optional. The run id that produced this result (story-develop). The runner ignores it; develop attach uses it to bind the shared per-task result.json to THIS run for terminal detection, so a prior run's leftover succeeded/failed result can't be mistaken for the current run's delivery."
+      "pattern": "^[A-Za-z0-9._-]{1,64}$",
+      "maxLength": 64,
+      "description": "Optional. The run id that produced this result (story-develop). The runner ignores it for dispatch; develop attach uses it to bind the shared per-task result.json to THIS run for terminal detection, so a prior run's leftover succeeded/failed result can't be mistaken for the current run's delivery. Constrained to a plain handle (like `commits`) because it is JOINED ONTO PATHS (`resolve_run_dir`) and PUBLISHED AS A SHELL COMMAND: the needs-human escalation renders `lithos-loom develop deliver <run_id>` on the gate, the finding, a desktop toast and a GitHub comment, for the operator to paste."
     },
     "started_at": {
       "type": "string",

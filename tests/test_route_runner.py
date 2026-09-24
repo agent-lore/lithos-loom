@@ -2780,12 +2780,25 @@ async def test_failed_run_raises_a_needs_human_gate_end_to_end(
     assert f"gate {gate_id}" in summaries[0]
     assert "cancel the story to abandon" in summaries[0]
     assert "[BlockerFailed]" not in summaries[0]
+    # …and the THIRD action, because the brief names a branch to keep. The
+    # finding is a surface the operator acts FROM, so it carries the action
+    # WHOLE — what the command does, and that the re-review is one flag away
+    # — the same sentence the gate's brief renders (correctness/f-003).
+    third = (
+        "keep the branch → `lithos-loom develop deliver run-1` pushes it, "
+        "opens the PR and swaps this gate for a `pr` gate (revise the "
+        "acceptance first if the stop was a dispute; add `--converge` to "
+        "re-review under it)"
+    )
+    assert third in summaries[0]
+    assert f"- {third[0].upper()}{third[1:]}." in (gate.description or "")
     # The push sinks got the notice.
     (notice,) = notifier.notices
     assert notice.gate_id == gate_id
     assert notice.story_title == "Wire the thing"
     assert notice.reason == "max_rounds"
     assert notice.project == "loom"
+    assert notice.deliver_command == "lithos-loom develop deliver run-1"
 
 
 async def test_notifier_problems_land_on_the_finding(tmp_path: Path) -> None:

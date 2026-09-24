@@ -21,8 +21,10 @@ from types import SimpleNamespace
 import pytest
 
 from lithos_loom.cli import develop
+from lithos_loom.gates import STORY_GATE_ID_KEY
 from lithos_loom.plugins.story_develop import run_outcome, run_owner
 from lithos_loom.runner import orphans
+from tests.support import FakeLithosClient, make_task
 
 
 def _make_run(
@@ -1939,3 +1941,369 @@ def test_attach_stream_handoff_body_is_escape_safe_via_json(
         if line.strip() and json.loads(line).get("event") == "handoff"
     ]
     assert any(e["body"] == "x\x1by" for e in handoff_events)  # decoded value intact
+
+
+# ── the `pr` column: a delivered stopped run vs one still waiting ───────
+
+
+def test_list_shows_the_pr_of_a_daemon_delivered_and_a_hand_delivered_run(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    daemon_pr = "https://github.com/agent-lore/lithos-loom/pull/1"
+    hand_pr = "https://github.com/agent-lore/lithos-loom/pull/2"
+    # the daemon's own delivery: the run-bound result.json carries the url
+    _make_run(patched, task_id="t-1", run_id="daemon", status="approved")
+    (patched / "t-1" / "result.json").write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "task_id": "t-1",
+                "run_id": "daemon",
+                "pr_url": daemon_pr,
+            }
+        )
+    )
+    # a hand delivery (`develop deliver`): the run's private delivery.json
+    hand = _make_run(patched, task_id="t-2", run_id="hand", status="disputed")
+    run_outcome.record_manual_delivery(hand, pr_url=hand_pr)
+    # …and a stopped run still waiting on its needs-human gate
+    _make_run(patched, task_id="t-3", run_id="waiting", status="disputed")
+
+    develop.develop_list(config=None, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["daemon"]["pr"] == daemon_pr
+    assert rows["hand"]["pr"] == hand_pr
+    assert rows["waiting"]["pr"] == ""
+
+    develop.develop_list(config=None, output_format="text")
+    out = capsys.readouterr().out
+    assert "pr" in out.splitlines()[0]
+    assert hand_pr in out and daemon_pr in out
+    assert (
+        next(line for line in out.splitlines() if line.startswith("waiting"))
+        .rstrip(" ")
+        .endswith("—")
+    )
+
+
+def test_list_and_prune_fall_back_to_the_storys_open_pr_gate(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """correctness/f-002: the gate is the authoritative delivery record.
+
+    A hand delivery made before the run-dir marker existed — or one whose
+    best-effort marker write failed — leaves nothing on disk, so `list` must
+    read `pr_gate_id` → that gate's `pr_url`, and `prune` must treat the run
+    as finished on the same answer.
+    """
+    gate_pr = "https://github.com/agent-lore/lithos-loom/pull/7"
+    # no terminal log on either: the gated run is finished by its DELIVERY
+    delivered = _make_run(patched, task_id="t-1", run_id="gated", rounds={1: ["cq"]})
+    _make_run(patched, task_id="t-2", run_id="waiting", rounds={1: ["cq"]})
+    assert run_outcome.run_pr_url(delivered) is None  # nothing on disk
+
+    client = FakeLithosClient(agent_id="loom")
+    client.add_task(make_task("t-1", metadata={STORY_GATE_ID_KEY: "gate-pr"}))
+    client.add_task(
+        make_task(
+            "gate-pr", task_type="gate", metadata={"gate_type": "pr", "pr_url": gate_pr}
+        )
+    )
+    client.add_task(make_task("t-2"))
+    monkeypatch.setattr(develop, "LithosClient", lambda *a, **k: client)
+    monkeypatch.setattr(
+        develop,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=patched, lithos_url="http://lithos.invalid", agent_id="loom"
+            )
+        ),
+    )
+
+    develop.develop_list(config=None, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["gated"]["pr"] == gate_pr
+    assert rows["waiting"]["pr"] == ""
+
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    out = capsys.readouterr().out
+    # the gated run is finished by its delivery; the waiting one (no terminal
+    # log, docker unavailable here) is named as kept, never as removable
+    assert "would remove gated" in out and "would remove waiting" not in out
+    assert "delivered as" in out
+
+
+def _gated_story(
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    *,
+    pr_url: str,
+    marker_run: str | None,
+    gate_status: str = "open",
+) -> None:
+    """A story behind an open `pr` gate, optionally attributing it to a run."""
+    metadata: dict = {STORY_GATE_ID_KEY: "gate-pr"}
+    if marker_run is not None:
+        metadata["manual_delivery"] = {
+            "run_id": marker_run,
+            "pr_url": pr_url,
+            "gated": True,
+            "swapped": True,
+        }
+    client = FakeLithosClient(agent_id="loom")
+    client.add_task(make_task("t-1", metadata=metadata))
+    client.add_task(
+        make_task(
+            "gate-pr",
+            task_type="gate",
+            status=gate_status,
+            metadata={"gate_type": "pr", "pr_url": pr_url},
+        )
+    )
+    monkeypatch.setattr(develop, "LithosClient", lambda *a, **k: client)
+    monkeypatch.setattr(
+        develop,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=work_dir, lithos_url="http://lithos.invalid", agent_id="loom"
+            )
+        ),
+    )
+
+
+def test_a_storys_delivery_is_attributed_to_the_run_that_produced_it(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """correctness/f-002: a task retains several runs, and the gate names none
+    of them — but the story's `manual_delivery` marker does. Showing the older
+    run behind a PR it never produced would be wrong on screen and *fatal* in
+    `prune`, which would delete it because a DIFFERENT run was delivered."""
+    pr_url = "https://github.com/agent-lore/lithos-loom/pull/7"
+    old_run = _make_run(patched, task_id="t-1", run_id="old-run", rounds={1: ["cq"]})
+    new_run = _make_run(patched, task_id="t-1", run_id="new-run", status="disputed")
+    _gated_story(monkeypatch, patched, pr_url=pr_url, marker_run="new-run")
+
+    develop.develop_list(config=None, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["new-run"]["pr"] == pr_url
+    assert rows["old-run"]["pr"] == ""  # never produced it
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert "removed new-run" in out and "removed old-run" not in out
+    assert not new_run.exists() and old_run.exists()
+
+
+def test_an_unattributed_delivery_is_applied_to_no_run_when_several_could_match(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No marker (a partial delivery, or one that predates it) leaves the PR
+    unattributed: one candidate takes it, several take nothing — a guess here
+    is a deletion."""
+    pr_url = "https://github.com/agent-lore/lithos-loom/pull/7"
+    a = _make_run(patched, task_id="t-1", run_id="run-a", rounds={1: ["cq"]})
+    b = _make_run(patched, task_id="t-1", run_id="run-b", rounds={1: ["cq"]})
+    _gated_story(monkeypatch, patched, pr_url=pr_url, marker_run=None)
+
+    develop.develop_list(config=None, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["run-a"]["pr"] == "" and rows["run-b"]["pr"] == ""
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert a.exists() and b.exists()
+
+    # …and with only one candidate left, that one takes it
+    shutil.rmtree(b)
+    capsys.readouterr()
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["pr"] == pr_url
+
+
+def test_a_sibling_that_already_records_the_gates_pr_keeps_it(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """correctness/f-002 (r3): "the only unresolved run" is not "the only run
+    it could be".
+
+    The normal daemon shape with no `manual_delivery` marker: `new-run`'s own
+    run-bound `result.json` survived a failed reap and records the story's
+    current gate url, while an older hard-killed `old-run` recorded nothing.
+    Asking the story only about `old-run` would leave it the sole candidate
+    and hand it its sibling's PR — and `prune` would then delete it for a
+    delivery it had no part in.
+    """
+    pr_url = "https://github.com/agent-lore/lithos-loom/pull/7"
+    old_run = _make_run(patched, task_id="t-1", run_id="old-run", rounds={1: ["cq"]})
+    _make_run(patched, task_id="t-1", run_id="new-run", status="approved")
+    (patched / "t-1" / "result.json").write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "task_id": "t-1",
+                "run_id": "new-run",
+                "pr_url": pr_url,
+            }
+        )
+    )
+    _gated_story(monkeypatch, patched, pr_url=pr_url, marker_run=None)
+
+    develop.develop_list(config=None, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["new-run"]["pr"] == pr_url  # its own record answers for it
+    assert rows["old-run"]["pr"] == ""  # and the gate is already placed
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert old_run.exists()
+
+
+def test_a_marker_for_another_pr_never_attributes_the_current_one(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-delivered story's marker names the PR it was written for; against
+    a gate for a different PR it says nothing about which run is behind it."""
+    _make_run(patched, task_id="t-1", run_id="run-a", rounds={1: ["cq"]})
+    _make_run(patched, task_id="t-1", run_id="run-b", rounds={1: ["cq"]})
+    client = FakeLithosClient(agent_id="loom")
+    client.add_task(
+        make_task(
+            "t-1",
+            metadata={
+                STORY_GATE_ID_KEY: "gate-pr",
+                "manual_delivery": {"run_id": "run-a", "pr_url": "https://x/pull/1"},
+            },
+        )
+    )
+    client.add_task(
+        make_task(
+            "gate-pr",
+            task_type="gate",
+            metadata={"gate_type": "pr", "pr_url": "https://x/pull/2"},
+        )
+    )
+    monkeypatch.setattr(develop, "LithosClient", lambda *a, **k: client)
+    monkeypatch.setattr(
+        develop,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=patched, lithos_url="http://lithos.invalid", agent_id="loom"
+            )
+        ),
+    )
+
+    develop.develop_list(config=None, output_format="json")
+    assert {r["pr"] for r in json.loads(capsys.readouterr().out)} == {""}
+
+
+def test_a_completed_pr_gate_never_makes_a_run_look_delivered(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`pr_gate_id` outlives the gate it names: a story whose PR closed
+    unmerged can be re-escalated and re-developed, and reading a CLOSED gate
+    would have `prune` delete the live run that replaced it."""
+    live = _make_run(patched, task_id="t-1", run_id="rerun", rounds={1: ["cq"]})
+    client = FakeLithosClient(agent_id="loom")
+    client.add_task(make_task("t-1", metadata={STORY_GATE_ID_KEY: "gate-pr"}))
+    client.add_task(
+        make_task(
+            "gate-pr",
+            task_type="gate",
+            status="completed",
+            metadata={"gate_type": "pr", "pr_url": "https://x/pull/1"},
+        )
+    )
+    monkeypatch.setattr(develop, "LithosClient", lambda *a, **k: client)
+    monkeypatch.setattr(
+        develop,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=patched, lithos_url="http://lithos.invalid", agent_id="loom"
+            )
+        ),
+    )
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert live.exists()
+    assert "no finished story-develop runs" in capsys.readouterr().out
+
+
+def test_an_unreachable_lithos_keeps_runs_and_costs_only_the_column(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither command may depend on a server being up — `prune` DELETES on
+    this answer, so a transport failure yields nothing at all."""
+    live = _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+
+    def _boom(*a: object, **k: object) -> object:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(develop, "LithosClient", _boom)
+    monkeypatch.setattr(
+        develop,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=patched, lithos_url="http://lithos.invalid", agent_id="loom"
+            )
+        ),
+    )
+
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["pr"] == ""
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert live.exists()
+
+
+def test_list_cannot_render_a_forged_row_from_a_mirrored_issue_title(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """security/f-001: the `title` cell is a mirrored story's GitHub issue
+    title — anyone's to write — and the whole row is one `echo`, so a bare
+    CR would rewrite it from column 0 and an LF would start a forged row.
+    Since the `pr` column this screen carries delivery state an operator
+    decides on."""
+    _make_run(
+        patched,
+        task_id="t-1",
+        run_id="r1",
+        title="ok\r\x1b[2Kr9  t-9  FORGED\nsecond row",
+    )
+    develop.develop_list(config=None, output_format="text")
+    out = capsys.readouterr().out
+
+    assert "\r" not in out and "\x1b" not in out
+    # one header line + exactly one data row: no embedded break made a second
+    assert len([line for line in out.splitlines() if line.strip()]) == 2
+    assert "FORGED" in out  # neutralised, not dropped — the operator sees it
+
+
+def test_prune_treats_a_hand_delivered_run_as_finished(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A run killed before its terminal conversation.md looks in-flight for
+    # ever — but once `develop deliver` has turned its branch into a monitored
+    # PR its lifecycle is provably over, whatever it wrote.
+    delivered = _make_run(patched, task_id="t-1", run_id="handed", rounds={1: ["cq"]})
+    run_outcome.record_manual_delivery(
+        delivered,
+        pr_url="https://github.com/agent-lore/lithos-loom/pull/2",
+        complete=True,
+    )
+    inflight = _make_run(patched, task_id="t-2", run_id="live", rounds={1: ["cq"]})
+    # …and a hand delivery that did not finish (the PR exists, the gate did
+    # not land): listed with its PR, but NOT finished — the exit-2 text tells
+    # the operator to re-run it, so prune must not take the run dir away.
+    partial = _make_run(patched, task_id="t-3", run_id="partial", rounds={1: ["cq"]})
+    run_outcome.record_manual_delivery(
+        partial, pr_url="https://github.com/agent-lore/lithos-loom/pull/3"
+    )
+
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    out = capsys.readouterr().out
+    assert "would remove handed" in out and "would remove 1 finished run" in out
+    assert "delivered as https://github.com/agent-lore/lithos-loom/pull/2" in out
+    assert "would remove live" not in out and "would remove partial" not in out
+    assert delivered.exists() and inflight.exists() and partial.exists()

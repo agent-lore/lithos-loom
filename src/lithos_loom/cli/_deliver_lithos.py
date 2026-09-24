@@ -138,7 +138,20 @@ budget alone is ~14 minutes (push 300s + PR list 120s + default branch 120s +
 PR create 300s), before GitHub and Lithos latency, so the TTL is set well
 above it and :func:`renew_story` re-ups the lease before the gate work — the
 window that actually needs exclusivity — so the gate phase never runs on a
-lease the git/gh phases spent."""
+lease the git/gh phases spent. A chained ``--converge`` is the one operation
+this cannot cover: see :data:`DELIVER_CHAIN_CLAIM_TTL_MINUTES`."""
+
+DELIVER_CHAIN_CLAIM_TTL_MINUTES = 480
+"""Claim lifetime for a delivery that chains ``--converge`` (PR #427 review).
+The chain is a paid multi-round loop whose coder alone has an hour per turn
+— a four-round run measured 1h52 — and Lithos refuses to renew a claim that
+has already expired, so under the short lease every such chain ended with the
+gate work skipped as a partial. Renewing on a timer under a blocking
+subprocess is a second protocol; taking the lease for the longest a claim can
+live (Lithos's ``claim_max_ttl_minutes`` cap) is not, and no realistic chain
+outlives it. Both the ``deliver`` lease and the dispatch hold's route claims
+get it. A plain delivery keeps the short lease — a claim a crashed delivery
+leaves behind holds off the next one for its whole length."""
 
 
 class DeliverRefused(LithosLoomError):

