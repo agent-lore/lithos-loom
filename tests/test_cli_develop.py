@@ -611,6 +611,187 @@ def test_prune_json_shape_and_empty(
     assert rows[0]["run_id"] == "rr" and rows[0]["pruned"] is False
 
 
+# ── prune: finished from liveness, not from one file ───────────────────
+#
+# The 2026-09-21 residue (54 dirs / 8.9 GB): every leftover lacked the terminal
+# log — killed before the epilogue, a converge `-intake` pass that never writes
+# one, a run that died in its startup window — so the old rule called them all
+# "in flight" forever. These pin the liveness rule that replaced it.
+
+
+def _backdate(run_dir: Path, seconds: float) -> float:
+    """Age every mtime `_latest_mtime` reads, and return the resulting time."""
+    when = time.time() - seconds
+    for path in (
+        *(run_dir / "handoff").iterdir(),
+        run_dir / "handoff",
+        run_dir,
+    ):
+        os.utime(path, (when, when))
+    return when
+
+
+def test_prune_removes_killed_run_with_no_live_process_and_old_mtime(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The headline case: handoffs but no terminal log (a harness/OOM kill took
+    # the epilogue with it), nothing alive for it, and untouched for longer than
+    # an agent turn. Finished — and the line says why, and how much disk.
+    killed = _make_run(patched, task_id="t-1", run_id="killed", rounds={1: ["cq"]})
+    (killed / "worktree").mkdir()
+    (killed / "worktree" / "big.bin").write_bytes(b"x" * 4096)
+    _backdate(killed, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])  # docker: none
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert not killed.exists()
+    assert "removed killed" in out and "removed 1 finished run" in out
+    assert "no live process and nothing written since" in out
+    assert "KiB" in out  # the size of what was reclaimed
+
+
+def test_prune_keeps_recent_run_with_no_terminal_log(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same shape, fresh mtime: a run in its startup window looks exactly like a
+    # finished one to docker (agent containers are `--rm`), so only freshness
+    # tells them apart. Kept, and named as in flight.
+    fresh = _make_run(patched, task_id="t-1", run_id="boot", rounds={1: ["cq"]})
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert fresh.exists()
+    assert "in flight — kept boot" in out
+    assert "agent-turn window" in out
+    assert "no finished story-develop runs to prune" in out
+
+
+def test_prune_keeps_run_with_a_matching_docker_ps_row(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Old mtime, but docker still lists a running container for the run id (a
+    # coder mid-turn writes nothing for up to its whole timeout). Kept — through
+    # the real `docker ps` parse, owner-pid column included.
+    live = _make_run(patched, task_id="t-1", run_id="live", rounds={1: ["cq"]})
+    _backdate(live, 7200)
+    monkeypatch.setattr(
+        develop,
+        "_docker",
+        lambda args: "loom-develop-live-coder\tUp 3 hours\t4242\n",
+    )
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert live.exists()
+    assert "agent container loom-develop-live-coder is up" in capsys.readouterr().out
+
+
+def test_prune_keeps_run_whose_owner_process_is_still_alive(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No container is up, but an exited one carries the `loom.pid` of a process
+    # that is: the run is between phases (gate / commit / epilogue), not dead.
+    between = _make_run(patched, task_id="t-1", run_id="mid", rounds={1: ["cq"]})
+    _backdate(between, 7200)
+    monkeypatch.setattr(
+        develop,
+        "_docker",
+        lambda args: "loom-develop-mid-coder\tExited (0) 2 hours ago\t777\n",
+    )
+    monkeypatch.setattr(develop, "pid_alive", lambda pid: pid == 777)
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert between.exists()
+    assert "owner process (pid 777) is alive" in capsys.readouterr().out
+
+
+def test_prune_keeps_run_whose_owner_pid_cannot_be_checked(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `pid_alive` returning None is "can't tell", never "dead" — unknown, kept.
+    opaque = _make_run(patched, task_id="t-1", run_id="opaque", rounds={1: ["cq"]})
+    _backdate(opaque, 7200)
+    monkeypatch.setattr(
+        develop,
+        "_docker",
+        lambda args: "loom-develop-opaque-coder\tExited (137) 2 hours ago\t999\n",
+    )
+    monkeypatch.setattr(develop, "pid_alive", lambda pid: None)
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert opaque.exists()
+    out = capsys.readouterr().out
+    assert "unknown — kept opaque" in out and "cannot be checked" in out
+    assert "1 unknown (never deleted)" in out
+
+
+def test_prune_reports_unknown_when_docker_is_unavailable(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The `patched` fixture has docker absent: an old dir with no terminal log
+    # cannot be classified, so it is named and kept — never deleted on a guess.
+    stale = _make_run(patched, task_id="t-1", run_id="nodocker", rounds={1: ["cq"]})
+    _backdate(stale, 7200)
+    develop.develop_prune(config=None, dry_run=False, output_format="json")
+    rows = json.loads(capsys.readouterr().out)
+    assert [(r["run_id"], r["state"], r["pruned"]) for r in rows] == [
+        ("nodocker", "unknown", False)
+    ]
+    assert "docker is unavailable" in rows[0]["reason"]
+    assert stale.exists()
+
+
+def test_prune_intake_dir_is_finished_with_its_parent_run(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A converge intake pass (`<run>-intake`) is review-only: it never writes a
+    # conversation.md, so it is finished with the run it belongs to. Here the
+    # parent is still live (fresh), so the intake — old on its own — is held.
+    parent = _make_run(patched, task_id="converge", run_id="cv1", rounds={1: ["cq"]})
+    intake = _make_run(
+        patched, task_id="converge", run_id="cv1-intake", rounds={1: ["cq"]}
+    )
+    _backdate(intake, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert parent.exists() and intake.exists()
+    assert "in flight — kept cv1-intake" in out
+    assert "intake pass of run cv1" in out
+
+    # Once the parent reaches its epilogue, both go.
+    (parent / "conversation.md").write_text("done")
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert not parent.exists() and not intake.exists()
+    assert "removed 2 finished runs" in out
+    assert "intake pass of run cv1, finished: terminal log written" in out
+
+
+def test_prune_dry_run_names_reason_and_size_per_candidate(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --dry-run is the operator's audit: every candidate with WHY it counts as
+    # finished and what it is holding, and nothing deleted.
+    killed = _make_run(patched, task_id="t-1", run_id="killed", rounds={1: ["cq"]})
+    (killed / "worktree").mkdir()
+    (killed / "worktree" / "big.bin").write_bytes(b"x" * 2048)
+    _backdate(killed, 7200)
+    logged = _make_run(patched, task_id="t-2", run_id="logged", conversation="end")
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    out = capsys.readouterr().out
+    assert "would remove killed" in out and "would remove logged" in out
+    assert "no live process and nothing written since" in out
+    assert "terminal log written" in out
+    assert "would remove 2 finished runs" in out
+    assert killed.exists() and logged.exists()  # dry run deletes nothing
+
+    develop.develop_prune(config=None, dry_run=True, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["killed"]["state"] == "finished"
+    assert rows["killed"]["size_bytes"] >= 2048
+    assert rows["logged"]["reason"] == "terminal log written"
+    assert all(r["pruned"] is False for r in rows.values())
+
+
 def test_attach_stops_when_seen_containers_vanish_without_marker(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

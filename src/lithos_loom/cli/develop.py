@@ -15,8 +15,12 @@ commands:
 * ``develop dump <run-id|task-id>`` — print the assembled conversation log so
   far.
 * ``develop prune`` — delete the on-disk run-state dirs of finished runs
-  (``--dry-run`` previews). Finished = no longer in flight, so an in-flight run
-  is never removed out from under a live daemon.
+  (``--dry-run`` previews, naming the reason + size per candidate). Finished is
+  read from **liveness**, not from one file: the run wrote its terminal
+  ``state.json`` / ``conversation.md``, or nothing is alive for it (no running
+  agent container, no live owner process) and its newest mtime is older than one
+  agent turn. An in-flight run is never removed out from under a live daemon,
+  and a dir the rule cannot classify is kept and named ``unknown``.
 
 The mutating commands registered in this namespace live in their own modules:
 ``review`` / ``converge`` / ``merge-gate`` / ``deliver`` (the last turns a
@@ -38,6 +42,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -53,9 +58,11 @@ import typer
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosLoomError
 from lithos_loom.plugins.story_develop import engines, handoff, run_outcome
+from lithos_loom.plugins.story_develop.config import DEFAULT_CODER_TIMEOUT
 from lithos_loom.plugins.story_develop.idempotency import lookup_completed
 from lithos_loom.plugins.story_develop.publish_text import CONTROL_CHARS_RE
 from lithos_loom.plugins.story_develop.run_outcome import is_run_dir, resolve_run_dir
+from lithos_loom.runner.orphans import PID_LABEL, pid_alive
 from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_exit
 
 develop_app = typer.Typer(
@@ -276,6 +283,12 @@ class ContainerStatus:
     agent: str  # "coder" | "review-<name>"
     status: str  # docker's status string, e.g. "Up 3 minutes"
     running: bool
+    owner_pid: int | None = None
+    """The host process that started the container (``loom.pid`` label,
+    ``containers.build_run_command``), when docker reports one. An *exited*
+    container whose owner is still alive means the run is between phases (the
+    gate, the commit), not finished — which is how ``prune`` tells a killed
+    run from a live one that happens to have no container up right now."""
 
 
 def _docker(args: list[str]) -> str | None:
@@ -299,13 +312,21 @@ def _run_containers(run_id: str) -> list[ContainerStatus] | None:
     not-yet-started). Callers must keep the two apart: ``None`` means "can't
     tell" (active agent → ``—``, file views still work), ``[]`` means "done".
     """
-    out = _docker(["ps", "-a", "--format", "{{.Names}}\t{{.Status}}"])
+    out = _docker(
+        [
+            "ps",
+            "-a",
+            "--format",
+            f'{{{{.Names}}}}\t{{{{.Status}}}}\t{{{{.Label "{PID_LABEL}"}}}}',
+        ]
+    )
     if out is None:
         return None
     prefix = f"{_CONTAINER_PREFIX}{run_id}-"
     result: list[ContainerStatus] = []
     for line in out.splitlines():
-        name, _, status = line.partition("\t")
+        name, _, rest = line.partition("\t")
+        status, _, owner = rest.partition("\t")
         if not name.startswith(prefix):
             continue
         result.append(
@@ -314,9 +335,28 @@ def _run_containers(run_id: str) -> list[ContainerStatus] | None:
                 agent=name[len(f"{_CONTAINER_PREFIX}{run_id}-") :],
                 status=status.strip(),
                 running=status.startswith("Up"),
+                owner_pid=_label_pid(owner),
             )
         )
     return result
+
+
+def _label_pid(label: str) -> int | None:
+    """The ``loom.pid`` label as a pid, or ``None`` when it isn't one.
+
+    A docker label value is an arbitrary string (and an older container
+    predating the label reports the empty one), so this never trusts it: a
+    non-numeric or absurdly long all-digit value — ``int()`` raises past
+    Python's conversion limit, as ``orphans`` found the hard way — is simply
+    "no owner recorded".
+    """
+    text = label.strip()
+    if not text.isdigit():
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 def _active_agent(containers: list[ContainerStatus]) -> str | None:
@@ -388,25 +428,181 @@ def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
         time.sleep(_ATTACH_POLL_SECONDS)
 
 
-def _is_finished(run_dir: Path) -> bool:
-    """Whether a run is terminal — i.e. safe for ``prune`` to remove.
+# ── prune: finished = nothing is alive for this run ────────────────────
 
-    The signal is the on-disk terminal marker: the plugin writes
-    ``conversation.md`` only after the agent containers stop, so its presence
-    means the run reached teardown. Container state alone is *not* sufficient —
-    agent containers run with ``--rm`` (``containers.py``), so a finished run and
-    a run still in its **startup window** (handoff dir seeded, containers not yet
-    started) both report zero containers. Pruning on "no running container" would
-    delete a live run out from under the daemon during that window. Requiring the
-    durable marker leaves every in-flight run (and any hard-crashed run that
-    never wrote the marker) untouched, erring conservative. A still-live agent
-    container is treated as a definitive override in case a future change writes
-    the marker earlier.
+_FINISHED = "finished"
+_IN_FLIGHT = "in flight"
+_UNCLASSIFIED = "unknown"
+
+# How long a run dir must sit untouched before "nothing is alive for it" reads
+# as finished rather than mid-turn. One agent turn is the longest a healthy run
+# goes without writing anything (the coder thinks with its container up; the
+# handoff lands only at the end), so the turn timeout is the bound — the same
+# "no live process and nothing newer than the timeout" reading ``attach`` uses
+# to call a run crashed rather than starting up. A run whose coder is genuinely
+# thinking has its container UP, so the window guards the container-less edges —
+# the startup window, and teardown before the epilogue — not the turn itself.
+_DEFAULT_IDLE_SECONDS = float(DEFAULT_CODER_TIMEOUT)
+
+# A converge run's intake pass runs under its own run id (``<run>-intake``, see
+# ``story_develop.converge``) and is review-only: it writes handoffs but never a
+# conversation.md, so the terminal-log rule alone would keep its worktree
+# forever. It is finished with its parent run.
+_INTAKE_SUFFIX = "-intake"
+
+
+@dataclass(frozen=True)
+class PruneVerdict:
+    """Why ``prune`` will — or won't — remove a run dir.
+
+    ``state`` is :data:`_FINISHED` (safe to delete), :data:`_IN_FLIGHT` (a live
+    run: never touched) or :data:`_UNCLASSIFIED` (the rule could not tell, so
+    the dir is kept and named). ``reason`` is the operator-facing "why".
     """
-    if not (run_dir / "conversation.md").is_file():
-        return False
-    containers = _run_containers(run_dir.name)
-    return not (containers and any(c.running for c in containers))
+
+    state: str
+    reason: str
+
+
+def _has_terminal_log(run_dir: Path) -> bool:
+    """Whether the run wrote its epilogue.
+
+    ``develop()`` writes ``conversation.md`` and then ``state.json`` after the
+    agent containers stop, so either file means the run reached teardown. A run
+    killed before the epilogue (OOM, SIGKILL, a crash) has neither — which is
+    why this is only *one* of prune's two finished signals: when it was the
+    only one, a prune left 54 dirs / 8.9 GB behind as "in flight" forever.
+    """
+    return (run_dir / run_outcome.CONVERSATION_LOG).is_file() or (
+        run_dir / run_outcome.STATE_FILE
+    ).is_file()
+
+
+def _run_liveness(run_id: str) -> PruneVerdict | None:
+    """What still holds *run_id* — ``None`` when nothing does.
+
+    Two host-side signals, both read through the docker seam ``attach`` already
+    uses: a **running** agent container, and the **owner process** of a
+    non-running one (the ``loom.pid`` label every run container carries), which
+    is alive while the run is between phases — the test gate, the commit, the
+    epilogue — with no container up. Neither is reachable when docker itself is
+    unavailable, and a pid the kernel will not answer for is not a "no": both
+    return :data:`_UNCLASSIFIED` so the caller keeps the dir.
+
+    The completion store is deliberately *not* consulted: a run recorded there
+    succeeded, and a succeeded run's dir was either reaped by the route-runner
+    or carries the epilogue :func:`_has_terminal_log` already reads.
+    """
+    containers = _run_containers(run_id)
+    if containers is None:
+        return PruneVerdict(
+            _UNCLASSIFIED,
+            "docker is unavailable — a live agent container cannot be ruled out",
+        )
+    for container in containers:
+        if container.running:
+            return PruneVerdict(_IN_FLIGHT, f"agent container {container.name} is up")
+    for container in containers:
+        if container.owner_pid is None:
+            continue
+        alive = pid_alive(container.owner_pid)
+        if alive:
+            return PruneVerdict(
+                _IN_FLIGHT,
+                f"the run's owner process (pid {container.owner_pid}) is alive",
+            )
+        if alive is None:
+            return PruneVerdict(
+                _UNCLASSIFIED,
+                f"the owner pid of {container.name} ({container.owner_pid}) "
+                "cannot be checked",
+            )
+    return None
+
+
+def _prune_verdict(run_dir: Path, *, idle_seconds: float, now: float) -> PruneVerdict:
+    """Classify *run_dir* for ``prune``: finished, in flight, or unclassifiable.
+
+    Finished is decided from **liveness**, not from one file: either the run
+    wrote its epilogue (:func:`_has_terminal_log`), or nothing is alive for it
+    (:func:`_run_liveness`) *and* its newest mtime is older than one agent turn.
+    The idle window is what keeps the **startup window** safe — agent containers
+    run with ``--rm``, so a run whose containers have not come up yet reports
+    exactly what a finished one does, and only its freshness tells them apart.
+
+    Anything the rule cannot decide (docker down, an unanswerable pid, an
+    unstat-able dir) is :data:`_UNCLASSIFIED` and kept; an mtime poisoned into
+    the future is simply "recent", i.e. also kept.
+    """
+    live = _run_liveness(run_dir.name)
+    if live is not None and live.state == _IN_FLIGHT:
+        return live
+    if _has_terminal_log(run_dir):
+        return PruneVerdict(_FINISHED, "terminal log written")
+    if run_dir.name.endswith(_INTAKE_SUFFIX):
+        parent = run_dir.parent / run_dir.name[: -len(_INTAKE_SUFFIX)]
+        if is_run_dir(parent):
+            # The intake pass belongs to its parent run: it is finished with it
+            # (and, while the parent lives, held with it — its own worktree is
+            # the parent run's intake export).
+            verdict = _prune_verdict(parent, idle_seconds=idle_seconds, now=now)
+            prefix = f"intake pass of run {parent.name}"
+            if verdict.state == _FINISHED:
+                return PruneVerdict(_FINISHED, f"{prefix}, finished: {verdict.reason}")
+            return PruneVerdict(
+                verdict.state, f"{prefix}, {verdict.state}: {verdict.reason}"
+            )
+    if live is not None:
+        return live  # unclassifiable — kept, named
+    mtime = _latest_mtime(run_dir)
+    if not mtime:
+        return PruneVerdict(_UNCLASSIFIED, "nothing under the run dir can be stat-ed")
+    if now - mtime < idle_seconds:
+        return PruneVerdict(
+            _IN_FLIGHT,
+            f"no terminal log, but written at {_format_mtime(mtime)} — inside the "
+            f"{int(idle_seconds)}s agent-turn window",
+        )
+    return PruneVerdict(
+        _FINISHED,
+        f"no live process and nothing written since {_format_mtime(mtime)}",
+    )
+
+
+def _dir_size(path: Path) -> int:
+    """Total bytes under *path* (best-effort).
+
+    Symlinks are never followed — a run dir holds a git worktree, and an agent
+    can plant a link to anywhere on the host. An unreadable entry contributes
+    nothing rather than aborting the sweep: the size is operator information,
+    not a decision input.
+    """
+    total = 0
+    stack = [path]
+    while stack:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                else:
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return total
+
+
+def _format_size(size: int) -> str:
+    """Human-readable byte count (the operator is deciding about disk space)."""
+    value = float(size)
+    for unit in ("B", "KiB", "MiB"):
+        if value < 1024:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"
 
 
 def _reap_empty_task_dir(task_dir: Path) -> None:
@@ -642,10 +838,17 @@ def develop_prune(
     """Remove the on-disk run-state dirs of **finished** story-develop runs.
 
     Succeeded runs are reaped by the route-runner; this clears the failed /
-    interrupted dirs that accumulate. A run is *finished* once it has written its
-    terminal ``conversation.md`` (after its agent containers stop); an in-flight
-    run — including one still in its startup window — is left untouched.
-    ``--dry-run`` previews without deleting. A deletion that fails (permissions,
+    interrupted / killed dirs (and the on-demand ``converge`` / ``review``
+    worktrees) that accumulate. A run is *finished* when it wrote its terminal
+    ``state.json`` / ``conversation.md``, **or** when nothing is alive for it —
+    no running agent container, no live owner process — and it has not been
+    written to for one agent turn. A converge ``-intake`` pass, which never
+    writes an epilogue, is finished with its parent run. Every in-flight run —
+    including one still in its startup window — is left untouched, and so is any
+    dir the rule cannot classify (docker unavailable, a pid it cannot check):
+    those are reported as ``unknown — kept``.
+    ``--dry-run`` previews without deleting, naming why each candidate counts as
+    finished and how much disk it holds. A deletion that fails (permissions,
     busy filesystem) is reported as an error, never as a success, and makes the
     command exit non-zero so automation can tell a clean sweep from a partial one.
     """
@@ -660,34 +863,47 @@ def develop_prune(
     except LithosLoomError as exc:
         _fail(str(exc))
     work_dir = cfg.orchestrator.work_dir
-    finished = [d for d in _iter_run_dirs(work_dir) if _is_finished(d)]
+    # Classify everything BEFORE deleting anything: an intake dir reads its
+    # parent's verdict, and the parent may be removed earlier in the sweep.
+    now = time.time()
+    verdicts = [
+        (run_dir, _prune_verdict(run_dir, idle_seconds=_DEFAULT_IDLE_SECONDS, now=now))
+        for run_dir in _iter_run_dirs(work_dir)
+    ]
 
-    # (info, removed, error) — `removed` is the *actual* outcome, not an
-    # assumption: a swallowed rmtree failure that still claimed success would
-    # leave callers acting on a dir that is still on disk (f-002).
-    results: list[tuple[RunInfo, bool, str | None]] = []
-    for run_dir in finished:
+    # (info, verdict, size, removed, error) — `removed` is the *actual* outcome,
+    # not an assumption: a swallowed rmtree failure that still claimed success
+    # would leave callers acting on a dir that is still on disk (f-002).
+    results: list[tuple[RunInfo, PruneVerdict, int, bool, str | None]] = []
+    for run_dir, verdict in verdicts:
         info = _run_info(run_dir)
-        if dry_run:
-            results.append((info, False, None))
+        size = _dir_size(run_dir)
+        if dry_run or verdict.state != _FINISHED:
+            results.append((info, verdict, size, False, None))
             continue
         try:
             shutil.rmtree(run_dir)
         except OSError as exc:
-            results.append((info, False, str(exc)))
+            results.append((info, verdict, size, False, str(exc)))
             continue
         _reap_empty_task_dir(run_dir.parent)
-        results.append((info, True, None))
+        results.append((info, verdict, size, True, None))
 
-    failed = any(err is not None for _, _, err in results)
+    failed = any(err is not None for *_, err in results)
 
     if output_format == _FORMAT_JSON:
         typer.echo(
             json.dumps(
                 [
-                    {**asdict(i), "pruned": removed}
+                    {
+                        **asdict(i),
+                        "state": v.state,
+                        "reason": v.reason,
+                        "size_bytes": size,
+                        "pruned": removed,
+                    }
                     | ({"error": err} if err is not None else {})
-                    for i, removed, err in results
+                    for i, v, size, removed, err in results
                 ]
             )
         )
@@ -695,11 +911,12 @@ def develop_prune(
             sys.exit(1)
         return
     if not results:
-        typer.echo(f"no finished story-develop runs to prune under {work_dir}")
+        typer.echo(f"no story-develop run dirs under {work_dir}")
         return
     verb = "would remove" if dry_run else "removed"
     done = 0
-    for info, _removed, err in results:
+    kept: list[str] = []
+    for info, verdict, size, _removed, err in results:
         if err is not None:
             typer.echo(
                 f"lithos-loom: failed to remove {info.run_id} "
@@ -707,9 +924,26 @@ def develop_prune(
                 err=True,
             )
             continue
-        done += 1
-        typer.echo(f"{verb} {info.run_id} (task {info.task_id})  {info.run_dir}")
-    typer.echo(f"{verb} {done} finished run{'s' if done != 1 else ''}")
+        if verdict.state == _FINISHED:
+            done += 1
+            label = verb
+        else:
+            kept.append(verdict.state)
+            label = f"{verdict.state} — kept"
+        typer.echo(
+            f"{label} {info.run_id} (task {info.task_id})  {info.run_dir}  "
+            f"{_format_size(size)}  — {verdict.reason}"
+        )
+    if done or not kept:
+        typer.echo(f"{verb} {done} finished run{'s' if done != 1 else ''}")
+    else:
+        typer.echo(f"no finished story-develop runs to prune under {work_dir}")
+    if kept:
+        typer.echo(
+            f"kept {len(kept)} run{'s' if len(kept) != 1 else ''}: "
+            f"{kept.count(_IN_FLIGHT)} in flight, "
+            f"{kept.count(_UNCLASSIFIED)} unknown (never deleted)"
+        )
     if failed:
         sys.exit(1)
 
