@@ -2374,9 +2374,27 @@ def test_list_titles_a_converge_run_with_its_pr_and_unpushed_marker(
 def test_list_does_not_mark_a_converge_run_that_pushed_itself(
     patched: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # an approved converge run pushes on its own — its tip being ahead of the
-    # intake head is the delivery, not stranded work
-    _converge_run(patched, run_id="cv2", pr_number=9, status="approved")
+    # an approved converge run that RECORDED its own push has delivered its
+    # rounds — the record, not the approval, is what says so
+    run_dir = _converge_run(patched, run_id="cv2", pr_number=9, status="approved")
+    run_outcome.record_converge_push(
+        run_dir,
+        pushed_sha="c" * 40,
+        pr_url="https://github.com/o/r/pull/9",
+        by=run_outcome.PUSHED_BY_CONVERGE,
+    )
 
     develop.develop_list(config=None, output_format="json")
     assert json.loads(capsys.readouterr().out)[0]["title"] == "#9"
+
+
+def test_list_marks_an_approved_run_whose_rounds_never_reached_the_pr(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """correctness/f-009: `converge --no-push`, and an approved run whose push
+    raced or failed, both end `approved` with the rounds still only local —
+    exactly the state the marker exists to surface."""
+    _converge_run(patched, run_id="cv3", pr_number=11, status="approved")
+
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["title"] == "#11 unpushed"

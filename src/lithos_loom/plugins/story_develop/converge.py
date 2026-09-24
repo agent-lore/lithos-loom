@@ -45,7 +45,12 @@ from .conflict_resolve import (
     prepare_conflict_intake,
     render_review_context,
 )
-from .converge_result import ConflictSummary, ConvergeResult, ConvergeStatus
+from .converge_result import (
+    ConflictSummary,
+    ConvergeResult,
+    ConvergeStatus,
+    nothing_to_change_message,
+)
 from .develop import DevelopResult, develop
 from .external_record import record_external_intake
 from .external_reviews import (
@@ -579,21 +584,6 @@ def _contains_base(base_sha: str) -> Callable[[DevelopResult], str | None]:
     return check
 
 
-def _nothing_to_change_message(outcomes: tuple[ExternalOutcome, ...]) -> str:
-    no_change = [o.finding_id for o in outcomes if o.disposition == "no_change_needed"]
-    refuted = [o.finding_id for o in outcomes if o.disposition == "rejected"]
-    parts = []
-    if no_change:
-        parts.append(f"no change needed for {', '.join(no_change)}")
-    if refuted:
-        parts.append(f"{', '.join(refuted)} refuted by triage")
-    why = "; ".join(parts)
-    return (
-        f"every external finding needed no change ({why}); the gate and panel "
-        "approved the unchanged head — nothing to converge"
-    )
-
-
 def _loop_and_deliver(
     config: DevelopConfig,
     change: ResolvedChange,
@@ -628,14 +618,17 @@ def _loop_and_deliver(
             config, max_cost_usd=config.max_cost_usd - pre_loop_cost
         )
 
+    # Before the loop, because `develop()` writes the terminal status every
+    # reader stops on (:func:`run_outcome.record_converge_cost`).
+    run_outcome.record_converge_cost(config.run_dir, intake_cost_usd=pre_loop_cost)
+
     result = develop(
         loop_config,
         coder_timeout=coder_timeout,
         reviewer_timeout=reviewer_timeout,
         entry=entry,
     )
-    # The whole command's spend, not just the loop's (`develop()` wrote that):
-    # what `develop converge-push` reports to the operator deciding on a push.
+    # …then the authoritative total, once the loop's own spend is known.
     run_outcome.record_converge_cost(
         config.run_dir,
         intake_cost_usd=pre_loop_cost,
@@ -670,7 +663,7 @@ def _loop_and_deliver(
                 intake_cost_usd=pre_loop_cost,
                 intake_deferred=intake_deferred,
                 external_outcomes=external_outcomes,
-                message=_nothing_to_change_message(external_outcomes),
+                message=nothing_to_change_message(external_outcomes),
             )
         # Defensive — the admitted round's handoff is the one the epilogue
         # reads, so its acks are all no-change; should a claim of a fix ever
@@ -777,6 +770,14 @@ def _loop_and_deliver(
             external_outcomes=external_outcomes,
             message=str(exc),
         )
+    # The durable "these rounds are on the PR" record — approval is not that
+    # signal (see :func:`run_outcome.record_converge_push`).
+    run_outcome.record_converge_push(
+        config.run_dir,
+        pushed_sha=pushed_sha,
+        pr_url=change.head_ref,
+        by=run_outcome.PUSHED_BY_CONVERGE,
+    )
     logger.info(
         "converge %s: pushed %s -> %s",
         config.run_id,

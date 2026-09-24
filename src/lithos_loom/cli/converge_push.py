@@ -48,6 +48,7 @@ or a run that is still in flight (refused — ``develop list`` shows it).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
@@ -58,7 +59,9 @@ from typing import Any
 import typer
 
 from lithos_loom.cli._converge_push_facts import (
+    ALREADY_PUSHED,
     REFUSED,
+    UNCERTAIN,
     ConvergePushRefused,
     ConvergeRun,
     NotAConvergeRun,
@@ -279,25 +282,38 @@ async def _lithos_coro(
     story_id: str,
     summary: str,
     run_id: str,
+    post_finding: bool,
     complete_gate: bool,
-) -> tuple[str, list[str]]:
+) -> tuple[bool, str, list[str]]:
     """Post the finding, then (opt-in) complete THIS run's exhaustion gate.
 
-    Returns ``(completed_gate_id, problems)``. The gate is matched on both
-    keys — ``escalation_reason`` *and* the gate's own ``run_id`` — because
-    completing an ``external-remediation`` gate is the operator's consent to
-    spend another budget: another run's gate, or one raised for another
-    reason, is a decision nobody made here and is left open.
+    Returns ``(finding_posted, completed_gate_id, problems)`` — what actually
+    LANDED, so the caller can record it and a re-run finishes only what did
+    not. Each step is skipped when a previous invocation already did it
+    (*post_finding* / *complete_gate*), so resuming never duplicates.
+
+    The gate is matched on both keys — ``escalation_reason`` *and* the gate's
+    own ``run_id`` — because completing an ``external-remediation`` gate is
+    the operator's consent to spend another budget: another run's gate, or one
+    raised for another reason, is a decision nobody made here and is left open.
     """
     problems: list[str] = []
     completed = ""
+    posted = False
     async with LithosClient(url, agent_id=agent) as client:
-        try:
-            await client.finding_post(task_id=story_id, summary=summary, agent=agent)
-        except (LithosClientError, OSError) as exc:
-            problems.append(f"could not post {CONVERGE_PUSHED} on {story_id} ({exc})")
+        if post_finding:
+            try:
+                await client.finding_post(
+                    task_id=story_id, summary=summary, agent=agent
+                )
+            except (LithosClientError, OSError) as exc:
+                problems.append(
+                    f"could not post {CONVERGE_PUSHED} on {story_id} ({exc})"
+                )
+            else:
+                posted = True
         if not complete_gate:
-            return completed, problems
+            return posted, completed, problems
         story = await read_story(client, story_id)
         targets = [
             g
@@ -309,7 +325,7 @@ async def _lithos_coro(
                 f"--complete-gate: no open loom {REMEDIATION_EXHAUSTED} gate on "
                 f"{story_id} names run {run_id}; no gate was touched"
             )
-            return completed, problems
+            return posted, completed, problems
         for gate in targets:
             try:
                 await client.task_complete(task_id=gate.gate_id, agent=agent)
@@ -317,7 +333,7 @@ async def _lithos_coro(
                 problems.append(f"could not complete gate {gate.gate_id} ({exc})")
             else:
                 completed = gate.gate_id
-    return completed, problems
+    return posted, completed, problems
 
 
 # ── the command ────────────────────────────────────────────────────────
@@ -394,19 +410,26 @@ def converge_push_command(
             # report-status, so the update was not applied. Reading the ref
             # back here would see whatever the other actor left and report
             # "uncertain" about an invocation that is known to have written
-            # nothing.
-            _error(f"push refused: {exc}")
-            raise typer.Exit(EXIT_CODES["refused"]) from exc
+            # nothing. Re-planned rather than exited on, so this refusal is
+            # the SAME report and the same `--json` object as the head-moved
+            # refusal the plan would have printed a moment earlier.
+            plan = _refused_after_race(facts, plan, exc)
+            exit_code = EXIT_CODES["refused"]
         except (RuntimeError, OSError) as exc:
             # Everything else is ambiguous: the server can accept the update
             # and the connection drop before the client sees the answer. The
             # lease proves atomicity, not observability — so read the ref back
             # and classify.
             pushed_sha, problem, code = _classify_failed_push(facts, plan, exc)
-            if not pushed_sha:
-                _error(problem)
-                raise typer.Exit(code) from exc
             notes.append(problem)
+            if not pushed_sha:
+                plan = dataclasses.replace(
+                    plan,
+                    verdict=REFUSED if code == EXIT_CODES["refused"] else UNCERTAIN,
+                    detail=problem,
+                )
+                exit_code = code
+    if pushed_sha:
         try:
             run_outcome.record_converge_push(
                 facts.run_dir, pushed_sha=pushed_sha, pr_url=facts.pr_url
@@ -417,6 +440,18 @@ def converge_push_command(
             notes.append(f"could not record the push in the run dir ({exc})")
         notes += _post_epilogue(
             cfg, facts, pushed_sha=pushed_sha, complete_gate=complete_gate
+        )
+    elif yes and _epilogue_owed(facts, plan, complete_gate=complete_gate):
+        # The push landed on an earlier invocation but the work that FOLLOWS it
+        # did not finish — a refusing transport, a Lithos outage, a SIGTERM
+        # between the two. That work is required, and "already pushed" must not
+        # report it as done: the recorded push is the resume point, and a run
+        # whose epilogue is complete still writes nothing here.
+        notes.append(
+            "the push is already on the PR; finishing the epilogue it left owed"
+        )
+        notes += _post_epilogue(
+            cfg, facts, pushed_sha=plan.tip, complete_gate=complete_gate
         )
 
     # Everything printed below carries text loom did not author — the agent's
@@ -445,6 +480,45 @@ def converge_push_command(
             encoding="utf-8",
         )
     raise typer.Exit(exit_code)
+
+
+def _refused_after_race(run: ConvergeRun, plan: PushPlan, exc: Exception) -> PushPlan:
+    """Turn a proven non-landing into a REFUSED plan the renderer can print.
+
+    Re-plans first, so the report names the head as it is NOW and measures its
+    ranges against it — the operator asked for a report and a `--json` object,
+    and a race is exactly when they need the fresh one. A re-plan that comes
+    back pushable (the other actor moved the branch back, say) is still
+    refused: THIS invocation was refused, and saying otherwise beside a
+    non-zero exit would be worse than a stale-looking base.
+    """
+    try:
+        fresh = plan_push(run)
+    except ConvergePushRefused as refusal:
+        fresh = dataclasses.replace(plan, detail=str(refusal))
+    detail = f"push refused: {exc}"
+    if fresh.verdict == REFUSED and fresh.detail:
+        detail = f"{detail} — {fresh.detail}"
+    return dataclasses.replace(fresh, verdict=REFUSED, detail=detail)
+
+
+def _epilogue_owed(run: ConvergeRun, plan: PushPlan, *, complete_gate: bool) -> bool:
+    """Whether an EARLIER push of this run left required work unfinished.
+
+    Only for a run whose recorded push is the tip now on the PR — the push
+    itself is done, so what remains is the audit the operator is owed: the
+    ``[ConvergePushed]`` finding, the reviewers' threads, and (when asked for)
+    the gate. Each is recorded as it lands, so a fully finished epilogue
+    answers ``False`` here and ``--yes`` on an already-pushed run stays the
+    no-op it is documented to be.
+    """
+    if plan.verdict != ALREADY_PUSHED or run.pushed_sha != plan.tip:
+        return False
+    if run.story_id and not run.finding_posted:
+        return True
+    if complete_gate and run.story_id and not run.gate_completed:
+        return True
+    return bool(replay_outcomes(run))
 
 
 def _error(message: str) -> None:
@@ -543,6 +617,12 @@ def _post_epilogue(
     failure may be reported as a failure to push. Each problem becomes a note
     on the command's own output (and in ``--json``), so what is owed is said
     rather than lost.
+
+    And each step that LANDS is recorded (the replies per id in
+    ``external.json``, the finding and the gate on the push record), so a step
+    that did not — a transport that refused, a Lithos outage, a SIGTERM — is
+    resumed by the next ``--yes`` instead of being lost behind "already
+    pushed" (:func:`_epilogue_owed`).
     """
     notes: list[str] = []
     try:
@@ -580,19 +660,33 @@ def _post_epilogue(
             "posted (pass --story to record it)"
         )
         return notes
+    # Skipped when a previous invocation already posted it: the finding is the
+    # audit of ONE push, not of each attempt to finish its epilogue.
+    post_finding = not facts.finding_posted
+    want_gate = complete_gate and not facts.gate_completed
     try:
-        _, problems = asyncio.run(
+        posted, gate_id, problems = asyncio.run(
             _lithos_coro(
                 cfg.orchestrator.lithos_url,
                 cfg.orchestrator.agent_id,
                 story_id=facts.story_id,
                 summary=finding_summary(facts, pushed_sha=pushed_sha),
                 run_id=facts.run_id,
-                complete_gate=complete_gate,
+                post_finding=post_finding,
+                complete_gate=want_gate,
             )
         )
     except (LithosClientError, LithosLoomError, OSError, ExceptionGroup) as exc:
         # LithosLoomError covers the story read's own refusal (a story that is
         # gone). Nothing here may turn a landed push into a crash.
         return [*notes, f"Lithos: {exc}; the finding was not posted"]
+    if posted or gate_id:
+        with contextlib.suppress(OSError):
+            run_outcome.record_converge_push(
+                facts.run_dir,
+                pushed_sha=pushed_sha,
+                pr_url=facts.pr_url,
+                finding_posted=True if posted else None,
+                gate_completed=gate_id or None,
+            )
     return notes + problems

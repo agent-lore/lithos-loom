@@ -225,7 +225,7 @@ def record_converge_intake(
 
 
 def record_converge_cost(
-    run_dir: Path, *, intake_cost_usd: float, total_cost_usd: float
+    run_dir: Path, *, intake_cost_usd: float, total_cost_usd: float | None = None
 ) -> None:
     """Record what the WHOLE converge command spent, not just its loop.
 
@@ -233,16 +233,19 @@ def record_converge_cost(
     pre-loop phase — the local-panel intake review, or external mode's triage
     turn — is converge's own and lives only in its process. Merged in here so
     the run dir carries the figure ``develop converge-push`` puts in front of
-    the operator's push decision; a run from before this records neither key
-    and the reader falls back to the loop-only figure.
+    the operator's push decision.
+
+    Called **twice**, and the order matters: ``intake_cost_usd`` alone before
+    the loop starts, so that a reader arriving after ``develop()`` has written
+    the terminal status but before the loop's own total lands can still SUM
+    the two halves; then again with *total_cost_usd*, the authoritative
+    figure. A run from before this records neither key and the reader falls
+    back to the loop-only figure.
     """
-    write_state(
-        run_dir,
-        {
-            "intake_cost_usd": round(intake_cost_usd, 4),
-            "total_cost_usd": round(total_cost_usd, 4),
-        },
-    )
+    record: dict[str, object] = {"intake_cost_usd": round(intake_cost_usd, 4)}
+    if total_cost_usd is not None:
+        record["total_cost_usd"] = round(total_cost_usd, 4)
+    write_state(run_dir, record)
 
 
 def converge_intake(run_dir: Path) -> dict | None:
@@ -256,34 +259,67 @@ def converge_intake(run_dir: Path) -> dict | None:
     return block if isinstance(block, dict) else None
 
 
-def record_converge_push(run_dir: Path, *, pushed_sha: str, pr_url: str) -> None:
-    """Record that ``develop converge-push`` put *pushed_sha* on the PR.
+# Who put this run's rounds on the PR: its own push epilogue (``converge``
+# approved and pushed) or the operator's decision (``develop converge-push``).
+PUSHED_BY_CONVERGE = "converge"
+PUSHED_BY_CONVERGE_PUSH = "converge-push"
+
+
+def record_converge_push(
+    run_dir: Path,
+    *,
+    pushed_sha: str,
+    pr_url: str,
+    by: str = PUSHED_BY_CONVERGE_PUSH,
+    finding_posted: bool | None = None,
+    gate_completed: str | None = None,
+) -> None:
+    """Record that this run's rounds are on the PR at *pushed_sha*, and how
+    far the work that follows the push has got.
 
     The run's own answer to "is anything still unpushed?" — read by a second
-    invocation (which then reports ``already pushed`` without touching the
-    network) and by ``develop list``, which drops its ``unpushed`` marker.
+    ``converge-push`` (which then reports ``already pushed`` without touching
+    the network) and by ``develop list``, which drops its ``unpushed`` marker.
+    Written by **both** pushers: ``converge``'s own approved push (*by* =
+    ``converge``) and the operator's (*by* = ``converge-push``). Approval is
+    not the discriminator — a ``--no-push`` run, and one whose push raced or
+    failed, are approved with their rounds still only local.
+
+    *finding_posted* / *gate_completed* record the steps AFTER the push, which
+    are best-effort and can each fail on their own. They are what lets a
+    re-run finish an epilogue a crash or a transport left half-done instead of
+    reporting "already pushed" over work still owed. Merged, never reset: a
+    later call that knows nothing about them leaves them alone.
+
     The remote is still the authority; this is the offline fast path, exactly
     as ``delivery.json`` is for a hand delivery.
     """
-    write_state(
-        run_dir,
+    record = converge_push_record(run_dir)
+    record.update(
         {
-            CONVERGE_PUSH_KEY: {
-                "pushed_sha": pushed_sha,
-                "pr_url": pr_url,
-                "at": datetime.now(UTC).isoformat(timespec="seconds"),
-            }
-        },
+            "pushed_sha": pushed_sha,
+            "pr_url": pr_url,
+            "by": by,
+            "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        }
     )
+    if finding_posted is not None:
+        record["finding_posted"] = finding_posted
+    if gate_completed is not None:
+        record["gate_completed"] = gate_completed
+    write_state(run_dir, {CONVERGE_PUSH_KEY: record})
+
+
+def converge_push_record(run_dir: Path) -> dict:
+    """The push record as written, or ``{}`` — the merge base for an update."""
+    state = read_state(run_dir) or {}
+    block = state.get(CONVERGE_PUSH_KEY)
+    return dict(block) if isinstance(block, dict) else {}
 
 
 def converge_pushed_sha(run_dir: Path) -> str | None:
-    """The sha ``develop converge-push`` pushed for this run, or ``None``."""
-    state = read_state(run_dir) or {}
-    block = state.get(CONVERGE_PUSH_KEY)
-    if not isinstance(block, dict):
-        return None
-    sha = block.get("pushed_sha")
+    """The sha this run's rounds were pushed at, by either pusher, or ``None``."""
+    sha = converge_push_record(run_dir).get("pushed_sha")
     return sha if isinstance(sha, str) and sha else None
 
 

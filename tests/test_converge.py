@@ -1732,3 +1732,60 @@ def test_the_whole_command_spend_survives_an_unapproved_loop(
     assert result.status == "not_converged"
     state = run_outcome.read_state(config.run_dir) or {}
     assert state["total_cost_usd"] == pytest.approx(3.0)
+
+
+def test_the_pre_loop_spend_lands_before_the_terminal_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """correctness/f-008: `develop()` writes the terminal status every reader
+    stops on. A reader arriving between that write and the total must still be
+    able to SUM, so the pre-loop half is recorded BEFORE the loop starts."""
+    captured = _install(monkeypatch, blocking=True, intake_cost=1.5)
+    config = _config(tmp_path)
+    seen: dict = {}
+
+    real_develop = converge_mod.develop
+
+    def spy(cfg, **kwargs):
+        # what the run dir holds at the moment the loop could write its
+        # terminal state and then be killed
+        seen["intake_cost"] = (run_outcome.read_state(cfg.run_dir) or {}).get(
+            "intake_cost_usd"
+        )
+        return real_develop(cfg, **kwargs)
+
+    monkeypatch.setattr(converge_mod, "develop", spy)
+
+    converge_pr(config, _change())
+
+    assert seen["intake_cost"] == pytest.approx(1.5)
+    assert captured["loop_config"] is not None
+
+
+def test_a_successful_push_is_recorded_on_the_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """correctness/f-009: approval is not the "these rounds are on the PR"
+    signal — `--no-push` and a raced push are approved too. The push itself
+    records it."""
+    _install(monkeypatch, blocking=True)
+    config = _config(tmp_path)
+
+    result = converge_pr(config, _change())
+
+    assert result.pushed is True
+    assert run_outcome.converge_pushed_sha(config.run_dir) == "p" * 40
+    record = run_outcome.converge_push_record(config.run_dir)
+    assert record["by"] == run_outcome.PUSHED_BY_CONVERGE
+
+
+def test_no_push_leaves_no_push_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, blocking=True)
+    config = _config(tmp_path)
+
+    result = converge_pr(config, _change(), no_push=True)
+
+    assert result.status == "converged" and result.pushed is False
+    assert run_outcome.converge_pushed_sha(config.run_dir) is None

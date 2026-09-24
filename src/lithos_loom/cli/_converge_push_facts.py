@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import math
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ __all__ = [
     "ALREADY_PUSHED",
     "FAST_FORWARD",
     "REFUSED",
+    "UNCERTAIN",
     "ConvergePushRefused",
     "ConvergeRun",
     "NotAConvergeRun",
@@ -58,6 +60,10 @@ __all__ = [
 FAST_FORWARD = "fast-forward"
 ALREADY_PUSHED = "already pushed"
 REFUSED = "refused"
+# Only ever the verdict of a push whose outcome could not be READ back — never
+# a plan's own verdict. It is kept apart from `refused` because the one thing
+# it cannot assert is that nothing was written.
+UNCERTAIN = "uncertain"
 
 # The statuses a converge loop can stop at without pushing. `approved` is not
 # among them: converge pushes on approval, so an approved run either delivered
@@ -111,8 +117,16 @@ class ConvergeRun:
     blocking_checks: tuple[dict[str, Any], ...]
     open_findings: tuple[dict[str, Any], ...]
     pushed_sha: str | None
-    """A previous ``converge-push`` of this run — the offline ``already
-    pushed`` answer, still proved against the remote before anything is done."""
+    """The sha this run's rounds were pushed at, by either pusher — the
+    offline ``already pushed`` answer, still proved against the remote before
+    anything is done."""
+    finding_posted: bool = False
+    """Whether the ``[ConvergePushed]`` audit for that push has landed."""
+    gate_completed: str = ""
+    """The gate a previous ``--complete-gate`` completed, if any. With
+    *finding_posted* this is what lets a re-run FINISH an epilogue a crash or
+    a refusing transport left half-done, instead of reporting "already
+    pushed" over work that is still owed."""
 
 
 def read_run(run_dir: Path) -> ConvergeRun:
@@ -149,17 +163,14 @@ def read_run(run_dir: Path) -> ConvergeRun:
             "check `git -C <worktree> log`, and push by hand"
         )
     worktree = Path(str(state.get("worktree") or (run_dir / "worktree")))
+    push_record = run_outcome.converge_push_record(run_dir)
     return ConvergeRun(
         run_id=str(state.get("run_id") or run_dir.name),
         run_dir=run_dir,
         status=status,
         failure_reason=str(state.get("failure_reason") or ""),
         rounds=state.get("rounds") if isinstance(state.get("rounds"), int) else None,
-        # The WHOLE command's spend (converge's intake / triage turn + the
-        # loop), which converge merges in after the loop; a run from before
-        # that falls back to the loop-only figure develop() writes, which is
-        # the most this run can honestly claim.
-        cost_usd=_opt_cost(state.get("total_cost_usd"), state.get("cost_usd")),
+        cost_usd=_whole_command_cost(state),
         branch=str(state.get("branch") or ""),
         worktree=worktree,
         pr_url=str(intake.get("pr_url") or ""),
@@ -183,7 +194,35 @@ def read_run(run_dir: Path) -> ConvergeRun:
             f for f in state.get("open_findings") or () if isinstance(f, dict)
         ),
         pushed_sha=run_outcome.converge_pushed_sha(run_dir),
+        finding_posted=bool(push_record.get("finding_posted")),
+        gate_completed=str(push_record.get("gate_completed") or ""),
     )
+
+
+def _whole_command_cost(state: Mapping[str, Any]) -> float | None:
+    """The WHOLE command's spend: converge's intake / triage turn + the loop.
+
+    Three sources, in order, because the two halves are written by different
+    processes at different moments and the run can be read between them:
+
+    1. ``total_cost_usd`` — converge's authoritative sum, written after the
+       loop returns;
+    2. ``cost_usd + intake_cost_usd`` — the loop's own figure (written by
+       ``develop()`` alongside the terminal status every reader stops on) plus
+       the pre-loop spend converge records BEFORE the loop starts. This is the
+       window the sum exists for: a run read — or killed — after the terminal
+       write but before the total lands still reports the whole spend, not the
+       loop-only one;
+    3. the loop's figure alone, for a run from before either key: the most
+       that run can honestly claim.
+    """
+    total = _opt_cost(state.get("total_cost_usd"))
+    if total is not None:
+        return total
+    loop = _opt_cost(state.get("cost_usd"))
+    if loop is None:
+        return None
+    return loop + (_opt_cost(state.get("intake_cost_usd")) or 0.0)
 
 
 def _opt_cost(*values: Any) -> float | None:

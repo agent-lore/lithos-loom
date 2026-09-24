@@ -17,7 +17,12 @@ from .external_reviews import ExternalOutcome
 from .findings import DeferredFinding
 from .review_resolve import ResolvedChange
 
-__all__ = ["ConflictSummary", "ConvergeResult", "ConvergeStatus"]
+__all__ = [
+    "ConflictSummary",
+    "ConvergeResult",
+    "ConvergeStatus",
+    "nothing_to_change_message",
+]
 
 # The converge verdict. A closed set so a new status can't be added in one place
 # (render / exit code / tests) and silently missed in another (finding #5).
@@ -219,3 +224,20 @@ class ConvergeResult:
             "total_cost_usd": round(self.total_cost_usd, 4),
             "message": self.message,
         }
+
+
+def nothing_to_change_message(outcomes: tuple[ExternalOutcome, ...]) -> str:
+    """The ``already_clean`` message for a batch that needed no change (#380):
+    which ids the coder judged not a defect, and which triage refuted."""
+    no_change = [o.finding_id for o in outcomes if o.disposition == "no_change_needed"]
+    refuted = [o.finding_id for o in outcomes if o.disposition == "rejected"]
+    parts = []
+    if no_change:
+        parts.append(f"no change needed for {', '.join(no_change)}")
+    if refuted:
+        parts.append(f"{', '.join(refuted)} refuted by triage")
+    why = "; ".join(parts)
+    return (
+        f"every external finding needed no change ({why}); the gate and panel "
+        "approved the unchanged head — nothing to converge"
+    )

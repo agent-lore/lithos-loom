@@ -120,7 +120,11 @@ A run killed during intake (SIGTERM, exit 143) is therefore still resolvable.
 The loop's own exit merges into the same file rather than overwriting it, and
 converge merges the **whole-command** spend in beside the loop's own
 (`total_cost_usd` = the intake / triage turn + the loop; `develop()` records
-only `cost_usd`). In `--from-github`
+only `cost_usd`) — the pre-loop half first, *before* the loop writes the
+terminal status every reader stops on, so a run killed in between can still be
+summed. A successful push is recorded as well (`converge_push`, `by:
+converge`): approval is not that signal, since `--no-push` and a raced push end
+approved with the rounds still only local. In `--from-github`
 mode the run also records the injected batch (`external.json`: the id→row map,
 triage's verdicts, the surviving ids), which is what the replayed thread replies
 are composed from — and the run's own reply epilogue adds each id whose reply

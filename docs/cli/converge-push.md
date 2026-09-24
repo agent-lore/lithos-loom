@@ -34,7 +34,9 @@ write. It prints, from the run dir and one read-only `ls-remote` / `fetch`:
 
 - the PR (url, number, head branch), the head sha the run started from
   (`intake_head_sha`) and the PR's **current** remote head;
-- the run's status and stop reason, its rounds and `total_cost_usd`;
+- the run's status and stop reason, its rounds and `total_cost_usd` (the whole
+  command's: converge's intake / triage turn plus the loop — summed from the
+  two halves for a run killed between them);
 - the last round's gate verdict (the test gate, plus any blocking check by
   name) and the findings the last review round left **open** (severity +
   title) — read from the run's recorded ledger data, never re-parsed prose;
@@ -127,13 +129,22 @@ before the verdict is printed — `gh`'s PR payload plus the worktree's `origin`
 
 Everything after the push is best-effort and degrades into a `note:` line (and
 into `notes` in `--json`): the commits are on the PR, and no later failure may
-be reported as a failure to push.
+be reported as a failure to push. But best-effort is not fire-and-forget —
+**each step that lands is recorded** (the replies per id in `external.json`,
+the finding and the gate on the push record), so a step that did not — a
+transport that refused, a Lithos outage, a SIGTERM between the push and the
+audit — is finished by the next `--yes`, which reports `already pushed` and
+resumes only what is still owed. A run whose epilogue is complete stays the
+documented no-op: `--yes` writes nothing.
 
 **An ambiguous failed push is read back before it is called one.** The two
 typed refusals the push seam raises — the head ref absent from origin, and a
 head that no longer holds the sha the lease names (including a push the server
 itself **rejected**, which is its own report-status) — prove that nothing
-landed, and are refused directly (exit 1). Everything else is ambiguous: the
+landed. They are re-planned against the live head and reported as an ordinary
+`refused` verdict (exit 1), through the same renderer and the same `--json`
+object as any other refusal: a race is exactly when the operator needs the
+facts, not an error line. Everything else is ambiguous: the
 server can accept the update and the connection drop before the client sees the
 answer. There the ref is re-read and
 the three answers kept apart: at our tip (or at a third sha that *contains* it)
@@ -210,7 +221,11 @@ report puts in front of the push decision. External mode additionally writes
 
 `develop list` shows the PR number in the `title` column for a converge run
 (blank before, since a converge run has no Lithos task), plus an `unpushed`
-marker while the worktree tip is ahead of the recorded intake head.
+marker while the worktree tip is ahead of the recorded intake head and **no
+push is recorded**. Both pushers write that record — converge's own approved
+push and this command — because approval is not the signal: `converge
+--no-push`, and an approved run whose push raced or failed, are approved with
+their rounds still only local.
 
 ## Out of scope
 

@@ -1026,3 +1026,153 @@ def test_a_proven_non_landing_is_refused_not_uncertain(
     assert _remote_head(worktree) == moved
     assert lithos.calls == []
     assert run_outcome.converge_pushed_sha(run_dir) is None
+
+
+# ── round 4: the reviewers' findings ───────────────────────────────────
+
+
+def test_sums_the_spend_a_run_killed_before_its_total_left_behind(
+    host, run_dir: Path, worktree: Path, lithos: FakeLithosClient, tmp_path: Path
+) -> None:
+    """correctness/f-008: the loop writes the terminal status alongside its own
+    `cost_usd`; converge's pre-loop half is recorded BEFORE that. A run read —
+    or killed — in between still reports the whole command's spend."""
+    state = run_outcome.read_state(run_dir) or {}
+    state.pop("total_cost_usd", None)
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    run_outcome.write_state(run_dir, {"cost_usd": 12.34, "intake_cost_usd": 8.16})
+    out = tmp_path / "record.json"
+
+    result = _invoke(_RUN, "--json", str(out))
+
+    assert result.exit_code == 0, result.output
+    assert "$20.50" in result.output
+    assert json.loads(out.read_text(encoding="utf-8"))["total_cost_usd"] == 20.5
+
+
+def test_a_moved_head_race_still_prints_the_report_and_the_json(
+    host,
+    run_dir: Path,
+    worktree: Path,
+    lithos: FakeLithosClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """correctness/f-011: a proven non-landing is still a refused MOVED-HEAD
+    report — the operator asked for the facts and for `--json`, and an error
+    line alone is neither."""
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "clone", str(tmp_path / "origin.git"), str(other)],
+        check=True,
+        capture_output=True,
+    )
+    _git(other, "config", "user.email", "o@example.com")
+    _git(other, "config", "user.name", "O")
+    _git(other, "checkout", _PR_BRANCH)
+    (other / "theirs.py").write_text("z = 3\n", encoding="utf-8")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-m", "someone else's commit")
+
+    def moves_then_refuses(*a, **k):
+        _git(other, "push", "origin", _PR_BRANCH)
+        raise MergeRaceDetected("PR head ref advanced remotely; re-run converge")
+
+    monkeypatch.setattr(cli, "push_to_pr_ref", moves_then_refuses)
+    out = tmp_path / "record.json"
+
+    result = _invoke(_RUN, "--yes", "--json", str(out))
+
+    assert result.exit_code == 1, result.output
+    # the full report, not just an error line — and the live head in it
+    assert "converge-push" in result.output and "PR head moved" in result.output
+    assert _remote_head(worktree)[:12] in result.output
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert record["verdict"] == "refused"
+    assert record["pushed"] is False
+    assert record["remote_head_sha"] == _remote_head(worktree)
+    assert lithos.calls == []
+
+
+def test_an_unfinished_epilogue_is_resumed_by_the_next_yes(
+    host,
+    run_dir: Path,
+    worktree: Path,
+    lithos: FakeLithosClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-010: the push lands, then Lithos is down. The finding and
+    the gate are REQUIRED — "already pushed" must not report them as done."""
+    lithos.raise_on["finding_post"] = LithosClientError("server_error", "down")
+
+    assert _invoke(_RUN, "--yes", "--complete-gate").exit_code == 0
+    tip = _remote_head(worktree)
+    assert run_outcome.converge_pushed_sha(run_dir) == tip
+    assert lithos.findings == []  # the audit is owed
+    # the gate step is independent and did land, so it must NOT be redone
+    assert _get(lithos, "gate-exhausted").status == "completed"
+
+    # Lithos is back: the next --yes finishes what the first left owed, even
+    # though the remote already equals the tip
+    del lithos.raise_on["finding_post"]
+    lithos.calls.clear()
+    result = _invoke(_RUN, "--yes", "--complete-gate")
+
+    assert result.exit_code == 0, result.output
+    assert "already pushed" in result.output
+    assert [f["task_id"] for f in lithos.findings] == [_STORY]
+    assert tip[:12] in lithos.findings[0]["summary"]
+    assert not lithos.called("task_complete")  # the gate was already done
+    assert _remote_head(worktree) == tip  # nothing pushed a second time
+
+
+def test_a_completed_epilogue_makes_a_re_run_a_no_op(
+    host, run_dir: Path, worktree: Path, lithos: FakeLithosClient
+) -> None:
+    assert _invoke(_RUN, "--yes", "--complete-gate").exit_code == 0
+    lithos.calls.clear()
+
+    result = _invoke(_RUN, "--yes", "--complete-gate")
+
+    assert result.exit_code == 0, result.output
+    assert "already pushed" in result.output
+    assert lithos.calls == []  # nothing written: the epilogue is complete
+
+
+def test_a_reply_the_transport_refused_is_resumed_too(
+    host,
+    run_dir: Path,
+    worktree: Path,
+    lithos: FakeLithosClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record_external_intake(
+        run_dir,
+        id_map={"f-002": _external_finding(8)},
+        rejections={"f-002": "the guard is already there"},
+        nothing_to_remediate={},
+        surviving_ids=[],
+    )
+    attempts: list[int] = []
+    monkeypatch.setattr(
+        converge_cli,
+        "post_thread_reply",
+        lambda repo, pr, activity_id, body: attempts.append(activity_id) and False,
+    )
+
+    assert _invoke(_RUN, "--yes").exit_code == 0
+    assert attempts == [8]
+    intake = read_external_intake(run_dir)
+    assert intake is not None and intake.replied == frozenset()  # nothing landed
+
+    # the transport recovers: the owed reply is posted on the next --yes
+    monkeypatch.setattr(
+        converge_cli,
+        "post_thread_reply",
+        lambda repo, pr, activity_id, body: attempts.append(activity_id) or True,
+    )
+    assert _invoke(_RUN, "--yes").exit_code == 0
+
+    assert attempts == [8, 8]
+    intake = read_external_intake(run_dir)
+    assert intake is not None and intake.replied == frozenset({"f-002"})

@@ -29,7 +29,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.conflict_resolve` | M | 3 | 5 |
 | `lithos_loom.plugins.story_develop.containers` | M | 0 | 7 |
 | `lithos_loom.plugins.story_develop.converge` | L | 0 | 1 |
-| `lithos_loom.plugins.story_develop.converge_result` | S | 2 | 0 |
+| `lithos_loom.plugins.story_develop.converge_result` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
@@ -59,7 +59,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
-| `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 28 |
+| `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 29 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
@@ -175,6 +175,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.converge_result`
 - class `ConflictSummary` — Resolve mode (PRD S5): what the run set out to resolve.
 - class `ConvergeResult` — Outcome of a :func:`converge_pr` run.
+- def `nothing_to_change_message` — The ``already_clean`` message for a batch that needed no change (#380): which ids the coder judged not a defect, and which triage refuted.
 
 ### `lithos_loom.plugins.story_develop.daemon_io`
 - def `read_task_payload` — Parse the runner's ``task.json`` into a :class:`TaskContext`.
@@ -450,8 +451,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `record_converge_intake` — Record the PR a converge run is converging, at INTAKE.
 - def `record_converge_cost` — Record what the WHOLE converge command spent, not just its loop.
 - def `converge_intake` — The PR facts :func:`record_converge_intake` wrote, or ``None``.
-- def `record_converge_push` — Record that ``develop converge-push`` put *pushed_sha* on the PR.
-- def `converge_pushed_sha` — The sha ``develop converge-push`` pushed for this run, or ``None``.
+- def `record_converge_push` — Record that this run's rounds are on the PR at *pushed_sha*, and how far the work that follows the push has got.
+- def `converge_push_record` — The push record as written, or ``{}`` — the merge base for an update.
+- def `converge_pushed_sha` — The sha this run's rounds were pushed at, by either pusher, or ``None``.
 - def `result_for_run` — THIS run's ``result.json`` (the plugin's final contract output), or ``None``.
 - def `delivery_complete` — Whether THIS approved run's post-dialogue PR delivery succeeded.
 - def `delivery_failed` — The reason THIS run's PR delivery FAILED (#194), or ``None``.

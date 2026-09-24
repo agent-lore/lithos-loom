@@ -294,12 +294,13 @@ def _converge_unpushed(run_dir: Path, intake: Mapping[str, Any]) -> bool:
     """Whether this converge run's worktree tip is ahead of the PR head it
     started from, with nothing recorded as pushed since."""
     if run_outcome.converge_pushed_sha(run_dir):
-        return False
+        return False  # a push is RECORDED — by converge itself or by hand
     state = run_outcome.read_state(run_dir) or {}
-    if state.get("status") in (None, "", run_outcome.APPROVED):
-        # No outcome yet (still running), or the approval that makes converge
-        # push by itself — neither is a stranded round.
-        return False
+    if not state.get("status"):
+        return False  # no outcome yet: still running, nothing stranded
+    # Approval is deliberately NOT read as "pushed": `converge --no-push`, and
+    # an approved run whose push raced or failed, both end approved with their
+    # rounds still only local. The push RECORD above is the discriminator.
     head = str(intake.get("intake_head_sha") or "")
     worktree = Path(str(state.get("worktree") or (run_dir / "worktree")))
     if not head or not worktree.is_dir():
