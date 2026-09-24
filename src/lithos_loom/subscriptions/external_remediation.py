@@ -1062,7 +1062,7 @@ class ExternalRemediation:
             f"[Friction] external-remediation: converge --from-github for "
             f"{spec.pr_url} failed (exit {rc}) without a result; the round is "
             f"spent ({budget.rounds_used}/{self._settings.budget}). Last "
-            f"output line: {message_tail(output)}",
+            f'output line: "{message_tail(output)}"',
         )
         await self._escalate_if_exhausted(
             gate_id,

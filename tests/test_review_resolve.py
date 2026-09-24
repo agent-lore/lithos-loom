@@ -530,3 +530,135 @@ def test_an_unretryable_intake_fetch_failure_is_still_typed_and_unretried(
 
     assert len(calls) == 1
     assert "couldn't find remote ref" in exc.value.host_action
+
+
+# ── #431 review: classify on the WHOLE stderr, report the `fatal:` line ───────
+
+
+def _rpc_early_eof() -> str:
+    # git's real shape for a dropped transport: its own diagnosis on the
+    # `error:` line, its verdict on the `fatal:` one
+    return (
+        "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly\n"
+        "fatal: early EOF\n"
+    )
+
+
+def test_a_transport_sign_under_gits_error_line_is_still_retried(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review f-001: the reported reason is git's FIRST `error:`/`fatal:` line,
+    so classifying on it alone missed `fatal: early EOF` under an
+    `error: RPC failed …` — one attempt instead of the required three."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    calls: list[int] = []
+
+    def flaky(argv, **kw):
+        calls.append(1)
+        return (128, _rpc_early_eof()) if len(calls) < 3 else (0, "")
+
+    monkeypatch.setattr(git, "run_group", flaky)
+
+    change = review_resolve.resolve_change(tmp_path, "#142")
+
+    assert change.head_sha == "h" * 40
+    assert len(calls) == 3  # two retries, not one attempt
+
+
+def test_the_host_action_names_gits_fatal_line_not_its_error_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # review f-001: the acceptance asks for the first `fatal:` line — git's own
+    # verdict — not the transport plumbing line above it
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    monkeypatch.setattr(git, "run_group", lambda argv, **kw: (128, _rpc_early_eof()))
+
+    with pytest.raises(review_resolve.FetchFailedError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    assert exc.value.problem == "fatal: early EOF"
+    assert "fatal: early EOF" in exc.value.host_action
+    assert "curl 92" not in exc.value.host_action
+
+
+def test_a_fetch_that_cannot_even_be_spawned_is_an_infra_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review f-002: `run_group` spawned the child outside any OSError guard,
+    so a missing / unexecutable `git` (or a checkout deleted under `cwd`) left
+    the CLI with an uncaught traceback and no `--json` — the watcher's
+    `crashed` path again."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(git.subprocess, "Popen", no_git)
+
+    with pytest.raises(review_resolve.FetchFailedError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    assert "cannot run git" in exc.value.problem
+    assert "SSH agent" in exc.value.host_action
+
+
+def test_a_hung_transport_spends_one_timeout_for_the_whole_intake_fetch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review security f-003: `timed out` is a retryable sign, so three
+    attempts would hold a dispatcher's single-flight slot for 3 × 300 s. The
+    attempts share ONE budget: a hiccup that answers in milliseconds still gets
+    its retries, a hang gets none."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(review_resolve.time, "monotonic", lambda: clock["now"])
+    timeouts: list[float] = []
+
+    def slow_then_hung(argv, *, timeout, **kw):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:  # a transport failure 100s in
+            clock["now"] += 100
+            return 128, _ssh_hiccup()
+        clock["now"] += timeout  # the retry hangs until its deadline
+        return None, ""
+
+    monkeypatch.setattr(git, "run_group", slow_then_hung)
+
+    with pytest.raises(review_resolve.FetchFailedError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    # attempt 2 got only what was LEFT of the one budget, and there is no third
+    assert timeouts == [review_resolve.PR_FETCH_TIMEOUT_SECONDS, 200.0]
+    assert "timed out" in exc.value.problem
+
+
+def test_the_host_action_cannot_carry_what_it_does_not_show(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review security f-001: git's stderr is the ORIGIN host's text (an ssh
+    banner, a `remote:` line) and `host_action` is printed on the operator's
+    terminal and published in a `[Friction]` — so it is stripped and bounded."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    forged = "fatal: \x1b[2Kok to merge‮ " + "x" * 600
+    monkeypatch.setattr(git, "run_group", lambda argv, **kw: (128, forged))
+
+    with pytest.raises(review_resolve.FetchFailedError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    problem = exc.value.problem
+    assert "\x1b" not in problem and "‮" not in problem
+    assert len(problem) <= 300 and problem.endswith("…")
+    assert problem in exc.value.host_action

@@ -475,3 +475,50 @@ def test_fetch_refspecs_reports_the_error_line_not_gits_trailing_boilerplate(
 
     assert problem.startswith("error: cannot lock ref 'refs/remotes/origin/main'")
     assert "remove the file manually" not in problem
+
+
+# ── #431 review: the whole stderr beside the reported line, and no escape ─────
+
+
+def test_fetch_problem_keeps_the_whole_stderr_beside_the_reported_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review f-001: a caller that CLASSIFIES the failure needs everything git
+    said — the collapsed reason keeps only the first `error:`/`fatal:` line,
+    which hides the transport sign on the line below."""
+    from lithos_loom.runner import git
+
+    stderr = (
+        "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly\n"
+        "fatal: early EOF\n"
+    )
+    monkeypatch.setattr(git, "run_group", lambda argv, **kw: (128, stderr))
+
+    problem = git.fetch_problem(tmp_path, ("main",))
+
+    assert problem.reason.startswith("error: RPC failed")
+    assert "early EOF" in problem.detail  # what a classifier reads
+    assert problem.fatal_line == "fatal: early EOF"  # what an operator reads
+    # the thin wrapper still reports exactly what it always did
+    assert git.fetch_refspecs(tmp_path, ("main",)) == problem.reason
+
+
+def test_fetch_problem_reports_a_git_that_cannot_be_spawned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review f-002: `run_group` documents that it never raises, but spawned
+    the child outside any OSError guard — a missing `git` or a deleted `cwd`
+    escaped as a traceback through every caller."""
+    from lithos_loom.runner import git
+
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(git.subprocess, "Popen", no_git)
+
+    problem = git.fetch_problem(tmp_path, ("main",))
+
+    assert problem.reason.startswith("fatal: cannot run git:")
+    assert problem.fatal_line == problem.reason
+    # and the same for every other caller of the shared spawn
+    assert "cannot run git" in git.fetch_branch(tmp_path, "main")

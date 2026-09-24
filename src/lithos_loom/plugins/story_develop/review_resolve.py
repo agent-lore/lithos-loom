@@ -23,6 +23,7 @@ from lithos_loom.github_client import PullRequest
 
 from ...runner import git
 from .github_access import github_call, repo_name_with_owner
+from .publish_text import MAX_EXCERPT_CHARS, publish_line
 
 # A PR argument: ``#142``, bare ``142``, or a GitHub PR URL ending ``/pull/142``.
 _PR_URL_REPO_RE = re.compile(r"github\.com/([^/\s#?]+/[^/\s#?]+)/pull/\d+\b")
@@ -119,13 +120,19 @@ class FetchFailedError(RuntimeError):
     traceback reaches a story's ``[Friction]`` as the "output tail". Raised
     after :data:`FETCH_ATTEMPTS` attempts on a transport failure, on the first
     answer for anything else.
+
+    ``problem`` is git's own ``fatal:`` line — text the ORIGIN host and the
+    local ssh client author (an ssh banner, a ``remote:`` line), so it is
+    stripped of anything that could render as something else and bounded
+    before it reaches an operator's terminal or a Lithos finding (review
+    security f-001, CWE-117 / CWE-150 / CWE-770).
     """
 
     def __init__(self, *, refspecs: Sequence[str], problem: str) -> None:
         self.refspecs = tuple(refspecs)
-        self.problem = problem
+        self.problem = publish_line(problem, limit=MAX_EXCERPT_CHARS)
         super().__init__(
-            f"git fetch origin {' '.join(self.refspecs)} failed: {problem}"
+            f"git fetch origin {' '.join(self.refspecs)} failed: {self.problem}"
         )
 
     @property
@@ -140,8 +147,11 @@ class FetchFailedError(RuntimeError):
         )
 
 
-def _transient_fetch_failure(problem: str) -> bool:
-    lowered = problem.lower()
+def _transient_fetch_failure(detail: str) -> bool:
+    """Does git's WHOLE stderr carry a transport sign? (review f-001: the one
+    reported line is a collapse — ``error: RPC failed …`` hides the
+    ``fatal: early EOF`` under it.)"""
+    lowered = detail.lower()
     return any(sign in lowered for sign in _TRANSIENT_FETCH_SIGNS)
 
 
@@ -150,33 +160,42 @@ def _git_fetch(repo: Path, *refspecs: str) -> None:
     ref-lock race against a concurrent fetch of the same moved base (the
     sweep's merge-gate probe or a remediation converge beside a story-develop
     worktree cut, #390) is retried once, a hung transport is killed with its
-    process group after :data:`PR_FETCH_TIMEOUT_SECONDS`, and no credential
-    prompt can block (``GIT_TERMINAL_PROMPT=0`` — on the operator's own
-    ``develop review`` an https helper that would have prompted now fails
-    plainly; use ``gh auth`` / ssh).
+    process group, and no credential prompt can block
+    (``GIT_TERMINAL_PROMPT=0`` — on the operator's own ``develop review`` an
+    https helper that would have prompted now fails plainly; use ``gh auth`` /
+    ssh).
 
     A **transport** failure on top of that is retried up to
     :data:`FETCH_ATTEMPTS` times with a short backoff (#431), and a failure
     that persists raises :class:`FetchFailedError` — which every intake
-    surface maps to an ``infra_failed`` run, never a crash."""
+    surface maps to an ``infra_failed`` run, never a crash. The retries share
+    ONE :data:`PR_FETCH_TIMEOUT_SECONDS` budget: the fast signs the retry
+    exists for come back in milliseconds, while a hung origin would otherwise
+    hold a dispatcher's single-flight slot for attempts × the timeout (review
+    security f-003)."""
+    deadline = time.monotonic() + PR_FETCH_TIMEOUT_SECONDS
+    problem = git.FetchProblem(f"timed out after {PR_FETCH_TIMEOUT_SECONDS:.0f}s")
     for attempt in range(1, FETCH_ATTEMPTS + 1):
-        problem = git.fetch_refspecs(repo, refspecs, timeout=PR_FETCH_TIMEOUT_SECONDS)
-        if not problem:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break  # the whole intake fetch gets one timeout, retries included
+        problem = git.fetch_problem(repo, refspecs, timeout=remaining)
+        if not problem.reason:
             return
-        if attempt == FETCH_ATTEMPTS or not _transient_fetch_failure(problem):
-            raise FetchFailedError(refspecs=refspecs, problem=problem)
+        if attempt == FETCH_ATTEMPTS or not _transient_fetch_failure(problem.detail):
+            break
         backoff = FETCH_RETRY_BACKOFF_SECONDS * attempt
         logger.warning(
             "git: intake fetch of %s failed transiently (%s); retrying in "
             "%.0fs (attempt %d/%d)",
             " ".join(refspecs),
-            problem,
+            problem.reason,
             backoff,
             attempt + 1,
             FETCH_ATTEMPTS,
         )
         time.sleep(backoff)
-    raise AssertionError("unreachable")  # pragma: no cover
+    raise FetchFailedError(refspecs=refspecs, problem=problem.fatal_line)
 
 
 def _gh_pr_view(repo: Path, number: str) -> PullRequest:

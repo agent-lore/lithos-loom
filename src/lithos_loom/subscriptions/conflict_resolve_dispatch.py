@@ -543,7 +543,7 @@ class ConflictResolveDispatch:
                 story_id,
                 replace(record, status="crashed", message=f"exit {rc}"),
                 f"failed (exit {rc}) without a result; last output line: "
-                f"{message_tail(output)}",
+                f'"{message_tail(output)}"',
                 ctx,
             )
             return
@@ -576,7 +576,10 @@ class ConflictResolveDispatch:
             # #377: the host failed under the coder — no verdict, no gate; the
             # pair stays armed for the next boot (the record's status + boot
             # id are the re-arm key), the breadcrumb names the host action.
-            action = str(data.get("host_action") or "fix the host")
+            # bounded like `refund_infra_failed` bounds its `message`: a host
+            # action quotes git's stderr, which the ORIGIN host wrote (review
+            # security f-001)
+            action = str(data.get("host_action") or "fix the host")[:300]
             worktree = str(data.get("worktree") or "")
             kept = (
                 f"; the run's worktree {worktree} holds any resolution the coder "

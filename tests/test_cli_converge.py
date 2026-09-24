@@ -1342,13 +1342,20 @@ def test_converge_binds_its_lifetime_to_a_loom_parent(
     assert bound
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [[], ["--resolve-conflicts"], ["--from-github"]],
+    ids=["plain", "resolve", "github"],
+)
 def test_an_intake_fetch_failure_is_infra_failed_not_a_traceback(
-    stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: list[str]
 ) -> None:
     """#431: a transient SSH failure at the intake fetch used to escape as an
     uncaught RuntimeError — exit 1 with no `--json` written, so the watcher
     recorded `crashed` and put a rich traceback frame in the story's finding.
-    It is the #377 `infra_failed` verdict now, record and all."""
+    It is the #377 `infra_failed` verdict now, record and all — in EVERY mode
+    the one intake fetch serves (review f-004), since each is a mode the
+    watcher dispatches autonomously."""
     from lithos_loom.plugins.story_develop.review_resolve import FetchFailedError
 
     def hiccup(repo, spec, **kw):
@@ -1361,7 +1368,7 @@ def test_an_intake_fetch_failure_is_infra_failed_not_a_traceback(
     out = tmp_path / "r.json"
     result = runner.invoke(
         develop_app,
-        ["converge", "#142", "--ac", "x", "--resolve-conflicts", "--json", str(out)],
+        ["converge", "#142", "--ac", "x", *mode, "--json", str(out)],
     )
 
     assert result.exit_code == 1, result.output

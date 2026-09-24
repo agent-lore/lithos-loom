@@ -30,7 +30,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
 | `lithos_loom.subscriptions._project_settings` | S | 1 | 7 |
-| `lithos_loom.subscriptions._subprocess` | XS | 0 | 2 |
+| `lithos_loom.subscriptions._subprocess` | S | 0 | 2 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.admission` | L | 2 | 0 |
 | `lithos_loom.subscriptions.admission_count` | S | 1 | 4 |
@@ -140,7 +140,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._subprocess`
 - def `spawn_command` — Run *cmd*, return ``(returncode, combined output)``.
-- def `message_tail` — The last non-traceback line of *output*, for an operator-facing finding.
+- def `message_tail` — The crashed child's last logical MESSAGE, fit to publish in a finding.
 
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
@@ -308,7 +308,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ## Dependencies
 
-- Depends on: [Bus](Bus.md), [Config](Config.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [Notifications](Notifications.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [State](State.md), [Tasks](Tasks.md)
+- Depends on: [Bus](Bus.md), [Config](Config.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [Notifications](Notifications.md), [Plugins](Plugins.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [State](State.md), [Tasks](Tasks.md)
 - Used by: [Children](Children.md), [Cli](Cli.md), [Entrypoint](Entrypoint.md), [Render](Render.md)
 
 ## ADRs

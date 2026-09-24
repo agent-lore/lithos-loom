@@ -14,7 +14,7 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 | `lithos_loom.plugin_runner` | S | 0 | 3 |
 | `lithos_loom.runner` | XS | 0 | 0 |
 | `lithos_loom.runner.detection` | S | 0 | 3 |
-| `lithos_loom.runner.git` | M | 1 | 29 |
+| `lithos_loom.runner.git` | M | 2 | 30 |
 | `lithos_loom.runner.orphans` | S | 1 | 6 |
 | `lithos_loom.runner.pidfile` | S | 1 | 5 |
 | `lithos_loom.runner.signals` | S | 0 | 9 |
@@ -34,7 +34,9 @@ Route and plugin execution (worktree, git, agent detection, subprocess plugin ru
 
 ### `lithos_loom.runner.git`
 - def `fetch_branch` — Fetch origin's *base_branch* into ``refs/remotes/origin/<base_branch>``.
+- class `FetchProblem` — Why a fetch failed: the one line worth REPORTING plus the WHOLE stderr.
 - def `fetch_refspecs` — ``git fetch origin <refspecs…>`` with the daemon's tolerances; ``""`` on success, else the reason (for the caller's log or error).
+- def `fetch_problem` — ``git fetch origin <refspecs…>`` with the daemon's tolerances, as a :class:`FetchProblem` (empty ``reason`` = success).
 - def `run_group` — Run *argv* in its own process group; ``(returncode, stderr)``, or ``(None, "")`` when it timed out — the whole group is killed then, so a transport helper (ssh, git-remote-https) cannot outlive the fetch.
 - def `base_sha` — Return the current ``HEAD`` SHA of *worktree*.
 - class `RangeBase` — Where a branch's own work begins (PRD S5c).

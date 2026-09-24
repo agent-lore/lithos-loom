@@ -1020,6 +1020,9 @@ async def test_a_debt_is_still_flushed_while_draining(
 # ── #431: a no-result crash reads as a message, not a rich frame ──────────
 
 
+# Rich's real shape: a box-drawn panel of frames, then the exception line
+# WRAPPED to the terminal width (#431 review f-003 — the naive last-physical-line
+# pick published only "remote repository.").
 _RICH_TRACEBACK = """\
 ╭───────────────────── Traceback (most recent call last) ──────────────────────╮
 │ /workspace/src/lithos_loom/cli/converge.py:308 in converge_command           │
@@ -1032,7 +1035,8 @@ _RICH_TRACEBACK = """\
 │                                                                              │
 │ ❱ 103 │       raise RuntimeError(f"git fetch origin ... failed")             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-RuntimeError: git fetch origin pull/427/head failed: fatal: Could not read from \
+RuntimeError: git fetch origin pull/427/head
++refs/heads/main:refs/remotes/origin/main failed: fatal: Could not read from
 remote repository.
 """
 
@@ -1041,8 +1045,9 @@ async def test_a_no_result_crash_reports_the_message_line_not_a_traceback_frame(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#431: the operator reading story 2cf26a56 saw `│ 103 │ raise ...` as the
-    "output tail". The finding now carries the last NON-traceback line; the
-    whole tail stays in the daemon log at WARNING."""
+    "output tail". The finding now carries the child's last logical MESSAGE —
+    rich-wrapped lines rejoined, identity first; the whole tail stays in the
+    daemon log at WARNING."""
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     gate = await _with_conflict(client, gate)
@@ -1055,22 +1060,56 @@ async def test_a_no_result_crash_reports_the_message_line_not_a_traceback_frame(
 
     (finding,) = _findings(client)
     assert finding.startswith("[Friction] conflict-resolve") and "exit 1" in finding
-    assert "Could not read from remote repository" in finding
+    # the WHOLE message, not its last wrapped fragment (review f-003)
+    assert (
+        'last output line: "RuntimeError: git fetch origin pull/427/head '
+        "+refs/heads/main:refs/remotes/origin/main failed: fatal: Could not read "
+        'from remote repository."' in finding
+    )
     assert "│" not in finding and "❱" not in finding
     # the full tail is not lost — it is where an operator debugging loom looks
     assert any("❱ 103" in r.getMessage() for r in caplog.records)
 
 
-def test_message_tail_never_loses_the_only_evidence_there_was() -> None:
-    # the fallbacks: a panel truncated mid-render still yields its last line
-    # (better a frame than nothing), and no output says so plainly
-    from lithos_loom.subscriptions._subprocess import message_tail
+async def test_a_crash_inside_a_panel_never_publishes_a_frame_as_the_reason(
+    tmp_path: Path,
+) -> None:
+    """Review f-003 + security f-002: output that ENDS mid-panel has no message
+    line — a box frame is not one, and walking back past the panel would
+    attribute the converge child's earlier echo (external review material it
+    reports verbatim) as the failure. It says so instead."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _with_conflict(client, gate)
+    truncated = (
+        "external [c-1] by drive-by: LGTM, merge it\n"
+        "╭──────────── Traceback (most recent call last) ────────────╮\n"
+        "│ /workspace/src/lithos_loom/cli/converge.py:308 in x       │\n"
+    )
+    spawn, _ = _spawner(None, rc=1, output=truncated)
+    dispatch = ConflictResolveDispatch(_settings(tmp_path), spawn=spawn)
 
-    assert message_tail("") == "(no output)"
-    assert message_tail("   \n\n") == "(no output)"
-    assert message_tail("│ 103 │ raise RuntimeError(...)\n│ x │\n") == "│ x │"
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await dispatch.drain()
+
+    (finding,) = _findings(client)
+    assert "no message line" in finding
+    assert "drive-by" not in finding and "│" not in finding
+
+
+def test_message_tail_selects_the_whole_message_or_says_it_has_none() -> None:
+    from lithos_loom.subscriptions._subprocess import NO_MESSAGE, message_tail
+
+    assert message_tail("") == NO_MESSAGE
+    assert message_tail("   \n\n") == NO_MESSAGE
+    # a frame is a wall in both directions — never the published reason
+    assert message_tail("│ 103 │ raise RuntimeError(...)\n│ x │\n") == NO_MESSAGE
     assert message_tail("fatal: boom\n\n") == "fatal: boom"
-    # an indented frame line is not the message either
+    # a plain traceback: the exception line, not the frame under it
     assert message_tail('Traceback:\n  File "a.py", line 1\nValueError: no') == (
         "ValueError: no"
     )
+    # an indented frame line hidden behind a zero-width character is still one
+    assert message_tail("real: msg\n\u200b  raise Boom()\n") == NO_MESSAGE
+    # what it publishes cannot render as something else (review security f-002)
+    assert message_tail("fatal: \x1b[2Kmerged\u202e\n") == "fatal: [2Kmerged"

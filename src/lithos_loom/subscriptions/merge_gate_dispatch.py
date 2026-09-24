@@ -768,7 +768,10 @@ class MergeGateDispatch:
                 story_id,
                 spec,
                 record,
-                value_of(data, "host_action") or "fix the host",
+                # bounded like `refund_infra_failed` bounds its `message`: a
+                # host action quotes git's stderr, which the ORIGIN host wrote
+                # (review security f-001)
+                value_of(data, "host_action")[:300] or "fix the host",
                 ctx,
             )
         elif status == "pr_closed":

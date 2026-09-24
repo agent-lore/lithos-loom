@@ -17,9 +17,14 @@ from __future__ import annotations
 
 import asyncio
 
+from lithos_loom.plugins.story_develop.publish_text import (
+    CONTROL_CHARS_RE,
+    MAX_EXCERPT_CHARS,
+    publish_line,
+)
 from lithos_loom.runner.signals import bound_child_env
 
-__all__ = ["message_tail", "spawn_command"]
+__all__ = ["NO_MESSAGE", "message_tail", "spawn_command"]
 
 
 async def _end_process(proc: asyncio.subprocess.Process) -> None:
@@ -65,29 +70,63 @@ async def spawn_command(
     )
 
 
-# Rich renders an uncaught exception as a box-drawn panel of source frames, so
-# the LAST 600 chars of a crashed child's output are usually frame decoration
-# (#431: a story's `[Friction]` carried `│   103 │   raise RuntimeError(...)`
-# instead of "SSH fetch failed"). A finding gets the last line that is a
-# MESSAGE — the exception line, git's own `fatal:` — and the full tail stays
-# in the daemon log at WARNING.
-_FRAME_MARKERS = ("│", "╭", "╰", "─", "┃", "┌", "└", "├", "|", "+-")
-_FRAME_OPENERS = ('File "', "Traceback (most recent call last)")
+# Rich renders an uncaught exception as a box-drawn panel of source frames and
+# then WRAPS the exception line itself across several physical lines, so neither
+# the last 600 chars of a crashed child's output nor its last physical line is
+# the reason (#431: a story's `[Friction]` carried `│ 103 │ raise RuntimeError(`;
+# its review f-003: the naive last-line pick carried `remote repository.`). What
+# a finding wants is the TRAILING BLOCK of non-frame lines, rejoined into the one
+# logical message — and, when the output ends inside a panel, nothing at all:
+# walking back past loom's own traceback would attribute EARLIER output (the
+# external review material converge echoes, review security f-002) as the
+# failure. The full tail stays in the daemon log at WARNING either way.
+_FRAME_MARKERS = (
+    "│",
+    "╭",
+    "╰",
+    "─",
+    "┃",
+    "┌",
+    "└",
+    "├",
+    "|",
+    "+-",
+    'File "',
+    "Traceback (most recent call last)",
+)
+NO_MESSAGE = "no message line — see the daemon log"
 
 
-def message_tail(output: str, *, limit: int = 300) -> str:
-    """The last non-traceback line of *output*, for an operator-facing finding.
+def _is_frame_line(line: str) -> bool:
+    """Is *line* traceback / panel decoration rather than a message?
 
-    Falls back to the last non-blank line when every line looks like a frame
-    (a panel truncated mid-render), and to ``"(no output)"`` for no output at
-    all — a finding never loses the only evidence there was.
+    Indentation is measured with :meth:`str.lstrip`, not ``startswith(" ")``:
+    a leading NBSP or zero-width character would otherwise present a frame's
+    source line as a message (review security f-002).
     """
-    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
-    for line in reversed(lines):
-        if line.startswith((" ", "\t")):
-            continue  # a frame's source / caret line
-        stripped = line.strip()
-        if stripped.startswith(_FRAME_MARKERS) or stripped.startswith(_FRAME_OPENERS):
+    clean = CONTROL_CHARS_RE.sub("", line)
+    if clean != clean.lstrip():
+        return True  # a frame's source / caret line
+    return clean.strip().startswith(_FRAME_MARKERS)
+
+
+def message_tail(output: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
+    """The crashed child's last logical MESSAGE, fit to publish in a finding.
+
+    The trailing run of non-frame, non-blank lines rejoined (a rich-wrapped
+    ``RuntimeError: …`` comes back whole, identity first), bounded and stripped
+    of anything that could render as something other than itself — the child's
+    output carries text loom did not author, and this lands on a screen the
+    operator decides on (:func:`publish_line`). :data:`NO_MESSAGE` when the
+    output holds no message line at all: a box frame is never the answer.
+    """
+    block: list[str] = []
+    for line in reversed(output.splitlines()):
+        if not line.strip():
+            if block:
+                break  # a blank line ends the message block
             continue
-        return stripped[-limit:]
-    return lines[-1].strip()[-limit:] if lines else "(no output)"
+        if _is_frame_line(line):
+            break  # a frame is a wall: never reach past it for a "message"
+        block.insert(0, line.strip())
+    return publish_line(" ".join(block), limit=limit) or NO_MESSAGE
