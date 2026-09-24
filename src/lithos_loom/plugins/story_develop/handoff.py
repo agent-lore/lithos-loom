@@ -13,7 +13,9 @@ back to the agent as a correction prompt.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import stat
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from importlib import resources
@@ -22,6 +24,18 @@ from pathlib import Path
 from .publish_text import CONTROL_CHARS_RE
 
 _PROMPTS = "lithos_loom.plugins.story_develop.prompts"
+
+MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
+"""Cap on one handoff read, everywhere loom reads a file an agent wrote.
+
+The handoff dir is an RW bind mount the coder and reviewers write into, so
+every byte in it is the agent's to choose. A slurp (``read_text``) of a
+poisoned multi-GB file would OOM whichever host process did it — the
+orchestrator driving the run, the read-only ``develop attach`` / ``list``
+observer, or ``develop deliver`` — so there is ONE bounded reader
+(:func:`read_handoff`) and each of them uses it (7848b74a, the plugin's own
+read was the outlier)."""
+_TRUNCATED_NOTE = "\n…(handoff truncated)"
 
 # --- severity (ported from Ralph++ tools/base.py) --------------------------
 
@@ -282,9 +296,64 @@ def reviewer_handoff_name(round_no: int, reviewer: str) -> str:
 def _read_or_missing(path: Path) -> str:
     """Body of a handoff file, or a placeholder if it was never written."""
     try:
-        return path.read_text(encoding="utf-8").strip()
+        return read_handoff(path)
     except OSError:
         return "_(no handoff file was written)_"
+
+
+def read_regular_file(path: Path, limit: int) -> bytes | None:
+    """Read at most *limit* bytes of *path*, or ``None`` if it is not a plain
+    file.
+
+    ``O_NOFOLLOW`` plus an ``fstat`` regular-file check on the **opened**
+    descriptor, so the type cannot change between the check and the read. That
+    one test rejects symlinks, FIFOs, devices and directories at once — a FIFO
+    planted in the RW handoff mount would otherwise block the whole command
+    (including ``--dry-run``) for ever on a read with no timeout; a symlink is
+    the agent choosing which host file this host-privileged process opens
+    (CWE-59). Short reads are continued up to *limit* or EOF.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        # back to blocking for the read itself: O_NONBLOCK was only there so
+        # opening a FIFO with no writer cannot hang before the fstat
+        os.set_blocking(fd, True)
+        chunks: list[bytes] = []
+        remaining = limit
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def read_handoff(path: Path, *, limit: int = MAX_HANDOFF_BYTES) -> str:
+    """The text of an agent-written handoff, bounded to *limit* bytes.
+
+    Reads through :func:`read_regular_file` (so a symlink or FIFO in the
+    mount reads as absent), decodes leniently — adversarial bytes must not
+    raise — strips, and marks an over-limit file with a trailing
+    ``…(handoff truncated)`` line so the reader knows it saw a prefix.
+    Raises ``OSError`` for an absent, unreadable or non-regular file: every
+    caller already treats those alike.
+    """
+    raw = read_regular_file(path, limit + 1)
+    if raw is None:
+        raise FileNotFoundError(f"{path}: not a readable regular file")
+    truncated = len(raw) > limit
+    text = raw[:limit].decode("utf-8", errors="replace").strip()
+    return f"{text}{_TRUNCATED_NOTE}" if truncated else text
 
 
 def _blockquote(text: str) -> str:
