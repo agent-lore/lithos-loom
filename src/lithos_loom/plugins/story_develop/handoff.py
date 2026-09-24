@@ -313,29 +313,55 @@ def read_regular_file(path: Path, limit: int) -> bytes | None:
     the agent choosing which host file this host-privileged process opens
     (CWE-59). Short reads are continued up to *limit* or EOF.
     """
+    opened = _open_regular_file(path)
+    if opened is None:
+        return None
+    fd, _ = opened
+    try:
+        return _read_up_to(fd, limit)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _open_regular_file(path: Path) -> tuple[int, os.stat_result] | None:
+    """Open *path* ``O_NOFOLLOW`` and prove it is a regular file on the
+    **opened** descriptor; ``None`` (nothing left open) otherwise.
+
+    The one place the plugin decides what an agent-written path is allowed to
+    be: the ``fstat`` on the descriptor cannot be raced by a swap between a
+    check and the open, and rejects symlinks, FIFOs, devices and directories
+    at once. ``O_NONBLOCK`` on the open so a FIFO with no writer cannot hang
+    before the ``fstat``; the caller reads blocking.
+    """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         return None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
             return None
-        # back to blocking for the read itself: O_NONBLOCK was only there so
-        # opening a FIFO with no writer cannot hang before the fstat
         os.set_blocking(fd, True)
-        chunks: list[bytes] = []
-        remaining = limit
-        while remaining > 0:
-            chunk = os.read(fd, remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
     except OSError:
-        return None
-    finally:
         os.close(fd)
+        return None
+    return fd, st
+
+
+def _read_up_to(fd: int, limit: int) -> bytes:
+    """At most *limit* bytes from *fd*, short reads continued to the cap or EOF."""
+    chunks: list[bytes] = []
+    remaining = limit
+    while remaining > 0:
+        chunk = os.read(fd, min(remaining, 1 << 16))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 
 def read_handoff(path: Path, *, limit: int = MAX_HANDOFF_BYTES) -> str:
@@ -640,8 +666,22 @@ def file_fingerprint(path: Path) -> str | None:
     failed attempt may only salvage an artifact it *itself* created or
     rewrote, so each attempt snapshots the file before running and compares
     after.
+
+    Bounded like every other read of the mount (PR #429 review): the hash
+    covers at most :data:`MAX_HANDOFF_BYTES`, and the file's size rides
+    along in front of it so a file that grew past the cap — whose hashed
+    prefix is unchanged — still reads as changed. Opened through
+    :func:`_open_regular_file`, so a symlink or FIFO is "unreadable", never
+    followed or hung on.
     """
+    opened = _open_regular_file(path)
+    if opened is None:
+        return None
+    fd, st = opened
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        digest = hashlib.sha256(_read_up_to(fd, MAX_HANDOFF_BYTES)).hexdigest()
     except OSError:
         return None
+    finally:
+        os.close(fd)
+    return f"{st.st_size}:{digest}"
