@@ -957,20 +957,26 @@ def test_prune_ignores_a_symlink_in_the_handoff_dir(
     assert fresh.exists()  # the link target is never touched
 
 
-def test_prune_ignores_a_future_stamped_handoff_file(
-    patched: Path, monkeypatch: pytest.MonkeyPatch
+def test_prune_keeps_a_run_whose_tree_is_stamped_in_the_future(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # security/f-002: `utime(2)` on a file it owns needs no privilege, so an
-    # agent could stamp one handoff into 2099 and pin its run dir as "written
-    # just now" forever. A future mtime cannot describe past activity — it is
-    # dropped from the max, not clamped to now (clamping keeps the dir too).
+    # A timestamp after `now` cannot describe past activity, so it is neither
+    # counted as the newest write (`utime(2)` on a file it owns needs no
+    # privilege, and counting it would let an agent pin its dir as "fresh")
+    # nor ignored (ignoring it would hide the real newest write behind an older
+    # visible one and license a delete the age never justified). It means the
+    # age is not established — which is `unknown — kept`, named.
     forged = _make_run(patched, task_id="t-1", run_id="forged", rounds={1: ["cq"]})
     _backdate(forged, 7200)
     future = time.time() + 365 * 24 * 3600
     os.utime(forged / "handoff" / "round_01_coder_done.md", (future, future))
     monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
     develop.develop_prune(config=None, dry_run=False, output_format="text")
-    assert not forged.exists()
+
+    out = capsys.readouterr().out
+    assert forged.exists()
+    assert "unknown — kept forged" in out and "stamped in the future" in out
 
 
 def test_prune_never_follows_a_symlinked_run_dir(
@@ -1041,15 +1047,15 @@ def test_prune_keeps_run_whose_host_cannot_identify_its_owner(
     assert "names no process this host can verify" in capsys.readouterr().out
 
 
-def test_prune_classifies_a_dead_run_with_an_unreadable_subdir(
+def test_prune_keeps_a_dead_run_whose_dir_it_cannot_fully_read(
     patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # security/f-005: `mkdir -m 000 x` in the RW worktree is one command, and a
-    # red check can leave the same thing behind under `test_gate/` by accident.
-    # It must not pin the dir as `unknown` forever: the verdict here was settled
-    # by liveness (the owner is provably gone), so the age walk's blind spot
-    # cannot veto it — and if the content really is undeletable, that surfaces
-    # as the failed deletion it is (an error + a non-zero exit), not silence.
+    # A dead owner proves nothing is being written NOW; it cannot prove that an
+    # unseen file was not modified in place seconds before the run died (an
+    # in-place write bumps no visible ancestor). So a tree with a hole in it has
+    # no established age, and an unestablished age never licenses a delete —
+    # whichever way liveness went. The line says which path blocks it, so the
+    # operator can finish the job by hand.
     dead = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
     (dead / run_owner.OWNER_FILE).write_text(
         json.dumps(
@@ -1058,7 +1064,7 @@ def test_prune_classifies_a_dead_run_with_an_unreadable_subdir(
     )
     locked = dead / "test_gate" / "round_01" / "tree-check-abc" / "locked"
     locked.mkdir(parents=True)
-    (locked / "root_owned").write_text("x")
+    (locked / "written_just_before_the_kill").write_text("x")
     _backdate(dead, 7200)
     locked.chmod(0o000)
     try:
@@ -1066,15 +1072,16 @@ def test_prune_classifies_a_dead_run_with_an_unreadable_subdir(
             list(os.scandir(locked))  # the shape the finding describes
         monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
 
-        develop.develop_prune(config=None, dry_run=True, output_format="json")
+        develop.develop_prune(config=None, dry_run=False, output_format="json")
 
         rows = json.loads(capsys.readouterr().out)
-        assert [(r["run_id"], r["state"]) for r in rows] == [("dead", "finished")]
-        # the age still had to pass (the tree went quiet two hours ago), and the
-        # line says the timestamp is the newest one it could SEE, not the total
-        assert "is gone" in rows[0]["reason"]
-        assert "nothing written since" in rows[0]["reason"]
-        assert "as far as could be read" in rows[0]["reason"]
+        assert [(r["run_id"], r["state"], r["pruned"]) for r in rows] == [
+            ("dead", "unknown", False)
+        ]
+        assert "age cannot be established" in rows[0]["reason"]
+        assert "could not be read" in rows[0]["reason"]
+        assert "delete it by hand" in rows[0]["reason"]
+        assert dead.exists()
     finally:
         locked.chmod(0o700)
 
@@ -1101,13 +1108,14 @@ def test_prune_keeps_a_signal_less_run_with_an_unreadable_subdir(
         locked.chmod(0o700)
 
 
-def test_prune_bounds_the_size_walk_without_bounding_the_verdict(
+def test_prune_bounds_the_walk_and_never_deletes_on_a_partial_one(
     patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # security/f-007: the walk is bounded (the file count under a run dir is
-    # agent-controlled, and every sweep — `--dry-run` included — walks every
-    # dir). A truncated walk reports its size as the floor it is, and still
-    # classifies: the verdict came from liveness, not from the walk.
+    # The walk is bounded (the file count under a run dir is agent-controlled,
+    # and every sweep — `--dry-run` included — walks every dir), and a walk that
+    # stopped early has not established an age: the dir is kept and its size is
+    # reported as the floor it is. The budget is set far above any honest tree
+    # for exactly that reason.
     monkeypatch.setattr(develop, "_MAX_SCAN_ENTRIES", 3)
     dead = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
     (dead / run_owner.OWNER_FILE).write_text(
@@ -1122,12 +1130,15 @@ def test_prune_bounds_the_size_walk_without_bounding_the_verdict(
     _backdate(dead, 7200)
     monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
 
-    develop.develop_prune(config=None, dry_run=True, output_format="text")
-    assert ">= " in capsys.readouterr().out  # a floor, not a claimed total
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert dead.exists()
+    assert ">= " in out  # a floor, not a claimed total
+    assert "more entries than the sweep walks" in out
 
     develop.develop_prune(config=None, dry_run=True, output_format="json")
     row = json.loads(capsys.readouterr().out)[0]
-    assert row["state"] == "finished" and row["size_partial"] is True
+    assert row["state"] == "unknown" and row["size_partial"] is True
 
 
 def test_prune_keeps_a_signal_less_run_it_cannot_walk_to_the_end(
@@ -1182,23 +1193,25 @@ def test_prune_keeps_a_just_stopped_run_through_the_grace_window(
     assert "is gone" in out and "nothing written since" in out
 
 
-def test_prune_strips_terminal_escapes_from_an_agent_named_path(
+def test_prune_renders_an_agent_named_path_line_safely(
     patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """security/f-008: the unreadable entry named in the reason is a path the
-    AGENT chose (any byte but NUL and `/` is a legal filename), and prune is the
-    one command that deletes things — a crafted name must not be able to erase
-    or forge the line beside it on the operator's terminal.
+    """security/f-008 + f-009: the unreadable entry named in a reason is a path
+    the AGENT chose (any byte but NUL and `/` is a legal filename), and prune is
+    the one command that deletes things — a crafted name must not be able to
+    erase the line beside it (CR), forge whole records (LF, which the shared
+    body sanitiser deliberately keeps), or drive the terminal (CSI).
 
-    The probe is a bare CR, not an ANSI CSI: ``click.echo`` strips ANSI itself
-    when stdout is not a tty (as under capsys), so an escape-only fixture would
-    pass with or without the fix, while the operator at a real terminal is
-    exactly who is unprotected. ``\r`` is stripped by `_sanitize` and by nobody
-    else, and it is enough on its own to overwrite the previous line. The json
-    view carries the raw bytes escaped, so it is checked for both.
+    The probes are a CR and an LF, not only an ANSI CSI: ``click.echo`` strips
+    ANSI itself when stdout is not a tty (as under capsys), so an escape-only
+    fixture would be green with or without the fix while the operator at a real
+    terminal stayed exposed. The structural assertion is the record count.
     """
     legacy = _make_run(patched, task_id="t-1", run_id="legacy", rounds={1: ["cq"]})
-    locked = legacy / "worktree" / "\x1b[2K\rremoved 54 finished runs"
+    forged_record = (
+        "\x1b[2K\rx\nremoved 99999999 (task t-9)  8.9 GiB  — terminal log written"
+    )
+    locked = legacy / "worktree" / forged_record
     locked.mkdir(parents=True)
     _backdate(legacy, 7200)
     locked.chmod(0o000)
@@ -1208,13 +1221,16 @@ def test_prune_strips_terminal_escapes_from_an_agent_named_path(
         develop.develop_prune(config=None, dry_run=False, output_format="text")
         out = capsys.readouterr().out
         assert legacy.exists()  # unreadable + no liveness signal → kept
-        assert "\r" not in out and "\x1b" not in out
-        assert "removed 54 finished runs" in out  # the text, stripped of controls
+        assert not any(c in out for c in "\x1b\r\t")
+        # one record, one line: the kept run, the "nothing finished" line and
+        # the tally — and nothing the filename forged in between. Nothing was
+        # deleted, so no line may open like a deletion record either.
+        assert len(out.strip().splitlines()) == 3
+        assert not any(line.startswith("removed") for line in out.splitlines())
 
         develop.develop_prune(config=None, dry_run=False, output_format="json")
-        raw = capsys.readouterr().out
-        assert r"\u001b" not in raw and r"\r" not in raw
-        assert "removed 54 finished runs" in json.loads(raw)[0]["reason"]
+        reason = json.loads(capsys.readouterr().out)[0]["reason"]
+        assert not any(c in reason for c in "\x1b\r\n\t")
     finally:
         locked.chmod(0o700)
 

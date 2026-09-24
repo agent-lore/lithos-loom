@@ -22,8 +22,8 @@ commands:
   (``story_develop.run_owner``) provably gone — *and* nothing anywhere under it
   written for longer than one agent turn, the grace window a just-stopped run
   gets. An in-flight run is never removed out from under a live daemon, and a
-  dir the rule cannot classify — docker unavailable included — is kept and
-  named ``unknown``.
+  dir the rule cannot classify — docker unavailable, or a tree whose age it
+  could not establish — is kept and named ``unknown``.
 
 The mutating commands registered in this namespace live in their own modules:
 ``review`` / ``converge`` / ``merge-gate`` / ``deliver`` (the last turns a
@@ -469,14 +469,16 @@ _INTAKE_SUFFIX = "-intake"
 # conservative treatment ``_reap_empty_task_dir`` gives it.
 _RUN_DIR_MARKERS = ("handoff", "worktree", "agents", "test_gate")
 
-# Entry budget for the *reporting* walk. The number of files under a run dir is
+# Entry budget for the walk. The number of files under a run dir is
 # agent-controlled (its worktree is an RW mount with no file-count limit), and
 # prune walks every discovered dir — ``--dry-run`` included — before it prints
-# anything. The budget bounds that; a truncated walk reports the size it did
-# measure as a lower bound (``>= 1.2 GiB``). It never bounds a *decision*: an
-# incomplete walk cannot prove a tree is idle, so the idle test treats a
-# truncated scan as unclassifiable rather than trusting a partial answer.
-_MAX_SCAN_ENTRIES = 200_000
+# anything, so the walk is bounded. A truncated walk decides nothing (the dir is
+# kept and named, and its size is reported as the lower bound it is), which is
+# why the budget is set far above any honest tree rather than at a tight one: a
+# big monorepo worktree plus a gate export per check per round runs to hundreds
+# of thousands of entries, and holding THAT dir forever would be the bug this
+# sweep exists to fix. It bounds the pathological case, not the large one.
+_MAX_SCAN_ENTRIES = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -502,19 +504,24 @@ class _TreeScan:
     than into the handoff dir, and reading only the latter would age a busy run
     into "idle".
 
-    ``unreadable`` names the first entry that could not be listed or stat-ed
-    (``""`` when the walk was complete), and ``truncated`` says the entry budget
-    ran out. Both mean the *age* is a floor rather than an answer — so they
-    disqualify the **idle test**, which is the only place age decides anything.
-    Neither is allowed to veto a verdict liveness already settled: a run whose
-    owner is provably dead is finished whether or not a check left a mode-000
-    directory behind, and an undeletable tree then surfaces as the failed
-    deletion it is (an error, a non-zero exit) instead of an eternal "unknown".
+    Three fields say the walk could not answer that question, each naming the
+    first place it fell short: ``unreadable`` (an entry that could not be listed
+    or stat-ed — a mode-000 directory, which a red check can leave behind by
+    itself), ``future`` (an entry stamped after the sweep's ``now``, which
+    cannot describe past activity and so is not a usable *newest*), and
+    ``truncated`` (the entry budget ran out). Any of them makes
+    ``newest_mtime`` a floor rather than the answer, and a floor cannot satisfy
+    "older than the timeout": an unseen file may have been modified in place
+    seconds before the run died without bumping any visible ancestor. So a
+    scan with a gap **never licenses a deletion**, however liveness was
+    settled — it is exactly the "a dir the rule cannot classify is reported as
+    unknown — kept, never deleted" case.
     """
 
     size: int
     newest_mtime: float
     unreadable: str
+    future: str
     truncated: bool
 
 
@@ -527,28 +534,36 @@ def _scan_tree(run_dir: Path, *, now: float, budget: int | None = None) -> _Tree
     at a host path — reporting that path's mtime (keeping its own dir forever)
     and its existence (a metadata oracle).
 
-    An mtime **in the future** is dropped rather than clamped: it cannot
-    describe past activity, and clamping it to ``now`` would still read as
-    "written just now" — which is the same denial of service by a different
-    route, since ``utime(2)`` on a file one owns needs no privilege at all.
+    An mtime **in the future** is neither counted as the newest nor silently
+    dropped — it is *recorded*. It cannot describe past activity (so counting
+    it would let `utime(2)`, which needs no privilege on a file one owns, pin
+    the dir forever), and ignoring it would let the same stamp hide the real
+    newest write behind an older visible one. Recorded, it simply means the age
+    is not established: see :class:`_TreeScan`.
 
     The walk stops after *budget* entries (:data:`_MAX_SCAN_ENTRIES`) and says
-    so; see :class:`_TreeScan` for what a truncated or partially-unreadable
-    walk may and may not decide.
+    so; see :class:`_TreeScan` for what a walk with a gap may decide (nothing).
     """
     size = 0
     newest = 0.0
     unreadable = ""
+    future = ""
     seen = 0
     limit = _MAX_SCAN_ENTRIES if budget is None else budget
     try:
         root = os.lstat(run_dir)
     except OSError:
         return _TreeScan(
-            size=0, newest_mtime=0.0, unreadable=str(run_dir), truncated=False
+            size=0,
+            newest_mtime=0.0,
+            unreadable=str(run_dir),
+            future="",
+            truncated=False,
         )
     if root.st_mtime <= now:
         newest = root.st_mtime
+    else:
+        future = str(run_dir)
     stack = [run_dir]
     while stack:
         current = stack.pop()
@@ -564,6 +579,7 @@ def _scan_tree(run_dir: Path, *, now: float, budget: int | None = None) -> _Tree
                     size=size,
                     newest_mtime=newest,
                     unreadable=unreadable,
+                    future=future,
                     truncated=True,
                 )
             try:
@@ -574,12 +590,18 @@ def _scan_tree(run_dir: Path, *, now: float, budget: int | None = None) -> _Tree
                 continue
             if st.st_mtime <= now:
                 newest = max(newest, st.st_mtime)
+            else:
+                future = future or entry.path
             if is_dir:
                 stack.append(Path(entry.path))
             else:
                 size += st.st_size
     return _TreeScan(
-        size=size, newest_mtime=newest, unreadable=unreadable, truncated=False
+        size=size,
+        newest_mtime=newest,
+        unreadable=unreadable,
+        future=future,
+        truncated=False,
     )
 
 
@@ -760,17 +782,20 @@ def _prune_verdict(
     is not a proxy for the first — it is the grace window a just-stopped run
     gets, so a crash stays on disk long enough to be looked at (and long enough
     for the route-runner to finish reading its result). Neither half alone
-    deletes anything.
+    deletes anything, and neither may be *assumed*: a walk that could not see
+    the whole tree (:class:`_TreeScan`) has not established an age, and an
+    unestablished age is `unknown — kept`, whatever the liveness probes said.
+    A dead owner proves nothing is being written **now**; it cannot prove that
+    an unseen file was not modified in place seconds before the run died.
 
-    What :func:`_run_liveness` established changes only what an **incomplete
-    age reading** may do. With a :data:`_GONE` answer — the process that ran it
-    provably dead, docker reporting no container up — nothing can be writing
-    under the dir, so the newest mtime the walk *could* read is the age, noted
-    as partial in the reason. With no liveness answer at all (:data:`_NO_SIGNAL`
-    — a run dir predating the owner marker) age is the only evidence there is,
-    so a partially-unreadable or truncated walk decides nothing. Letting the
-    hole veto a settled verdict too is what made ``mkdir -m 000 x`` in a
-    worktree a one-command "keep my run dir forever".
+    That is deliberately the conservative direction: the cost of keeping a dir
+    that could have gone is disk the operator can reclaim by hand (named, every
+    sweep, with the path that blocks it), while the cost of the other reading is
+    a dead run's artifacts deleted inside the window that exists to preserve
+    them. It also means a run whose own agent left a mode-000 directory behind
+    is held rather than swept — accepted, per the acceptance criteria's
+    "a dir the rule cannot classify … is reported as unknown — kept, never
+    deleted".
     """
     live = _run_liveness(run_dir)
     if live.state == _IN_FLIGHT:
@@ -796,21 +821,18 @@ def _prune_verdict(
         return PruneVerdict(_UNCLASSIFIED, live.reason)
     settled = live.state == _GONE
     scan = scans.get(run_dir) or _scan_tree(run_dir, now=now)
-    if not settled and (scan.unreadable or scan.truncated):
-        # No liveness answer: age is the ONLY evidence, and this walk has a
-        # hole in it. Nothing may be concluded from a tree we could not see.
-        gap = (
-            f"part of its dir could not be read ({_sanitize(scan.unreadable)})"
-            if scan.unreadable
-            else f"its dir holds more entries than the sweep walks "
-            f"({_MAX_SCAN_ENTRIES})"
-        )
+    gap = _age_gap(scan)
+    if gap:
         return PruneVerdict(
             _UNCLASSIFIED,
-            f"this run left no owner marker and {gap}, so its age is unknown",
+            (
+                f"{live.reason}, but its age cannot be established ({gap}) — "
+                "delete it by hand if you know the run is done"
+                if settled
+                else f"this run left no owner marker and its age cannot be "
+                f"established ({gap})"
+            ),
         )
-    if not scan.newest_mtime:
-        return PruneVerdict(_UNCLASSIFIED, "nothing under the run dir can be stat-ed")
     written = _format_mtime(scan.newest_mtime)
     if now - scan.newest_mtime <= idle_seconds:
         # Both halves of the rule must hold, so a run that stopped moments ago
@@ -830,25 +852,26 @@ def _prune_verdict(
         return PruneVerdict(
             _FINISHED, f"no live process and nothing written since {written}"
         )
-    return PruneVerdict(
-        _FINISHED, f"{live.reason}; nothing written since {written}{_gap_note(scan)}"
-    )
+    return PruneVerdict(_FINISHED, f"{live.reason}; nothing written since {written}")
 
 
-def _gap_note(scan: _TreeScan) -> str:
-    """What the age reading could not see, for a verdict liveness already settled.
+def _age_gap(scan: _TreeScan) -> str:
+    """Why *scan* did not establish the tree's age — ``""`` when it did.
 
-    A partial walk cannot age a run *up* — only a live writer could, and the
-    liveness probes established there is none — so it does not veto the verdict
-    (that is how ``mkdir -m 000 x`` in a worktree became a permanent
-    ``unknown — kept`` before). It does mean the timestamp is the newest one
-    *visible*, so the line says so rather than overstating it. The path is
-    agent-chosen: sanitise it before it reaches a terminal.
+    Paths are rendered with ``!r``: they are agent-chosen (any byte but NUL and
+    ``/`` is a legal filename) and this text lands on one line of the operator's
+    terminal during the one command that deletes things, so every control byte
+    — the newline the shared sanitiser deliberately keeps for multi-line bodies
+    included — must arrive literal rather than as layout.
     """
     if scan.unreadable:
-        return f" (as far as could be read; {_sanitize(scan.unreadable)} could not be)"
+        return f"part of its dir could not be read: {scan.unreadable!r}"
+    if scan.future:
+        return f"{scan.future!r} is stamped in the future"
     if scan.truncated:
-        return " (as far as could be read; the tree was too large to walk to the end)"
+        return f"its dir holds more entries than the sweep walks ({_MAX_SCAN_ENTRIES})"
+    if not scan.newest_mtime:
+        return "nothing under it can be stat-ed"
     return ""
 
 
@@ -1112,8 +1135,8 @@ def develop_prune(
     worktree, which has no handoff dir either, is judged by the same rule. Every
     in-flight run — including one still in its startup window — is left
     untouched, and so is any dir the rule cannot classify (docker unavailable,
-    an owner it cannot check, or, with no liveness answer at all, a tree it
-    cannot walk to the end): those are reported as ``unknown — kept``.
+    an owner it cannot check, a tree whose age it cannot establish — unreadable,
+    future-stamped, or too large to walk): those are ``unknown — kept``.
     ``--dry-run`` previews without deleting, naming why each candidate counts as
     finished and how much disk it holds. A deletion that fails (permissions,
     busy filesystem) is reported as an error, never as a success, and makes the
@@ -1214,12 +1237,13 @@ def develop_prune(
             label = f"{verdict.state} — kept"
         # The reason can quote a path an agent named (an unreadable entry), and
         # this is the one command that deletes things — a crafted name must not
-        # be able to erase or forge a line beside it. Sanitised at construction
-        # too; this is the sink, and the sink is where the rule holds.
+        # be able to erase or forge a line beside it. Rendered line-safe at
+        # construction too; this is the sink, and the sink is where the rule
+        # holds.
         typer.echo(
             f"{label} {info.run_id} (task {info.task_id})  {info.run_dir}  "
             f"{_format_size(scan.size, at_least=scan.truncated)}  "
-            f"— {_sanitize(verdict.reason)}"
+            f"— {_line_safe(verdict.reason)}"
         )
     if done or not kept:
         typer.echo(f"{verb} {done} finished run{'s' if done != 1 else ''}")
@@ -1486,6 +1510,19 @@ def _print_snapshot(run_dir: Path) -> None:
         typer.echo(f"reviewers: {', '.join(info.reviewers)}")
     typer.echo(f"run_dir: {info.run_dir}")
     _print_new_handoffs(run_dir / "handoff", set())
+
+
+def _line_safe(text: str) -> str:
+    """:func:`_sanitize`, plus the two control bytes it deliberately keeps.
+
+    ``CONTROL_CHARS_RE`` preserves LF and TAB because it guards multi-line
+    *bodies* (PR bodies, handoffs). ``prune``'s output is not a body: it is one
+    record per line, read as a list, so a newline in an agent-chosen path would
+    forge whole records — including a plausible summary tail — on the one
+    command that deletes things. Here the record is the unit, so LF and TAB fold
+    to spaces.
+    """
+    return _sanitize(text).replace("\n", " ").replace("\t", " ")
 
 
 def _sanitize(text: str) -> str:
