@@ -123,6 +123,7 @@ anyway.
 | `no_checks` | 0 | The profile resolved to an empty check-set; nothing gated, nothing pushed. |
 | `red` | 1 | A blocking check failed on the merge result. |
 | `errored` | 1 | The check-set could not run (infrastructure); no verdict. |
+| `infra_failed` | 1 | The intake fetch of the PR head + base failed on the host — a transport failure is retried 3× with a short backoff first (#431) — so nothing was merged or gated; `host_action` names git's own `fatal:` line and where to look (the daemon's SSH agent / its network access to origin). Not a verdict on the merge: the watcher's re-gate posts `[Friction]` with that action, retries the key, and re-arms it on the next daemon boot (#377). |
 | `fork_unsupported` | 2 | A fork PR; refused from GitHub's metadata before any fetch. |
 | `pr_closed` | 2 | The PR is merged or closed; its branch is not a live target, nothing is trial-merged or pushed. |
 | `repo_mismatch` | 2 | `--expect-repo` named a repository and the checkout's origin is a different one; nothing was fetched, gated or pushed. |

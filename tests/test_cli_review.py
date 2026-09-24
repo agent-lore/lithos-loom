@@ -395,3 +395,31 @@ def test_exit_code_follows_blocking(stubs: dict) -> None:
 def test_keep_worktree_flag(stubs: dict) -> None:
     runner.invoke(develop_app, ["review", "#142", "--ac", "x", "--keep-worktree"])
     assert stubs["keep_worktree"] is True
+
+
+def test_an_intake_fetch_failure_is_infra_failed_not_a_traceback(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #431: every intake surface shares the fetch, so every one of them maps a
+    # failed fetch to the #377 verdict rather than raising through the CLI.
+    from lithos_loom.plugins.story_develop.review_resolve import FetchFailedError
+
+    def hiccup(repo, spec, **kw):
+        raise FetchFailedError(
+            refspecs=("pull/7/head", "+refs/heads/main:refs/remotes/origin/main"),
+            problem="fatal: Could not read from remote repository.",
+        )
+
+    monkeypatch.setattr(review_cli, "resolve_change", hiccup)
+    out = tmp_path / "r.json"
+    result = runner.invoke(
+        develop_app, ["review", "#7", "--ac", "x", "--json", str(out)]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "config" not in stubs  # no panel built, nothing spent
+    assert "Traceback" not in result.output
+    assert not isinstance(result.exception, FetchFailedError)
+    record = json.loads(out.read_text())
+    assert record["status"] == "infra_failed"
+    assert "SSH agent" in record["host_action"]

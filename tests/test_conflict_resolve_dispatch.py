@@ -155,7 +155,12 @@ def _result(status: str, **overrides: Any) -> dict[str, Any]:
     return data
 
 
-def _spawner(run: dict[str, Any] | None, *, rc: int = 0) -> tuple[Any, list[list[str]]]:
+def _spawner(
+    run: dict[str, Any] | None,
+    *,
+    rc: int = 0,
+    output: str = "converge output",
+) -> tuple[Any, list[list[str]]]:
     calls: list[list[str]] = []
 
     async def spawn(cmd: list[str]) -> tuple[int, str]:
@@ -164,7 +169,7 @@ def _spawner(run: dict[str, Any] | None, *, rc: int = 0) -> tuple[Any, list[list
         path.parent.mkdir(parents=True, exist_ok=True)
         if run is not None:
             path.write_text(json.dumps(run), encoding="utf-8")
-        return rc, "converge output"
+        return rc, output
 
     return spawn, calls
 
@@ -1010,3 +1015,62 @@ async def test_a_debt_is_still_flushed_while_draining(
     assert not dispatch.debt_on(_PR_URL)
     gate = await _refresh(client, gate.id)
     assert read_budget(gate, _PR_URL).last_loom_pushed_sha == _PUSHED
+
+
+# ── #431: a no-result crash reads as a message, not a rich frame ──────────
+
+
+_RICH_TRACEBACK = """\
+╭───────────────────── Traceback (most recent call last) ──────────────────────╮
+│ /workspace/src/lithos_loom/cli/converge.py:308 in converge_command           │
+│                                                                              │
+│   305 │   host = load_config(config)                                         │
+│ ❱ 308 │       resolved = resolve_change(                                     │
+│                                                                              │
+│ /workspace/src/lithos_loom/plugins/story_develop/review_resolve.py:103 in    │
+│ _git_fetch                                                                   │
+│                                                                              │
+│ ❱ 103 │       raise RuntimeError(f"git fetch origin ... failed")             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+RuntimeError: git fetch origin pull/427/head failed: fatal: Could not read from \
+remote repository.
+"""
+
+
+async def test_a_no_result_crash_reports_the_message_line_not_a_traceback_frame(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#431: the operator reading story 2cf26a56 saw `│ 103 │ raise ...` as the
+    "output tail". The finding now carries the last NON-traceback line; the
+    whole tail stays in the daemon log at WARNING."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _with_conflict(client, gate)
+    spawn, _ = _spawner(None, rc=1, output=_RICH_TRACEBACK)
+    dispatch = ConflictResolveDispatch(_settings(tmp_path), spawn=spawn)
+
+    with caplog.at_level("WARNING"):
+        assert await _consider(client, gate, story, dispatch) == "dispatched"
+        await dispatch.drain()
+
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] conflict-resolve") and "exit 1" in finding
+    assert "Could not read from remote repository" in finding
+    assert "│" not in finding and "❱" not in finding
+    # the full tail is not lost — it is where an operator debugging loom looks
+    assert any("❱ 103" in r.getMessage() for r in caplog.records)
+
+
+def test_message_tail_never_loses_the_only_evidence_there_was() -> None:
+    # the fallbacks: a panel truncated mid-render still yields its last line
+    # (better a frame than nothing), and no output says so plainly
+    from lithos_loom.subscriptions._subprocess import message_tail
+
+    assert message_tail("") == "(no output)"
+    assert message_tail("   \n\n") == "(no output)"
+    assert message_tail("│ 103 │ raise RuntimeError(...)\n│ x │\n") == "│ x │"
+    assert message_tail("fatal: boom\n\n") == "fatal: boom"
+    # an indented frame line is not the message either
+    assert message_tail('Traceback:\n  File "a.py", line 1\nValueError: no') == (
+        "ValueError: no"
+    )

@@ -30,7 +30,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions._obsidian_status_transition` | S | 0 | 1 |
 | `lithos_loom.subscriptions._project_context_projection` | M | 0 | 1 |
 | `lithos_loom.subscriptions._project_settings` | S | 1 | 7 |
-| `lithos_loom.subscriptions._subprocess` | XS | 0 | 1 |
+| `lithos_loom.subscriptions._subprocess` | XS | 0 | 2 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.admission` | L | 2 | 0 |
 | `lithos_loom.subscriptions.admission_count` | S | 1 | 4 |
@@ -47,7 +47,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
 | `lithos_loom.subscriptions.merge_gate_command` | S | 1 | 6 |
 | `lithos_loom.subscriptions.merge_gate_dispatch` | L | 1 | 0 |
-| `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 10 |
+| `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 11 |
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_gate_stranding` | M | 1 | 4 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
@@ -140,6 +140,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ### `lithos_loom.subscriptions._subprocess`
 - def `spawn_command` — Run *cmd*, return ``(returncode, combined output)``.
+- def `message_tail` — The last non-traceback line of *output*, for an operator-facing finding.
 
 ### `lithos_loom.subscriptions._task_archive`
 - def `make_handler` — Build a stateful ``task-archive`` handler bound to ``cfg``.
@@ -243,6 +244,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `post_checkout_unresolved` — The sweep could not resolve the mapped checkout's origin: nothing is spawned (the child would only die in `gh` before any structured refusal), one ``[Friction]`` on the story naming why, settled on (path, reason) until the path changes or the read starts to answer.
 - def `post_config_unresolved`
 - def `post_crashed`
+- def `post_infra_failed` — The run stopped on the HOST, not on a verdict (#377, #431: its intake fetch failed through its retries). Keyed like a crash — retried on this pair, re-armed by a daemon restart — but the breadcrumb names what to fix instead of an output tail.
 
 ### `lithos_loom.subscriptions.merge_gate_record`
 - class `MergeGateRecord` — The gate's parsed ``merge_gate`` marker: the re-run key + the outcome.

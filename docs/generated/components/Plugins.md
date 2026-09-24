@@ -56,7 +56,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.publish_text` | M | 0 | 3 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
-| `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
+| `lithos_loom.plugins.story_develop.review_resolve` | M | 3 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 21 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
@@ -409,6 +409,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.review_resolve`
 - class `ResolvedChange` — A concrete change to review: the ``base..head`` commit pair + intent.
+- class `FetchFailedError` — The intake fetch failed — an infrastructure failure, not a verdict.
 - class `RepoMismatchError` — The checkout's ``origin`` is not the repository the caller expected.
 - def `resolve_change` — Resolve *spec* into a :class:`ResolvedChange`.
 

@@ -440,3 +440,93 @@ def test_resolving_a_pr_still_raises_on_any_other_fetch_failure(
     with pytest.raises(RuntimeError, match="couldn't find remote ref"):
         review_resolve.resolve_change(tmp_path, "#142")
     assert len(calls) == 1
+
+
+# ── #431: a transient intake fetch failure is retried, then `infra_failed` ────
+
+
+def _ssh_hiccup() -> str:
+    return (
+        "kex_exchange_identification: read: Connection reset by peer\n"
+        "fatal: Could not read from remote repository.\n"
+        "\n"
+        "Please make sure you have the correct access rights\n"
+        "and the repository exists.\n"
+    )
+
+
+def test_a_transient_intake_fetch_failure_is_retried_and_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#431: the daemon's SSH agent blinked for a second and the whole
+    conflict-resolve run was recorded as `crashed`, re-armed only by the next
+    daemon boot. A transport failure is now retried."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    calls: list[list[str]] = []
+
+    def hiccup(argv, **kw):
+        calls.append(list(argv))
+        return (128, _ssh_hiccup()) if len(calls) == 1 else (0, "")
+
+    monkeypatch.setattr(git, "run_group", hiccup)
+
+    with caplog.at_level("WARNING"):
+        change = review_resolve.resolve_change(tmp_path, "#142")
+
+    assert change.head_sha == "h" * 40  # the intake proceeded
+    assert len(calls) == 2  # one retry, not a daemon restart
+    retries = [r for r in caplog.records if "failed transiently" in r.message]
+    assert len(retries) == 1
+
+
+def test_a_persistent_intake_fetch_failure_is_a_typed_infra_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #431: bounded — three attempts, then the #377 verdict (NOT a crash) with
+    # git's own `fatal:` line and where to look for it on the host.
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    calls: list[int] = []
+
+    def failing(argv, **kw):
+        calls.append(1)
+        return 128, _ssh_hiccup()
+
+    monkeypatch.setattr(git, "run_group", failing)
+
+    with pytest.raises(review_resolve.FetchFailedError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    assert len(calls) == review_resolve.FETCH_ATTEMPTS == 3
+    assert exc.value.problem == "fatal: Could not read from remote repository."
+    action = exc.value.host_action
+    assert "Could not read from remote repository" in action
+    assert "SSH agent" in action and "pull/142/head" in action
+
+
+def test_an_unretryable_intake_fetch_failure_is_still_typed_and_unretried(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a ref that does not exist is not a hiccup: answered first time, but
+    # still `infra_failed` material rather than an uncaught RuntimeError
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    calls: list[int] = []
+
+    def missing(argv, **kw):
+        calls.append(1)
+        return 128, "fatal: couldn't find remote ref pull/142/head\n"
+
+    monkeypatch.setattr(git, "run_group", missing)
+
+    with pytest.raises(review_resolve.FetchFailedError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    assert len(calls) == 1
+    assert "couldn't find remote ref" in exc.value.host_action

@@ -11,8 +11,11 @@ the resolution logic is unit-testable without a network round-trip.
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +28,8 @@ from .github_access import github_call, repo_name_with_owner
 _PR_URL_REPO_RE = re.compile(r"github\.com/([^/\s#?]+/[^/\s#?]+)/pull/\d+\b")
 _PR_URL_RE = re.compile(r"/pull/(\d+)\b")
 _PR_HASH_RE = re.compile(r"^#?(\d+)$")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -87,6 +92,58 @@ def _merge_base(repo: Path, a: str, b: str) -> str:
 # 60 s base-branch budget is too tight for it (#392 review, L6).
 PR_FETCH_TIMEOUT_SECONDS = 300.0
 
+# Transport failures the intake fetch hits TRANSIENTLY — the daemon's ssh agent
+# or the network blinking for a second. One `Could not read from remote
+# repository.` used to cost a whole conflict-resolve run and leave the PR
+# `behind` until the next daemon boot (#431), so these are retried; anything
+# else (a ref that does not exist, a permission denial) is answered first time.
+_TRANSIENT_FETCH_SIGNS = (
+    "could not read from remote repository",
+    "connection reset",
+    "timed out",
+    "early eof",
+    "kex_exchange",
+)
+# Three attempts, ~1 s then ~2 s apart: a hiccup costs seconds, not a restart.
+FETCH_ATTEMPTS = 3
+FETCH_RETRY_BACKOFF_SECONDS = 1.0
+
+
+class FetchFailedError(RuntimeError):
+    """The intake fetch failed — an infrastructure failure, not a verdict.
+
+    #377's contract, applied to intake (#431): an auth / transport / spawn
+    failure says nothing about the change, so the caller ends the run
+    ``infra_failed`` with a :attr:`host_action` naming what to fix on the host
+    and writes its ``--json`` record — never an uncaught exception whose
+    traceback reaches a story's ``[Friction]`` as the "output tail". Raised
+    after :data:`FETCH_ATTEMPTS` attempts on a transport failure, on the first
+    answer for anything else.
+    """
+
+    def __init__(self, *, refspecs: Sequence[str], problem: str) -> None:
+        self.refspecs = tuple(refspecs)
+        self.problem = problem
+        super().__init__(
+            f"git fetch origin {' '.join(self.refspecs)} failed: {problem}"
+        )
+
+    @property
+    def host_action(self) -> str:
+        """What to fix on the host — git's own ``fatal:`` line plus where to
+        look for it (the operator reading the story sees "SSH fetch failed",
+        not a traceback fragment)."""
+        return (
+            f"the intake fetch of {' '.join(self.refspecs)} from origin failed "
+            f"({self.problem}) — check the daemon's SSH agent (SSH_AUTH_SOCK, "
+            "`ssh-add -l`) and its network access to origin, then re-run"
+        )
+
+
+def _transient_fetch_failure(problem: str) -> bool:
+    lowered = problem.lower()
+    return any(sign in lowered for sign in _TRANSIENT_FETCH_SIGNS)
+
 
 def _git_fetch(repo: Path, *refspecs: str) -> None:
     """Fetch the PR head + base with the daemon's tolerances (#392): a lost
@@ -96,11 +153,30 @@ def _git_fetch(repo: Path, *refspecs: str) -> None:
     process group after :data:`PR_FETCH_TIMEOUT_SECONDS`, and no credential
     prompt can block (``GIT_TERMINAL_PROMPT=0`` — on the operator's own
     ``develop review`` an https helper that would have prompted now fails
-    plainly; use ``gh auth`` / ssh). Anything else still raises — the
-    callers' contract is unchanged."""
-    problem = git.fetch_refspecs(repo, refspecs, timeout=PR_FETCH_TIMEOUT_SECONDS)
-    if problem:
-        raise RuntimeError(f"git fetch origin {' '.join(refspecs)} failed: {problem}")
+    plainly; use ``gh auth`` / ssh).
+
+    A **transport** failure on top of that is retried up to
+    :data:`FETCH_ATTEMPTS` times with a short backoff (#431), and a failure
+    that persists raises :class:`FetchFailedError` — which every intake
+    surface maps to an ``infra_failed`` run, never a crash."""
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        problem = git.fetch_refspecs(repo, refspecs, timeout=PR_FETCH_TIMEOUT_SECONDS)
+        if not problem:
+            return
+        if attempt == FETCH_ATTEMPTS or not _transient_fetch_failure(problem):
+            raise FetchFailedError(refspecs=refspecs, problem=problem)
+        backoff = FETCH_RETRY_BACKOFF_SECONDS * attempt
+        logger.warning(
+            "git: intake fetch of %s failed transiently (%s); retrying in "
+            "%.0fs (attempt %d/%d)",
+            " ".join(refspecs),
+            problem,
+            backoff,
+            attempt + 1,
+            FETCH_ATTEMPTS,
+        )
+        time.sleep(backoff)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _gh_pr_view(repo: Path, number: str) -> PullRequest:

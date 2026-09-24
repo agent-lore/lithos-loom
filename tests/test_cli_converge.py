@@ -1340,3 +1340,83 @@ def test_converge_binds_its_lifetime_to_a_loom_parent(
     result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
     assert result.exit_code == 0, result.output
     assert bound
+
+
+def test_an_intake_fetch_failure_is_infra_failed_not_a_traceback(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#431: a transient SSH failure at the intake fetch used to escape as an
+    uncaught RuntimeError — exit 1 with no `--json` written, so the watcher
+    recorded `crashed` and put a rich traceback frame in the story's finding.
+    It is the #377 `infra_failed` verdict now, record and all."""
+    from lithos_loom.plugins.story_develop.review_resolve import FetchFailedError
+
+    def hiccup(repo, spec, **kw):
+        raise FetchFailedError(
+            refspecs=("pull/142/head", "+refs/heads/main:refs/remotes/origin/main"),
+            problem="fatal: Could not read from remote repository.",
+        )
+
+    monkeypatch.setattr(converge_cli, "resolve_change", hiccup)
+    out = tmp_path / "r.json"
+    result = runner.invoke(
+        develop_app,
+        ["converge", "#142", "--ac", "x", "--resolve-conflicts", "--json", str(out)],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "config" not in stubs  # nothing was built, nothing spent
+    assert "Traceback" not in result.output
+    assert not isinstance(result.exception, FetchFailedError)
+    record = json.loads(out.read_text())
+    assert record["status"] == "infra_failed"
+    assert "Could not read from remote repository" in record["host_action"]
+    assert "SSH agent" in record["host_action"]
+
+
+def test_a_transient_intake_fetch_failure_lets_the_run_proceed(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#431 end to end through the real resolver: a fetch that fails once with
+    `Could not read from remote repository.` and then succeeds costs a retry,
+    not the run — `--resolve-conflicts` reaches the intake merge."""
+    from lithos_loom.plugins.story_develop import review_resolve
+    from lithos_loom.runner import git
+
+    monkeypatch.setattr(converge_cli, "resolve_change", review_resolve.resolve_change)
+    monkeypatch.setattr(
+        review_resolve,
+        "_gh_pr_view",
+        lambda repo, n: SimpleNamespace(
+            head_sha="h" * 40,
+            base_ref="main",
+            head_ref="feature",
+            head_repo="o/r",
+            base_repo="o/r",
+            title="A PR title",
+            body="the intent",
+            merged=False,
+            state="open",
+        ),
+    )
+    monkeypatch.setattr(review_resolve, "_merge_base", lambda repo, a, b: "b" * 40)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    fetches: list[list[str]] = []
+
+    def hiccup_once(argv, **kw):
+        fetches.append(list(argv))
+        if len(fetches) == 1:
+            return 128, "fatal: Could not read from remote repository.\n"
+        return 0, ""
+
+    monkeypatch.setattr(git, "run_group", hiccup_once)
+
+    with caplog.at_level("WARNING"):
+        result = runner.invoke(
+            develop_app, ["converge", "#142", "--ac", "x", "--resolve-conflicts"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert stubs["resolve_conflicts"] is True  # the intake merge was reached
+    assert len(fetches) == 2
+    assert sum("failed transiently" in r.message for r in caplog.records) == 1
