@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 import subprocess
 import time
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop import check_runner as check_runner_mod
-from lithos_loom.plugins.story_develop import containers, engines, handoff
+from lithos_loom.plugins.story_develop import containers, engines, handoff, run_owner
 from lithos_loom.plugins.story_develop import develop as develop_mod
 from lithos_loom.plugins.story_develop import test_gate as test_gate_mod
 from lithos_loom.plugins.story_develop import turns as turns_mod
@@ -348,6 +349,34 @@ def test_build_run_cmd_mounts_git_common_dir(config: DevelopConfig) -> None:
 
 
 # --- happy paths ------------------------------------------------------------
+
+
+def test_run_dir_names_its_owner_before_the_worktree_is_built(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """The owner stamp must land BEFORE the worktree.
+
+    ``worktree.create`` starts with an unbounded fetch + checkout, and the run
+    has no agent container at all until it returns — so for that whole phase
+    the marker is the ONLY thing telling the operator's `develop prune` that
+    the run dir belongs to a live process rather than to a corpse.
+    """
+    seen: dict[str, bool] = {}
+    real_create = develop_mod.worktree.create
+
+    def spy(repo, base_branch, description, *, parent):
+        seen["stamped"] = run_owner.owner_recorded(config.run_dir)
+        return real_create(repo, base_branch, description, parent=parent)
+
+    monkeypatch.setattr(develop_mod.worktree, "create", spy)
+    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+
+    result = develop_mod.develop(config)
+
+    assert result.status == "approved"
+    assert seen["stamped"] is True
+    identity = run_owner.read_owner(config.run_dir)
+    assert identity is not None and identity.pid == os.getpid()
 
 
 def test_approved_in_round_one_on_lgtm(

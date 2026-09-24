@@ -27,6 +27,10 @@ Marker inventory (who writes / who reads each):
 - ``conversation.md`` (run dir) — the teardown marker (the plugin writes it just
   before ``state.json``); its presence means the run reached teardown. Read by
   :func:`capture_outcome`.
+- ``owner.json`` (run dir) — WHICH host process is running this run, stamped at
+  run start. Not in this module (it needs ``runner.orphans``, and this one stays
+  a stdlib leaf): see :mod:`run_owner`. It is what tells ``develop prune`` that a
+  run dir with no container and no epilogue is alive rather than abandoned.
 - run-dir **absence** — the route-runner reaps the dir after applying a succeeded
   result, so its absence is itself an end signal; the outcome is then recovered
   from the host-persistent completion store (:func:`recover_reaped_outcome`).

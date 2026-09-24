@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...runner import worktree
-from . import containers, engines, handoff, turns
+from . import containers, engines, handoff, run_owner, turns
 from .agent_session import build_run_cmd
 from .config import HANDOFF_MOUNT_NAME, DevelopConfig
 from .sandbox_facts import for_prompt as _sandbox_section
@@ -241,6 +241,8 @@ def triage_external_findings(
     """
     finding_ids = [f.finding_id for f in outcome.findings]
 
+    config.run_dir.mkdir(parents=True, exist_ok=True)
+    run_owner.record_owner(config.run_dir)  # prune's liveness stamp
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     handoff.seed_handoff_dir(config.handoff_dir)

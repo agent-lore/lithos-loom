@@ -8,11 +8,12 @@ assembly, and worktree cleanup.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-from lithos_loom.plugins.story_develop import review_only
+from lithos_loom.plugins.story_develop import review_only, run_owner
 from lithos_loom.plugins.story_develop.check_set import (
     Check,
     CheckResult,
@@ -183,6 +184,16 @@ def test_keep_worktree_retains_it(harness: dict, tmp_path: Path) -> None:
     config = _config(tmp_path)
     review_only.review_change(config, _CHANGE, keep_worktree=True)
     assert harness["removed"] == []
+
+
+def test_run_dir_names_its_owner(harness: dict, tmp_path: Path) -> None:
+    """A review-only run never writes an epilogue, so the owner stamp is what
+    keeps `develop prune` off its worktree while it is still running (and lets
+    prune clear it once the process is gone)."""
+    config = _config(tmp_path)
+    review_only.review_change(config, _CHANGE)
+    identity = run_owner.read_owner(config.run_dir)
+    assert identity is not None and identity.pid == os.getpid()
 
 
 def test_handoff_mountpoint_created_before_containers_start(
