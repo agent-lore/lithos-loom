@@ -51,6 +51,7 @@ from lithos_loom.plugins.story_develop import run_outcome
 __all__ = [
     "MANUAL_DELIVERY",
     "delivery_finding",
+    "converge_lines",
     "echo_plan",
     "file_record",
     "preview",
@@ -216,6 +217,27 @@ def quoted_block(
     return out
 
 
+def converge_lines(chain: ConvergeChain, *, pr: str, verb: str) -> list[str]:
+    """``<verb> <pr> under <source>`` plus **the criteria themselves**.
+
+    A chained converge spends money and pushes commits against this text, and
+    for a mirrored story it is the GitHub issue body — anyone's to write, and
+    re-synchronised by the mirror after an operator's own edit. Naming only
+    the *source* ("under the story's description") would have the operator
+    approve a hand-off they have never read, under a UI that tells them they
+    are re-reviewing under the acceptance THEY revised. So the head of the
+    text travels with the headline, bounded and shaped like every other quote
+    on this screen (security/f-004). ``--ac-file`` has nothing to show: the
+    file is the operator's own and converge reads it by path.
+    """
+    lines = [f"{verb} {pr} under {chain.ac_source}"]
+    if chain.acceptance:
+        lines.extend(
+            f"{_BLOCK_MARKER}{line}" for line in quoted_block(chain.acceptance)
+        )
+    return lines
+
+
 def echo_plan(
     *,
     facts: RunFacts,
@@ -227,7 +249,7 @@ def echo_plan(
     title: str,
     no_gate: bool,
     retirement: GateRetirement,
-    converge: str | None = None,
+    converge: Sequence[str] = (),
 ) -> None:
     push_words = {
         PUSH_CREATE: f"create origin/{facts.branch} at {state.local_sha[:12]}",
@@ -334,10 +356,13 @@ def echo_plan(
         for described in retirement.retained:
             echo(f"          leaving {described} open")
     echo(f"  5 post: {MANUAL_DELIVERY} on {story.story_id}")
-    if converge is not None:
-        # loom-authored (the AC *source*, never the criteria themselves), so
-        # it is stated bare like the rest of the plan's own lines
-        echo(f"  6 converge: {converge}")
+    if converge:
+        # `echo` strips and shapes: after the loom-authored headline these are
+        # the story's own text, which for a mirrored story is an outside
+        # issue body
+        echo(f"  6 converge: {converge[0]}")
+        for line in converge[1:]:
+            echo(f"              {line}")
 
 
 def preview(
@@ -399,9 +424,9 @@ def preview(
         no_gate=no_gate,
         retirement=story.retirement(run_id=facts.run_id, dispatch_routes=routes),
         converge=(
-            None
+            ()
             if converge is None
-            else f"would converge {pr_label} under {converge.ac_source}"
+            else converge_lines(converge, pr=pr_label, verb="would converge")
         ),
     )
 

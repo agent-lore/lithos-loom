@@ -113,7 +113,9 @@ class NeedsHumanNotice:
     def comment_body(self, login: str) -> str:
         keep = (
             f"Keep the branch: `{self.deliver_command}` — pushes it, opens the "
-            "PR and swaps the gate for a `pr` gate.\n\n"
+            "PR and swaps this gate for a `pr` gate (revise the acceptance "
+            "first if the stop was a dispute; add `--converge` to re-review "
+            "under it).\n\n"
             if self.deliver_command
             else ""
         )

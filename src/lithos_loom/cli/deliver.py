@@ -104,6 +104,7 @@ from lithos_loom.cli._deliver_lithos import (
 )
 from lithos_loom.cli._deliver_output import (
     MANUAL_DELIVERY,
+    converge_lines,
     delivery_finding,
     file_record,
     preview,
@@ -111,6 +112,7 @@ from lithos_loom.cli._deliver_output import (
 )
 from lithos_loom.cli._deliver_preflight import (
     dispatch_routes,
+    refuse_bad_converge_flags,
     refuse_if_the_run_is_still_the_daemons,
     resolve_facts,
     resolve_repo,
@@ -292,12 +294,15 @@ def deliver_command(
     # whose number could not be read back (already a `[Friction]` above)
     pr = str(number) if number is not None else str(record["pr_url"])
     label = f"#{number}" if number is not None else pr
-    typer.echo(
-        sanitize_for_terminal(
-            f"  converging {label} under {delivered.converge.ac_source}…"
-        )
-    )
-    raise typer.Exit(run_converge(delivered.converge.argv(pr)))
+    for line in converge_lines(delivered.converge, pr=label, verb="converging"):
+        # the criteria are the story's own text (an outside issue body for a
+        # mirrored story) — shown, so the operator sees what a paid, pushing
+        # agent is about to work against, and stripped like every other line
+        typer.echo(sanitize_for_terminal(f"  {line}"))
+    # pinned to the head the delivery VERIFIED behind the PR (step 2b), not
+    # the sha it pushed: converge refuses outright if the branch moved since
+    head = str(record["pr_head_sha"] or "")
+    raise typer.Exit(run_converge(delivered.converge.argv(pr, head=head)))
 
 
 @dataclass(frozen=True)
@@ -333,22 +338,12 @@ def _deliver(
     every step after it degrades into ``notes`` and the command exits 2 with
     the url printed and the `[Friction]` posted.
     """
-    if converge and no_gate:
-        raise DeliverRefused(
-            "--converge and --no-gate are exclusive: converge pushes review "
-            "fixes onto a PR nothing is watching — no merge tracking, no "
-            "external-review ingestion, no re-gate. Converging an unmonitored "
-            "PR is `lithos-loom develop converge`'s own business; drop "
-            "--no-gate to have this delivery gate the PR first"
-        )
-    if not converge and (acceptance_file is not None or profile is not None):
-        # Silently ignoring them would have the operator believe a revised
-        # acceptance file was read when nothing reviewed anything at all.
-        flag = "--ac-file" if acceptance_file is not None else "--profile"
-        raise DeliverRefused(
-            f"{flag} only applies to the converge run --converge chains; "
-            "this delivery reviews nothing. Add --converge, or drop the flag"
-        )
+    refuse_bad_converge_flags(
+        converge=converge,
+        no_gate=no_gate,
+        acceptance_file=acceptance_file,
+        profile=profile,
+    )
     facts = resolve_facts(host, run=run, branch=branch, story_id=story_id)
     agent = host.orchestrator.agent_id
     url = host.orchestrator.lithos_url
@@ -393,6 +388,7 @@ def _deliver(
         converge_chain(
             story,
             repo=repo,
+            repo_name=repo_name,
             acceptance_file=acceptance_file,
             profile=profile,
             config_path=config_path,

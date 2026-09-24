@@ -36,27 +36,33 @@ files via :func:`story_develop.handoff.conversation_log`.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import logging
 import re
 import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
-from dataclasses import asdict, dataclass
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import typer
 
 from lithos_loom.config import load_config
-from lithos_loom.errors import LithosLoomError
+from lithos_loom.errors import LithosClientError, LithosLoomError
+from lithos_loom.gates import GATE_TYPE_PR, STORY_GATE_ID_KEY
+from lithos_loom.lithos_client import LithosClient
 from lithos_loom.plugins.story_develop import engines, handoff, run_outcome
 from lithos_loom.plugins.story_develop.idempotency import lookup_completed
 from lithos_loom.plugins.story_develop.publish_text import CONTROL_CHARS_RE
 from lithos_loom.plugins.story_develop.run_outcome import is_run_dir, resolve_run_dir
 from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_exit
+
+logger = logging.getLogger(__name__)
 
 develop_app = typer.Typer(
     name="develop",
@@ -394,7 +400,82 @@ def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
         time.sleep(_ATTACH_POLL_SECONDS)
 
 
-def _is_finished(run_dir: Path) -> bool:
+# ── the authoritative delivery record: the story's own `pr` gate ───────
+
+
+def gate_delivered_prs(cfg: Any, task_ids: Sequence[str]) -> dict[str, str]:
+    """``{task_id: pr_url}`` from each story's OPEN ``pr`` gate (best-effort).
+
+    The run dir's own markers are the fast path, but they are not the record:
+    a hand delivery made before the marker existed has none, and the marker
+    write is deliberately best-effort (a full disk costs a column, never the
+    delivery). The **gate** is what actually says a story's work is a
+    monitored PR — it is the thing that withholds the story — so it is the
+    fallback both `list` and `prune` fall back to, exactly as the acceptance
+    asks (`pr_gate_id` → that gate's `pr_url`).
+
+    Three guards, all in the conservative direction:
+
+    * the gate must still be **open**. ``pr_gate_id`` is provenance and
+      outlives the gate it names, so a story whose PR closed unmerged, was
+      re-escalated and re-developed would otherwise have its live run read as
+      delivered — and `prune` DELETES on that answer.
+    * it must really be a ``pr`` gate.
+    * any failure — unreachable Lithos, a missing task, a transport error —
+      yields nothing at all. `list` then shows what the run dir knows and
+      `prune` keeps the run: neither command may depend on a server being up
+      to avoid deleting live work.
+    """
+    orchestrator = getattr(cfg, "orchestrator", None)
+    url = getattr(orchestrator, "lithos_url", "") or ""
+    agent = getattr(orchestrator, "agent_id", "") or ""
+    if not url or not task_ids:
+        return {}
+
+    async def _read() -> dict[str, str]:
+        found: dict[str, str] = {}
+        async with LithosClient(url, agent_id=agent) as client:
+            for task_id in task_ids:
+                story = await client.task_get(task_id=task_id)
+                gate_id = (getattr(story, "metadata", None) or {}).get(
+                    STORY_GATE_ID_KEY
+                )
+                if not isinstance(gate_id, str) or not gate_id:
+                    continue
+                gate = await client.task_get(task_id=gate_id)
+                meta = getattr(gate, "metadata", None) or {}
+                if getattr(gate, "status", None) != "open":
+                    continue
+                if meta.get("gate_type") != GATE_TYPE_PR:
+                    continue
+                pr_url = meta.get("pr_url")
+                if isinstance(pr_url, str) and pr_url:
+                    found[task_id] = pr_url
+        return found
+
+    try:
+        return asyncio.run(_read())
+    except (LithosClientError, OSError, ExceptionGroup) as exc:
+        # `LithosClient.__aenter__` surfaces a connect failure as a plain
+        # OSError, or as an ExceptionGroup wrapping one inside a task group
+        # (the `gates` command's rationale). ExceptionGroup, not
+        # BaseExceptionGroup, so KeyboardInterrupt / SystemExit propagate.
+        logger.debug("develop: could not read delivery gates from Lithos: %s", exc)
+        return {}
+
+
+def _with_delivery(cfg: Any, infos: Sequence[RunInfo]) -> list[RunInfo]:
+    """*infos* with the ``pr`` column filled in for every run the run dir
+    could not answer for — one Lithos session, only for the stories that need
+    it (a run whose own delivery record is on disk costs nothing)."""
+    missing = sorted({i.task_id for i in infos if not i.pr})
+    gated = gate_delivered_prs(cfg, missing)
+    if not gated:
+        return list(infos)
+    return [i if i.pr else replace(i, pr=gated.get(i.task_id, "")) for i in infos]
+
+
+def _is_finished(run_dir: Path, *, delivered: Mapping[str, str] | None = None) -> bool:
     """Whether a run is terminal — i.e. safe for ``prune`` to remove.
 
     The signal is the on-disk terminal marker: the plugin writes
@@ -409,14 +490,21 @@ def _is_finished(run_dir: Path) -> bool:
     container is treated as a definitive override in case a future change writes
     the marker earlier.
 
-    The second terminal signal is a **hand delivery** (``develop deliver``):
-    that command refuses a run a live dispatch still claims, so its marker is
-    only ever written over a finished lifecycle — and it is what finally makes
-    a run killed before its ``conversation.md`` prunable once its branch is a
-    monitored PR.
+    The second terminal signal is a **delivery**: this run's branch is behind
+    a PR. That is a finished lifecycle by construction — ``develop deliver``
+    refuses a run a live dispatch still claims, and the runner's readiness
+    check defers a story behind an OPEN ``pr`` gate, so nothing is developing
+    it — and it is what finally makes a run killed before its
+    ``conversation.md`` prunable once its work is a monitored PR. Read from
+    the run dir first and, for what the run dir cannot answer, from the
+    story's own gate (*delivered*, keyed by task id — see
+    :func:`gate_delivered_prs`, which yields nothing at all when Lithos cannot
+    be reached, so an outage keeps runs rather than deleting them).
     """
-    delivered = run_outcome.manual_delivery_pr(run_dir)
-    if not (run_dir / run_outcome.CONVERSATION_LOG).is_file() and not delivered:
+    is_delivered = bool(
+        run_outcome.run_pr_url(run_dir) or (delivered or {}).get(run_dir.parent.name)
+    )
+    if not (run_dir / run_outcome.CONVERSATION_LOG).is_file() and not is_delivered:
         return False
     containers = _run_containers(run_dir.name)
     return not (containers and any(c.running for c in containers))
@@ -594,7 +682,7 @@ def develop_list(
     except LithosLoomError as exc:
         _fail(str(exc))
     work_dir = cfg.orchestrator.work_dir
-    infos = [_run_info(d) for d in _iter_run_dirs(work_dir)]
+    infos = _with_delivery(cfg, [_run_info(d) for d in _iter_run_dirs(work_dir)])
 
     if output_format == _FORMAT_JSON:
         typer.echo(
@@ -623,28 +711,33 @@ def develop_list(
         )
         return
     rows = [
-        (
-            i.run_id,
-            i.task_id,
-            (i.title[:40] + "…") if len(i.title) > 41 else i.title,
-            f"r{i.round}",
-            _agent_state(i),
-            _format_mtime(_latest_mtime(Path(i.run_dir))),
-            # the delivered PR, or `—` for a run still waiting on its gate —
-            # the one column that says whether a stopped run's work is on the
-            # maintained path or still only on a branch
-            i.pr or _UNKNOWN,
+        tuple(
+            _cell(value)
+            for value in (
+                i.run_id,
+                i.task_id,
+                (i.title[:40] + "…") if len(i.title) > 41 else i.title,
+                f"r{i.round}",
+                _agent_state(i),
+                _format_mtime(_latest_mtime(Path(i.run_dir))),
+                # the delivered PR, or `—` for a run still waiting on its gate
+                # — the one column that says whether a stopped run's work is on
+                # the maintained path or still only on a branch
+                i.pr or _UNKNOWN,
+            )
         )
         for i in infos
     ]
     headers = ("run", "task", "title", "round", "active", "updated", "pr")
+    # Widths off the SHAPED cells: measuring the raw text would let an escape
+    # run that renders as nothing still pad every other row (security/f-001).
     widths = [
         max(len(h), max((len(r[c]) for r in rows), default=0))
         for c, h in enumerate(headers)
     ]
     typer.echo("  ".join(h.ljust(widths[c]) for c, h in enumerate(headers)))
     for row in rows:
-        typer.echo("  ".join(str(v).ljust(widths[c]) for c, v in enumerate(row)))
+        typer.echo("  ".join(v.ljust(widths[c]) for c, v in enumerate(row)))
 
 
 @develop_app.command("prune")
@@ -681,7 +774,15 @@ def develop_prune(
     except LithosLoomError as exc:
         _fail(str(exc))
     work_dir = cfg.orchestrator.work_dir
-    finished = [d for d in _iter_run_dirs(work_dir) if _is_finished(d)]
+    run_dirs = _iter_run_dirs(work_dir)
+    # One Lithos session for the runs whose own dir does not record a PR — the
+    # story's open `pr` gate is the authoritative "already delivered" answer,
+    # and it is the only one a delivery that predates the run-dir marker (or
+    # whose best-effort write failed) has left.
+    delivered = gate_delivered_prs(
+        cfg, sorted({d.parent.name for d in run_dirs if not run_outcome.run_pr_url(d)})
+    )
+    finished = [d for d in run_dirs if _is_finished(d, delivered=delivered)]
 
     # (info, removed, error) — `removed` is the *actual* outcome, not an
     # assumption: a swallowed rmtree failure that still claimed success would
@@ -997,6 +1098,23 @@ def _sanitize(text: str) -> str:
     clear the screen, or set the window title. Plain text is unaffected.
     """
     return CONTROL_CHARS_RE.sub("", text)
+
+
+def _cell(value: str) -> str:
+    """One table cell, shaped so it can only render as the text it carries.
+
+    `develop list` is the screen an operator decides on — since the `pr`
+    column it is the "delivered vs still waiting" inventory — and the `title`
+    cell is a mirrored story's **GitHub issue title**, i.e. anyone's to write.
+    The whole row is emitted as ONE echo, so a bare `\r` rewrites it from
+    column 0 and an embedded LF starts a forged row: :func:`_sanitize` removes
+    the escape class every publication boundary strips (see the comment above
+    `_MAX_HANDOFF_BYTES`), and folding the remaining whitespace — LF and TAB
+    survive that class by design — keeps a cell to the single visual line the
+    table lays out (security/f-001; the `--format json` path is escape-safe
+    via `json.dumps`).
+    """
+    return " ".join(_sanitize(str(value)).split()) or ""
 
 
 def _read_handoff(path: Path) -> str:

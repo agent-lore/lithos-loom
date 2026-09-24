@@ -3597,11 +3597,18 @@ def converge(monkeypatch: pytest.MonkeyPatch, lithos: FakeLithosClient) -> dict:
     return calls
 
 
-def test_converge_runs_after_the_delivery_with_the_pr_and_the_story(
+def test_converge_runs_after_the_delivery_under_the_storys_current_description(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
 ) -> None:
     """The #99 / #101 / #423 sequence in one command: deliver, then re-review
-    the PR it produced under the story's CURRENT acceptance criteria."""
+    the PR it produced under the story's CURRENT description.
+
+    The fixture's description and its ``metadata.acceptance_criteria`` differ
+    deliberately (correctness/f-001): a dispute is settled by editing the
+    story, and an older metadata copy left behind must not be what a paid
+    re-review is judged against.
+    """
+    head = _head(repo)
 
     result = _invoke(_RUN, "--converge")
 
@@ -3612,11 +3619,22 @@ def test_converge_runs_after_the_delivery_with_the_pr_and_the_story(
     (argv,) = converge["argv"]
     assert argv[0] == "99"  # the delivered PR's number
     assert argv[1:5] == ["--story", _STORY, "--repo", str(repo)]
-    # the AC is the story's own, not the PR body's copy of it
-    assert argv[5:] == ["--ac", "Done when the PR is open and gated."]
+    # pinned like every other loom-initiated converge (security/f-002): the
+    # repo the delivery resolved, and the head it VERIFIED behind the PR
+    assert argv[5:9] == ["--expect-repo", _REPO_NAME, "--expect-head", head]
+    # the AC is the story's live DESCRIPTION — never the stale metadata copy
+    assert argv[9] == "--ac"
+    assert argv[10] == (
+        "Deliver a stopped run's branch\n\n"
+        "The gap: a stopped run leaves a branch with no PR."
+    )
+    assert "Done when the PR is open and gated." not in argv[10]
     assert converge["story_at_call"][0][STORY_GATE_ID_KEY]
     assert _get(lithos, "gate-human").status == "completed"
-    assert "converging #99 under the story's acceptance criteria" in result.output
+    assert "converging #99 under the story's description" in result.output
+    # …and the criteria themselves are SHOWN before a paid, pushing agent acts
+    # on them (security/f-004) — they are the story's own text
+    assert "| The gap: a stopped run leaves a branch with no PR." in result.output
 
 
 def test_converge_exit_code_becomes_the_commands_and_leaves_the_gate(
@@ -3652,9 +3670,12 @@ def test_converge_reads_the_acceptance_from_ac_file_when_given(
     assert result.exit_code == 0, result.output
     (argv,) = converge["argv"]
     # the PATH is passed on, so converge reads the operator's file itself
-    assert argv[5:] == ["--ac-file", str(ac), "--profile", "thorough"]
+    assert argv[5:9] == ["--expect-repo", _REPO_NAME, "--expect-head", _head(repo)]
+    assert argv[9:] == ["--ac-file", str(ac), "--profile", "thorough"]
     assert "--ac" not in argv
     assert f"converging #99 under --ac-file {ac}" in result.output
+    # nothing of the story's own text is quoted: the file is the operator's
+    assert "| The gap:" not in result.output
 
 
 def test_converge_is_refused_with_no_gate_and_writes_nothing(
@@ -3693,7 +3714,9 @@ def test_converge_dry_run_previews_the_chain_and_writes_nothing(
     result = _invoke(_RUN, "--converge", "--dry-run")
 
     assert result.exit_code == 0, result.output
-    assert "would converge #42 under the story's acceptance criteria" in result.output
+    assert "would converge #42 under the story's description" in result.output
+    # the plan shows the criteria a converge run would be judged against
+    assert "| The gap: a stopped run leaves a branch with no PR." in result.output
     assert converge["argv"] == []
     assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
     assert gh["created"] == [] and lithos.mutating_calls == []

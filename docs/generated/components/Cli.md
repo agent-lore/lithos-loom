@@ -15,8 +15,8 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._deliver_converge` | S | 1 | 2 |
 | `lithos_loom.cli._deliver_facts` | M | 2 | 9 |
 | `lithos_loom.cli._deliver_lithos` | L | 7 | 4 |
-| `lithos_loom.cli._deliver_output` | M | 0 | 6 |
-| `lithos_loom.cli._deliver_preflight` | S | 0 | 4 |
+| `lithos_loom.cli._deliver_output` | M | 0 | 7 |
+| `lithos_loom.cli._deliver_preflight` | S | 0 | 5 |
 | `lithos_loom.cli._deliver_repo` | M | 2 | 10 |
 | `lithos_loom.cli._deliver_session` | M | 2 | 7 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
@@ -25,7 +25,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
 | `lithos_loom.cli.deliver` | L | 0 | 1 |
-| `lithos_loom.cli.develop` | L | 2 | 4 |
+| `lithos_loom.cli.develop` | L | 2 | 5 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
 | `lithos_loom.cli.merge_gate` | M | 0 | 1 |
@@ -70,6 +70,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 ### `lithos_loom.cli._deliver_output`
 - def `delivery_finding` — The ``[ManualDelivery]`` summary posted on the story (pure).
 - def `quoted_block` — *text* as bounded display lines, each safe to print behind an indent.
+- def `converge_lines` — ``<verb> <pr> under <source>`` plus **the criteria themselves**.
 - def `echo_plan`
 - def `preview` — The ``--dry-run`` screen: every fact RESOLVED, and nothing written.
 - def `render`
@@ -80,6 +81,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `refuse_if_the_run_is_still_the_daemons` — Refuse while the run's stop has not been handed over, and a daemon that could still be holding it is running here.
 - def `dispatch_routes` — The host's configured ``[[routes]]`` names — the ALLOWLIST of routes whose ``human`` gate a delivery may retire.
 - def `resolve_repo` — The project checkout holding the branch — ``[projects.<slug>].repo``.
+- def `refuse_bad_converge_flags` — The ``--converge`` flag combinations that are refused before anything resolves, let alone writes.
 
 ### `lithos_loom.cli._deliver_repo`
 - class `RemoteState` — How ``origin``'s copy of the branch stands against the local one.
@@ -149,6 +151,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 ### `lithos_loom.cli.develop`
 - class `RunInfo` — A story-develop run discovered on disk.
 - class `ContainerStatus`
+- def `gate_delivered_prs` — ``{task_id: pr_url}`` from each story's OPEN ``pr`` gate (best-effort).
 - def `develop_list` — List inspectable story-develop runs (in-flight + failed/interrupted).
 - def `develop_prune` — Remove the on-disk run-state dirs of **finished** story-develop runs.
 - def `develop_dump` — Print the assembled conversation log for a run (finished or in-flight).

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -62,6 +63,7 @@ __all__ = [
     "create_human_gate_best_effort",
     "create_pr_gate",
     "create_pr_gate_best_effort",
+    "deliver_action",
     "deliver_command_line",
     "human_gate_brief",
     "is_human_gate",
@@ -125,14 +127,49 @@ DELIVER_COMMAND = "lithos-loom develop deliver"
 completing it (re-develop from scratch) and cancelling the story (abandon)."""
 
 
-def deliver_command_line(run_id: str) -> str:
+# A run id is a plain handle (loom's own is `secrets.token_hex(4)`), but it
+# reaches this module from a plugin's `result.json` — a subprocess contract
+# from an operator-configured `[[routes]] command`, not in-process state. The
+# strings below are published to the operator AS A COMMAND TO PASTE INTO A
+# SHELL, on a desktop toast and in a GitHub comment as well as on the gate, and
+# `resolve_run_dir` joins the same value onto the work dir with no containment
+# check. So the value is constrained where it becomes a command: anything but
+# a plain handle renders NO third action rather than a forgeable one
+# (security/f-003; the contract itself carries the matching `pattern` +
+# `maxLength` in docs/result-schema.json).
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
+
+
+def deliver_command_line(run_id: str) -> str | None:
     """The copy-pasteable ``develop deliver`` invocation for *run_id*.
 
     One source for every surface that offers the third choice — the gate
     brief here, the ``[NeedsHuman]`` finding, and the push sinks — so the
     command an operator copies out of a toast is the one the gate names.
+    ``None`` when *run_id* is not a plain handle (see :data:`_RUN_ID_RE`):
+    there is then no safe command to offer, and no action is better than one
+    that pastes an attacker's shell line.
     """
-    return f"{DELIVER_COMMAND} {run_id}"
+    return f"{DELIVER_COMMAND} {run_id}" if _RUN_ID_RE.match(run_id or "") else None
+
+
+def deliver_action(run_id: str) -> str | None:
+    """The third action's full wording, or ``None`` (see above).
+
+    ONE sentence for every surface the operator might act from — the gate
+    brief, the ``[NeedsHuman]`` finding, the ``@mention`` — so none of them
+    stops short of telling the operator what the command does and that the
+    re-review is one flag away. Sentence-initial lowercase: a caller renders
+    it as a bullet (capitalised) or runs it on after a semicolon.
+    """
+    command = deliver_command_line(run_id)
+    if command is None:
+        return None
+    return (
+        f"keep the branch → `{command}` pushes it, opens the PR and swaps "
+        "this gate for a `pr` gate (revise the acceptance first if the stop "
+        "was a dispute; add `--converge` to re-review under it)"
+    )
 
 
 # A gate's ``route`` is what says whose escalation it is: a **dispatch**
@@ -554,13 +591,9 @@ def human_gate_brief(
         # raised before any branch existed never advertises a command that
         # would refuse. Callers passing their own *actions* are untouched —
         # those gates do not sit on a stopped run's branch.
-        if b.get("branch") and run_id:
-            lines.append(
-                f"- Keep the branch → `{deliver_command_line(run_id)}` pushes "
-                "it, opens the PR and swaps this gate for a `pr` gate (revise "
-                "the acceptance first if the stop was a dispute; add "
-                "`--converge` to re-review under it)."
-            )
+        action = deliver_action(run_id or "") if b.get("branch") else None
+        if action:
+            lines.append(f"- {action[0].upper()}{action[1:]}.")
     else:
         lines += [
             f"- {actions}.",

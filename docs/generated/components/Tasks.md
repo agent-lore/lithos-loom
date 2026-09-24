@@ -11,7 +11,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.gates` | L | 3 | 12 |
+| `lithos_loom.gates` | L | 3 | 13 |
 | `lithos_loom.task_graph` | S | 1 | 1 |
 | `lithos_loom.task_line` | S | 0 | 4 |
 | `lithos_loom.task_line_parser` | S | 2 | 1 |
@@ -20,6 +20,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 
 ### `lithos_loom.gates`
 - def `deliver_command_line` — The copy-pasteable ``develop deliver`` invocation for *run_id*.
+- def `deliver_action` — The third action's full wording, or ``None`` (see above).
 - class `GateWriter` — The three Lithos calls gate creation needs (a structural subset of :class:`~lithos_loom.lithos_client.TaskClient`).
 - class `PrGateSpec` — The PR a ``pr`` gate watches, read back from its metadata.
 - class `HumanGateSpec` — What a loom-raised ``human`` gate escalated, read back from its metadata.

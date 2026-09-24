@@ -248,3 +248,30 @@ def resolve_repo(host: LoomConfig, story: StoryState) -> Path:
             f"[projects.{slug}] stanza with its `repo` path"
         )
     return project.repo
+
+
+def refuse_bad_converge_flags(
+    *,
+    converge: bool,
+    no_gate: bool,
+    acceptance_file: Path | None,
+    profile: str | None,
+) -> None:
+    """The ``--converge`` flag combinations that are refused before anything
+    resolves, let alone writes."""
+    if converge and no_gate:
+        raise DeliverRefused(
+            "--converge and --no-gate are exclusive: converge pushes review "
+            "fixes onto a PR nothing is watching — no merge tracking, no "
+            "external-review ingestion, no re-gate. Converging an unmonitored "
+            "PR is `lithos-loom develop converge`'s own business; drop "
+            "--no-gate to have this delivery gate the PR first"
+        )
+    if not converge and (acceptance_file is not None or profile is not None):
+        # Silently ignoring them would have the operator believe a revised
+        # acceptance file was read when nothing reviewed anything at all.
+        flag = "--ac-file" if acceptance_file is not None else "--profile"
+        raise DeliverRefused(
+            f"{flag} only applies to the converge run --converge chains; "
+            "this delivery reviews nothing. Add --converge, or drop the flag"
+        )

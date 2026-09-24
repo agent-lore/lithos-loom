@@ -37,6 +37,7 @@ from lithos_loom.gates import (
     ESCALATION_REASONS,
     STORY_HUMAN_GATE_ID_KEY,
     create_human_gate_best_effort,
+    deliver_action,
     deliver_command_line,
 )
 from lithos_loom.notifications import (
@@ -190,13 +191,15 @@ def _needs_human_summary(
     run_id: str | None,
     gate_id: str,
     actions: str = REDISPATCH_ACTIONS,
-    deliver_command: str | None = None,
+    deliver_action_text: str | None = None,
 ) -> str:
     """The ``[NeedsHuman]`` finding: reason, summary, the run facts every
     August rescue needed, the gate, and the actions open to the operator —
-    including the third one (``develop deliver``) when the run left a branch,
-    so the finding an operator greps names the same command the gate brief
-    does."""
+    including the third one (``develop deliver``) when the run left a branch.
+    The finding is a surface the operator acts FROM, so it carries the third
+    action WHOLE (:func:`~lithos_loom.gates.deliver_action`) — what the
+    command does and that the re-review is one flag away — not just the
+    command, which would leave the reader to guess both."""
     b = escalation.brief
     facts: list[str] = []
     if run_id:
@@ -211,7 +214,7 @@ def _needs_human_summary(
     if b.get("worktree"):
         facts.append(f"worktree {b['worktree']}")
     facts_part = f"; {', '.join(facts)}" if facts else ""
-    keep = f"; keep the branch: {deliver_command}" if deliver_command else ""
+    keep = f"; {deliver_action_text}" if deliver_action_text else ""
     return (
         f"[NeedsHuman] route {route}: {escalation.reason} — {escalation.summary}"
         f"{facts_part}; gate {gate_id} — {actions}{keep}"
@@ -267,11 +270,11 @@ async def raise_needs_human(
     # passes its own *actions* is a decision gate (a stranded PR, an exhausted
     # remediation) — there is no stopped run's branch to keep there, so it is
     # never offered one.
-    deliver_command = (
-        deliver_command_line(run_id)
-        if run_id and escalation.brief.get("branch") and actions == REDISPATCH_ACTIONS
-        else None
+    offers_delivery = bool(
+        run_id and escalation.brief.get("branch") and actions == REDISPATCH_ACTIONS
     )
+    deliver_text = deliver_action(run_id or "") if offers_delivery else None
+    deliver_command = deliver_command_line(run_id or "") if offers_delivery else None
 
     gate_id, gate_problem = await create_human_gate_best_effort(
         lithos,
@@ -327,7 +330,7 @@ async def raise_needs_human(
         run_id=run_id,
         gate_id=gate_id,
         actions=actions,
-        deliver_command=deliver_command,
+        deliver_action_text=deliver_text,
     )
     if problems:
         summary += " [Friction] " + "; ".join(problems)

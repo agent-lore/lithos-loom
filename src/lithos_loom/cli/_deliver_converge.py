@@ -46,6 +46,8 @@ class ConvergeChain:
 
     story_id: str
     repo: Path
+    expect_repo: str
+    """The ``owner/name`` the delivery resolved from the checkout's ``origin``."""
     acceptance: str
     acceptance_file: Path | None
     ac_source: str
@@ -53,9 +55,24 @@ class ConvergeChain:
     profile: str | None
     config: Path | None
 
-    def argv(self, pr: str) -> list[str]:
-        """The ``develop converge`` argv for *pr* (a number or a PR url)."""
+    def argv(self, pr: str, *, head: str = "") -> list[str]:
+        """The ``develop converge`` argv for *pr* (a number or a PR url).
+
+        **Pinned**, like every other loom-initiated converge dispatch (the
+        remediation and conflict-resolve dispatchers, ``merge-gate``):
+        ``--expect-repo`` because a bare ``#N`` otherwise resolves against
+        whatever ``--repo``'s ``origin`` says at that moment, and
+        ``--expect-head`` because the delivery's own head read-back (step 2b)
+        is a point-in-time observation — converge re-resolves the head itself,
+        and an actor who advances ``origin/<branch>`` in between would have a
+        paid round spend, and loom's own push land, on a revision no step of
+        this command verified. Converge's refusals turn both into a no-op.
+        """
         argv = [pr, "--story", self.story_id, "--repo", str(self.repo)]
+        if self.expect_repo:
+            argv += ["--expect-repo", self.expect_repo]
+        if head:
+            argv += ["--expect-head", head]
         if self.acceptance_file is not None:
             argv += ["--ac-file", str(self.acceptance_file)]
         else:
@@ -94,6 +111,7 @@ def converge_chain(
     story: StoryState,
     *,
     repo: Path,
+    repo_name: str,
     acceptance_file: Path | None,
     profile: str | None,
     config_path: Path | None,
@@ -101,31 +119,33 @@ def converge_chain(
     """The ``--converge`` chain for *story*, with its acceptance criteria
     resolved from the live story read (never from the PR body).
 
-    ``metadata.acceptance_criteria`` when the story carries them — the same
-    field story-develop's own runs review against — else the story's
-    description (title + body), which is what the coder was given when there
-    is no separate AC field. ``--ac-file`` wins over both and is passed on as
-    the path, so converge reads the operator's file itself.
+    The criteria are the story's **current description** (title + body) —
+    the text the operator edits when a dispute sends them to the story, and
+    the one thing guaranteed to be what they just revised. Deliberately NOT
+    ``metadata.acceptance_criteria``: a story can carry an older value there
+    while its description has been rewritten, and preferring it would have
+    the one-command workflow silently re-review against the stale copy — the
+    exact failure this chain exists to remove. ``--ac-file`` overrides, and
+    is passed on as the path so converge reads the operator's file itself.
     """
     if acceptance_file is not None:
         return ConvergeChain(
             story_id=story.story_id,
             repo=repo,
+            expect_repo=repo_name,
             acceptance="",
             acceptance_file=acceptance_file,
             ac_source=f"--ac-file {acceptance_file}",
             profile=profile,
             config=config_path,
         )
-    criteria = story.acceptance_criteria
     return ConvergeChain(
         story_id=story.story_id,
         repo=repo,
-        acceptance=criteria or story.task_text,
+        expect_repo=repo_name,
+        acceptance=story.task_text,
         acceptance_file=None,
-        ac_source=(
-            "the story's acceptance criteria" if criteria else "the story's description"
-        ),
+        ac_source="the story's description",
         profile=profile,
         config=config_path,
     )
