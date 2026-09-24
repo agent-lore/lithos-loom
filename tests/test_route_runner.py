@@ -2780,12 +2780,18 @@ async def test_failed_run_raises_a_needs_human_gate_end_to_end(
     assert f"gate {gate_id}" in summaries[0]
     assert "cancel the story to abandon" in summaries[0]
     assert "[BlockerFailed]" not in summaries[0]
+    # …and the THIRD action, because the brief names a branch to keep: the
+    # finding, the gate's own brief and the push notice all carry the same
+    # copy-pasteable command (slice 2).
+    assert "keep the branch: lithos-loom develop deliver run-1" in summaries[0]
+    assert "`lithos-loom develop deliver run-1`" in (gate.description or "")
     # The push sinks got the notice.
     (notice,) = notifier.notices
     assert notice.gate_id == gate_id
     assert notice.story_title == "Wire the thing"
     assert notice.reason == "max_rounds"
     assert notice.project == "loom"
+    assert notice.deliver_command == "lithos-loom develop deliver run-1"
 
 
 async def test_notifier_problems_land_on_the_finding(tmp_path: Path) -> None:

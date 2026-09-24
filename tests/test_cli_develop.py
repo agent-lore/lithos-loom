@@ -1276,3 +1276,65 @@ def test_attach_stream_handoff_body_is_escape_safe_via_json(
         if line.strip() and json.loads(line).get("event") == "handoff"
     ]
     assert any(e["body"] == "x\x1by" for e in handoff_events)  # decoded value intact
+
+
+# ── the `pr` column: a delivered stopped run vs one still waiting ───────
+
+
+def test_list_shows_the_pr_of_a_daemon_delivered_and_a_hand_delivered_run(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    daemon_pr = "https://github.com/agent-lore/lithos-loom/pull/1"
+    hand_pr = "https://github.com/agent-lore/lithos-loom/pull/2"
+    # the daemon's own delivery: the run-bound result.json carries the url
+    _make_run(patched, task_id="t-1", run_id="daemon", status="approved")
+    (patched / "t-1" / "result.json").write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "task_id": "t-1",
+                "run_id": "daemon",
+                "pr_url": daemon_pr,
+            }
+        )
+    )
+    # a hand delivery (`develop deliver`): the run's private delivery.json
+    hand = _make_run(patched, task_id="t-2", run_id="hand", status="disputed")
+    run_outcome.record_manual_delivery(hand, pr_url=hand_pr)
+    # …and a stopped run still waiting on its needs-human gate
+    _make_run(patched, task_id="t-3", run_id="waiting", status="disputed")
+
+    develop.develop_list(config=None, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["daemon"]["pr"] == daemon_pr
+    assert rows["hand"]["pr"] == hand_pr
+    assert rows["waiting"]["pr"] == ""
+
+    develop.develop_list(config=None, output_format="text")
+    out = capsys.readouterr().out
+    assert "pr" in out.splitlines()[0]
+    assert hand_pr in out and daemon_pr in out
+    assert (
+        next(line for line in out.splitlines() if line.startswith("waiting"))
+        .rstrip(" ")
+        .endswith("—")
+    )
+
+
+def test_prune_treats_a_hand_delivered_run_as_finished(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A run killed before its terminal conversation.md looks in-flight for
+    # ever — but once `develop deliver` has turned its branch into a monitored
+    # PR its lifecycle is provably over, whatever it wrote.
+    delivered = _make_run(patched, task_id="t-1", run_id="handed", rounds={1: ["cq"]})
+    run_outcome.record_manual_delivery(
+        delivered, pr_url="https://github.com/agent-lore/lithos-loom/pull/2"
+    )
+    inflight = _make_run(patched, task_id="t-2", run_id="live", rounds={1: ["cq"]})
+
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    out = capsys.readouterr().out
+    assert "would remove handed" in out and "would remove 1 finished run" in out
+    assert "live" not in out
+    assert delivered.exists() and inflight.exists()  # dry run deletes nothing

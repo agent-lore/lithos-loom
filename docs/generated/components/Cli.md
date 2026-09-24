@@ -12,12 +12,13 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
+| `lithos_loom.cli._deliver_converge` | S | 1 | 2 |
 | `lithos_loom.cli._deliver_facts` | M | 2 | 9 |
 | `lithos_loom.cli._deliver_lithos` | L | 7 | 4 |
-| `lithos_loom.cli._deliver_output` | M | 0 | 4 |
+| `lithos_loom.cli._deliver_output` | M | 0 | 6 |
 | `lithos_loom.cli._deliver_preflight` | S | 0 | 4 |
 | `lithos_loom.cli._deliver_repo` | M | 2 | 10 |
-| `lithos_loom.cli._deliver_session` | S | 0 | 7 |
+| `lithos_loom.cli._deliver_session` | M | 2 | 7 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
@@ -34,6 +35,11 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli.task` | M | 1 | 1 |
 
 ## Public API
+
+### `lithos_loom.cli._deliver_converge`
+- class `ConvergeChain` — What ``--converge`` runs once the delivery has landed.
+- def `run_converge` — Run ``develop converge`` in THIS process and return its exit code.
+- def `converge_chain` — The ``--converge`` chain for *story*, with its acceptance criteria resolved from the live story read (never from the PR body).
 
 ### `lithos_loom.cli._deliver_facts`
 - class `RunFacts` — What the stopped run left on disk, for the PR body and the finding.
@@ -65,7 +71,9 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `delivery_finding` — The ``[ManualDelivery]`` summary posted on the story (pure).
 - def `quoted_block` — *text* as bounded display lines, each safe to print behind an indent.
 - def `echo_plan`
+- def `preview` — The ``--dry-run`` screen: every fact RESOLVED, and nothing written.
 - def `render`
+- def `file_record` — Write the ``--json`` record, if one was asked for.
 
 ### `lithos_loom.cli._deliver_preflight`
 - def `resolve_facts` — Resolve the run (or the explicit branch + story) into :class:`RunFacts`.
@@ -95,6 +103,8 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `claim_story` — Claim *aspect* of the story; ``False`` when another agent holds it.
 - def `renew_story` — Re-up the ``deliver`` lease before the gate work — the phase that must be exclusive — so it never runs on a lease the git / gh phases spent. ``False`` when the renewal did not land, and the caller then **skips the whole gate phase**: a lease that would not renew may already belong to another delivery, and a gate raised under it is the duplicate the claim exists to prevent. The PR stands and the story keeps the gate it had — a partial a later invocation finishes.
 - def `release_story` — Release *aspect*. Best-effort: a lingering claim only expires with its TTL — and a released route claim is itself the signal that re-triggers the runner's readiness check (``task.released``), which then defers the story behind the ``pr`` gate this delivery just raised.
+- class `DispatchHold` — The story's route claims, held for the length of one delivery.
+- class `Claim` — The story's ``deliver`` lease for the length of one delivery.
 
 ### `lithos_loom.cli._github_metadata`
 - class `GithubMetadataError` — Raised when the CLI cannot complete a project-context mutation.

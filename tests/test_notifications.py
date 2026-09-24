@@ -392,3 +392,31 @@ def test_comment_body_renders_the_escalation_actions() -> None:
     runner = NeedsHumanNotice(route="story-develop", **base)
     assert REDISPATCH_ACTIONS in runner.comment_body("dave")
     assert "re-dispatch" in runner.comment_body("dave")
+
+
+# ── slice 2: the third action rides the push channel, copy-pasteable ────
+
+
+def test_push_sinks_carry_the_deliver_command_when_the_run_left_a_branch() -> None:
+    """A notification is where the operator is standing when a run stops; the
+    whole point of the third choice is that it can be acted on from there."""
+    from lithos_loom.notifications import NeedsHumanNotice
+
+    base = dict(
+        gate_id="g" * 36,
+        story_id="s-1",
+        story_title="Wire the thing",
+        project="p",
+        route="story-develop",
+        reason="disputed",
+        summary="round 4: deadlock",
+        run_id="de459d10",
+    )
+    stopped = NeedsHumanNotice(
+        deliver_command="lithos-loom develop deliver de459d10", **base
+    )
+    assert "lithos-loom develop deliver de459d10" in stopped.toast_body
+    assert "lithos-loom develop deliver de459d10" in stopped.comment_body("dave")
+    # …and a gate with no branch to keep (or a decision gate) says nothing.
+    assert "develop deliver" not in NeedsHumanNotice(**base).toast_body
+    assert "develop deliver" not in NeedsHumanNotice(**base).comment_body("dave")

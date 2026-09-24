@@ -62,6 +62,7 @@ __all__ = [
     "create_human_gate_best_effort",
     "create_pr_gate",
     "create_pr_gate_best_effort",
+    "deliver_command_line",
     "human_gate_brief",
     "is_human_gate",
     "is_loom_human_gate",
@@ -117,6 +118,22 @@ ROUTE_CONFLICT_RESOLVE = "conflict-resolve"
 ROUTE_PR_GATE = "pr-gate"
 """``metadata.route`` of the `pr`-gate resolver's stranded-PR gate (a delivered
 PR closed unmerged / deleted)."""
+
+DELIVER_COMMAND = "lithos-loom develop deliver"
+"""The CLI that turns a stopped run's branch into a delivered, monitored PR
+(§4.15c) — the operator's THIRD choice on a dispatch route's gate, beside
+completing it (re-develop from scratch) and cancelling the story (abandon)."""
+
+
+def deliver_command_line(run_id: str) -> str:
+    """The copy-pasteable ``develop deliver`` invocation for *run_id*.
+
+    One source for every surface that offers the third choice — the gate
+    brief here, the ``[NeedsHuman]`` finding, and the push sinks — so the
+    command an operator copies out of a toast is the one the gate names.
+    """
+    return f"{DELIVER_COMMAND} {run_id}"
+
 
 # A gate's ``route`` is what says whose escalation it is: a **dispatch**
 # route's gate says "this story's run stopped", while each of the three above
@@ -455,9 +472,11 @@ def human_gate_brief(
     Mirrors what the August rescues each needed — run id, rounds, cost, branch,
     what was blocking — and states the actions and their consequences: the
     runner's pair (complete → re-dispatch, cancel the story → abandon) by
-    default, or the caller's own *actions* when the gate is a decision rather
-    than a re-dispatch (a stranded delivery, an exhausted remediation). The
-    warning against cancelling the gate itself stands either way.
+    default — joined by a third, ``develop deliver`` (§4.15c), whenever the
+    brief names a *branch* the operator could keep — or the caller's own
+    *actions* when the gate is a decision rather than a re-dispatch (a
+    stranded delivery, an exhausted remediation). The warning against
+    cancelling the gate itself stands either way.
     """
     b = dict(brief or {})
     lines = [
@@ -529,6 +548,19 @@ def human_gate_brief(
                 "satisfied."
             ),
         ]
+        # The third choice, offered only when there IS a branch to keep: the
+        # rounds that landed are on it, and re-dispatching discards them.
+        # Gated on the brief's own `branch` (and a run to name), so a gate
+        # raised before any branch existed never advertises a command that
+        # would refuse. Callers passing their own *actions* are untouched —
+        # those gates do not sit on a stopped run's branch.
+        if b.get("branch") and run_id:
+            lines.append(
+                f"- Keep the branch → `{deliver_command_line(run_id)}` pushes "
+                "it, opens the PR and swaps this gate for a `pr` gate (revise "
+                "the acceptance first if the stop was a dispute; add "
+                "`--converge` to re-review under it)."
+            )
     else:
         lines += [
             f"- {actions}.",

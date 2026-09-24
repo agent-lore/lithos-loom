@@ -29,6 +29,10 @@ lithos-loom develop deliver --branch loom/story-ac1380c1-4f2a --story ac1380c1
 
 # A PR only — no gate, no merge tracking (an UNMONITORED hand-off)
 lithos-loom develop deliver de459d10 --no-gate
+
+# Deliver AND re-review: the stop was an acceptance dispute, the acceptance has
+# since been revised on the story, and converge re-reviews the PR under it
+lithos-loom develop deliver de459d10 --converge
 ```
 
 ## What it does
@@ -395,6 +399,9 @@ unreviewed code merges on a reviewed PR's reputation.
 | `--no-gate` | Open the PR only. No `pr` gate is raised and the needs-human gate is left open, so the PR is **UNMONITORED** — nothing tracks its merge, ingests reviews on it, or re-gates it when the base moves. The finding says so. |
 | `--dry-run` | Print the five steps with every fact **resolved** and write nothing. Resolved means asked: remote state from git, and — through the same `pr_plan` reads step 2 makes — the repository's **default base** and the concrete step-2 decision (`adopt #N`, `open a new PR onto <base>`, or the `REFUSE` a same-name PR that is not this branch's would produce), plus the would-be title, the gates that would be completed and the ones that would be kept. The preview asks *before* step 1 and the real step 2 asks after it, so the push is **projected into the decision**: an open PR for a branch this delivery will fast-forward sits at `origin`'s current sha now and at the delivered one then, and the plan reads it as the adoption it will be (`adopt #N (head <old> → <new> after the push above)`) instead of refusing something that cannot refuse. The two `gh` calls are **reads**, and they are the only ones: nothing is pushed, created or written to Lithos. The preview therefore needs GitHub reachable and `gh` authenticated, exactly as the delivery does — a plan that resolved neither the base nor the adoption would be a guess the operator approves in place of a decision. A push the plan refuses stops there — step 2 reads nothing, because the real invocation never reaches it. When a new PR would be opened, the plan also prints the coder's handoff quote **as it would be published**. Text loom did not author — the stop reason, the story title, the quote, a `gh` refusal — is stripped of terminal control bytes, **bounded**, and emitted with every continuation line indented behind a `|` marker before it is echoed. Stripping escapes is only half of it: LF survives by design, and a newline would land the next word at column 0 as a forged plan line, while sheer volume would scroll the real plan away. The story line takes the title's first line only, as the PR title already does. This is the screen the decision is made on. |
 | `--json PATH` | Write the structured record. |
+| `--converge` | After a **successful** delivery (exit 0), run `develop converge <pr> --story <id>` on the PR just delivered, in this process and through converge's own parser — so every `develop_*` layer, panel and check-set behind `--story` is the one you would get by typing the command yourself. The acceptance criteria are the **story's current** ones (`metadata.acceptance_criteria`, else its description), never the PR body's copy: the body was written from the same story a moment ago and goes stale the instant the operator revises it, which is precisely what a dispute makes them do. converge's exit code and summary become this command's, so a `not_converged` run exits non-zero — with the `pr` gate still on the story, because the PR is delivered either way and the next move is the one after any non-converged remediation. Refused with `--no-gate` (converging an UNMONITORED PR is [`converge`](converge.md)'s own business); with `--dry-run` it is previewed (`6 converge: would converge #N under <AC source>`) and nothing runs. A delivery that ends **partial** (exit 2) skips it and says so: converge would spend on a PR whose gate or head is unsettled and hide that behind its own exit code. |
+| `--ac-file PATH` | With `--converge`: the acceptance criteria for the converge run, overriding the story's. The **path** is passed on, so converge reads the file itself. Without `--converge` it is refused — this command reviews nothing, and silently ignoring it would have you believe a revised acceptance had been read. |
+| `--profile NAME` / `-p` | With `--converge`: the review profile for the converge run (default: the story's own). Refused without `--converge`, for the same reason. |
 | `--config` | Host config path. |
 
 ## Output
@@ -408,6 +415,16 @@ unreviewed code merges on a reviewed PR's reputation.
   `complete`, `changed`, `notes[]`. `complete` is what the
   exit code follows: false whenever anything is owed, including a record that
   could not be written (the delivery still stands — `pr_url` says so).
+- **The run dir**: the delivered PR url is recorded in the run's private
+  `delivery.json` (best-effort, alongside the daemon's own delivery markers) as
+  soon as the PR exists. The story's `pr` gate stays the authoritative record —
+  and the only one another host can read — but `develop list` and
+  `develop prune` are *local* inventories of the work dir, so the delivery
+  leaves its answer where they already look: `list` shows the PR in its `pr`
+  column beside the run instead of listing it with the runs still waiting on a
+  decision, and `prune` stops holding a run whose work is already a monitored
+  PR (including one killed before it could write its terminal
+  `conversation.md`).
 
 ## Exit codes
 
@@ -427,8 +444,10 @@ spends nothing.
 
 - **Not a resume.** It delivers what the run committed; it does not restart the
   coder/reviewer loop. Re-reviewing the delivered PR (under revised acceptance
-  criteria, say) is `lithos-loom develop converge <pr> --story <id> --ac-file …`
-  — see [`converge.md`](converge.md).
+  criteria, say) is `develop converge` — either chained with `--converge` (the
+  same run, under the story's current criteria) or run yourself afterwards as
+  `lithos-loom develop converge <pr> --story <id> --ac-file …`. See
+  [`converge.md`](converge.md).
 - **Not a rescue for a run with no commits.** A branch with nothing on it
   delivers an empty PR; check `develop dump <run>` first.
 - **Never destructive.** It does not force-push, rewrite a branch, cancel a

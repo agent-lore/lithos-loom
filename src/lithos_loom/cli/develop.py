@@ -175,6 +175,11 @@ class RunInfo:
     round: int  # highest round with any handoff (0 = no handoff yet)
     reviewers: tuple[str, ...]
     run_dir: str
+    # The PR this run's branch is behind — its own delivery (#188) or a hand
+    # one (`develop deliver`); "" while the run has none. A stopped run whose
+    # branch has since been delivered is a different thing from one still
+    # waiting on its gate, and only this tells them apart.
+    pr: str = ""
 
 
 def _latest_mtime(run_dir: Path) -> float:
@@ -264,6 +269,7 @@ def _run_info(run_dir: Path) -> RunInfo:
         round=round_no,
         reviewers=reviewers,
         run_dir=str(run_dir),
+        pr=run_outcome.run_pr_url(run_dir) or "",
     )
 
 
@@ -402,8 +408,15 @@ def _is_finished(run_dir: Path) -> bool:
     never wrote the marker) untouched, erring conservative. A still-live agent
     container is treated as a definitive override in case a future change writes
     the marker earlier.
+
+    The second terminal signal is a **hand delivery** (``develop deliver``):
+    that command refuses a run a live dispatch still claims, so its marker is
+    only ever written over a finished lifecycle — and it is what finally makes
+    a run killed before its ``conversation.md`` prunable once its branch is a
+    monitored PR.
     """
-    if not (run_dir / "conversation.md").is_file():
+    delivered = run_outcome.manual_delivery_pr(run_dir)
+    if not (run_dir / run_outcome.CONVERSATION_LOG).is_file() and not delivered:
         return False
     containers = _run_containers(run_dir.name)
     return not (containers and any(c.running for c in containers))
@@ -571,7 +584,10 @@ def develop_list(
 ) -> None:
     """List inspectable story-develop runs (in-flight + failed/interrupted).
 
-    Succeeded runs are reaped by the route-runner, so they won't appear.
+    Succeeded runs are reaped by the route-runner, so they won't appear. The
+    ``pr`` column names the PR a run's branch is behind — its own delivery, or
+    a hand one (``develop deliver``) — so a stopped run whose work is already
+    on the maintained path is distinguishable from one still waiting.
     """
     try:
         cfg = load_config(config)
@@ -614,10 +630,14 @@ def develop_list(
             f"r{i.round}",
             _agent_state(i),
             _format_mtime(_latest_mtime(Path(i.run_dir))),
+            # the delivered PR, or `—` for a run still waiting on its gate —
+            # the one column that says whether a stopped run's work is on the
+            # maintained path or still only on a branch
+            i.pr or _UNKNOWN,
         )
         for i in infos
     ]
-    headers = ("run", "task", "title", "round", "active", "updated")
+    headers = ("run", "task", "title", "round", "active", "updated", "pr")
     widths = [
         max(len(h), max((len(r[c]) for r in rows), default=0))
         for c, h in enumerate(headers)
@@ -643,7 +663,8 @@ def develop_prune(
 
     Succeeded runs are reaped by the route-runner; this clears the failed /
     interrupted dirs that accumulate. A run is *finished* once it has written its
-    terminal ``conversation.md`` (after its agent containers stop); an in-flight
+    terminal ``conversation.md`` (after its agent containers stop), or once its
+    branch has been delivered as a PR by ``develop deliver``; an in-flight
     run — including one still in its startup window — is left untouched.
     ``--dry-run`` previews without deleting. A deletion that fails (permissions,
     busy filesystem) is reported as an error, never as a success, and makes the

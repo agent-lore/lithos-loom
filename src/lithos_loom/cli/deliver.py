@@ -50,6 +50,12 @@ From there the PR is a first-class PR-maintenance object: landability, external
 review ingestion, the base-move re-gate, the conflict resolver, merge → story
 completed + dependents nudged, and the S6 admission count.
 
+``--converge`` adds an optional sixth step (:mod:`cli._deliver_converge`): the
+delivered PR, re-reviewed by ``develop converge`` under the story's **current**
+acceptance criteria, whose exit code becomes this command's. It runs only after
+a delivery that finished — a partial one owes the operator something, and
+converge's own exit code would hide it.
+
 **Failure is classified by what is committed, not by which step raised.** The
 record is built before the first external write and filled in as each step
 lands. A refusal with nothing of this run's outside the host is exit 1; from
@@ -70,15 +76,19 @@ Lithos. ``--branch`` / ``--story`` is the explicit fallback for a host with
 
 from __future__ import annotations
 
-import json
 import subprocess
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import typer
 
+from lithos_loom.cli._deliver_converge import (
+    ConvergeChain,
+    converge_chain,
+    run_converge,
+)
 from lithos_loom.cli._deliver_facts import (
     RunFacts,
     pr_body,
@@ -95,7 +105,8 @@ from lithos_loom.cli._deliver_lithos import (
 from lithos_loom.cli._deliver_output import (
     MANUAL_DELIVERY,
     delivery_finding,
-    echo_plan,
+    file_record,
+    preview,
     render,
 )
 from lithos_loom.cli._deliver_preflight import (
@@ -106,32 +117,36 @@ from lithos_loom.cli._deliver_preflight import (
 )
 from lithos_loom.cli._deliver_repo import (
     PUSH_CREATE,
-    PUSH_DIVERGED,
     PUSH_FAST_FORWARD,
     delivered_pr_head,
     open_or_adopt,
     origin_repo_name,
-    pr_plan,
     push_branch,
     remote_state,
 )
 from lithos_loom.cli._deliver_session import (
-    claim_story,
+    Claim,
+    DispatchHold,
     post_finding,
     read_story_sync,
-    release_story,
-    renew_story,
     run_gate_delivery,
 )
 from lithos_loom.config import LoomConfig, load_config
 from lithos_loom.errors import LithosLoomError
+from lithos_loom.plugins.story_develop import run_outcome
 from lithos_loom.plugins.story_develop.pr_delivery import (
     pr_number_from_url,
     request_operator_review,
 )
 from lithos_loom.plugins.story_develop.publish_text import publish_title
 
-__all__ = ["EXIT_CODES", "MANUAL_DELIVERY", "deliver_command"]
+__all__ = [
+    "EXIT_CODES",
+    "MANUAL_DELIVERY",
+    "ConvergeChain",
+    "deliver_command",
+    "run_converge",
+]
 
 # 0 delivered (or adopted, or a dry-run plan); 1 refused/failed with nothing
 # written; 2 the PR is open but the gate half did not complete — a PARTIAL
@@ -185,12 +200,34 @@ def deliver_command(
     json_out: Path | None = typer.Option(
         None, "--json", help="Write the structured JSON record to this path."
     ),
+    converge: bool = typer.Option(
+        False,
+        "--converge",
+        help="After a successful delivery, run `develop converge <pr> --story "
+        "<id>` on the PR: re-review it under the story's CURRENT acceptance "
+        "criteria and push the fixes. converge's exit code and summary become "
+        "this command's. Exclusive with --no-gate (converge on an unmonitored "
+        "PR is the standalone command's business).",
+    ),
+    acceptance_file: Path | None = typer.Option(
+        None,
+        "--ac-file",
+        help="With --converge: read the acceptance criteria from this file "
+        "instead of the story's description.",
+    ),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        "-p",
+        help="With --converge: the review profile for the converge run "
+        "(default: the story's own).",
+    ),
     config: Path | None = typer.Option(None, "--config", help="Host config path."),
 ) -> None:
     """Push a stopped run's branch, open its PR, and swap the needs-human gate
     for a pr gate."""
     try:
-        record = _deliver(
+        delivered = _deliver(
             load_config(config),
             run=run,
             branch=branch,
@@ -199,6 +236,10 @@ def deliver_command(
             no_gate=no_gate,
             dry_run=dry_run,
             json_out=json_out,
+            converge=converge,
+            acceptance_file=acceptance_file,
+            profile=profile,
+            config_path=config,
         )
     except LithosLoomError as exc:
         # DeliverRefused (a precondition), or a config that would not load —
@@ -219,6 +260,7 @@ def deliver_command(
             f"error: {sanitize_for_terminal(str(exc))}", err=True, fg=typer.colors.RED
         )
         raise typer.Exit(EXIT_CODES["refused"]) from exc
+    record = delivered.record
     if record is None:  # --dry-run: the plan was printed, nothing to record
         raise typer.Exit(EXIT_CODES["delivered"])
     for line in render(record):
@@ -229,9 +271,42 @@ def deliver_command(
     # not land, a finding that would not post, a `--json` record that could not
     # be written — is a PARTIAL delivery with its own exit code. Exit 1 is only
     # ever a refusal that wrote nothing.
-    raise typer.Exit(
-        EXIT_CODES["delivered"] if record["complete"] else EXIT_CODES["ungated"]
+    if not record["complete"]:
+        if delivered.converge is not None:
+            # The delivery owes the operator something; converge would spend
+            # money on a PR whose gate, head or provenance is unsettled, and
+            # its own exit code would then hide that. Say so and stop.
+            typer.echo(
+                "  --converge SKIPPED: the delivery above is unfinished. "
+                "Re-run to finish it, then converge."
+            )
+        raise typer.Exit(EXIT_CODES["ungated"])
+    if delivered.converge is None:
+        raise typer.Exit(EXIT_CODES["delivered"])
+    # The PR is delivered and monitored either way from here: converge's exit
+    # code and summary become this command's, and a run that ends
+    # `not_converged` leaves the `pr` gate exactly where step 3 put it — the
+    # operator's next move is the one after any non-converged remediation.
+    number = record["pr_number"]
+    # converge takes `#142` / `142` / a url; the url is the fallback for a PR
+    # whose number could not be read back (already a `[Friction]` above)
+    pr = str(number) if number is not None else str(record["pr_url"])
+    label = f"#{number}" if number is not None else pr
+    typer.echo(
+        sanitize_for_terminal(
+            f"  converging {label} under {delivered.converge.ac_source}…"
+        )
     )
+    raise typer.Exit(run_converge(delivered.converge.argv(pr)))
+
+
+@dataclass(frozen=True)
+class _Delivered:
+    """What the command body hands back: the JSON record (``None`` for a dry
+    run) and, when ``--converge`` was asked for, the chain to run after it."""
+
+    record: dict[str, Any] | None
+    converge: ConvergeChain | None = None
 
 
 def _deliver(
@@ -244,7 +319,11 @@ def _deliver(
     no_gate: bool,
     dry_run: bool,
     json_out: Path | None,
-) -> dict[str, Any] | None:
+    converge: bool = False,
+    acceptance_file: Path | None = None,
+    profile: str | None = None,
+    config_path: Path | None = None,
+) -> _Delivered:
     """The command body. Returns the JSON record, or ``None`` for a dry run.
 
     **Phase-aware failure.** Everything up to and including the PR open may
@@ -254,6 +333,22 @@ def _deliver(
     every step after it degrades into ``notes`` and the command exits 2 with
     the url printed and the `[Friction]` posted.
     """
+    if converge and no_gate:
+        raise DeliverRefused(
+            "--converge and --no-gate are exclusive: converge pushes review "
+            "fixes onto a PR nothing is watching — no merge tracking, no "
+            "external-review ingestion, no re-gate. Converging an unmonitored "
+            "PR is `lithos-loom develop converge`'s own business; drop "
+            "--no-gate to have this delivery gate the PR first"
+        )
+    if not converge and (acceptance_file is not None or profile is not None):
+        # Silently ignoring them would have the operator believe a revised
+        # acceptance file was read when nothing reviewed anything at all.
+        flag = "--ac-file" if acceptance_file is not None else "--profile"
+        raise DeliverRefused(
+            f"{flag} only applies to the converge run --converge chains; "
+            "this delivery reviews nothing. Add --converge, or drop the flag"
+        )
     facts = resolve_facts(host, run=run, branch=branch, story_id=story_id)
     agent = host.orchestrator.agent_id
     url = host.orchestrator.lithos_url
@@ -294,51 +389,36 @@ def _deliver(
     # the defang, since `story.title` is the external issue's title for a
     # mirrored story and the PR title becomes the squash commit subject
     title = publish_title(story.title) or facts.branch
-    if dry_run:
-        state = remote_state(repo, facts.branch)
-        # Every fact resolved, nothing written: the base and the adopt /
-        # open / refuse decision come from the SAME reads step 2 makes
-        # (`pr_plan`), so the screen the operator approves is the decision
-        # the delivery takes — not a placeholder base and a generic "adopt or
-        # open". Skipped only when the push above is refused, which is where
-        # the real invocation stops too: a decision it would never reach is
-        # not a fact about this delivery.
-        plan = (
-            None
-            if state.action == PUSH_DIVERGED
-            else pr_plan(
-                repo,
-                branch=facts.branch,
-                repo_name=repo_name,
-                base=base,
-                head_sha=state.local_sha,
-                # the preview runs BEFORE the push, and a PR's head is
-                # whatever origin/<branch> points at: a fast-forward carries
-                # an open PR at the current remote sha to the delivered one,
-                # so the plan reads it as the adoption the real step 2 makes
-                moves_to_ours=(
-                    state.remote_sha if state.action == PUSH_FAST_FORWARD else ""
-                ),
-            )
+    chain = (
+        converge_chain(
+            story,
+            repo=repo,
+            acceptance_file=acceptance_file,
+            profile=profile,
+            config_path=config_path,
         )
-        echo_plan(
+        if converge
+        else None
+    )
+    if dry_run:
+        preview(
             facts=facts,
             story=story,
             repo=repo,
             repo_name=repo_name,
-            plan=plan,
-            state=state,
+            base=base,
             title=title,
             no_gate=no_gate,
-            retirement=story.retirement(run_id=facts.run_id, dispatch_routes=routes),
+            routes=routes,
+            converge=chain,
         )
-        return None
+        return _Delivered(None, chain)
 
     # A terminal story cannot be claimed, and with --no-gate on one there is
     # no gate work to serialise. Otherwise the claim is the cross-process
     # guard: two deliveries of one story must not interleave, or both read
     # "no pr gate" before either writes one and the story ends up with two.
-    claim = _Claim(url=url, agent=agent, story_id=story.story_id)
+    claim = Claim(url=url, agent=agent, story_id=story.story_id)
     if story.status == "open" and not claim.take():
         raise DeliverRefused(
             f"another `develop deliver` holds the {DELIVER_ASPECT} claim on "
@@ -354,7 +434,7 @@ def _deliver(
     # which of us got there first. Released in the `finally` — and that
     # release is itself the event that re-triggers the runner's readiness
     # check, which then defers the story behind the gate we raised.
-    hold = _DispatchHold(
+    hold = DispatchHold(
         url=url,
         agent=dispatch_hold_agent(agent),
         story_id=story.story_id,
@@ -371,96 +451,25 @@ def _deliver(
                 f"develop attach {facts.run_id or facts.branch}` and re-run "
                 "once it has finished"
             )
-        return _deliver_claimed(
-            host,
-            facts=facts,
-            story=story,
-            repo=repo,
-            repo_name=repo_name,
-            title=title,
-            base=base,
-            no_gate=no_gate,
-            json_out=json_out,
-            claim=claim,
-            routes=routes,
+        return _Delivered(
+            _deliver_claimed(
+                host,
+                facts=facts,
+                story=story,
+                repo=repo,
+                repo_name=repo_name,
+                title=title,
+                base=base,
+                no_gate=no_gate,
+                json_out=json_out,
+                claim=claim,
+                routes=routes,
+            ),
+            chain,
         )
     finally:
         hold.release()
         claim.release()
-
-
-@dataclass
-class _DispatchHold:
-    """The story's route claims, held for the length of one delivery.
-
-    The exclusion against a **dispatch**, as opposed to :class:`_Claim`'s
-    exclusion against another delivery. Every configured dispatch route is
-    claimed before the push and released after the gate work, so a daemon
-    that boots (or bootstraps this story) mid-delivery cannot take the story
-    into a fresh run behind our back: the route-runner claims the same aspect
-    before it dispatches, finds it held by another agent, logs the lost race
-    and defers. The identity is :func:`dispatch_hold_agent`'s, not the host's
-    — a claim only excludes another *agent*.
-
-    Taken route by route and released the same way, so a refusal leaves
-    nothing behind (the caller releases in its ``finally``).
-    """
-
-    url: str
-    agent: str
-    story_id: str
-    routes: Sequence[str]
-    held: list[str] = field(default_factory=list)
-
-    def take(self) -> str | None:
-        """Claim every route. Returns the first route already held by someone
-        else (nothing was written), or ``None`` when the story is ours."""
-        for route in self.routes:
-            if not claim_story(self.url, self.agent, self.story_id, aspect=route):
-                return route
-            self.held.append(route)
-        return None
-
-    def release(self) -> None:
-        for route in self.held:
-            release_story(self.url, self.agent, self.story_id, aspect=route)
-        self.held.clear()
-
-
-@dataclass
-class _Claim:
-    """The story's ``deliver`` lease for the length of one delivery.
-
-    Exclusivity is only ever *asserted* while the lease is provably ours, so
-    the handle remembers whether a renewal failed: a lease that would not renew
-    may already belong to another delivery, and then this process must neither
-    mutate gate state (:func:`_deliver_claimed` skips it) nor **release** —
-    releasing would hand the other holder's own claim away, since deliveries on
-    one host share the configured agent id.
-    """
-
-    url: str
-    agent: str
-    story_id: str
-    held: bool = False
-    lost: bool = False
-
-    def take(self) -> bool:
-        self.held = claim_story(self.url, self.agent, self.story_id)
-        return self.held
-
-    def renew(self) -> bool:
-        if not self.held:
-            return False
-        if renew_story(self.url, self.agent, self.story_id):
-            return True
-        # Not ours to release either: another delivery may hold it now.
-        self.lost = True
-        return False
-
-    def release(self) -> None:
-        if self.held and not self.lost:
-            release_story(self.url, self.agent, self.story_id)
 
 
 def _deliver_claimed(
@@ -474,7 +483,7 @@ def _deliver_claimed(
     base: str | None,
     no_gate: bool,
     json_out: Path | None,
-    claim: _Claim,
+    claim: Claim,
     routes: Sequence[str],
 ) -> dict[str, Any]:
     """Steps 1-5, under the story's ``deliver`` claim.
@@ -526,7 +535,7 @@ def _deliver_claimed(
         record["push_uncertain"] = True
         record["gate_complete"] = False
         record["complete"] = False
-        _file_record(json_out, record, notes)
+        file_record(json_out, record, notes)
         return record
     record["pushed"] = state.action in (PUSH_CREATE, PUSH_FAST_FORWARD)
     if upstream_note:
@@ -576,7 +585,7 @@ def _deliver_claimed(
             )
         record["gate_complete"] = False
         record["complete"] = False
-        _file_record(json_out, record, notes)
+        file_record(json_out, record, notes)
         return record
     record["pr_url"] = pr_url
     record["adopted"] = adopted
@@ -584,6 +593,15 @@ def _deliver_claimed(
         record["pr_number"] = pr_number_from_url(pr_url)
     except RuntimeError as exc:
         notes.append(f"could not read the PR number from {pr_url} ({exc})")
+    if facts.run_dir:
+        # The run's own private record that its branch is now a PR (#188's
+        # marker, hand-delivery half). The story's `pr` gate is authoritative
+        # and is what a second host reads; this is what keeps the LOCAL
+        # inventories honest — `develop list` shows the PR beside the run
+        # instead of listing it with the runs still waiting on a decision, and
+        # `develop prune` stops holding a run whose work is already delivered.
+        # Best-effort by construction (see `record_manual_delivery`).
+        run_outcome.record_manual_delivery(Path(facts.run_dir), pr_url=pr_url)
 
     # 2b — read back the revision GitHub actually put behind the PR. `gh pr
     # create` opens from a head BRANCH (the API takes no sha), so an actor who
@@ -771,30 +789,5 @@ def _deliver_claimed(
             )
             record["gate_complete"] = False
             record["complete"] = False
-    _file_record(json_out, record, notes)
+    file_record(json_out, record, notes)
     return record
-
-
-def _file_record(
-    json_out: Path | None, record: dict[str, Any], notes: list[str]
-) -> None:
-    """Write the ``--json`` record, if one was asked for.
-
-    A record the operator asked for and did not get is a partial result, not a
-    footnote: the delivery stands, but the output they will script against is
-    missing, so it lowers ``complete`` (exit 2) as well as leaving a note.
-    """
-    if json_out is None:
-        return
-    try:
-        _write_json(json_out, record)
-    except OSError as exc:
-        notes.append(f"could not write the JSON record to {json_out} ({exc})")
-        record["complete"] = False
-
-
-def _write_json(json_out: Path | None, record: Mapping[str, Any]) -> None:
-    if json_out is None:
-        return
-    json_out.parent.mkdir(parents=True, exist_ok=True)
-    json_out.write_text(json.dumps(dict(record), indent=2), encoding="utf-8")

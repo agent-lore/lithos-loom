@@ -20,10 +20,12 @@ Marker inventory (who writes / who reads each):
   written after delivery. Bound to THIS run by ``run_id == run_dir.name`` (#198)
   so a prior run's leftover can't false-done a retry. Read by
   :func:`result_for_run` / :func:`delivery_complete`.
-- ``delivery.json`` (run dir, private) — the delivery deadline (#189) and/or a
-  best-effort delivery-failure marker (#194). Written by
-  :func:`record_delivery_deadline` / :func:`record_delivery_failure`; read by
-  :func:`delivery_deadline` / :func:`delivery_failed` / :func:`delivery_timed_out`.
+- ``delivery.json`` (run dir, private) — the delivery deadline (#189), a
+  best-effort delivery-failure marker (#194), and/or the PR a HAND delivery
+  (``develop deliver``, §4.15c) put this run's branch behind. Written by
+  :func:`record_delivery_deadline` / :func:`record_delivery_failure` /
+  :func:`record_manual_delivery`; read by :func:`delivery_deadline` /
+  :func:`delivery_failed` / :func:`delivery_timed_out` / :func:`run_pr_url`.
 - ``conversation.md`` (run dir) — the teardown marker (the plugin writes it just
   before ``state.json``); its presence means the run reached teardown. Read by
   :func:`capture_outcome`.
@@ -279,6 +281,55 @@ def record_delivery_failure(run_dir: Path, *, reason: str) -> None:
     data["reason"] = reason
     with contextlib.suppress(OSError):
         marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+
+def record_manual_delivery(run_dir: Path, *, pr_url: str) -> None:
+    """Record that ``develop deliver`` put this run's branch behind *pr_url*.
+
+    A stopped run's own delivery never ran, so nothing in the run dir would
+    otherwise say the work has since been delivered: ``develop list`` would
+    keep showing it beside runs still waiting for a decision, and ``prune``
+    would keep a run whose branch is already a monitored PR. The story's `pr`
+    gate is the authoritative record (and the only one a second host can
+    read), but both of those commands are local, offline inventories of the
+    work dir — so the delivery leaves its answer where they already look.
+    Merges into the existing marker so a recorded deadline / failure survives.
+    Best-effort: a write failure costs a column, never the delivery.
+    """
+    marker = run_dir / DELIVERY_MARKER
+    data: dict[str, object] = {}
+    try:
+        existing = json.loads(marker.read_text(encoding="utf-8"))
+        if isinstance(existing, dict):
+            data = existing
+    except (OSError, json.JSONDecodeError):
+        pass
+    data["manual_pr_url"] = pr_url
+    with contextlib.suppress(OSError):
+        marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+
+def manual_delivery_pr(run_dir: Path) -> str | None:
+    """The PR a HAND delivery put this run's branch behind, or ``None``."""
+    try:
+        data = json.loads((run_dir / DELIVERY_MARKER).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    url = data.get("manual_pr_url") if isinstance(data, dict) else None
+    return url if isinstance(url, str) and url else None
+
+
+def run_pr_url(run_dir: Path) -> str | None:
+    """The PR this run's branch is behind — delivered by the daemon or by hand.
+
+    What ``develop list`` shows: the run's own delivery (#188, from its
+    run-bound ``result.json``) first, since only an approved run has one, then
+    the ``develop deliver`` marker. ``None`` means "no PR of this run's" — a
+    run still waiting on a decision. Two file reads and no ``state.json``:
+    this is a listing, called once per run dir, and the verdict adds nothing
+    a delivery record does not already say.
+    """
+    return delivered_pr_url(run_dir, None) or manual_delivery_pr(run_dir)
 
 
 def run_phase(

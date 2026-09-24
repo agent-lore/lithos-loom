@@ -1540,7 +1540,7 @@ def test_a_failed_renewal_skips_every_gate_mutation(
 ) -> None:
     """correctness/f-006: a lease that will not renew may already belong to
     another delivery — so nothing is mutated and nothing is released."""
-    monkeypatch.setattr(cli, "renew_story", lambda *a, **k: False)
+    monkeypatch.setattr(cli_session, "renew_story", lambda *a, **k: False)
 
     result = _invoke(_RUN)
 
@@ -3572,3 +3572,183 @@ def test_the_delivery_does_not_mistake_its_own_dispatch_hold_for_a_live_run(
     asyncio.run(lithos.task_claim(task_id=_STORY, aspect="story-develop", agent="loom"))
     foreign = asyncio.run(cli_lithos.read_story(lithos, _STORY, own_agents=(hold,)))
     assert foreign.route_claims == ("story-develop (agent loom)",)
+
+
+# ── --converge: the delivered PR, re-reviewed under the story's own AC ──
+
+
+@pytest.fixture
+def converge(monkeypatch: pytest.MonkeyPatch, lithos: FakeLithosClient) -> dict:
+    """Stub the in-process ``develop converge`` seam.
+
+    The seam itself (converge's own parser + flag resolution) is converge's
+    tests' business; what this pins is the argv `deliver` hands it and WHEN —
+    so the story is read at CALL time, which is what says the five steps ran
+    first.
+    """
+    calls: dict[str, Any] = {"argv": [], "story_at_call": [], "exit_code": 0}
+
+    def _run(argv: Any) -> int:
+        calls["argv"].append(list(argv))
+        calls["story_at_call"].append(dict(_get(lithos, _STORY).metadata))
+        return int(calls["exit_code"])
+
+    monkeypatch.setattr(cli, "run_converge", _run)
+    return calls
+
+
+def test_converge_runs_after_the_delivery_with_the_pr_and_the_story(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
+) -> None:
+    """The #99 / #101 / #423 sequence in one command: deliver, then re-review
+    the PR it produced under the story's CURRENT acceptance criteria."""
+
+    result = _invoke(_RUN, "--converge")
+
+    assert result.exit_code == 0, result.output
+    # steps 1-5 first: the PR exists, the gate holds the story, and the
+    # story already records it by the time converge is called
+    assert len(gh["created"]) == 1
+    (argv,) = converge["argv"]
+    assert argv[0] == "99"  # the delivered PR's number
+    assert argv[1:5] == ["--story", _STORY, "--repo", str(repo)]
+    # the AC is the story's own, not the PR body's copy of it
+    assert argv[5:] == ["--ac", "Done when the PR is open and gated."]
+    assert converge["story_at_call"][0][STORY_GATE_ID_KEY]
+    assert _get(lithos, "gate-human").status == "completed"
+    assert "converging #99 under the story's acceptance criteria" in result.output
+
+
+def test_converge_exit_code_becomes_the_commands_and_leaves_the_gate(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
+) -> None:
+    """A `not_converged` run exits non-zero — and the PR is delivered either
+    way, so the `pr` gate stays exactly where step 3 put it."""
+    converge["exit_code"] = 1
+
+    result = _invoke(_RUN, "--converge")
+
+    assert result.exit_code == 1, result.output
+    gate_id = _get(lithos, _STORY).metadata[STORY_GATE_ID_KEY]
+    gate = _get(lithos, gate_id)
+    assert gate.status == "open" and gate.metadata["gate_type"] == GATE_TYPE_PR
+    assert gate_id in {e.from_task_id for e in _edges_into(lithos, _STORY)}
+
+
+def test_converge_reads_the_acceptance_from_ac_file_when_given(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    converge: dict,
+    tmp_path: Path,
+) -> None:
+    ac = tmp_path / "revised-ac.md"
+    ac.write_text("The acceptance as the operator revised it.\n", encoding="utf-8")
+
+    result = _invoke(_RUN, "--converge", "--ac-file", str(ac), "--profile", "thorough")
+
+    assert result.exit_code == 0, result.output
+    (argv,) = converge["argv"]
+    # the PATH is passed on, so converge reads the operator's file itself
+    assert argv[5:] == ["--ac-file", str(ac), "--profile", "thorough"]
+    assert "--ac" not in argv
+    assert f"converging #99 under --ac-file {ac}" in result.output
+
+
+def test_converge_is_refused_with_no_gate_and_writes_nothing(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
+) -> None:
+    """Converging an UNMONITORED PR is the standalone command's business: this
+    one would push review fixes onto a PR nothing tracks."""
+
+    result = _invoke(_RUN, "--converge", "--no-gate")
+
+    assert result.exit_code == 1, result.output
+    assert "exclusive" in result.output
+    assert converge["argv"] == []
+    # a refusal, so nothing at all was written
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+    assert gh["created"] == [] and lithos.mutating_calls == []
+
+
+def test_ac_file_without_converge_is_refused(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, tmp_path: Path
+) -> None:
+    """Silently ignoring it would have the operator believe a revised
+    acceptance was read when nothing reviewed anything at all."""
+    result = _invoke(_RUN, "--ac-file", str(tmp_path / "ac.md"))
+
+    assert result.exit_code == 1, result.output
+    assert "--ac-file only applies" in result.output
+    assert gh["created"] == [] and lithos.mutating_calls == []
+
+
+def test_converge_dry_run_previews_the_chain_and_writes_nothing(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
+) -> None:
+    gh["existing"] = [_open_pr(number=42, head_sha=_head(repo))]
+
+    result = _invoke(_RUN, "--converge", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "would converge #42 under the story's acceptance criteria" in result.output
+    assert converge["argv"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+    assert gh["created"] == [] and lithos.mutating_calls == []
+
+
+def test_converge_dry_run_names_a_pr_it_would_open_without_inventing_a_number(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
+) -> None:
+
+    result = _invoke(_RUN, "--converge", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "would converge the PR opened above" in result.output
+
+
+def test_converge_is_skipped_when_the_delivery_is_unfinished(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    converge: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial delivery owes the operator something; converge would spend on
+    a PR whose gate never landed and hide that behind its own exit code."""
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise cli_lithos.DeliverRefused("lithos is down")
+
+    monkeypatch.setattr(cli, "run_gate_delivery", _boom)
+
+    result = _invoke(_RUN, "--converge")
+
+    assert result.exit_code == cli.EXIT_CODES["ungated"], result.output
+    assert "--converge SKIPPED" in result.output
+    assert converge["argv"] == []
+    # the PR IS open — what is owed is the gate, and the operator finishes it
+    assert len(gh["created"]) == 1
+
+
+# ── the run dir records the hand delivery (develop list / prune) ───────
+
+
+def test_the_delivery_is_recorded_in_the_runs_own_delivery_marker(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """`develop list` and `develop prune` are LOCAL inventories of the work
+    dir: without this a delivered stopped run is indistinguishable from one
+    still waiting on its gate."""
+    from lithos_loom.plugins.story_develop import run_outcome
+
+    assert run_outcome.run_pr_url(run_dir) is None
+
+    assert _invoke(_RUN).exit_code == 0
+
+    assert run_outcome.manual_delivery_pr(run_dir) == _PR_URL
+    assert run_outcome.run_pr_url(run_dir) == _PR_URL

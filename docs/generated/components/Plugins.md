@@ -58,7 +58,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
-| `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 17 |
+| `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 20 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
@@ -444,6 +444,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `delivery_timed_out` — Whether an in-flight delivery has exceeded its bound (#189).
 - def `record_delivery_deadline` — Record when this run's PR delivery budget expires, for `develop attach` (#189).
 - def `record_delivery_failure` — Mark this run's PR delivery as FAILED in its private delivery.json (#194).
+- def `record_manual_delivery` — Record that ``develop deliver`` put this run's branch behind *pr_url*.
+- def `manual_delivery_pr` — The PR a HAND delivery put this run's branch behind, or ``None``.
+- def `run_pr_url` — The PR this run's branch is behind — delivered by the daemon or by hand.
 - def `run_phase` — Classify the run for ``attach``: ``"running"`` / ``"delivering"`` / ``"terminal"`` / ``"vanished"``.
 - class `RunOutcome` — A run's terminal outcome, captured the moment ``attach`` detects it.
 - def `recover_reaped_outcome` — Recover a **reaped** run's outcome from the host-persistent completion store.
