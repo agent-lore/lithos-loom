@@ -281,9 +281,28 @@ def test_read_handoff_bounds_size_and_decodes_leniently(tmp_path: Path) -> None:
     assert "ok" in develop._read_handoff(p)
 
 
+def test_sanitize_uses_the_one_canonical_control_class() -> None:
+    """security/f-002: `_sanitize` carried a third copy of the class, declared
+    identical to two others by a comment that named a symbol this diff had
+    already deleted. The copies had drifted from the canonical one (which now
+    covers `Default_Ignorable_Code_Point` in full), so tag-block smuggling
+    survived into the operator's `develop attach` terminal. Identity is the
+    assertion: one object, so it cannot drift again — the behaviour it now
+    carries is exercised below."""
+    from lithos_loom.plugins.story_develop.publish_text import CONTROL_CHARS_RE
+
+    assert develop.CONTROL_CHARS_RE is CONTROL_CHARS_RE
+
+
 def test_sanitize_strips_control_keeps_tab_and_newline() -> None:
     # f-001: ESC (0x1b) and BEL (0x07) stripped; TAB/LF preserved.
-    assert develop._sanitize("a\x1b[31mb\x07\n\tc") == "a[31mb\n\tc"
+    # security/f-002 widened the class to `Default_Ignorable_Code_Point` in
+    # full, so the tag block, U+061C and the deprecated formats go too — the
+    # smuggling channels the drifted copy left live on the `attach` screen.
+    assert (
+        develop._sanitize("a\x1b[31mb\x07\n\tc\U000e0001\u061c\u206a\U000e0101\ufff0")
+        == "a[31mb\n\tc"
+    )
 
 
 # ── commands ───────────────────────────────────────────────────────────

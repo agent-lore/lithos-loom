@@ -31,6 +31,7 @@ from lithos_loom.github_models import (
 
 from . import run_outcome
 from .github_access import github_call, repo_name_with_owner
+from .publish_text import fence_untrusted, publish_title
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +116,22 @@ def build_pr_body(
     delivery whose run dir was reaped) and render as ``unknown`` — never as a
     confident zero.
 
-    *provenance_quote* is untrusted text (an agent's handoff) rendered as a
-    fenced block so none of it is active markup.
+    **Every section loom did not author is published fenced** through
+    :func:`~.publish_text.fence_untrusted` (bounded, defanged, in a code block
+    its own content cannot terminate): *provenance_quote* is an agent's
+    handoff, and *description* / *acceptance_criteria* are — for a story the
+    github-issue watcher materialised — the GitHub issue body an outside
+    reporter wrote, copied into the task by the mirror and re-read live at
+    delivery. A PR description is live markup opened under the operator's `gh`
+    identity, so unfenced any of them could close an unrelated issue on merge
+    (`Closes #1`), ping strangers, fire an off-site request for every viewer
+    (an `<img>` or a reference image), or — with one trailing fence line —
+    swallow every section composed *after* it, including the panel's verdicts
+    and loom's own `Closes #N`. A fence needs no enumeration of GFM, which is
+    why it and not a rewrite pass is what these sections rest on.
+
+    The *issue_closes* line loom composes itself is therefore the only live
+    closing keyword in the body, and it is added outside the fenced *what*.
 
     *provenance* is an optional block of extra lines about where the branch
     came from — empty for a run that delivered itself (the Review section
@@ -124,11 +139,12 @@ def build_pr_body(
     (``lithos-loom develop deliver``: the run id and why that run stopped).
     One body builder, so a hand delivery's PR reads like every other.
     """
-    parts = ["## What", "", description.strip(), ""]
+    parts = ["## What", "", fence_untrusted(description), ""]
     if issue_closes:
         parts += [issue_closes, ""]
     if acceptance_criteria:
-        parts += ["## Acceptance criteria", "", acceptance_criteria.strip(), ""]
+        criteria = fence_untrusted(acceptance_criteria)
+        parts += ["## Acceptance criteria", "", criteria, ""]
     parts += [
         "## Review",
         "",
@@ -155,14 +171,13 @@ def build_pr_body(
         # coder's handoff), and a PR description is live markup — GitHub
         # honours closing keywords and @-mentions anywhere in it. Inside a code
         # block neither fires, and the operator still sees exactly what was
-        # written.
+        # written — the fence being measured against the quote itself, so the
+        # quote cannot close it and resume live markup.
         parts += [
             "",
             "Coder's final handoff, verbatim:",
             "",
-            "```text",
-            provenance_quote,
-            "```",
+            fence_untrusted(provenance_quote),
         ]
     parts += [
         "",
@@ -639,7 +654,18 @@ def deliver(
 
     push_branch(wt, result.branch)
     repo = repo_name_with_owner(wt)
-    title = config.description.strip().splitlines()[0][:90]
+    # `publish_title`, not a raw first line: for a mirrored story this IS the
+    # external issue's title, and a multi-commit PR's title becomes the
+    # squash COMMIT SUBJECT — a raw-text channel no fence reaches, where
+    # GitHub still honours closing keywords (security/f-001).
+    #
+    # `or result.branch` is the helper's documented fallback, the same one
+    # `develop deliver` takes (security/f-003): an issue titled with nothing
+    # but default-ignorable code points leaves no title at all, and
+    # `gh pr create --title ""` is rejected — which would fail EVERY delivery
+    # of that story, after the branch has already been pushed, burning the
+    # run's agent spend and an operator interrupt each time.
+    title = publish_title(config.description) or result.branch
     body = build_pr_body(
         description=config.description,
         acceptance_criteria=config.acceptance_criteria,

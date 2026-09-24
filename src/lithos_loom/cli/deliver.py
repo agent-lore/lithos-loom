@@ -129,6 +129,7 @@ from lithos_loom.plugins.story_develop.pr_delivery import (
     pr_number_from_url,
     request_operator_review,
 )
+from lithos_loom.plugins.story_develop.publish_text import publish_title
 
 __all__ = ["EXIT_CODES", "MANUAL_DELIVERY", "deliver_command"]
 
@@ -289,9 +290,10 @@ def _deliver(
         )
     repo = resolve_repo(host, story)
     repo_name = origin_repo_name(repo)
-    # the same title rule story-develop's own delivery applies
-    heading = story.title.strip()
-    title = heading.splitlines()[0][:90] if heading else facts.branch
+    # the same title rule story-develop's own delivery applies — including
+    # the defang, since `story.title` is the external issue's title for a
+    # mirrored story and the PR title becomes the squash commit subject
+    title = publish_title(story.title) or facts.branch
     if dry_run:
         state = remote_state(repo, facts.branch)
         # Every fact resolved, nothing written: the base and the adopt /
