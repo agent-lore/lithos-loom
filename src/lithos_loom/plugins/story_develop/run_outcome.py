@@ -320,6 +320,8 @@ def record_manual_delivery(
         if isinstance(existing, dict):
             data = existing
     except (OSError, json.JSONDecodeError):
+        # No marker yet, or one we cannot read: start from an empty record —
+        # the write below is best-effort either way.
         pass
     data["manual_pr_url"] = pr_url
     if complete:

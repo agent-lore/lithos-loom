@@ -102,6 +102,8 @@ from lithos_loom.cli._deliver_facts import (
 )
 from lithos_loom.cli._deliver_lithos import (
     DELIVER_ASPECT,
+    DELIVER_CHAIN_CLAIM_TTL_MINUTES,
+    DELIVER_CLAIM_TTL_MINUTES,
     DeliverRefused,
     DeliverUncertain,
     GateOutcome,
@@ -420,7 +422,18 @@ def _deliver(
     # no gate work to serialise. Otherwise the claim is the cross-process
     # guard: two deliveries of one story must not interleave, or both read
     # "no pr gate" before either writes one and the story ends up with two.
-    claim = Claim(url=url, agent=agent, story_id=story.story_id)
+    # A chained converge is a paid multi-round loop the short lease cannot
+    # cover, and an expired lease will not renew — so the chain takes its
+    # claims (this one and the dispatch hold's) for as long as a claim can
+    # live, rather than renewing under a blocking subprocess.
+    ttl_minutes = (
+        DELIVER_CHAIN_CLAIM_TTL_MINUTES
+        if chain is not None
+        else DELIVER_CLAIM_TTL_MINUTES
+    )
+    claim = Claim(
+        url=url, agent=agent, story_id=story.story_id, ttl_minutes=ttl_minutes
+    )
     if story.status == "open" and not claim.take():
         raise DeliverRefused(
             f"another `develop deliver` holds the {DELIVER_ASPECT} claim on "
@@ -441,6 +454,7 @@ def _deliver(
         agent=dispatch_hold_agent(agent),
         story_id=story.story_id,
         routes=routes if story.status == "open" else (),
+        ttl_minutes=ttl_minutes,
     )
     try:
         refused = hold.take()

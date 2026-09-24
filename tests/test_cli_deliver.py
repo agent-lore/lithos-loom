@@ -3837,6 +3837,45 @@ def test_converge_dry_run_names_a_pr_it_would_open_without_inventing_a_number(
     assert "would converge the PR opened above" in result.output
 
 
+def test_a_chained_delivery_takes_its_claims_for_the_whole_converge(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
+) -> None:
+    """The claims outlive the chain (PR #427 review, Medium 2).
+
+    Lithos refuses to renew a claim that has already expired, and the chain
+    is a paid multi-round loop whose coder alone has an hour per turn — a
+    four-round run measured 1h52. Under the ordinary 60-minute lease every
+    such chain ended with the gate work skipped as a partial. So a chained
+    delivery takes its lease — and the dispatch hold's — for the longest a
+    claim can live (the server's 8-hour cap), which no realistic chain
+    outlives; a plain delivery keeps the short lease, since a claim a crashed
+    delivery leaves behind holds off the next one for its whole length.
+    """
+    result = _invoke(_RUN, "--converge")
+
+    assert result.exit_code == 0, result.output
+    ttls = {c["aspect"]: c["ttl_minutes"] for c in lithos.calls_to("task_claim")}
+    assert set(ttls) == {"deliver", "story-develop"}
+    assert set(ttls.values()) == {cli_lithos.DELIVER_CHAIN_CLAIM_TTL_MINUTES}
+    assert cli_lithos.DELIVER_CHAIN_CLAIM_TTL_MINUTES >= 8 * 60
+    # the chain ran under those claims, not after them
+    assert len(converge["argv"]) == 1
+
+
+def test_a_plain_delivery_keeps_the_short_claim(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    ttls = {c["ttl_minutes"] for c in lithos.calls_to("task_claim")}
+    assert ttls == {cli_lithos.DELIVER_CLAIM_TTL_MINUTES}
+    assert (
+        cli_lithos.DELIVER_CLAIM_TTL_MINUTES
+        < cli_lithos.DELIVER_CHAIN_CLAIM_TTL_MINUTES
+    )
+
+
 def test_converge_is_skipped_when_the_delivery_is_unfinished(
     host,
     lithos: FakeLithosClient,
