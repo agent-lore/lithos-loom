@@ -22,14 +22,24 @@ other's skip logic.
 
 Per-state posting policy (PRD S2): ``CHANGES_REQUESTED`` always posts;
 ``COMMENTED`` (and any unrecognised state) posts only with a non-empty body;
-``APPROVED`` / ``DISMISSED`` advance the marker silently — an approval is not
-an operator action item. Inline comments post unless they are thread replies
-or loom's own automated replies. Conversation comments (#353 — the only
-channel open to the PR's own author, i.e. the operator on every
-loom-delivered PR) post unless empty or loom-authored (a reply or a
-``[NeedsHuman]`` notice, both posted under the operator's login). Skipped
-material still advances the marks so it is never re-fetched or
-re-considered.
+``DISMISSED`` advances the marker silently — a dismissal has had its say.
+Inline comments post unless they are thread replies or loom's own automated
+replies. Conversation comments (#353 — the only channel open to the PR's own
+author, i.e. the operator on every loom-delivered PR) post unless empty or
+loom-authored (a reply or a ``[NeedsHuman]`` notice, both posted under the
+operator's login). Skipped material still advances the marks so it is never
+re-fetched or re-considered.
+
+**An approval is not a finding.** A row that asks for nothing — an
+``APPROVED`` review with no inline comments of its own, a "No findings /
+LGTM / ready to merge" comment — is classified as an ``approval``
+(:func:`~lithos_loom.github_review_streams.dispositions`): recorded on the
+marks like any other activity, reported on the story with the ``approval``
+disposition, and NEVER placed in the dispatchable batch. Remediation run
+827cedf8 on lens #100 spent a coder turn and a full panel pass to learn what
+Dave's "No findings. Ready to merge." already said, and deferred that PR's
+merge-gate behind it. A comment that approves *and* asks ("LGTM, but rename
+X") is a finding, not an approval.
 
 Remediation (injecting trusted findings into ``develop converge``) is the
 follow-up slice; this module only detects and reports.
@@ -49,7 +59,7 @@ from lithos_loom.github_review_activity import ExternalReviewActivity, ReviewStr
 from lithos_loom.github_review_streams import (
     STREAM_ADAPTERS,
     AuthorTrust,
-    actionable,
+    dispositions,
     fetch_activity,
     proven_handled,
     render_row,
@@ -58,7 +68,9 @@ from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
 
 __all__ = [
+    "APPROVAL_NOTE",
     "EXTERNAL_REVIEW",
+    "UNVERIFIED_APPROVAL_NOTE",
     "REVIEW_SEEN_KEY",
     "IngestResult",
     "PendingMarkerProvider",
@@ -80,6 +92,27 @@ REVIEW_SEEN_KEY = "external_review_seen"
 # A finding is a breadcrumb, not a transcript: rows listed per stream, capped.
 _MAX_LISTED = 20
 
+# The `approval` disposition, stated on the finding when the whole batch asks
+# for nothing: an approval is not a finding, so no coder, no panel and no
+# remediation round are spent on it (the sibling of 8cfa3184).
+APPROVAL_NOTE = (
+    "disposition: approval — this activity carries no actionable finding, so "
+    "nothing was remediated and no remediation round was reserved or spent"
+)
+
+# The same disposition when NO approval in the batch came from an author loom
+# could verify as a repo write/admin collaborator (PR #425 review, security
+# f-003). Anyone who can comment on a public PR can leave an approval, and
+# this line is read while deciding to merge — loom must not lend a drive-by
+# account its own voice. Bots are labelled this way too: the allowlist that
+# trusts one lives in the remediation settings, which detection cannot see.
+UNVERIFIED_APPROVAL_NOTE = (
+    "disposition: approval — this activity carries no actionable finding, but "
+    "no approval in it comes from an author loom can verify as a repo "
+    "write/admin collaborator: it is recorded, not evidence the PR is ready. "
+    "Nothing was dispatched and no remediation round was reserved or spent"
+)
+
 
 @dataclass(frozen=True)
 class IngestResult:
@@ -92,6 +125,11 @@ class IngestResult:
     — no news, silent states, orphan gate, GitHub error — reports
     ``posted=False`` with an empty batch.
 
+    ``approvals`` are the rows that ask for nothing (an APPROVED review, a
+    "No findings / LGTM" comment). They are reported with the ``approval``
+    disposition and are NOT in ``actionable``: a batch of nothing but
+    approvals posts, dispatches nothing and spends no budget round.
+
     ``failed`` (PR #348 re-review 1) separates "nothing to report" from a
     RETRYABLE failure — a GitHub listing error, or a batch whose finding /
     de-dup mark did not land. On the still-open path the next sweep retries
@@ -102,6 +140,7 @@ class IngestResult:
     posted: bool = False
     failed: bool = False
     actionable: list[ExternalReviewActivity] = field(default_factory=list)
+    approvals: list[ExternalReviewActivity] = field(default_factory=list)
 
     def count(self, stream: ReviewStream) -> int:
         return sum(1 for a in self.actionable if a.stream is stream)
@@ -158,23 +197,63 @@ def _since(stamp: str | None) -> datetime | None:
     return boundary - timedelta(seconds=1)
 
 
+def _listed(
+    rows: list[ExternalReviewActivity], render: Callable[[ExternalReviewActivity], str]
+) -> tuple[list[str], int]:
+    """Rendered lines per stream, each capped; plus how many were elided."""
+    lines: list[str] = []
+    hidden = 0
+    for adapter in STREAM_ADAPTERS:  # listed per stream, each capped
+        of_stream = [a for a in rows if a.stream is adapter.stream]
+        lines.extend(render(a) for a in of_stream[:_MAX_LISTED])
+        hidden += max(0, len(of_stream) - _MAX_LISTED)
+    return lines, hidden
+
+
+def _approval_renderer(
+    verified: Mapping[str, bool],
+) -> Callable[[ExternalReviewActivity], str]:
+    """Render an approval row, tagged with its disposition AND whether loom
+    could verify the author (security f-003): the approval of an account that
+    merely *can* comment on the PR must not read like a collaborator's."""
+
+    def render(a: ExternalReviewActivity) -> str:
+        tag = "approval" if verified.get(a.author) else "approval, unverified author"
+        return f"- [{tag}] {render_row(a).removeprefix('- ')}"
+
+    return render
+
+
 def _render_summary(
     pr_url: str,
     batch: list[ExternalReviewActivity],
     *,
+    approvals: list[ExternalReviewActivity] | None = None,
+    verified: Mapping[str, bool] | None = None,
     story_id: str,
     gate_id: str,
     extra_note: str | None = None,
     post_merge: bool = False,
 ) -> str:
     lines = [f"{EXTERNAL_REVIEW} new review activity on delivered PR {pr_url}:"]
-    hidden = 0
-    for adapter in STREAM_ADAPTERS:  # listed per stream, each capped
-        rows = [a for a in batch if a.stream is adapter.stream]
-        lines.extend(render_row(a) for a in rows[:_MAX_LISTED])
-        hidden += max(0, len(rows) - _MAX_LISTED)
+    rendered, hidden = _listed(batch, render_row)
+    lines.extend(rendered)
+    verified = verified or {}
+    rendered, elided = _listed(approvals or [], _approval_renderer(verified))
+    lines.extend(rendered)
+    hidden += elided
     if hidden:
         lines.append(f"- …and {hidden} more (see the PR)")
+    if not batch:
+        # Nothing but approvals: say so where the operator reads it, and say
+        # that no round was spent (the whole point of the disposition) — but
+        # only claim "no actionable finding" in loom's own voice when an
+        # author loom can verify said it.
+        lines.append(
+            APPROVAL_NOTE
+            if any(verified.get(a.author) for a in approvals or ())
+            else UNVERIFIED_APPROVAL_NOTE
+        )
     if extra_note:
         lines.append(extra_note)
     if post_merge:
@@ -222,14 +301,20 @@ def _new_marker(
 def _reply_author_trust(
     spec: PrGateSpec, github: GitHubClient, ctx: SubscriptionContext
 ) -> AuthorTrust:
-    """The sweep's trust for handled-proof: write/admin humans only (bots never
-    post replies), a probe failure logged as friction and treated as unproven."""
+    """The sweep's trust: write/admin humans only (bots never post replies, and
+    the bot allowlist lives in the remediation settings this module cannot
+    see), a probe failure logged as friction and treated as unverified.
+
+    Two readers, one probe budget per batch: the landed-fix proof, and the
+    label on an approval row (security f-003).
+    """
 
     def on_error(author: str, exc: Exception) -> None:
         ctx.logger.warning(
-            "[Friction] external-reviews: permission probe for reply "
+            "[Friction] external-reviews: permission probe for "
             "author %r on %s failed (%s: %s); treating their "
-            "landed-fix replies as unproven this sweep",
+            "landed-fix replies as unproven and their approvals as "
+            "unverified this sweep",
             author,
             spec.repo,
             type(exc).__name__,
@@ -304,14 +389,16 @@ async def ingest_external_reviews(
 
     # Handled-ness is proven over the whole fetched history (roots below the
     # marks still vouch for a review above them); the decision is on `new`.
-    handled = await proven_handled(activities, _reply_author_trust(spec, github, ctx))
-    batch = actionable(new, handled, context=activities)
+    trust = _reply_author_trust(spec, github, ctx)
+    handled = await proven_handled(activities, trust)
+    batch, approvals = dispositions(new, handled, context=activities)
     marker: dict[str, Any] = {
         REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, activities)
     }
 
-    if not batch:
-        # Only silent material (approvals, replies, our own automated replies):
+    if not batch and not approvals:
+        # Only silent material (dismissals, replies, our own automated
+        # replies):
         # advance the marks so it is never re-walked, post nothing. The marker
         # IS this material's durable record, so a failed write is a retryable
         # failure (PR #348 re-review round 3) — the merged-path caller must
@@ -339,7 +426,12 @@ async def ingest_external_reviews(
         )
         return IngestResult(failed=not marked)
 
-    if pending_marker_for is not None:
+    # One probe per unseen approval author, on the batch's own cached trust:
+    # the row's label and the note's voice depend on it (security f-003).
+    verified = {a.author: await trust.is_trusted(a.author) for a in approvals}
+    if batch and pending_marker_for is not None:
+        # An approvals-only batch never parks a dispatch trigger: there is
+        # nothing to remediate, so no round may be owed for it.
         pending = await pending_marker_for(batch)
         if pending:
             marker.update(pending)
@@ -349,6 +441,8 @@ async def ingest_external_reviews(
         summary=_render_summary(
             spec.pr_url,
             batch,
+            approvals=approvals,
+            verified=verified,
             story_id=story_id,
             gate_id=gate.id,
             extra_note=extra_note,
@@ -368,13 +462,14 @@ async def ingest_external_reviews(
         return IngestResult(failed=True)
     counts = Counter(a.stream for a in batch)
     ctx.logger.info(
-        "external-reviews: posted %s for %s (%s) on story %s",
+        "external-reviews: posted %s for %s (%s%s) on story %s",
         EXTERNAL_REVIEW,
         spec.pr_url,
         ", ".join(
             f"{counts[adapter.stream]} {adapter.label}(s)"
             for adapter in STREAM_ADAPTERS
         ),
+        f", {len(approvals)} approval(s)" if approvals else "",
         story_id,
     )
-    return IngestResult(posted=True, actionable=batch)
+    return IngestResult(posted=True, actionable=batch, approvals=approvals)

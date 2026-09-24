@@ -85,13 +85,16 @@ def triage(
     """Measure triage on batches of findings with known verdicts (PRD S8).
 
     Each sample is ONE read-only triage turn over a case's whole batch, the
-    production shape. Two rates per case: **reject** — known-false findings
-    rejected with a citation into their declared refutation (files + line ranges) — and
+    production shape. Three rates per case: **reject** — known-false findings
+    rejected with a citation into their declared refutation (files + line ranges);
+    **approval** — findings that are no claim at all (a pure approval)
+    answered ``NOTHING_TO_REMEDIATE`` instead of costing a coder turn; and
     **over-supp** — must-proceed findings (known-true or ambiguous) that were
-    rejected, the expensive direction. A case passes at the bar on the first
-    with the second at or under ``--max-over-suppression``. A FAIL is the
-    measurement; exit 1 only when a case has no valid sample (the triage turn
-    degraded to all-proceed every time — no verdict was ever given).
+    suppressed either way, the expensive direction. A case passes at the bar
+    on the first two with the third at or under ``--max-over-suppression``. A
+    FAIL is the measurement; exit 1 only when a case has no valid sample (the
+    triage turn degraded to all-proceed every time — no verdict was ever
+    given).
     """
     require_rate("--bar", bar)
     require_rate("--max-over-suppression", max_over_suppression)
@@ -221,6 +224,10 @@ def _write_summary(
         "reject_rate_ci": list(r.reject_rate_ci),
         "rejected_known_false": r.rejected_known_false,
         "known_false_opportunities": r.known_false_opportunities,
+        "approval_rate": r.approval_rate,
+        "approval_rate_ci": list(r.approval_rate_ci),
+        "recognised_approvals": r.recognised_approvals,
+        "approval_opportunities": r.approval_opportunities,
         "over_suppression_rate": r.over_suppression_rate,
         "over_suppression_ci": list(r.over_suppression_ci),
         "suppressed_known_true": r.suppressed_known_true,
@@ -230,6 +237,7 @@ def _write_summary(
         "errored_per_sample": list(r.errored_per_sample),
         "rejected_known_false_per_sample": list(r.rejected_known_false_per_sample),
         "suppressed_known_true_per_sample": list(r.suppressed_known_true_per_sample),
+        "recognised_approvals_per_sample": list(r.recognised_approvals_per_sample),
         "cost_usd_per_sample": list(r.cost_usd_per_sample),
         "notes_per_sample": list(r.notes_per_sample),
         "per_finding_correct": r.per_finding_correct,
@@ -248,7 +256,7 @@ def _rate_cell(count: int, opps: int, ci: tuple[float, float]) -> str:
 def print_triage_table(results: Sequence[TriageCaseResult]) -> None:
     header = (
         f"{'case':<28} {'n':>3} {'valid':>5} {'reject (95% CI)':>22} "
-        f"{'over-supp (95% CI)':>22} {'cost':>8}  result"
+        f"{'approval (95% CI)':>22} {'over-supp (95% CI)':>22} {'cost':>8}  result"
     )
     typer.echo(header)
     typer.echo("-" * len(header))
@@ -262,9 +270,12 @@ def print_triage_table(results: Sequence[TriageCaseResult]) -> None:
         sup = _rate_cell(
             r.suppressed_known_true, r.known_true_opportunities, r.over_suppression_ci
         )
+        appr = _rate_cell(
+            r.recognised_approvals, r.approval_opportunities, r.approval_rate_ci
+        )
         typer.echo(
-            f"{r.case_id:<28} {r.n:>3} {r.n_valid:>5} {rej:>22} {sup:>22} "
-            f"{'$' + format(cost, '.2f'):>8}  {mark}"
+            f"{r.case_id:<28} {r.n:>3} {r.n_valid:>5} {rej:>22} {appr:>22} "
+            f"{sup:>22} {'$' + format(cost, '.2f'):>8}  {mark}"
         )
         tot_rej += r.rejected_known_false
         tot_kf += r.known_false_opportunities

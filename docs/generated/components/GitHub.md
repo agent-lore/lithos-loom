@@ -11,12 +11,17 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
+| `lithos_loom.github_approval` | L | 0 | 2 |
 | `lithos_loom.github_client` | M | 7 | 0 |
 | `lithos_loom.github_models` | M | 6 | 16 |
 | `lithos_loom.github_review_activity` | S | 2 | 3 |
-| `lithos_loom.github_review_streams` | M | 3 | 8 |
+| `lithos_loom.github_review_streams` | M | 3 | 10 |
 
 ## Public API
+
+### `lithos_loom.github_approval`
+- def `carries_approval` — True when ANY unit of *body* is a recognised approval phrase.
+- def `is_approval_text` — True when *body* carries an approval and **no ask** — nothing to remediate.
 
 ### `lithos_loom.github_client`
 - class `GitHubError` — Base for GitHub-watcher errors. Subclasses carry actionable context.
@@ -49,7 +54,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - def `issue_comment_is_actionable` — The conversation-stream policy (#353): a non-empty body from anyone but loom. There is no review state to key on and no thread structure — every human comment on the conversation is a potential verdict.
 - def `issue_comment_reply_body` — Wrap a per-finding reply for the conversation tab, naming its target.
 - def `issue_comment_reply_target` — The conversation comment id a loom reply answers, or ``None``.
-- def `review_is_actionable` — The per-state external-review policy (PRD S2).
+- def `review_is_actionable` — The per-state external-review policy (PRD S2 + the 827cedf8 guard).
 
 ### `lithos_loom.github_review_activity`
 - class `ReviewStream` — The GitHub stream a row came from — also its id space.
@@ -68,7 +73,9 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 - class `AuthorTrust` — Per-batch answer to "may this author's material act?" (ADR 0011 d8).
 - def `landed_fix_claims` — ``(root_key, reply_author)`` pairs whose reply *claims* a landed fix.
 - def `proven_handled` — Root keys proven handled by an **authenticated** landed-fix reply.
+- def `reviews_with_comments` — Summary reviews that own at least one inline ROOT comment.
 - def `handled_review_ids` — Summary reviews ALL of whose own inline roots are handled.
+- def `dispositions` — ``(actionable, approvals)`` for *candidates*, in input order.
 - def `actionable` — The rows of *candidates* worth reporting / injecting, in input order.
 
 ## Dependencies

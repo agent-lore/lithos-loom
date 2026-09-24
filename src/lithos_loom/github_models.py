@@ -16,8 +16,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
+# The approval vocabulary is a POLICY vocabulary, not a payload model, so it
+# lives in its own module and is re-exported here (as github_client
+# re-exports the dataclasses below) — importers and the docs keep one name.
+from .github_approval import carries_approval, is_approval_text
+
 __all__ = [
     "AUTOMATED_REPLY_MARKER",
+    "BLOCKING_REVIEW_STATES",
     "FIXED_REPLY_PREFIX",
     "SILENT_REVIEW_STATES",
     "LOOM_NOTICE_MARKER",
@@ -36,6 +42,8 @@ __all__ = [
     "parse_pull_request_review",
     "parse_pull_request_review_comment",
     "strip_marker",
+    "carries_approval",
+    "is_approval_text",
     "is_automated_reply",
     "is_landed_fix_reply",
     "is_loom_pr_comment",
@@ -438,9 +446,20 @@ def _has_marker_line(body: str, marker: str) -> bool:
     return any(line.strip() == marker for line in body.splitlines())
 
 
-# Review states recorded but never actionable: an approval is not an operator
-# action item, and a dismissal has already had its say.
-SILENT_REVIEW_STATES = frozenset({"APPROVED", "DISMISSED"})
+# Review states recorded but never actionable WHATEVER the body says: a
+# dismissal has already had its say. `APPROVED` left this set with the
+# 827cedf8 guard (PR #425 review, correctness f-001) — an approval is still
+# not an operator action item, but the sweep decides that from the BODY (a
+# bare approval is the `approval` disposition), so an `APPROVED` review that
+# also asks for something is a finding like any other.
+SILENT_REVIEW_STATES = frozenset({"DISMISSED"})
+
+# The mirror image: review states actionable WHATEVER the body says. A
+# `CHANGES_REQUESTED` review blocks the PR on GitHub until it is dismissed or
+# superseded, so its body never speaks for it — neither to silence it (below)
+# nor to classify it as a bare approval (PR #426 review, f-001: the two rules
+# read the same state and must not drift, so both read it from here).
+BLOCKING_REVIEW_STATES = frozenset({"CHANGES_REQUESTED"})
 
 # The reply line that names the conversation comment a loom reply answers —
 # the conversation-stream twin of ``in_reply_to_id`` (which issue comments do
@@ -505,14 +524,28 @@ def issue_comment_reply_target(body: str) -> int | None:
 
 
 def review_is_actionable(review: PullRequestReview) -> bool:
-    """The per-state external-review policy (PRD S2).
+    """The per-state external-review policy (PRD S2 + the 827cedf8 guard).
 
-    ``CHANGES_REQUESTED`` is always actionable; ``APPROVED`` / ``DISMISSED``
-    never are; ``COMMENTED`` — and any state GitHub adds later — only with a
-    non-empty body (conservative for unknown states, silent-drop only for the
-    two known non-actionable ones).
+    ``CHANGES_REQUESTED`` is always actionable; ``DISMISSED`` never is (it has
+    had its say); every other state — ``APPROVED``, ``COMMENTED``, and any
+    state GitHub adds later — is actionable on a non-empty body.
+
+    `APPROVED` used to be silent unconditionally, which dropped the acceptance
+    guard's own example on the floor: an `APPROVED` review reading "LGTM, but
+    rename X" carries an ask, and an ask is a finding whatever state the
+    reviewer clicked (PR #425 review, correctness f-001). The state no longer
+    silences a body.
+
+    What this rule deliberately does NOT do is read the body for approval
+    prose. Whether a row is a bare approval is a question about *dispatch*,
+    answered once by :func:`~lithos_loom.github_review_streams.dispositions`
+    on the watcher's side. Keeping it out of here keeps all three streams on
+    one rule and leaves the converge intake (``actionable``) feeding approval
+    rows to the S5a triage step — the model-driven backstop behind the
+    hand-written vocabulary, which must not become the sole and final arbiter
+    for one stream (PR #425 re-review, security f-004).
     """
-    if review.state == "CHANGES_REQUESTED":
+    if review.state in BLOCKING_REVIEW_STATES:
         return True
     if review.state in SILENT_REVIEW_STATES:
         return False

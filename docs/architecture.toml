@@ -62,7 +62,7 @@ Bus            = ["lithos_loom.bus"]
 Config         = ["lithos_loom.config"]
 Errors         = ["lithos_loom.errors"]
 LithosClient   = ["lithos_loom.lithos_client", "lithos_loom.lithos_types"]
-GitHub         = ["lithos_loom.github_client", "lithos_loom.github_models", "lithos_loom.github_review_activity", "lithos_loom.github_review_streams"]
+GitHub         = ["lithos_loom.github_approval", "lithos_loom.github_client", "lithos_loom.github_models", "lithos_loom.github_review_activity", "lithos_loom.github_review_streams"]
 Tasks          = ["lithos_loom.task_graph", "lithos_loom.task_line_parser", "lithos_loom.task_line", "lithos_loom.gates"]
 Notifications  = ["lithos_loom.notifications"]
 State          = ["lithos_loom.cursor_store", "lithos_loom.sync_state"]
@@ -108,7 +108,15 @@ modules_over_800_lines = 10 # 8->6 via ARCH-9 slices 1-2; 6->7: rounds.py (821) 
                                # story, raise/adopt the pr gate, retire the human gates, post the finding
                                # — one responsibility read in order; the next change that grows it takes
                                # the gate step (gate_delivery + retirement) into its own module;
-                               # direction: down
+                               # HELD at 10 through PR #426: the weak approval floor grew three
+                               # rounds of authorial-text rules (quotes, structural fences, HTML
+                               # comments, value enumerations, soft wraps), which took
+                               # github_models.py past 800 — so the approval vocabulary was
+                               # EXTRACTED to github_approval.py (517 lines: the phrase
+                               # vocabulary, the unit splitters, the masks and both classifiers),
+                               # leaving github_models the payload models + parsers it says it is
+                               # (552). github_models re-exports the two public names, as
+                               # github_client re-exports the dataclasses; direction: down
 max_module_lines       = 2100 # stop-loss; 2210->2100 after PRD S6 extracted the wire
                                # types (Task / Note / … / WriteStatus) into lithos_types,
                                # taking lithos_client from 2228 to ~2030. The parsers are

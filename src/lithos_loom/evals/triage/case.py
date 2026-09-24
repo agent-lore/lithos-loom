@@ -20,6 +20,13 @@ declares the verdict a correct triage gives it:
   keeps the claim's own anchor from scoring as evidence. A known-false may be
   ``synthetic`` (a closed question written to have an exact refutation) —
   say so in ``provenance``.
+- ``expected = "nothing"``: not a claim at all — a pure approval ("No
+  findings. Ready to merge."). A correct triage answers
+  ``NOTHING_TO_REMEDIATE``, which ends the run at round 0 without a paid
+  coder turn (827cedf8). There is nothing to cite, so no ``refutation``.
+  Letting one PROCEED is the waste this verdict exists to stop; a
+  must-proceed finding answered this way is scored as over-suppression,
+  exactly like a rejection.
 
 The tree is a ``sha`` or ``base`` + ``head_patch`` (applied at run time, so
 a tree on no branch — a pre-squash tip — needs no kept-alive commit).
@@ -38,7 +45,7 @@ from ...plugins.story_develop.config import parse_image
 
 __all__ = ["Refutation", "TriageCase", "TriageFinding", "load_triage_case"]
 
-_EXPECTED = ("proceed", "reject")
+_EXPECTED = ("proceed", "reject", "nothing")
 # external: a real reviewer's words; panel: loom's own panel wrote it (a
 # known-good-arm finding from `eval review`); synthetic: written for the eval.
 _PROVENANCES = ("external", "panel", "synthetic")
@@ -106,7 +113,7 @@ class TriageFinding:
     path: str
     line: int | None
     body: str
-    expected: str  # proceed | reject
+    expected: str  # proceed | reject | nothing
     ambiguous: bool = False  # proceed only: a judgement, not a known-true
     refutation: tuple[Refutation, ...] = ()  # reject only
     provenance: str = "external"
@@ -139,6 +146,11 @@ class TriageCase:
     @property
     def known_false(self) -> tuple[TriageFinding, ...]:
         return tuple(f for f in self.findings if f.expected == "reject")
+
+    @property
+    def approvals(self) -> tuple[TriageFinding, ...]:
+        """Every finding that must be answered ``NOTHING_TO_REMEDIATE``."""
+        return tuple(f for f in self.findings if f.expected == "nothing")
 
     @property
     def tree_label(self) -> str:
@@ -285,7 +297,7 @@ def _parse_finding(cid: str, index: int, f: dict) -> TriageFinding:
             f"case {cid}/{fid}: a known-false finding needs refutation — the repo "
             "files (with line ranges) a correct rejection must cite"
         )
-    if expected == "proceed" and refutation:
+    if expected != "reject" and refutation:
         raise ValueError(
             f'case {cid}/{fid}: refutation is only meaningful with expected = "reject"'
         )

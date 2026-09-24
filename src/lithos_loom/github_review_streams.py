@@ -1,15 +1,16 @@
 """The stream registry and the shared decisions over review activity (#355).
 
 Everything that is *specific to one stream* — how to fetch it, which
-gate-marker keys hold its cursor, whether one of its rows is actionable, how
-a row renders in the ``[ExternalReview]`` finding, and which
-``ExternalFinding`` id the reply epilogue answers it on — lives in exactly
-one :class:`StreamAdapter` row of :data:`STREAM_ADAPTERS`. Every consumer
-looks its policy up through :func:`adapter_for`, which is **exhaustive over
-:class:`ReviewStream`** and fails loudly on an unregistered stream: there is
-no catch-all branch anywhere (PR #356 review, finding 1). Adding a stream is
-one enum member plus one adapter row, and forgetting a policy is an import-
-time error, not a silent mis-classification.
+gate-marker keys hold its cursor, whether one of its rows is actionable (or
+a bare approval, which asks for nothing), how a row renders in the
+``[ExternalReview]`` finding, and which ``ExternalFinding`` id the reply
+epilogue answers it on — lives in exactly one :class:`StreamAdapter` row of
+:data:`STREAM_ADAPTERS`. Every consumer looks its policy up through
+:func:`adapter_for`, which is **exhaustive over :class:`ReviewStream`** and
+fails loudly on an unregistered stream: there is no catch-all branch
+anywhere (PR #356 review, finding 1). Adding a stream is one enum member
+plus one adapter row, and forgetting a policy is an import-time error, not a
+silent mis-classification.
 
 The decisions that are stream-*agnostic* — the authenticated landed-fix
 proof, the owning-review suppression scope, trust — live here too, so the
@@ -27,8 +28,10 @@ from enum import StrEnum
 
 from .github_client import GitHubClient
 from .github_models import (
+    BLOCKING_REVIEW_STATES,
     IssueComment,
     PullRequestReview,
+    is_approval_text,
     is_automated_reply,
     is_landed_fix_reply,
     issue_comment_is_actionable,
@@ -52,12 +55,14 @@ __all__ = [
     "StreamAdapter",
     "actionable",
     "adapter_for",
+    "dispositions",
     "excerpt",
     "fetch_activity",
     "handled_review_ids",
     "landed_fix_claims",
     "proven_handled",
     "render_row",
+    "reviews_with_comments",
 ]
 
 # Repo permission levels whose holders may seed a coder and whose landed-fix
@@ -88,6 +93,19 @@ Fetch = Callable[
 Actionable = Callable[
     [ExternalReviewActivity, frozenset[ActivityKey], frozenset[int]], bool
 ]
+# (row, proven-handled keys, handled summary-review ids, review ids that own
+# inline roots) — the approval rule needs the same suppression inputs as
+# ``Actionable`` plus the ownership set, so an APPROVED review whose own
+# comments carry the asks is not reported as "nothing to remediate".
+Approval = Callable[
+    [
+        ExternalReviewActivity,
+        frozenset[ActivityKey],
+        frozenset[int],
+        frozenset[int],
+    ],
+    bool,
+]
 Render = Callable[[ExternalReviewActivity], str]
 
 
@@ -102,6 +120,9 @@ class StreamAdapter:
     - ``fetch``: list the stream, bounded by the cursor, as normalised rows.
     - ``is_actionable``: the stream's reporting/injection rule, given the
       proven-handled keys and the handled summary-review ids.
+    - ``is_approval``: the stream's "this row asks for nothing" rule — the
+      row is reported with the ``approval`` disposition and never injected,
+      remediated or budgeted against. Checked BEFORE ``is_actionable``.
     - ``render``: the row's line in the ``[ExternalReview]`` finding.
     - ``label``: the finding's noun for a row, for the sweep log.
     - ``reply_mode``: the reply capability the epilogue answers a row with.
@@ -112,6 +133,7 @@ class StreamAdapter:
     mark_at_key: str | None
     fetch: Fetch
     is_actionable: Actionable
+    is_approval: Approval
     render: Render
     label: str
     reply_mode: ReplyMode
@@ -146,7 +168,46 @@ def _review_actionable(
         return False
     # CHANGES_REQUESTED is never suppressed — a reply does not prove the
     # requested changes were accepted.
-    return a.review_state == "CHANGES_REQUESTED" or a.activity_id not in handled_reviews
+    return (
+        a.review_state in BLOCKING_REVIEW_STATES or a.activity_id not in handled_reviews
+    )
+
+
+def _review_approval(
+    a: ExternalReviewActivity,
+    handled: frozenset[ActivityKey],
+    handled_reviews: frozenset[int],
+    owns_comments: frozenset[int],
+) -> bool:
+    """A bare ``APPROVED`` click, or any summary whose whole body is approval
+    prose.
+
+    ``DISMISSED`` is never an approval — a dismissal has had its say. Nor is
+    ``CHANGES_REQUESTED``, whatever its body says: the state itself blocks the
+    PR on GitHub until it is dismissed or superseded, so a contradictory
+    "No findings. Ready to merge." body cannot make it a row that asks for
+    nothing — :func:`review_is_actionable` holds it always actionable, and
+    reading the same state from ``BLOCKING_REVIEW_STATES`` keeps the two rules
+    from drifting (PR #426 review, f-001). An `APPROVED` body that asks for
+    something is not an approval either, and it is not silent:
+    :func:`review_is_actionable` reports it as the finding it is (PR #425
+    review, correctness f-001 — the acceptance guard's own "LGTM, but rename
+    X" arrives on this stream too).
+
+    Ownership only decides the WORDLESS case (the AC's "``APPROVED`` and no
+    inline comments"): a review that clicked approve and wrote nothing while
+    leaving inline comments has nothing of its own to report — its comments
+    speak for it. A review that WROTE approval prose is always reported as an
+    approval, whatever it owns: it is the one row both buckets used to refuse,
+    and a body no bucket takes is a body the operator never sees (PR #425
+    re-review, security f-004).
+    """
+    del handled, handled_reviews
+    if a.review_state == "DISMISSED" or a.review_state in BLOCKING_REVIEW_STATES:
+        return False
+    if not a.body.strip():
+        return a.review_state == "APPROVED" and a.activity_id not in owns_comments
+    return is_approval_text(a.body)
 
 
 def _render_review(a: ExternalReviewActivity) -> str:
@@ -178,6 +239,16 @@ def _inline_actionable(
     return a.key not in handled and not is_automated_reply(a.body)
 
 
+def _inline_approval(
+    a: ExternalReviewActivity,
+    handled: frozenset[ActivityKey],
+    handled_reviews: frozenset[int],
+    owns_comments: frozenset[int],
+) -> bool:
+    del owns_comments
+    return _inline_actionable(a, handled, handled_reviews) and is_approval_text(a.body)
+
+
 def _render_inline(a: ExternalReviewActivity) -> str:
     loc = f"{a.path}:{a.line}" if a.line else a.path
     url = f" ({a.url})" if a.url else ""
@@ -204,6 +275,18 @@ def _conversation_actionable(
     return a.key not in handled and issue_comment_is_actionable(comment)
 
 
+def _conversation_approval(
+    a: ExternalReviewActivity,
+    handled: frozenset[ActivityKey],
+    handled_reviews: frozenset[int],
+    owns_comments: frozenset[int],
+) -> bool:
+    del owns_comments
+    return _conversation_actionable(a, handled, handled_reviews) and is_approval_text(
+        a.body
+    )
+
+
 def _render_conversation(a: ExternalReviewActivity) -> str:
     url = f" ({a.url})" if a.url else ""
     return f"- comment by {a.author} on the PR conversation: {excerpt(a.body)}{url}"
@@ -219,6 +302,7 @@ STREAM_ADAPTERS: tuple[StreamAdapter, ...] = (
         mark_at_key=None,
         fetch=_fetch_reviews,
         is_actionable=_review_actionable,
+        is_approval=_review_approval,
         render=_render_review,
         label="review",
         reply_mode=ReplyMode.NONE,
@@ -229,6 +313,7 @@ STREAM_ADAPTERS: tuple[StreamAdapter, ...] = (
         mark_at_key="last_comment_at",
         fetch=_fetch_inline,
         is_actionable=_inline_actionable,
+        is_approval=_inline_approval,
         render=_render_inline,
         label="inline comment",
         reply_mode=ReplyMode.THREAD,
@@ -239,6 +324,7 @@ STREAM_ADAPTERS: tuple[StreamAdapter, ...] = (
         mark_at_key="last_issue_comment_at",
         fetch=_fetch_conversation,
         is_actionable=_conversation_actionable,
+        is_approval=_conversation_approval,
         render=_render_conversation,
         label="conversation comment",
         reply_mode=ReplyMode.CONVERSATION,
@@ -388,6 +474,22 @@ async def proven_handled(
     return frozenset(handled)
 
 
+def reviews_with_comments(
+    activities: Sequence[ExternalReviewActivity],
+) -> frozenset[int]:
+    """Summary reviews that own at least one inline ROOT comment.
+
+    The approval rule's scope twin of :func:`handled_review_ids`: such a
+    review is not "nothing to remediate" whatever its state says — its own
+    comments carry the asks.
+    """
+    return frozenset(
+        a.owning_review_id
+        for a in activities
+        if a.owning_review_id is not None and not a.is_reply
+    )
+
+
 def handled_review_ids(
     activities: Sequence[ExternalReviewActivity], handled: frozenset[ActivityKey]
 ) -> frozenset[int]:
@@ -408,6 +510,36 @@ def handled_review_ids(
     )
 
 
+def dispositions(
+    candidates: Sequence[ExternalReviewActivity],
+    handled: frozenset[ActivityKey],
+    *,
+    context: Sequence[ExternalReviewActivity] | None = None,
+) -> tuple[list[ExternalReviewActivity], list[ExternalReviewActivity]]:
+    """``(actionable, approvals)`` for *candidates*, in input order.
+
+    The second list is the rows that ask for nothing — an APPROVED review, a
+    "No findings / LGTM" comment. They are reported (the operator wants to
+    know the PR was approved) and never acted on: no coder, no panel, no
+    remediation round. Each row is classified by its own stream's registered
+    rules, approval first (an approval is not a finding, and an APPROVED
+    review is not "actionable" at all). ``context`` is the full fetched
+    history the cross-row suppression scopes are computed over.
+    """
+    rows = candidates if context is None else context
+    handled_reviews = handled_review_ids(rows, handled)
+    owns_comments = reviews_with_comments(rows)
+    act: list[ExternalReviewActivity] = []
+    appr: list[ExternalReviewActivity] = []
+    for a in candidates:
+        adapter = adapter_for(a.stream)
+        if adapter.is_approval(a, handled, handled_reviews, owns_comments):
+            appr.append(a)
+        elif adapter.is_actionable(a, handled, handled_reviews):
+            act.append(a)
+    return act, appr
+
+
 def actionable(
     candidates: Sequence[ExternalReviewActivity],
     handled: frozenset[ActivityKey],
@@ -422,6 +554,15 @@ def actionable(
     ``context`` (default: the candidates) is the full fetched history the
     review-ownership suppression is computed over — the sweep passes
     everything it fetched while deciding only on the rows above its marks.
+
+    Approval-only rows are deliberately NOT filtered here — on ANY stream
+    (PR #425 re-review, security f-004: for one round the review stream was
+    filtered by body here too, which made the hand-written vocabulary the
+    sole and final arbiter for it). The converge intake feeds them to the
+    S5a triage step, whose ``NOTHING_TO_REMEDIATE`` verdict is the
+    model-driven half of the answer. Only the watcher sweep, which decides
+    whether to spend a round at all, splits them out — with
+    :func:`dispositions`.
     """
     handled_reviews = handled_review_ids(
         candidates if context is None else context, handled

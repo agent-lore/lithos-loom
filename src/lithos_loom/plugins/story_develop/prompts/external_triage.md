@@ -22,6 +22,19 @@ cite the specific code that refutes it — a file and line whose actual
 behaviour contradicts what the claim asserts. "Seems unlikely", "the tests
 probably cover this", or "the reviewer misread the style" are not evidence.
 
+There is one other thing a "claim" can turn out to be: **not a claim at
+all**. Reviewers approve on the same channels they review on, so a batch can
+carry a comment whose entire content is "No findings / LGTM / ready to
+merge" — praise, an acknowledgement, an approval. There is nothing there to
+verify and nothing to change, so it gets `NOTHING_TO_REMEDIATE` and no coder
+is paid to rediscover it. This is **not** a soft REJECT: a claim that asks
+for anything at all — "LGTM, but rename `foo`" — keeps its ask and
+PROCEEDs. A claim is also shown with its author's **review state** where it
+has one (`[dave, CHANGES_REQUESTED review] …`): a `CHANGES_REQUESTED`
+review blocks the PR on GitHub until it is dismissed, so it is never
+"nothing to remediate" however approving its words are — that contradiction
+is the reviewer's to resolve, and it PROCEEDs.
+
 ## Acceptance criteria (the change's intent, for context)
 
 {acceptance_criteria}
@@ -51,6 +64,7 @@ per claim, exactly this shape:
 ## Verdicts
 - f-001: PROCEED
 - f-002: REJECT — src/util.py:14 already guards the None case; the claimed crash cannot occur
+- f-003: NOTHING_TO_REMEDIATE — the comment is an approval ("No findings. Ready to merge."); it asks for no change
 ```
 
 Keep each verdict on **one line** (do not wrap the evidence).
@@ -66,6 +80,17 @@ Rules:
   treated as PROCEED, and so is one whose evidence names no `file:line`
   resolving to a repo file (a bare filename or version number is not a
   citation).
+- `NOTHING_TO_REMEDIATE` is **only** for a claim that asks for nothing —
+  an approval, a thank-you, a note that a previous round's fix looks right.
+  You **must** state, after an em-dash, why it asks for nothing (quote the
+  approving words); nothing here can be cited, so that one line is the only
+  thing an operator can check, and a bare `NOTHING_TO_REMEDIATE` is treated
+  as `PROCEED`. The verdict is also refused in code for a claim whose body
+  carries no approving words at all, and for a `CHANGES_REQUESTED` review —
+  such a line is read as `PROCEED`, so do not spend it there. If it contains any ask,
+  question about the code, or disagreement, however politely worded, it is
+  a claim: use `PROCEED`. Never use it because you think the claim is wrong
+  — that is what `REJECT` (with evidence) is for.
 - Every claim must get a verdict line. A claim you are unsure about gets
   `PROCEED`.
 - Do not invent verdicts for finding ids that are not in the list above.

@@ -107,6 +107,7 @@ source_modules = [
     "lithos_loom.errors",
     "lithos_loom.lithos_client",
     "lithos_loom.lithos_types",
+    "lithos_loom.github_approval",
     "lithos_loom.github_client",
     "lithos_loom.github_models",
     "lithos_loom.github_review_activity",

@@ -28,6 +28,7 @@ from lithos_loom.github_models import AUTOMATED_REPLY_MARKER, issue_comment_repl
 from lithos_loom.github_review_activity import ExternalReviewActivity, ReviewStream
 from lithos_loom.github_review_streams import ReplyMode
 from lithos_loom.plugins.story_develop import external_reviews as ext_mod
+from lithos_loom.plugins.story_develop import external_triage as triage_mod
 from lithos_loom.plugins.story_develop.external_reviews import (
     CoderAck,
     ExternalFinding,
@@ -226,7 +227,7 @@ def test_review_policy_and_handled_author_suppression(
         monkeypatch,
         reviews=[
             _review(500, author=_BOT, state="COMMENTED", body="generated 1 comment"),
-            _review(501, author="dave", state="APPROVED"),
+            _review(501, author="dave", state="APPROVED", body="LGTM"),
             _review(502, author="dave", state="CHANGES_REQUESTED", body="blockers"),
         ],
         comments=[
@@ -239,10 +240,42 @@ def test_review_policy_and_handled_author_suppression(
     trusted, _untrusted = fetch_external_findings(_REPO, 62, trusted_bots=(_BOT,))
 
     # The bot's COMMENTED summary is suppressed (its roots were handled); the
-    # APPROVED review is silent; the human CHANGES_REQUESTED survives.
-    assert [(f.author, f.activity_id) for f in trusted] == [("dave", 502)]
-    assert trusted[0].reply_mode is ReplyMode.NONE
-    assert "pullrequestreview-502" in trusted[0].thread_url
+    # human's APPROVED and CHANGES_REQUESTED reviews both survive. The
+    # approval reaches the intake on purpose (security f-004): this fetch is
+    # what feeds the S5a backstop, and only the WATCHER's `dispositions()`
+    # decides that a bare approval is not worth dispatching for.
+    assert [(f.author, f.activity_id) for f in trusted] == [
+        ("dave", 501),
+        ("dave", 502),
+    ]
+    assert trusted[1].reply_mode is ReplyMode.NONE
+    assert "pullrequestreview-502" in trusted[1].thread_url
+
+
+def test_an_approved_review_that_asks_is_still_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #425 review, correctness f-001: `APPROVED` used to be silent
+    whatever the body said, so the acceptance guard's own "LGTM, but rename
+    X" was dropped on both the watcher and the converge side. Only a state
+    with nothing written, or a dismissal, is silent now."""
+    _install_github(
+        monkeypatch,
+        reviews=[
+            _review(500, author="dave", state="APPROVED", body=""),
+            _review(
+                501, author="dave", state="APPROVED", body="LGTM, but rename `foo`"
+            ),
+            _review(502, author="dave", state="DISMISSED", body="rename `foo`"),
+        ],
+        permissions={"dave": "write"},
+    )
+
+    trusted, _untrusted = fetch_external_findings(_REPO, 62, trusted_bots=(_BOT,))
+
+    assert [(f.activity_id, f.body) for f in trusted] == [
+        (501, "LGTM, but rename `foo`")
+    ]
 
 
 # ── handoff rendering + injection ──────────────────────────────────────
@@ -293,6 +326,124 @@ def test_handoff_text_parses_and_attributes_the_author() -> None:
     assert parsed.findings[0].files == ["src/x.py:12"]
     assert "[dave]" in parsed.findings[0].rationale
     assert parsed.findings[1].files == []
+
+
+def test_a_blocking_review_state_survives_the_fetch_and_reaches_triage() -> None:
+    """PR #426 re-review, correctness f-001: the watcher refuses to call a
+    ``CHANGES_REQUESTED`` review an approval, but the subprocess re-fetches
+    the row — and the state was dropped on the way in, so triage saw a bare
+    ``[dave] LGTM`` and could answer it ``NOTHING_TO_REMEDIATE``."""
+    row = ExternalReviewActivity(
+        stream=ReviewStream.REVIEW,
+        activity_id=500,
+        author="dave",
+        body="LGTM",
+        url="https://example/review",
+        review_state="CHANGES_REQUESTED",
+    )
+    finding = ext_mod.finding_from_activity(row, source="human", trusted=True)
+    assert finding.review_state == "CHANGES_REQUESTED"
+
+    text = findings_to_handoff_text([finding], current_head_sha=_HEAD)
+    rationale = parse_review_handoff(text).findings[0].rationale
+    assert "[dave, CHANGES_REQUESTED review]" in rationale
+    assert "LGTM" in rationale  # the body reaches the batch intact
+
+    # ...and it is ineligible for the third verdict however it reads.
+    _, id_map = ext_mod.external_intake_reviews([finding], current_head_sha=_HEAD)
+    assert triage_mod.approval_eligible_ids(id_map) == frozenset()
+
+
+def test_approval_eligibility_is_read_from_the_row_not_the_verdict() -> None:
+    """Security f-001: a ``NOTHING_TO_REMEDIATE`` verdict may only drop a row
+    whose own body carries approving words — a real claim never becomes an
+    approval because a line of triage prose says so."""
+    approval = _finding(body="**No findings.** Ready to merge.", activity_id=1)
+    mixed = _finding(body="LGTM, but rename `foo`", activity_id=2)
+    claim = _finding(body="this leaks the token", activity_id=3)
+    _, id_map = ext_mod.external_intake_reviews(
+        [approval, mixed, claim], current_head_sha=_HEAD
+    )
+    ids = {ext: fid for fid, ext in id_map.items()}
+    eligible = triage_mod.approval_eligible_ids(id_map)
+    assert ids[approval] in eligible
+    assert ids[mixed] in eligible  # carries an approval AND an ask — triage's call
+    assert ids[claim] not in eligible
+
+
+# Bodies whose only approving word is NOT the author's verdict — each a
+# measured bypass of the eligibility floor (round-5 review f-001; the round-5
+# panel's correctness f-002 for the fence and the colon-less lead-in, security
+# f-001 for the invisible comment, security f-002 for the dotted identifier).
+_NOT_THE_AUTHORS_VERDICT = [
+    "> LGTM\nNo: the token is logged at src/api.py:88.",
+    "````\n```\nLGTM\n```\n````\nThe token is logged at src/api.py:88.",
+    "Allowed status\n- approved\n\nThe endpoint never validates it at src/api.py:12.",
+    "<!-- LGTM -->\nThe admin token is logged at src/api.py:88 — redact it.",
+    (
+        "The flag task.approved, so nothing validates it. The token is logged at "
+        "src/api.py:88."
+    ),
+    (
+        "The flag task._approved, so nothing validates it. The token is logged at "
+        "src/api.py:88."
+    ),
+    "````\n````` example\nLGTM\n````\nThe token is logged at src/api.py:88.",
+    (
+        "The session is reused even when the user is not\napproved. The token is "
+        "logged at src/api.py:88."
+    ),
+    "| verdict |\n| --- |\n| LGTM |\n\nThe token is logged at src/api.py:88.",
+    "> the token is logged at src/api.py:88\nLGTM",
+    "This is not |\nLGTM\n\nThe token is logged at src/api.py:88.",
+    "- the token is logged at src/api.py:88\nLGTM",
+    (
+        "- approved\n  means approved by admin\n- pending\n  means awaiting review"
+        "\n\nThe token is logged at src/api.py:88."
+    ),
+    "| verdict |\n---\n| LGTM |\n\nThe token is logged at src/api.py:88.",
+    (
+        "LGTM\n2. The token is logged at src/api.py:88.\n\nThe endpoint never "
+        "redacts it."
+    ),
+    (
+        "LGTM\n    The token is logged at src/api.py:88.\n\nThe endpoint never "
+        "redacts it."
+    ),
+    "| check | result |\n| --- | --- |\n| authz | missing at src/api.py:12 |\napproved",
+]
+
+
+@pytest.mark.parametrize("body", _NOT_THE_AUTHORS_VERDICT)
+def test_an_approval_that_is_not_the_authors_verdict_cannot_be_dropped(
+    body: str,
+) -> None:
+    """The floor and the parser driven together: an approval word the author
+    only quoted, fenced, listed as a value, hid in an invisible comment or
+    wrote as part of an identifier is not their verdict, so a
+    ``NOTHING_TO_REMEDIATE`` line on that row falls through to PROCEED and the
+    defect beside it reaches the coder instead of being consumed at round 0
+    with its high-water mark already advanced."""
+    quoted = _finding(body=body, activity_id=1)
+    verdict = _finding(body="**No findings.** Ready to merge.", activity_id=2)
+    _, id_map = ext_mod.external_intake_reviews(
+        [quoted, verdict], current_head_sha=_HEAD
+    )
+    ids = {ext: fid for fid, ext in id_map.items()}
+    eligible = triage_mod.approval_eligible_ids(id_map)
+    assert ids[quoted] not in eligible
+    assert ids[verdict] in eligible
+
+    finding_ids = sorted(id_map)
+    text = "".join(
+        f"- {fid}: NOTHING_TO_REMEDIATE — the comment only approves\n"
+        for fid in finding_ids
+    )
+    verdicts = triage_mod.parse_triage_verdicts(
+        text, finding_ids, approval_eligible=eligible
+    )
+    assert verdicts.proceed == (ids[quoted],)
+    assert set(verdicts.nothing_to_remediate) == {ids[verdict]}
 
 
 def test_stale_head_sha_gets_a_reanchor_note() -> None:
