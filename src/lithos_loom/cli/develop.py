@@ -52,6 +52,7 @@ from typing import Any, NoReturn
 
 import typer
 
+from lithos_loom.cli._deliver_lithos import DELIVERY_MARKER_KEY
 from lithos_loom.config import load_config
 from lithos_loom.errors import LithosClientError, LithosLoomError
 from lithos_loom.gates import GATE_TYPE_PR, STORY_GATE_ID_KEY
@@ -403,8 +404,23 @@ def _wait_for_run(work_dir: Path, key: str) -> tuple[Path | None, dict | None]:
 # ── the authoritative delivery record: the story's own `pr` gate ───────
 
 
-def gate_delivered_prs(cfg: Any, task_ids: Sequence[str]) -> dict[str, str]:
-    """``{task_id: pr_url}`` from each story's OPEN ``pr`` gate (best-effort).
+@dataclass(frozen=True)
+class GateDelivery:
+    """A story's delivered PR, as its own state records it.
+
+    *run_id* is which run's branch that PR carries — the story's
+    ``manual_delivery`` marker, when it names this very PR. ``""`` when the
+    story does not say (the `pr` gate itself records none): the delivery is
+    real but unattributed, and the caller must not guess.
+    """
+
+    pr_url: str
+    run_id: str = ""
+
+
+def gate_delivered_prs(cfg: Any, task_ids: Sequence[str]) -> dict[str, GateDelivery]:
+    """``{task_id: GateDelivery}`` from each story's OPEN ``pr`` gate
+    (best-effort).
 
     The run dir's own markers are the fast path, but they are not the record:
     a hand delivery made before the marker existed has none, and the marker
@@ -414,13 +430,18 @@ def gate_delivered_prs(cfg: Any, task_ids: Sequence[str]) -> dict[str, str]:
     fallback both `list` and `prune` fall back to, exactly as the acceptance
     asks (`pr_gate_id` → that gate's `pr_url`).
 
-    Three guards, all in the conservative direction:
+    Four guards, all in the conservative direction:
 
     * the gate must still be **open**. ``pr_gate_id`` is provenance and
       outlives the gate it names, so a story whose PR closed unmerged, was
       re-escalated and re-developed would otherwise have its live run read as
       delivered — and `prune` DELETES on that answer.
     * it must really be a ``pr`` gate.
+    * the answer is about a **story**, and a story can have several retained
+      runs. The gate names no run, so the ``manual_delivery`` marker is read
+      beside it and its ``run_id`` travels — but only when the marker is about
+      THIS PR (a re-delivered story's marker names the current one). What to
+      do with an unattributed delivery is :func:`delivered_runs`' decision.
     * any failure — unreachable Lithos, a missing task, a transport error —
       yields nothing at all. `list` then shows what the run dir knows and
       `prune` keeps the run: neither command may depend on a server being up
@@ -432,14 +453,13 @@ def gate_delivered_prs(cfg: Any, task_ids: Sequence[str]) -> dict[str, str]:
     if not url or not task_ids:
         return {}
 
-    async def _read() -> dict[str, str]:
-        found: dict[str, str] = {}
+    async def _read() -> dict[str, GateDelivery]:
+        found: dict[str, GateDelivery] = {}
         async with LithosClient(url, agent_id=agent) as client:
             for task_id in task_ids:
                 story = await client.task_get(task_id=task_id)
-                gate_id = (getattr(story, "metadata", None) or {}).get(
-                    STORY_GATE_ID_KEY
-                )
+                story_meta = getattr(story, "metadata", None) or {}
+                gate_id = story_meta.get(STORY_GATE_ID_KEY)
                 if not isinstance(gate_id, str) or not gate_id:
                     continue
                 gate = await client.task_get(task_id=gate_id)
@@ -449,8 +469,11 @@ def gate_delivered_prs(cfg: Any, task_ids: Sequence[str]) -> dict[str, str]:
                 if meta.get("gate_type") != GATE_TYPE_PR:
                     continue
                 pr_url = meta.get("pr_url")
-                if isinstance(pr_url, str) and pr_url:
-                    found[task_id] = pr_url
+                if not isinstance(pr_url, str) or not pr_url:
+                    continue
+                found[task_id] = GateDelivery(
+                    pr_url=pr_url, run_id=_marked_run(story_meta, pr_url)
+                )
         return found
 
     try:
@@ -464,18 +487,69 @@ def gate_delivered_prs(cfg: Any, task_ids: Sequence[str]) -> dict[str, str]:
         return {}
 
 
+def _marked_run(story_meta: Mapping[str, Any], pr_url: str) -> str:
+    """The run the story's ``manual_delivery`` marker says is behind *pr_url*.
+
+    ``""`` when there is no marker, when it is about a different PR, or when
+    its ``run_id`` is missing — every one of which means "the story does not
+    attribute this PR to a run", not "attribute it to whatever is left".
+    """
+    marker = story_meta.get(DELIVERY_MARKER_KEY)
+    if not isinstance(marker, Mapping) or marker.get("pr_url") != pr_url:
+        return ""
+    run_id = marker.get("run_id")
+    return run_id if isinstance(run_id, str) else ""
+
+
+def delivered_runs(
+    cfg: Any, unresolved: Sequence[tuple[str, str]]
+) -> dict[tuple[str, str], str]:
+    """``{(task_id, run_id): pr_url}`` for the runs a story's open ``pr`` gate
+    can be attributed to.
+
+    *unresolved* is ``(task_id, run_id)`` for every run whose own dir records
+    no PR — the only ones the story is asked about.
+
+    A story's delivery is a fact about ONE run's branch, and a task can retain
+    several runs: attributing it to all of them would show an older run behind
+    a PR it never produced and — worse — let `prune` delete that older run
+    because a *different* run of the task was delivered. So the marker's
+    ``run_id`` decides when the story has one, and an unattributed delivery is
+    applied only when exactly one unresolved run could be its subject.
+    """
+    gated = gate_delivered_prs(cfg, sorted({task for task, _ in unresolved}))
+    if not gated:
+        return {}
+    candidates: dict[str, list[str]] = {}
+    for task_id, run_id in unresolved:
+        candidates.setdefault(task_id, []).append(run_id)
+    attributed: dict[tuple[str, str], str] = {}
+    for task_id, delivery in gated.items():
+        runs = candidates.get(task_id, [])
+        if delivery.run_id:
+            if delivery.run_id in runs:
+                attributed[(task_id, delivery.run_id)] = delivery.pr_url
+        elif len(runs) == 1:
+            attributed[(task_id, runs[0])] = delivery.pr_url
+    return attributed
+
+
 def _with_delivery(cfg: Any, infos: Sequence[RunInfo]) -> list[RunInfo]:
     """*infos* with the ``pr`` column filled in for every run the run dir
     could not answer for — one Lithos session, only for the stories that need
     it (a run whose own delivery record is on disk costs nothing)."""
-    missing = sorted({i.task_id for i in infos if not i.pr})
-    gated = gate_delivered_prs(cfg, missing)
-    if not gated:
+    attributed = delivered_runs(cfg, [(i.task_id, i.run_id) for i in infos if not i.pr])
+    if not attributed:
         return list(infos)
-    return [i if i.pr else replace(i, pr=gated.get(i.task_id, "")) for i in infos]
+    return [
+        i if i.pr else replace(i, pr=attributed.get((i.task_id, i.run_id), ""))
+        for i in infos
+    ]
 
 
-def _is_finished(run_dir: Path, *, delivered: Mapping[str, str] | None = None) -> bool:
+def _is_finished(
+    run_dir: Path, *, delivered: Mapping[tuple[str, str], str] | None = None
+) -> bool:
     """Whether a run is terminal — i.e. safe for ``prune`` to remove.
 
     The signal is the on-disk terminal marker: the plugin writes
@@ -497,12 +571,14 @@ def _is_finished(run_dir: Path, *, delivered: Mapping[str, str] | None = None) -
     it — and it is what finally makes a run killed before its
     ``conversation.md`` prunable once its work is a monitored PR. Read from
     the run dir first and, for what the run dir cannot answer, from the
-    story's own gate (*delivered*, keyed by task id — see
-    :func:`gate_delivered_prs`, which yields nothing at all when Lithos cannot
-    be reached, so an outage keeps runs rather than deleting them).
+    story's own gate (*delivered*, keyed by ``(task_id, run_id)`` — see
+    :func:`delivered_runs`, which attributes a story's delivery to the ONE run
+    that produced it and yields nothing at all when Lithos cannot be reached,
+    so neither a sibling run nor an outage can make this one deletable).
     """
     is_delivered = bool(
-        run_outcome.run_pr_url(run_dir) or (delivered or {}).get(run_dir.parent.name)
+        run_outcome.run_pr_url(run_dir)
+        or (delivered or {}).get((run_dir.parent.name, run_dir.name))
     )
     if not (run_dir / run_outcome.CONVERSATION_LOG).is_file() and not is_delivered:
         return False
@@ -779,8 +855,9 @@ def develop_prune(
     # story's open `pr` gate is the authoritative "already delivered" answer,
     # and it is the only one a delivery that predates the run-dir marker (or
     # whose best-effort write failed) has left.
-    delivered = gate_delivered_prs(
-        cfg, sorted({d.parent.name for d in run_dirs if not run_outcome.run_pr_url(d)})
+    delivered = delivered_runs(
+        cfg,
+        [(d.parent.name, d.name) for d in run_dirs if not run_outcome.run_pr_url(d)],
     )
     finished = [d for d in run_dirs if _is_finished(d, delivered=delivered)]
 

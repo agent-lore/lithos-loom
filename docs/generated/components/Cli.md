@@ -25,7 +25,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
 | `lithos_loom.cli.deliver` | L | 0 | 1 |
-| `lithos_loom.cli.develop` | L | 2 | 5 |
+| `lithos_loom.cli.develop` | L | 3 | 6 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
 | `lithos_loom.cli.merge_gate` | M | 0 | 1 |
@@ -151,7 +151,9 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 ### `lithos_loom.cli.develop`
 - class `RunInfo` — A story-develop run discovered on disk.
 - class `ContainerStatus`
-- def `gate_delivered_prs` — ``{task_id: pr_url}`` from each story's OPEN ``pr`` gate (best-effort).
+- class `GateDelivery` — A story's delivered PR, as its own state records it.
+- def `gate_delivered_prs` — ``{task_id: GateDelivery}`` from each story's OPEN ``pr`` gate (best-effort).
+- def `delivered_runs` — ``{(task_id, run_id): pr_url}`` for the runs a story's open ``pr`` gate can be attributed to.
 - def `develop_list` — List inspectable story-develop runs (in-flight + failed/interrupted).
 - def `develop_prune` — Remove the on-disk run-state dirs of **finished** story-develop runs.
 - def `develop_dump` — Print the assembled conversation log for a run (finished or in-flight).

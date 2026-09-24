@@ -3674,8 +3674,31 @@ def test_converge_reads_the_acceptance_from_ac_file_when_given(
     assert argv[9:] == ["--ac-file", str(ac), "--profile", "thorough"]
     assert "--ac" not in argv
     assert f"converging #99 under --ac-file {ac}" in result.output
-    # nothing of the story's own text is quoted: the file is the operator's
+    # the preview covers EVERY source (correctness/f-004): the file's own text
+    # is shown, and the story's — which nothing will be judged against — is not
+    assert "| The acceptance as the operator revised it." in result.output
     assert "| The gap:" not in result.output
+
+
+def test_an_unreadable_ac_file_is_refused_before_anything_is_delivered(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    converge: dict,
+    tmp_path: Path,
+) -> None:
+    """The file is what the chained run would be judged against, and it is
+    read at the chain's own boundary — so a missing one costs nothing instead
+    of being discovered by converge with the PR already pushed and gated."""
+    result = _invoke(_RUN, "--converge", "--ac-file", str(tmp_path / "gone.md"))
+
+    assert result.exit_code == cli.EXIT_CODES["refused"], result.output
+    assert "--ac-file" in result.output and "could not be read" in result.output
+    assert converge["argv"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+    assert gh["created"] == [] and lithos.mutating_calls == []
 
 
 def test_converge_is_refused_with_no_gate_and_writes_nothing(

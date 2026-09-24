@@ -1367,6 +1367,132 @@ def test_list_and_prune_fall_back_to_the_storys_open_pr_gate(
     assert "would remove gated" in out and "waiting" not in out
 
 
+def _gated_story(
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    *,
+    pr_url: str,
+    marker_run: str | None,
+    gate_status: str = "open",
+) -> None:
+    """A story behind an open `pr` gate, optionally attributing it to a run."""
+    metadata: dict = {STORY_GATE_ID_KEY: "gate-pr"}
+    if marker_run is not None:
+        metadata["manual_delivery"] = {
+            "run_id": marker_run,
+            "pr_url": pr_url,
+            "gated": True,
+            "swapped": True,
+        }
+    client = FakeLithosClient(agent_id="loom")
+    client.add_task(make_task("t-1", metadata=metadata))
+    client.add_task(
+        make_task(
+            "gate-pr",
+            task_type="gate",
+            status=gate_status,
+            metadata={"gate_type": "pr", "pr_url": pr_url},
+        )
+    )
+    monkeypatch.setattr(develop, "LithosClient", lambda *a, **k: client)
+    monkeypatch.setattr(
+        develop,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=work_dir, lithos_url="http://lithos.invalid", agent_id="loom"
+            )
+        ),
+    )
+
+
+def test_a_storys_delivery_is_attributed_to_the_run_that_produced_it(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """correctness/f-002: a task retains several runs, and the gate names none
+    of them — but the story's `manual_delivery` marker does. Showing the older
+    run behind a PR it never produced would be wrong on screen and *fatal* in
+    `prune`, which would delete it because a DIFFERENT run was delivered."""
+    pr_url = "https://github.com/agent-lore/lithos-loom/pull/7"
+    old_run = _make_run(patched, task_id="t-1", run_id="old-run", rounds={1: ["cq"]})
+    new_run = _make_run(patched, task_id="t-1", run_id="new-run", status="disputed")
+    _gated_story(monkeypatch, patched, pr_url=pr_url, marker_run="new-run")
+
+    develop.develop_list(config=None, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["new-run"]["pr"] == pr_url
+    assert rows["old-run"]["pr"] == ""  # never produced it
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert "removed new-run" in out and "old-run" not in out
+    assert not new_run.exists() and old_run.exists()
+
+
+def test_an_unattributed_delivery_is_applied_to_no_run_when_several_could_match(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No marker (a partial delivery, or one that predates it) leaves the PR
+    unattributed: one candidate takes it, several take nothing — a guess here
+    is a deletion."""
+    pr_url = "https://github.com/agent-lore/lithos-loom/pull/7"
+    a = _make_run(patched, task_id="t-1", run_id="run-a", rounds={1: ["cq"]})
+    b = _make_run(patched, task_id="t-1", run_id="run-b", rounds={1: ["cq"]})
+    _gated_story(monkeypatch, patched, pr_url=pr_url, marker_run=None)
+
+    develop.develop_list(config=None, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["run-a"]["pr"] == "" and rows["run-b"]["pr"] == ""
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert a.exists() and b.exists()
+
+    # …and with only one candidate left, that one takes it
+    shutil.rmtree(b)
+    capsys.readouterr()
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["pr"] == pr_url
+
+
+def test_a_marker_for_another_pr_never_attributes_the_current_one(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-delivered story's marker names the PR it was written for; against
+    a gate for a different PR it says nothing about which run is behind it."""
+    _make_run(patched, task_id="t-1", run_id="run-a", rounds={1: ["cq"]})
+    _make_run(patched, task_id="t-1", run_id="run-b", rounds={1: ["cq"]})
+    client = FakeLithosClient(agent_id="loom")
+    client.add_task(
+        make_task(
+            "t-1",
+            metadata={
+                STORY_GATE_ID_KEY: "gate-pr",
+                "manual_delivery": {"run_id": "run-a", "pr_url": "https://x/pull/1"},
+            },
+        )
+    )
+    client.add_task(
+        make_task(
+            "gate-pr",
+            task_type="gate",
+            metadata={"gate_type": "pr", "pr_url": "https://x/pull/2"},
+        )
+    )
+    monkeypatch.setattr(develop, "LithosClient", lambda *a, **k: client)
+    monkeypatch.setattr(
+        develop,
+        "load_config",
+        lambda config=None: SimpleNamespace(
+            orchestrator=SimpleNamespace(
+                work_dir=patched, lithos_url="http://lithos.invalid", agent_id="loom"
+            )
+        ),
+    )
+
+    develop.develop_list(config=None, output_format="json")
+    assert {r["pr"] for r in json.loads(capsys.readouterr().out)} == {""}
+
+
 def test_a_completed_pr_gate_never_makes_a_run_look_delivered(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

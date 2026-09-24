@@ -227,8 +227,9 @@ def converge_lines(chain: ConvergeChain, *, pr: str, verb: str) -> list[str]:
     approve a hand-off they have never read, under a UI that tells them they
     are re-reviewing under the acceptance THEY revised. So the head of the
     text travels with the headline, bounded and shaped like every other quote
-    on this screen (security/f-004). ``--ac-file`` has nothing to show: the
-    file is the operator's own and converge reads it by path.
+    on this screen (security/f-004) — including an ``--ac-file``'s, read at
+    the chain's own boundary so the preview covers every source rather than
+    stopping at the one the operator did not name.
     """
     lines = [f"{verb} {pr} under {chain.ac_source}"]
     if chain.acceptance:

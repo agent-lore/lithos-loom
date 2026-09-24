@@ -23,7 +23,7 @@ from pathlib import Path
 import typer
 import typer.main
 
-from lithos_loom.cli._deliver_lithos import StoryState
+from lithos_loom.cli._deliver_lithos import DeliverRefused, StoryState
 from lithos_loom.cli.converge import converge_command
 
 __all__ = ["ConvergeChain", "converge_chain", "run_converge"]
@@ -49,6 +49,10 @@ class ConvergeChain:
     expect_repo: str
     """The ``owner/name`` the delivery resolved from the checkout's ``origin``."""
     acceptance: str
+    """The criteria as they will be judged — shown to the operator before a
+    paid, pushing agent acts on them. For ``--ac-file`` this is the file's
+    text read for the PREVIEW; converge reads the file itself by path, which
+    stays the authoritative read."""
     acceptance_file: Path | None
     ac_source: str
     """How the criteria were resolved, for the report and the dry-run plan."""
@@ -107,6 +111,31 @@ def run_converge(argv: Sequence[str]) -> int:
     return 0
 
 
+# Enough of the file to show the operator what the run will be judged
+# against; converge re-reads it whole by path. Bounded because this read
+# happens on the terminal path (`--dry-run` included) only to print ~8 lines.
+_AC_FILE_PREVIEW_BYTES = 64 * 1024
+
+
+def _read_ac_file(path: Path) -> str:
+    """The head of *path*, for the preview — or a refusal.
+
+    Read HERE, before the push, so an ``--ac-file`` that is missing, a
+    directory, or unreadable costs nothing: today the same mistake delivers
+    the PR first and is only discovered when converge exits on it, with the
+    branch already pushed and gated.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return handle.read(_AC_FILE_PREVIEW_BYTES)
+    except OSError as exc:
+        raise DeliverRefused(
+            f"--ac-file {path} could not be read ({exc}) — it is the "
+            "acceptance the chained converge run would be judged against, so "
+            "nothing is delivered until it resolves"
+        ) from exc
+
+
 def converge_chain(
     story: StoryState,
     *,
@@ -125,15 +154,17 @@ def converge_chain(
     ``metadata.acceptance_criteria``: a story can carry an older value there
     while its description has been rewritten, and preferring it would have
     the one-command workflow silently re-review against the stale copy — the
-    exact failure this chain exists to remove. ``--ac-file`` overrides, and
-    is passed on as the path so converge reads the operator's file itself.
+    exact failure this chain exists to remove. ``--ac-file`` overrides: the file is
+    read here for the PREVIEW (and an unreadable one refuses before anything
+    is delivered), while the path is what travels to converge, whose own read
+    stays authoritative.
     """
     if acceptance_file is not None:
         return ConvergeChain(
             story_id=story.story_id,
             repo=repo,
             expect_repo=repo_name,
-            acceptance="",
+            acceptance=_read_ac_file(acceptance_file),
             acceptance_file=acceptance_file,
             ac_source=f"--ac-file {acceptance_file}",
             profile=profile,
