@@ -427,7 +427,9 @@ def develop(
     # Stamp WHO is running this before anything slow: the worktree below starts
     # with an unbounded fetch + checkout, during which the run has no container
     # at all, and the operator's `develop prune` must be able to tell that
-    # containerless phase from a run that was killed an hour ago.
+    # containerless phase from a run that was killed an hour ago. It RAISES if
+    # it cannot stamp — a run dir prune can only guess about is worse than a
+    # run that never started, and __main__ turns the raise into a failed result.
     config.run_dir.mkdir(parents=True, exist_ok=True)
     run_owner.record_owner(config.run_dir)
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)

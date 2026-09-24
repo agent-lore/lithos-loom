@@ -850,12 +850,14 @@ def test_prune_keeps_run_whose_owner_marker_is_alive(
     )
 
 
-def test_prune_removes_run_whose_owner_process_is_gone(patched: Path) -> None:
+def test_prune_removes_run_whose_owner_process_is_gone(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The same marker, for a process that is positively gone (a live pid whose
     # recorded start time does not match it — a reused pid, which is why the
-    # marker records an identity and not a bare number). Docker is absent here
-    # (the `patched` fixture): a marker that settles the question is what lets
-    # the sweep work at all on a host where docker cannot be asked.
+    # marker records an identity and not a bare number). Docker answers "no
+    # containers", so the two halves together are a definitive "nothing is
+    # alive": finished, without consulting the idle window at all.
     dead = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
     (dead / run_owner.OWNER_FILE).write_text(
         json.dumps(
@@ -867,6 +869,7 @@ def test_prune_removes_run_whose_owner_process_is_gone(patched: Path) -> None:
         )
     )
     _backdate(dead, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
     develop.develop_prune(config=None, dry_run=False, output_format="text")
     assert not dead.exists()
 
@@ -882,7 +885,7 @@ def test_prune_keeps_run_whose_owner_marker_is_unreadable(
     monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
     develop.develop_prune(config=None, dry_run=False, output_format="text")
     assert garbled.exists()
-    assert "owner marker cannot be read" in capsys.readouterr().out
+    assert "names no process this host can verify" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("label", ["", "0", "-5", "not-a-pid", "9" * 5000])
@@ -988,6 +991,158 @@ def test_prune_never_follows_a_symlinked_run_dir(
     assert victim.exists() and (patched / "t-1" / "linked").is_symlink()
     assert "linked" not in out  # not classified, not walked, not reported
     assert "no story-develop run dirs" in out
+
+
+# ── prune: the round-3 review findings ─────────────────────────────────
+
+
+def test_prune_keeps_everything_unlogged_when_docker_is_unavailable(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # correctness/f-001 (second branch): a dead owner settles the HOST PROCESS,
+    # never the container beside it — a killed plugin can leave its `--rm`
+    # container (and the `docker exec` inside it) running. With docker
+    # unaskable that cannot be ruled out, so, absent a terminal log, the dir is
+    # unknown no matter what the marker says. (`patched` has docker absent.)
+    dead_owner = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
+    (dead_owner / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {"pid": os.getpid(), "start_ticks": 1, "host_boot": orphans.host_boot_id()}
+        )
+    )
+    logged = _make_run(patched, task_id="t-2", run_id="logged", conversation="end")
+    _backdate(dead_owner, 7200)
+    _backdate(logged, 7200)
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+
+    out = capsys.readouterr().out
+    assert dead_owner.exists()  # cannot rule out a container we cannot see
+    assert "unknown — kept dead" in out and "docker is unavailable" in out
+    assert not logged.exists()  # a terminal log needs no liveness probe
+
+
+def test_prune_keeps_run_whose_host_cannot_identify_its_owner(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # correctness/f-001 (first branch): a host that cannot read process facts
+    # still stamps a marker — one that says so. The run then reads as "cannot
+    # tell" rather than falling through to the idle window, which would delete
+    # it while it was still fetching.
+    monkeypatch.setattr(run_owner, "process_identity", lambda pid: None)
+    blind = _make_run(patched, task_id="t-1", run_id="blind", rounds={1: ["cq"]})
+    run_owner.record_owner(blind)
+    _backdate(blind, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+
+    assert blind.exists()
+    assert "names no process this host can verify" in capsys.readouterr().out
+
+
+def test_prune_classifies_a_dead_run_with_an_unreadable_subdir(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # security/f-005: `mkdir -m 000 x` in the RW worktree is one command, and a
+    # red check can leave the same thing behind under `test_gate/` by accident.
+    # It must not pin the dir as `unknown` forever: the verdict here was settled
+    # by liveness (the owner is provably gone), so the age walk's blind spot
+    # cannot veto it — and if the content really is undeletable, that surfaces
+    # as the failed deletion it is (an error + a non-zero exit), not silence.
+    dead = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
+    (dead / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {"pid": os.getpid(), "start_ticks": 1, "host_boot": orphans.host_boot_id()}
+        )
+    )
+    locked = dead / "test_gate" / "round_01" / "tree-check-abc" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "root_owned").write_text("x")
+    _backdate(dead, 7200)
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            list(os.scandir(locked))  # the shape the finding describes
+        monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+        develop.develop_prune(config=None, dry_run=True, output_format="json")
+
+        rows = json.loads(capsys.readouterr().out)
+        assert [(r["run_id"], r["state"]) for r in rows] == [("dead", "finished")]
+        assert "is gone" in rows[0]["reason"]
+    finally:
+        locked.chmod(0o700)
+
+
+def test_prune_keeps_a_signal_less_run_with_an_unreadable_subdir(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The other half of security/f-005: with NO liveness signal (a run dir from
+    # before the owner marker), age is the only evidence there is — and a tree
+    # that cannot be read has no trustworthy age. Unknown, and the reason names
+    # the path so the operator can act on it.
+    legacy = _make_run(patched, task_id="t-1", run_id="legacy", rounds={1: ["cq"]})
+    locked = legacy / "test_gate" / "round_01" / "tree-check-abc"
+    locked.mkdir(parents=True)
+    _backdate(legacy, 7200)
+    locked.chmod(0o000)
+    try:
+        monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+        develop.develop_prune(config=None, dry_run=False, output_format="text")
+        out = capsys.readouterr().out
+        assert legacy.exists()
+        assert "could not be read" in out and str(locked) in out
+    finally:
+        locked.chmod(0o700)
+
+
+def test_prune_bounds_the_size_walk_without_bounding_the_verdict(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # security/f-007: the walk is bounded (the file count under a run dir is
+    # agent-controlled, and every sweep — `--dry-run` included — walks every
+    # dir). A truncated walk reports its size as the floor it is, and still
+    # classifies: the verdict came from liveness, not from the walk.
+    monkeypatch.setattr(develop, "_MAX_SCAN_ENTRIES", 3)
+    dead = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
+    (dead / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {"pid": os.getpid(), "start_ticks": 1, "host_boot": orphans.host_boot_id()}
+        )
+    )
+    big = dead / "worktree"
+    big.mkdir()
+    for i in range(20):
+        (big / f"f{i}").write_bytes(b"z" * 100)
+    _backdate(dead, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    assert ">= " in capsys.readouterr().out  # a floor, not a claimed total
+
+    develop.develop_prune(config=None, dry_run=True, output_format="json")
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["state"] == "finished" and row["size_partial"] is True
+
+
+def test_prune_keeps_a_signal_less_run_it_cannot_walk_to_the_end(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ...and the same bound on the path where the walk IS the evidence: a
+    # truncated walk cannot prove a tree is idle, so it never licenses a delete.
+    monkeypatch.setattr(develop, "_MAX_SCAN_ENTRIES", 2)
+    legacy = _make_run(patched, task_id="t-1", run_id="legacy", rounds={1: ["cq"]})
+    (legacy / "worktree").mkdir()
+    for i in range(10):
+        (legacy / "worktree" / f"f{i}").write_text("z")
+    _backdate(legacy, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+
+    assert legacy.exists()
+    assert "more entries than the sweep walks" in capsys.readouterr().out
 
 
 def test_attach_stops_when_seen_containers_vanish_without_marker(

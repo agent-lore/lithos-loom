@@ -59,7 +59,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
 | `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 17 |
-| `lithos_loom.plugins.story_develop.run_owner` | XS | 0 | 3 |
+| `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
 | `lithos_loom.plugins.story_develop.test_gate` | S | 1 | 6 |
