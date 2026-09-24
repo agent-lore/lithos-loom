@@ -502,35 +502,51 @@ def _marked_run(story_meta: Mapping[str, Any], pr_url: str) -> str:
 
 
 def delivered_runs(
-    cfg: Any, unresolved: Sequence[tuple[str, str]]
+    cfg: Any, runs: Sequence[tuple[str, str, str]]
 ) -> dict[tuple[str, str], str]:
     """``{(task_id, run_id): pr_url}`` for the runs a story's open ``pr`` gate
     can be attributed to.
 
-    *unresolved* is ``(task_id, run_id)`` for every run whose own dir records
-    no PR — the only ones the story is asked about.
+    *runs* is ``(task_id, run_id, local_pr_url)`` for **every** run on disk —
+    not only the ones missing a PR. A story's delivery is a fact about ONE
+    run's branch, and a task can retain several runs: attributing it to all of
+    them would show an older run behind a PR it never produced and — worse —
+    let `prune` delete that older run because a *different* run of the task
+    was delivered. Two facts decide, in order:
 
-    A story's delivery is a fact about ONE run's branch, and a task can retain
-    several runs: attributing it to all of them would show an older run behind
-    a PR it never produced and — worse — let `prune` delete that older run
-    because a *different* run of the task was delivered. So the marker's
-    ``run_id`` decides when the story has one, and an unattributed delivery is
-    applied only when exactly one unresolved run could be its subject.
+    * the story's ``manual_delivery`` marker, when it names a run for this PR;
+    * otherwise the runs' OWN records. A sibling that already records this
+      exact PR locally **is** the delivery — the gate is accounted for, and
+      nothing unresolved may claim it as well. (Without this the sole
+      remaining candidate is not "the only run it could be" but "the only run
+      we happened to ask about": a daemon-delivered run whose `result.json`
+      survived a failed reap answers for itself, and the hard-killed sibling
+      beside it would inherit its PR and be pruned for it.)
+
+    Only when neither says anything is the delivery applied to a candidate,
+    and then only if exactly one unresolved run could be its subject.
     """
-    gated = gate_delivered_prs(cfg, sorted({task for task, _ in unresolved}))
+    needs_lookup = sorted({task for task, _, pr in runs if not pr})
+    gated = gate_delivered_prs(cfg, needs_lookup)
     if not gated:
         return {}
     candidates: dict[str, list[str]] = {}
-    for task_id, run_id in unresolved:
-        candidates.setdefault(task_id, []).append(run_id)
+    claimed: dict[str, set[str]] = {}
+    for task_id, run_id, local_pr in runs:
+        if local_pr:
+            claimed.setdefault(task_id, set()).add(local_pr)
+        else:
+            candidates.setdefault(task_id, []).append(run_id)
     attributed: dict[tuple[str, str], str] = {}
     for task_id, delivery in gated.items():
-        runs = candidates.get(task_id, [])
+        unresolved = candidates.get(task_id, [])
         if delivery.run_id:
-            if delivery.run_id in runs:
+            if delivery.run_id in unresolved:
                 attributed[(task_id, delivery.run_id)] = delivery.pr_url
-        elif len(runs) == 1:
-            attributed[(task_id, runs[0])] = delivery.pr_url
+        elif delivery.pr_url in claimed.get(task_id, set()):
+            continue  # a sibling records this PR: the gate is already placed
+        elif len(unresolved) == 1:
+            attributed[(task_id, unresolved[0])] = delivery.pr_url
     return attributed
 
 
@@ -538,7 +554,7 @@ def _with_delivery(cfg: Any, infos: Sequence[RunInfo]) -> list[RunInfo]:
     """*infos* with the ``pr`` column filled in for every run the run dir
     could not answer for — one Lithos session, only for the stories that need
     it (a run whose own delivery record is on disk costs nothing)."""
-    attributed = delivered_runs(cfg, [(i.task_id, i.run_id) for i in infos if not i.pr])
+    attributed = delivered_runs(cfg, [(i.task_id, i.run_id, i.pr) for i in infos])
     if not attributed:
         return list(infos)
     return [
@@ -857,7 +873,7 @@ def develop_prune(
     # whose best-effort write failed) has left.
     delivered = delivered_runs(
         cfg,
-        [(d.parent.name, d.name) for d in run_dirs if not run_outcome.run_pr_url(d)],
+        [(d.parent.name, d.name, run_outcome.run_pr_url(d) or "") for d in run_dirs],
     )
     finished = [d for d in run_dirs if _is_finished(d, delivered=delivered)]
 

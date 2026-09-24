@@ -49,13 +49,12 @@ class ConvergeChain:
     expect_repo: str
     """The ``owner/name`` the delivery resolved from the checkout's ``origin``."""
     acceptance: str
-    """The criteria as they will be judged — shown to the operator before a
-    paid, pushing agent acts on them. For ``--ac-file`` this is the file's
-    text read for the PREVIEW; converge reads the file itself by path, which
-    stays the authoritative read."""
-    acceptance_file: Path | None
+    """The criteria, as ONE snapshot: the text shown to the operator IS the
+    text handed to converge (``--ac``). Never a path — a path is read twice,
+    once for the preview and once by converge after the delivery, and the two
+    reads can disagree about content, encoding and emptiness alike."""
     ac_source: str
-    """How the criteria were resolved, for the report and the dry-run plan."""
+    """Where that snapshot came from, for the report and the dry-run plan."""
     profile: str | None
     config: Path | None
 
@@ -77,10 +76,12 @@ class ConvergeChain:
             argv += ["--expect-repo", self.expect_repo]
         if head:
             argv += ["--expect-head", head]
-        if self.acceptance_file is not None:
-            argv += ["--ac-file", str(self.acceptance_file)]
-        else:
-            argv += ["--ac", self.acceptance]
+        # Always the snapshot, never `--ac-file`: converge resolves `--ac` to
+        # exactly this string (`resolve_acceptance_criteria` strips both the
+        # same way), so what the operator approved on screen is what the panel
+        # and the coder are given. In-process, so there is no argv size limit
+        # to trade against.
+        argv += ["--ac", self.acceptance]
         if self.profile:
             argv += ["--profile", self.profile]
         if self.config is not None:
@@ -111,29 +112,34 @@ def run_converge(argv: Sequence[str]) -> int:
     return 0
 
 
-# Enough of the file to show the operator what the run will be judged
-# against; converge re-reads it whole by path. Bounded because this read
-# happens on the terminal path (`--dry-run` included) only to print ~8 lines.
-_AC_FILE_PREVIEW_BYTES = 64 * 1024
-
-
 def _read_ac_file(path: Path) -> str:
-    """The head of *path*, for the preview — or a refusal.
+    """*path* read WHOLE, strictly, once — or a refusal.
 
-    Read HERE, before the push, so an ``--ac-file`` that is missing, a
-    directory, or unreadable costs nothing: today the same mistake delivers
-    the PR first and is only discovered when converge exits on it, with the
-    branch already pushed and gated.
+    Read HERE, before the push, and then carried as the snapshot: a path read
+    twice is two different inputs. The delivery would print one and converge
+    judge the other if anything edited the file in between, and the two reads
+    would not even agree on what counts as readable — a lenient, bounded
+    preview passes an invalid byte (or one past its bound) that converge's
+    strict full read then rejects, after the PR is pushed and gated. So this
+    read is converge's own: whole, ``utf-8`` strict, and stripped as
+    ``resolve_acceptance_criteria`` strips it. Every way it can fail —
+    missing, a directory, unreadable, not UTF-8 — refuses while nothing has
+    been written.
     """
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            return handle.read(_AC_FILE_PREVIEW_BYTES)
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise DeliverRefused(
             f"--ac-file {path} could not be read ({exc}) — it is the "
             "acceptance the chained converge run would be judged against, so "
             "nothing is delivered until it resolves"
         ) from exc
+    except UnicodeDecodeError as exc:
+        raise DeliverRefused(
+            f"--ac-file {path} is not valid UTF-8 ({exc}) — converge would "
+            "refuse it, so nothing is delivered until it resolves"
+        ) from exc
+    return text
 
 
 def converge_chain(
@@ -154,29 +160,36 @@ def converge_chain(
     ``metadata.acceptance_criteria``: a story can carry an older value there
     while its description has been rewritten, and preferring it would have
     the one-command workflow silently re-review against the stale copy — the
-    exact failure this chain exists to remove. ``--ac-file`` overrides: the file is
-    read here for the PREVIEW (and an unreadable one refuses before anything
-    is delivered), while the path is what travels to converge, whose own read
-    stays authoritative.
+    exact failure this chain exists to remove. ``--ac-file`` overrides, read
+    WHOLE and strictly here and then carried as the snapshot both the preview
+    and converge use (see :func:`_read_ac_file`).
+
+    Either way the criteria are resolved BEFORE the push, so criteria converge
+    would refuse — unreadable, not UTF-8, empty — cost nothing instead of
+    being discovered with the PR already pushed and gated.
     """
-    if acceptance_file is not None:
-        return ConvergeChain(
-            story_id=story.story_id,
-            repo=repo,
-            expect_repo=repo_name,
-            acceptance=_read_ac_file(acceptance_file),
-            acceptance_file=acceptance_file,
-            ac_source=f"--ac-file {acceptance_file}",
-            profile=profile,
-            config=config_path,
+    source = (
+        f"--ac-file {acceptance_file}"
+        if acceptance_file is not None
+        else "the story's description"
+    )
+    criteria = (
+        _read_ac_file(acceptance_file)
+        if acceptance_file is not None
+        else story.task_text
+    ).strip()
+    if not criteria:
+        raise DeliverRefused(
+            f"the acceptance criteria for the converge run are empty "
+            f"({source}) — converge refuses a run with no criteria, so "
+            "nothing is delivered until they resolve"
         )
     return ConvergeChain(
         story_id=story.story_id,
         repo=repo,
         expect_repo=repo_name,
-        acceptance=story.task_text,
-        acceptance_file=None,
-        ac_source="the story's description",
+        acceptance=criteria,
+        ac_source=source,
         profile=profile,
         config=config_path,
     )

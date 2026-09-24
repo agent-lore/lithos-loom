@@ -227,15 +227,12 @@ def converge_lines(chain: ConvergeChain, *, pr: str, verb: str) -> list[str]:
     approve a hand-off they have never read, under a UI that tells them they
     are re-reviewing under the acceptance THEY revised. So the head of the
     text travels with the headline, bounded and shaped like every other quote
-    on this screen (security/f-004) — including an ``--ac-file``'s, read at
-    the chain's own boundary so the preview covers every source rather than
-    stopping at the one the operator did not name.
+    on this screen (security/f-004) — including an ``--ac-file``'s, since the
+    chain carries ONE snapshot whatever the source, so the text shown here is
+    the text ``--ac`` hands converge rather than a second read of a path.
     """
     lines = [f"{verb} {pr} under {chain.ac_source}"]
-    if chain.acceptance:
-        lines.extend(
-            f"{_BLOCK_MARKER}{line}" for line in quoted_block(chain.acceptance)
-        )
+    lines.extend(f"{_BLOCK_MARKER}{line}" for line in quoted_block(chain.acceptance))
     return lines
 
 

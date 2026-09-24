@@ -3669,15 +3669,28 @@ def test_converge_reads_the_acceptance_from_ac_file_when_given(
 
     assert result.exit_code == 0, result.output
     (argv,) = converge["argv"]
-    # the PATH is passed on, so converge reads the operator's file itself
     assert argv[5:9] == ["--expect-repo", _REPO_NAME, "--expect-head", _head(repo)]
-    assert argv[9:] == ["--ac-file", str(ac), "--profile", "thorough"]
-    assert "--ac" not in argv
+    # ONE snapshot (correctness/f-004): the file is read once, before the
+    # push, and its CONTENTS travel — never the path, which converge would
+    # re-read after the delivery, leaving the preview and the judgement two
+    # different inputs
+    assert argv[9:] == [
+        "--ac",
+        "The acceptance as the operator revised it.",
+        "--profile",
+        "thorough",
+    ]
+    assert "--ac-file" not in argv
     assert f"converging #99 under --ac-file {ac}" in result.output
-    # the preview covers EVERY source (correctness/f-004): the file's own text
-    # is shown, and the story's — which nothing will be judged against — is not
+    # …and that exact snapshot is what the operator was shown; the story's
+    # description, which nothing will be judged against, is not
     assert "| The acceptance as the operator revised it." in result.output
     assert "| The gap:" not in result.output
+
+    # the snapshot is immutable: an edit landing after the preview cannot
+    # change what converge was handed
+    ac.write_text("something else entirely\n", encoding="utf-8")
+    assert converge["argv"][0][10] == "The acceptance as the operator revised it."
 
 
 def test_an_unreadable_ac_file_is_refused_before_anything_is_delivered(
@@ -3696,6 +3709,41 @@ def test_an_unreadable_ac_file_is_refused_before_anything_is_delivered(
 
     assert result.exit_code == cli.EXIT_CODES["refused"], result.output
     assert "--ac-file" in result.output and "could not be read" in result.output
+    assert converge["argv"] == []
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
+    assert gh["created"] == [] and lithos.mutating_calls == []
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [
+        (b"\xff\xfe not utf-8", "not valid UTF-8"),
+        (b"   \n\n", "are empty"),
+    ],
+    ids=["invalid-utf8", "empty"],
+)
+def test_criteria_converge_would_refuse_are_refused_before_delivery(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    converge: dict,
+    tmp_path: Path,
+    contents: bytes,
+    expected: str,
+) -> None:
+    """correctness/f-004: the two reads must agree on what counts as usable.
+    A lenient preview that accepts what converge's strict read rejects only
+    moves the failure past the push — the PR is already open and gated when
+    converge refuses."""
+    ac = tmp_path / "revised-ac.md"
+    ac.write_bytes(contents)
+
+    result = _invoke(_RUN, "--converge", "--ac-file", str(ac))
+
+    assert result.exit_code == cli.EXIT_CODES["refused"], result.output
+    assert expected in result.output
     assert converge["argv"] == []
     assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
     assert gh["created"] == [] and lithos.mutating_calls == []

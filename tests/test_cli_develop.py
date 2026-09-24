@@ -1454,6 +1454,43 @@ def test_an_unattributed_delivery_is_applied_to_no_run_when_several_could_match(
     assert json.loads(capsys.readouterr().out)[0]["pr"] == pr_url
 
 
+def test_a_sibling_that_already_records_the_gates_pr_keeps_it(
+    patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """correctness/f-002 (r3): "the only unresolved run" is not "the only run
+    it could be".
+
+    The normal daemon shape with no `manual_delivery` marker: `new-run`'s own
+    run-bound `result.json` survived a failed reap and records the story's
+    current gate url, while an older hard-killed `old-run` recorded nothing.
+    Asking the story only about `old-run` would leave it the sole candidate
+    and hand it its sibling's PR — and `prune` would then delete it for a
+    delivery it had no part in.
+    """
+    pr_url = "https://github.com/agent-lore/lithos-loom/pull/7"
+    old_run = _make_run(patched, task_id="t-1", run_id="old-run", rounds={1: ["cq"]})
+    _make_run(patched, task_id="t-1", run_id="new-run", status="approved")
+    (patched / "t-1" / "result.json").write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "task_id": "t-1",
+                "run_id": "new-run",
+                "pr_url": pr_url,
+            }
+        )
+    )
+    _gated_story(monkeypatch, patched, pr_url=pr_url, marker_run=None)
+
+    develop.develop_list(config=None, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["new-run"]["pr"] == pr_url  # its own record answers for it
+    assert rows["old-run"]["pr"] == ""  # and the gate is already placed
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert old_run.exists()
+
+
 def test_a_marker_for_another_pr_never_attributes_the_current_one(
     patched: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
