@@ -13,6 +13,11 @@ Three reads, in order, each of which can refuse on its own:
   intake-time snapshot and a branch name is not a PR;
 * **the ref** — the worktree tip against the PR's live head, which is the
   verdict the operator authorises the push from.
+
+…and how all three READ OUT: the operator's report, the stable ``--json``
+object and the ``[ConvergePushed]`` summary are pure functions of the facts
+and the plan, so they live here with them rather than in the sequence that
+decides.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ALREADY_PUSHED",
+    "CONVERGE_PUSHED",
     "FAST_FORWARD",
     "REFUSED",
     "UNCERTAIN",
@@ -51,8 +57,11 @@ __all__ = [
     "PrCheck",
     "PushPlan",
     "fetch_pull_request",
+    "finding_summary",
+    "json_record",
     "plan_push",
     "read_run",
+    "report",
     "resolve_converge_run",
     "verify_pr",
 ]
@@ -120,6 +129,15 @@ class ConvergeRun:
     """The sha this run's rounds were pushed at, by either pusher — the
     offline ``already pushed`` answer, still proved against the remote before
     anything is done."""
+    pushed_by: str = ""
+    """WHICH pusher put it there — ``converge`` (its own approved push, whose
+    epilogue is the converge command's own and is not this one's business) or
+    ``converge-push`` (the operator's salvage, whose epilogue this command
+    owes and resumes)."""
+    intent_sha: str = ""
+    """The tip a ``converge-push`` recorded it was ABOUT to push. With a
+    remote that now holds it, this is what says the push landed even when the
+    process died before recording it."""
     finding_posted: bool = False
     """Whether the ``[ConvergePushed]`` audit for that push has landed."""
     gate_completed: str = ""
@@ -194,6 +212,8 @@ def read_run(run_dir: Path) -> ConvergeRun:
             f for f in state.get("open_findings") or () if isinstance(f, dict)
         ),
         pushed_sha=run_outcome.converge_pushed_sha(run_dir),
+        pushed_by=str(push_record.get("by") or ""),
+        intent_sha=str(push_record.get("intent_sha") or ""),
         finding_posted=bool(push_record.get("finding_posted")),
         gate_completed=str(push_record.get("gate_completed") or ""),
     )
@@ -558,3 +578,126 @@ def plan_push(run: ConvergeRun) -> PushPlan:
         log=log,
         diffstat=diffstat,
     )
+
+
+CONVERGE_PUSHED = "[ConvergePushed]"
+"""Finding prefix: an exhausted converge run's rounds were pushed onto the PR
+by the operator's decision (``develop converge-push``), naming the sha, the
+rounds and the findings the run left open."""
+
+
+# ── rendering ──────────────────────────────────────────────────────────
+
+
+def _gate_line(run: ConvergeRun) -> str:
+    bits = []
+    if run.test_gate:
+        bits.append(f"test {run.test_gate.get('verdict', '?')}")
+    for check in run.blocking_checks:
+        bits.append(f"{check.get('name', '?')} {check.get('verdict', 'RED')}")
+    return ", ".join(bits) if bits else "no gate verdict recorded"
+
+
+def report(run: ConvergeRun, plan: PushPlan) -> list[str]:
+    """The operator-facing report — every fact the decision rests on."""
+    stop = f"{run.status}" + (f" — {run.failure_reason}" if run.failure_reason else "")
+    lines = [
+        f"converge-push {run.run_id}: {stop}",
+        f"  PR:           {run.pr_url or '(url unknown)'}"
+        + (f" (#{run.pr_number})" if run.pr_number else ""),
+        f"  head branch:  {run.pr_head_branch}",
+        f"  intake head:  {run.intake_head_sha[:12] or '(unknown)'}"
+        f"   PR head now: {plan.remote_sha[:12] or '(absent)'}",
+        f"  worktree tip: {plan.tip[:12]}  ({run.worktree})",
+        f"  rounds:       {run.rounds if run.rounds is not None else 'unknown'}"
+        + (f"   cost: ${run.cost_usd:.2f}" if run.cost_usd is not None else ""),
+        f"  gate:         {_gate_line(run)}",
+    ]
+    if run.open_findings:
+        lines.append(f"  open findings ({len(run.open_findings)}):")
+        lines += [
+            f"    - [{f.get('reviewer', '?')}/{f.get('finding_id', '?')}] "
+            f"{f.get('severity', '?')} — {f.get('title', '')}"
+            for f in run.open_findings
+        ]
+    else:
+        lines.append("  open findings: none recorded")
+    lines.append(f"  fixer commits ({len(plan.commits)}):")
+    lines += [f"    {line}" for line in plan.log.splitlines() if line.strip()]
+    lines += [f"    {line}" for line in plan.diffstat.splitlines() if line.strip()]
+    if run.pushed_sha:
+        lines.append(f"  recorded push: {run.pushed_sha[:12]} (converge-push)")
+    lines.append(f"  verdict:      {plan.verdict} — {plan.detail}")
+    if plan.pushable:
+        lines.append(
+            "  re-run with --yes to push (the watcher reads it as a HUMAN "
+            "push: the remediation budget re-arms)"
+        )
+    return lines
+
+
+def json_record(
+    run: ConvergeRun, plan: PushPlan, *, pushed_sha: str = "", notes: list[str]
+) -> dict[str, Any]:
+    """The same facts as a stable object."""
+    return {
+        "run_id": run.run_id,
+        "run_dir": str(run.run_dir),
+        "status": run.status,
+        "failure_reason": run.failure_reason,
+        "rounds": run.rounds,
+        "total_cost_usd": run.cost_usd,
+        "pr_url": run.pr_url,
+        "pr_number": run.pr_number,
+        "pr_head_branch": run.pr_head_branch,
+        "story_id": run.story_id,
+        "repo": run.repo,
+        "intake_head_sha": run.intake_head_sha,
+        "remote_head_sha": plan.remote_sha,
+        "worktree_tip": plan.tip,
+        "verdict": plan.verdict,
+        "detail": plan.detail,
+        "fixer_commits": list(plan.commits),
+        "diffstat": plan.diffstat,
+        "gate": {
+            "test_gate": run.test_gate,
+            "blocking_checks": list(run.blocking_checks),
+        },
+        "open_findings": list(run.open_findings),
+        "pushed": bool(pushed_sha),
+        "pushed_sha": pushed_sha or None,
+        "notes": notes,
+    }
+
+
+def finding_summary(run: ConvergeRun, *, pushed_sha: str) -> str:
+    """``[ConvergePushed]`` — what landed, and what it landed WITH.
+
+    The open findings are named, not counted: the operator overrode an
+    unapproved loop, and the record of that decision is what makes the next
+    reader of this PR able to tell a converged head from a pushed one.
+    """
+    lines = [
+        f"{CONVERGE_PUSHED} converge run {run.run_id} stopped {run.status} "
+        f"without pushing; its rounds were pushed to "
+        f"{run.pr_url or run.pr_head_branch} by "
+        "`lithos-loom develop converge-push` (the operator's decision).",
+        f"- pushed {pushed_sha[:12]} onto {run.pr_head_branch}",
+        f"- rounds: {run.rounds if run.rounds is not None else 'unknown'}"
+        + (f", cost ${run.cost_usd:.2f}" if run.cost_usd is not None else ""),
+        f"- gate at the last round: {_gate_line(run)}",
+    ]
+    if run.open_findings:
+        lines.append("- pushed WITH these findings still open:")
+        lines += [
+            f"  - [{f.get('reviewer', '?')}/{f.get('finding_id', '?')}] "
+            f"{f.get('severity', '?')} — {f.get('title', '')}"
+            for f in run.open_findings
+        ]
+    else:
+        lines.append("- no review findings were left open")
+    lines.append(
+        "- the push is the operator's, not loom's: the watcher reads it as a "
+        "human push and the external-remediation budget re-arms."
+    )
+    return "\n".join(lines)

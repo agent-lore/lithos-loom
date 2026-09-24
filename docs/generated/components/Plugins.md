@@ -59,7 +59,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
-| `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 29 |
+| `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 30 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
@@ -452,6 +452,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `record_converge_cost` — Record what the WHOLE converge command spent, not just its loop.
 - def `converge_intake` — The PR facts :func:`record_converge_intake` wrote, or ``None``.
 - def `record_converge_push` — Record that this run's rounds are on the PR at *pushed_sha*, and how far the work that follows the push has got.
+- def `record_converge_push_intent` — Record that ``develop converge-push`` is ABOUT to push *tip*.
 - def `converge_push_record` — The push record as written, or ``{}`` — the merge base for an update.
 - def `converge_pushed_sha` — The sha this run's rounds were pushed at, by either pusher, or ``None``.
 - def `result_for_run` — THIS run's ``result.json`` (the plugin's final contract output), or ``None``.

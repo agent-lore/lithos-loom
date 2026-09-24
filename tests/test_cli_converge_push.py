@@ -1176,3 +1176,173 @@ def test_a_reply_the_transport_refused_is_resumed_too(
     assert attempts == [8, 8]
     intake = read_external_intake(run_dir)
     assert intake is not None and intake.replied == frozenset({"f-002"})
+
+
+# ── round 5: the reviewers' findings ───────────────────────────────────
+
+
+def test_the_push_intent_is_recorded_before_the_push(
+    host,
+    run_dir: Path,
+    worktree: Path,
+    lithos: FakeLithosClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-010: a SIGTERM between `git push` returning and its
+    record would otherwise leave no trace that the rounds are on the PR."""
+    real = cli.push_to_pr_ref
+    seen: dict = {}
+
+    def spy(*a, **k):
+        seen["record"] = run_outcome.converge_push_record(run_dir)
+        return real(*a, **k)
+
+    monkeypatch.setattr(cli, "push_to_pr_ref", spy)
+    tip = _git(worktree, "rev-parse", "HEAD")
+
+    assert _invoke(_RUN, "--yes").exit_code == 0
+
+    assert seen["record"]["intent_sha"] == tip
+    assert not seen["record"].get("pushed_sha")  # nothing is claimed yet
+
+
+def test_a_push_whose_record_never_landed_is_resumed(
+    host, run_dir: Path, worktree: Path, lithos: FakeLithosClient
+) -> None:
+    """correctness/f-010: the state a kill between the push and its record
+    leaves — the intent on disk, the tip on the PR, nothing recorded as
+    pushed. The epilogue is still owed and must run."""
+    tip = _git(worktree, "rev-parse", "HEAD")
+    run_outcome.record_converge_push_intent(run_dir, tip=tip, pr_url=_PR_URL)
+    _git(worktree, "push", "origin", f"HEAD:refs/heads/{_PR_BRANCH}")
+    assert run_outcome.converge_pushed_sha(run_dir) is None
+
+    result = _invoke(_RUN, "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert "already pushed" in result.output
+    assert [f["task_id"] for f in lithos.findings] == [_STORY]
+    # …and the record is repaired, so `develop list` stops calling it unpushed
+    assert run_outcome.converge_pushed_sha(run_dir) == tip
+
+
+def test_an_ordinary_converge_delivery_is_never_resumed(
+    host, run_dir: Path, worktree: Path, lithos: FakeLithosClient
+) -> None:
+    """correctness/f-012: converge's own approved push records `by: converge`.
+    Posting `[ConvergePushed]` over it would claim the operator salvaged a run
+    that in fact converged — and the acceptance says an already-pushed run
+    writes nothing."""
+    tip = _git(worktree, "rev-parse", "HEAD")
+    _git(worktree, "push", "origin", f"HEAD:refs/heads/{_PR_BRANCH}")
+    run_outcome.record_converge_push(
+        run_dir,
+        pushed_sha=tip,
+        pr_url=_PR_URL,
+        by=run_outcome.PUSHED_BY_CONVERGE,
+    )
+
+    result = _invoke(_RUN, "--yes", "--complete-gate")
+
+    assert result.exit_code == 0, result.output
+    assert "already pushed" in result.output
+    assert lithos.calls == []  # no finding, no gate, no replies
+    assert _get(lithos, "gate-exhausted").status == "open"
+
+
+def test_a_concurrent_push_of_the_same_tip_is_idempotent(
+    host,
+    run_dir: Path,
+    worktree: Path,
+    lithos: FakeLithosClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-013: two `--yes` invocations plan against the same head;
+    the first pushes tip T and finishes its epilogue, the second's leased seam
+    reads T and refuses. The remote IS the tip, so the second is the
+    already-pushed no-op, not a moved-head failure."""
+    real = cli.push_to_pr_ref
+
+    def pushes_then_refuses(*a, **k):
+        # the winner's push, and its epilogue, from inside the loser's seam
+        real(*a, **k)
+        run_outcome.record_converge_push(
+            run_dir,
+            pushed_sha=_git(worktree, "rev-parse", "HEAD"),
+            pr_url=_PR_URL,
+            finding_posted=True,
+        )
+        raise MergeRaceDetected("PR head ref advanced remotely; re-run converge")
+
+    monkeypatch.setattr(cli, "push_to_pr_ref", pushes_then_refuses)
+    tip = _git(worktree, "rev-parse", "HEAD")
+
+    result = _invoke(_RUN, "--yes")
+
+    assert result.exit_code == 0, result.output  # NOT the refusal's 1
+    assert "already pushed" in result.output
+    assert _remote_head(worktree) == tip
+    assert lithos.findings == []  # the winner posted it; this one writes nothing
+
+
+def test_a_live_lock_holder_refuses_the_second_invocation(
+    host, run_dir: Path, worktree: Path, lithos: FakeLithosClient
+) -> None:
+    """correctness/f-010: the resume path is a read-then-act; two invocations
+    interleaving in it would post the same replies and finding twice."""
+    import os
+
+    (run_dir / cli.LOCK_FILE).write_text(f"{os.getpid()}\n", encoding="utf-8")
+    before = _remote_head(worktree)
+
+    result = _invoke(_RUN, "--yes")
+
+    assert result.exit_code == 1, result.output
+    assert "is writing for run" in result.output
+    assert _remote_head(worktree) == before
+    assert lithos.calls == []
+
+
+def test_a_stale_lock_is_taken_over(
+    host, run_dir: Path, worktree: Path, lithos: FakeLithosClient
+) -> None:
+    # the SIGTERM this whole resume path exists for leaves the lock behind
+    (run_dir / cli.LOCK_FILE).write_text("2147483646\n", encoding="utf-8")
+    tip = _git(worktree, "rev-parse", "HEAD")
+
+    result = _invoke(_RUN, "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert _remote_head(worktree) == tip
+    assert not (run_dir / cli.LOCK_FILE).exists()  # released on the way out
+
+
+def test_a_landed_finding_is_recorded_even_if_the_gate_read_fails(
+    host,
+    run_dir: Path,
+    worktree: Path,
+    lithos: FakeLithosClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-010: the finding posted, then `--complete-gate`'s story
+    read raised. Losing that answer would have the next run post it twice."""
+
+    real = cli.read_story
+    failing = [True]
+
+    async def flaky(client, story_id, **kwargs):
+        if failing[0]:
+            raise LithosClientError("server_error", "the story read failed")
+        return await real(client, story_id, **kwargs)
+
+    monkeypatch.setattr(cli, "read_story", flaky)
+
+    assert _invoke(_RUN, "--yes", "--complete-gate").exit_code == 0
+    assert len(lithos.findings) == 1
+
+    # the gate read recovers: the finding is NOT posted a second time
+    failing[0] = False
+    assert _invoke(_RUN, "--yes", "--complete-gate").exit_code == 0
+
+    assert len(lithos.findings) == 1
+    assert _get(lithos, "gate-exhausted").status == "completed"

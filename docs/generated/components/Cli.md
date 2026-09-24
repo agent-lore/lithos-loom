@@ -12,7 +12,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
-| `lithos_loom.cli._converge_push_facts` | M | 5 | 5 |
+| `lithos_loom.cli._converge_push_facts` | L | 5 | 8 |
 | `lithos_loom.cli._deliver_converge` | S | 1 | 3 |
 | `lithos_loom.cli._deliver_facts` | M | 2 | 9 |
 | `lithos_loom.cli._deliver_lithos` | L | 8 | 4 |
@@ -25,7 +25,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | L | 0 | 3 |
-| `lithos_loom.cli.converge_push` | M | 0 | 5 |
+| `lithos_loom.cli.converge_push` | L | 0 | 2 |
 | `lithos_loom.cli.deliver` | L | 0 | 1 |
 | `lithos_loom.cli.develop` | XL | 4 | 6 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
@@ -49,6 +49,9 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `verify_pr` — Re-read the PR before the verdict is printed — the pin every other write path in this system carries.
 - class `PushPlan` — What a push would do, decided against the PR's LIVE remote head.
 - def `plan_push` — Read the worktree tip + the PR's live head and decide the verdict.
+- def `report` — The operator-facing report — every fact the decision rests on.
+- def `json_record` — The same facts as a stable object.
+- def `finding_summary` — ``[ConvergePushed]`` — what landed, and what it landed WITH.
 
 ### `lithos_loom.cli._deliver_converge`
 - class `ConvergeChain` — What ``--converge`` runs once the delivery has landed.
@@ -164,9 +167,6 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `post_external_replies` — Answer each external finding where it was raised, by its reply mode. Returns how many replies were posted.
 
 ### `lithos_loom.cli.converge_push`
-- def `report` — The operator-facing report — every fact the decision rests on.
-- def `json_record` — The same facts as a stable object.
-- def `finding_summary` — ``[ConvergePushed]`` — what landed, and what it landed WITH.
 - def `replay_outcomes` — The threads this push owes an answer — never one already answered.
 - def `converge_push_command` — Report an exhausted converge run's unpushed rounds — and push them.
 

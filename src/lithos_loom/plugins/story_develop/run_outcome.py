@@ -310,6 +310,31 @@ def record_converge_push(
     write_state(run_dir, {CONVERGE_PUSH_KEY: record})
 
 
+def record_converge_push_intent(run_dir: Path, *, tip: str, pr_url: str) -> None:
+    """Record that ``develop converge-push`` is ABOUT to push *tip*.
+
+    Written before the push, because the push is the one step whose effect
+    outlives this process: killed between ``git push`` returning and
+    :func:`record_converge_push`, the run would otherwise carry no trace that
+    its rounds are on the PR — and the next invocation, seeing the remote
+    already at the tip with nothing recorded, would report "already pushed"
+    over an audit that was never written. The intent plus a remote that holds
+    the tip is what says the push landed.
+
+    Never sets ``pushed_sha``: a push that is then refused must not leave a
+    record claiming it happened (``develop list`` reads that key).
+    """
+    record = converge_push_record(run_dir)
+    record.update(
+        {
+            "intent_sha": tip,
+            "intent_by": PUSHED_BY_CONVERGE_PUSH,
+            "pr_url": pr_url,
+        }
+    )
+    write_state(run_dir, {CONVERGE_PUSH_KEY: record})
+
+
 def converge_push_record(run_dir: Path) -> dict:
     """The push record as written, or ``{}`` — the merge base for an update."""
     state = read_state(run_dir) or {}

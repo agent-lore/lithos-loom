@@ -125,7 +125,24 @@ before the verdict is printed — `gh`'s PR payload plus the worktree's `origin`
    the open findings and decided — so the record says exactly that.
 4. **Record the push in the run dir** (`state.json`'s `converge_push` block),
    so a second invocation is `already pushed` and `develop list` drops its
-   `unpushed` marker.
+   `unpushed` marker. An **intent** is recorded in that block *before* the
+   push, too: killed between `git push` returning and the record, the run
+   would otherwise carry no trace that its rounds are on the PR, and the next
+   invocation would report "already pushed" over an audit that was never
+   written. The intent plus a remote holding that exact tip is what says the
+   push landed; the record is then repaired and the epilogue finished.
+
+   Only a push **this command made** is resumed that way. Converge's own
+   approved delivery records `by: converge`, and posting `[ConvergePushed]`
+   over it would claim the operator salvaged a run that in fact converged — so
+   `--yes` on one of those writes nothing at all.
+
+`--yes` holds a **per-run lock** for everything it writes (`converge-push.lock`
+in the run dir, carrying the owner's pid): the push, its record and the resume
+below are a read-then-act sequence, and two invocations interleaving in it would
+post the same replies and the same `[ConvergePushed]` twice. A second one is
+refused, exit 1, having written nothing; a lock left behind by a process that is
+provably **gone** is taken over rather than left to block.
 
 Everything after the push is best-effort and degrades into a `note:` line (and
 into `notes` in `--json`): the commits are on the PR, and no later failure may
@@ -141,10 +158,13 @@ documented no-op: `--yes` writes nothing.
 typed refusals the push seam raises — the head ref absent from origin, and a
 head that no longer holds the sha the lease names (including a push the server
 itself **rejected**, which is its own report-status) — prove that nothing
-landed. They are re-planned against the live head and reported as an ordinary
-`refused` verdict (exit 1), through the same renderer and the same `--json`
-object as any other refusal: a race is exactly when the operator needs the
-facts, not an error line. Everything else is ambiguous: the
+landed. They are re-planned against the live head and reported through the same
+renderer and the same `--json` object as any other verdict: a race is exactly
+when the operator needs the facts, not an error line. Usually that is `refused`
+(exit 1); when the re-plan finds the head is **this run's own tip** — a
+concurrent `converge-push`, or the operator's own hand push, got there first —
+the verdict stays `already pushed` and the invocation is the documented
+idempotent no-op, exit 0. Everything else is ambiguous: the
 server can accept the update and the connection drop before the client sees the
 answer. There the ref is re-read and
 the three answers kept apart: at our tip (or at a third sha that *contains* it)
