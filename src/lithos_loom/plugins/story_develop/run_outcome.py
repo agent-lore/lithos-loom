@@ -16,6 +16,11 @@ Marker inventory (who writes / who reads each):
 - ``state.json`` (run dir) — the dialogue verdict, written by ``develop()`` at run
   end. Read by :func:`read_state`. An ``approved`` verdict is NOT terminal on its
   own: in daemon mode PR delivery runs *after* ``develop()`` returns (#171).
+  Three writers, all through :func:`write_state` (which MERGES): the loop's own
+  exit, ``develop converge``'s intake record of the PR it is converging
+  (:func:`record_converge_intake`, written before the first paid turn) and
+  ``develop converge-push``'s record of what it pushed
+  (:func:`record_converge_push`).
 - ``result.json`` (shared per-task dir) — the plugin's final contract output,
   written after delivery. Bound to THIS run by ``run_id == run_dir.name`` (#198)
   so a prior run's leftover can't false-done a retry. Read by
@@ -61,6 +66,20 @@ STATE_FILE = "state.json"
 RESULT_FILE = "result.json"
 DELIVERY_MARKER = "delivery.json"
 CONVERSATION_LOG = "conversation.md"
+
+# `develop converge` runs live under their own pseudo-task dir rather than a
+# story's (``<work_dir>/converge/<run_id>/``), because a converge run has no
+# Lithos source task — the PR is its subject. Named here, with the rest of the
+# layout, so the two commands that must tell a converge run from a story run
+# (``develop converge-push``, which is only for one, and ``develop deliver``,
+# which refuses one) agree on the test.
+CONVERGE_DIR = "converge"
+
+# ``state.json`` blocks a converge run owns (nested, so the loop's own
+# top-level keys — ``base_sha`` is both a PR fact and a fork point — can never
+# be confused with the PR's).
+CONVERGE_KEY = "converge"
+CONVERGE_PUSH_KEY = "converge_push"
 
 # The only success status; an approved dialogue still has PR delivery to do.
 APPROVED = "approved"
@@ -122,6 +141,121 @@ def read_state(run_dir: Path) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def write_state(run_dir: Path, payload: dict) -> None:
+    """Write the run's ``state.json``, MERGING over whatever is already there.
+
+    ``develop()`` writes the dialogue verdict at run end, but it is no longer
+    the only writer: ``develop converge`` records the PR it is converging
+    **at intake** (:func:`record_converge_intake`), before the first paid
+    turn, so a run killed mid-loop is still resolvable; and
+    ``develop converge-push`` records its push afterwards. A plain overwrite
+    would drop the intake block the moment the loop ended — so the loop's
+    keys are laid over the file rather than replacing it.
+
+    Top-level, last-writer-wins per key: the two extra writers own their own
+    nested blocks (:data:`CONVERGE_KEY` / :data:`CONVERGE_PUSH_KEY`) and
+    never a key ``develop()`` writes.
+    """
+    data = read_state(run_dir) or {}
+    data.update(payload)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / STATE_FILE).write_text(
+        json.dumps(data, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def is_converge_run_dir(run_dir: Path) -> bool:
+    """Whether *run_dir* is a ``develop converge`` run's (``<work_dir>/converge/<id>``).
+
+    The layout is the test, not the run's contents: a converge run always has
+    a PR (the thing it converges), and a story-develop run never does — so
+    ``deliver`` refuses the former and ``converge-push`` refuses the latter
+    on this alone, before reading anything an agent could have written.
+    """
+    return run_dir.parent.name == CONVERGE_DIR
+
+
+def record_converge_intake(
+    run_dir: Path,
+    *,
+    pr_url: str,
+    pr_number: int | None,
+    pr_head_branch: str,
+    intake_head_sha: str,
+    base_sha: str,
+    repo: str,
+    story_id: str = "",
+) -> None:
+    """Record the PR a converge run is converging, at INTAKE.
+
+    Everything ``develop converge-push`` needs to push an exhausted run's
+    rounds onto the right branch — and nothing the loop's own ``state.json``
+    carries: the run's ``branch`` is its LOCAL branch, not the PR's head, and
+    nothing else on disk names the PR at all (the operator had to read it out
+    of the daemon log or the process argv).
+
+    Written before the first paid turn, so a run killed at any point after
+    intake (SIGTERM, exit 143) is still resolvable — which is exactly the
+    run an operator most wants to salvage.
+    """
+    write_state(
+        run_dir,
+        {
+            CONVERGE_KEY: {
+                "pr_url": pr_url,
+                "pr_number": pr_number,
+                "pr_head_branch": pr_head_branch,
+                "intake_head_sha": intake_head_sha,
+                "base_sha": base_sha,
+                "repo": repo,
+                "story_id": story_id,
+            }
+        },
+    )
+
+
+def converge_intake(run_dir: Path) -> dict | None:
+    """The PR facts :func:`record_converge_intake` wrote, or ``None``.
+
+    ``None`` for a story-develop run, and for a converge run that predates
+    the record — the caller then has no PR to push onto and says so.
+    """
+    state = read_state(run_dir) or {}
+    block = state.get(CONVERGE_KEY)
+    return block if isinstance(block, dict) else None
+
+
+def record_converge_push(run_dir: Path, *, pushed_sha: str, pr_url: str) -> None:
+    """Record that ``develop converge-push`` put *pushed_sha* on the PR.
+
+    The run's own answer to "is anything still unpushed?" — read by a second
+    invocation (which then reports ``already pushed`` without touching the
+    network) and by ``develop list``, which drops its ``unpushed`` marker.
+    The remote is still the authority; this is the offline fast path, exactly
+    as ``delivery.json`` is for a hand delivery.
+    """
+    write_state(
+        run_dir,
+        {
+            CONVERGE_PUSH_KEY: {
+                "pushed_sha": pushed_sha,
+                "pr_url": pr_url,
+                "at": datetime.now(UTC).isoformat(timespec="seconds"),
+            }
+        },
+    )
+
+
+def converge_pushed_sha(run_dir: Path) -> str | None:
+    """The sha ``develop converge-push`` pushed for this run, or ``None``."""
+    state = read_state(run_dir) or {}
+    block = state.get(CONVERGE_PUSH_KEY)
+    if not isinstance(block, dict):
+        return None
+    sha = block.get("pushed_sha")
+    return sha if isinstance(sha, str) and sha else None
 
 
 def result_for_run(run_dir: Path) -> dict | None:

@@ -44,11 +44,15 @@ __all__ = [
 ]
 
 REMEDIATION_ACTIONS = (
-    "the story stays behind its pr gate; push the fix branch by hand if the "
-    "residual is acceptable, re-run `develop converge <pr> --from-github` with "
-    "a higher --max-rounds, or address the finding directly — a human push to "
-    "the PR re-arms loom's budget, and so does completing this gate once "
-    "decided (loom then remediates the next review on a fresh budget)"
+    "the story stays behind its pr gate; the exhausted run's rounds are "
+    "committed on a local branch, so `lithos-loom develop converge-push "
+    "<run>` (the run this gate names) reports what they produced and what is "
+    "still unpushed and, with --yes, pushes them onto the PR; otherwise push "
+    "the fix branch by hand if the residual is acceptable, re-run `develop "
+    "converge <pr> --from-github` with a higher --max-rounds, or address the "
+    "finding directly — a human push to the PR re-arms loom's budget, and so "
+    "does completing this gate once decided (loom then remediates the next "
+    "review on a fresh budget)"
 )
 """What the operator can do about an exhausted remediation — none of it is a
 re-dispatch, so the runner's two actions would mislead here."""
@@ -77,6 +81,7 @@ async def escalate_if_exhausted(
     last_status: str,
     detail: str,
     cost: float | None = None,
+    run_id: str = "",
 ) -> str | None:
     """Raise the needs-human gate when *budget* is spent and the PR is still
     not converged. Returns ``None`` when nothing was needed or the gate
@@ -110,6 +115,10 @@ async def escalate_if_exhausted(
         notifier=notifier,
         escalation=escalation,
         actions=REMEDIATION_ACTIONS,
+        # The exhausted CONVERGE run, recorded on the gate so the operator
+        # (and `develop converge-push`, which matches on it) can find the
+        # rounds that were left on a local branch.
+        run_id=run_id,
     )
 
 
@@ -172,6 +181,7 @@ async def _escalate(
     notifier: RemediationNotifier | None,
     escalation: Escalation,
     actions: str,
+    run_id: str = "",
 ) -> str | None:
     async def _record(human_gate_id: str) -> bool:
         updated = dataclasses.replace(
@@ -215,6 +225,7 @@ async def _escalate(
         route=ROUTE_EXTERNAL_REMEDIATION,
         agent=ctx.agent_id,
         escalation=escalation,
+        run_id=run_id or None,
         notifier=notifier,
         actions=actions,
         record=_record,

@@ -37,7 +37,6 @@ plugin-enforced via each reviewer's :class:`~.findings.FindingLedger`.
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from collections.abc import Sequence
@@ -682,44 +681,69 @@ def develop(
     # Durable run state (PRD decision #5: resume state is ~free — session ids
     # + handoffs are on disk). Written on every exit, primarily for
     # `interrupted` runs and the future daemon re-dispatch (T10).
-    (config.run_dir / run_outcome.STATE_FILE).write_text(
-        json.dumps(
-            {
-                "status": status,
-                "run_id": config.run_id,
-                "branch": branch,
-                "worktree": str(wt),
-                "base_sha": base.start_sha,
-                "rounds": rounds_completed,
-                # Why a non-approved run stopped, for the offline `attach` summary
-                # (#188). Only the reason-bearing statuses set a real reason;
-                # approved + max_rounds describe themselves (and would otherwise
-                # leak the "no rounds ran" sentinel for an exhausted run).
-                "failure_reason": (
-                    failure_reason if status in _REASON_BEARING_STATUSES else None
-                ),
-                # Review-metadata record (ADR 0003 §11) — the same profile +
-                # panel + findings-by-severity written to Lithos metadata, kept
-                # in the durable run-state for local outcome correlation.
-                "review_profile": config.review_profile,
-                "review_panel": [r.reviewer for r in final_reviews],
-                "findings_by_severity": findings_by_severity(final_reviews),
-                "coder_session": coder_session,
-                "reviewers": {
-                    r.spec.name: {"session": r.session, "tool": r.engine_now.name}
-                    for r in reviewers
-                },
-                "pause_budget_remaining_s": round(budget.remaining, 1),
-                "resume_after": (
-                    resume_after.isoformat(timespec="seconds")
-                    if resume_after is not None
-                    else None
-                ),
+    # Merged, not overwritten (:func:`run_outcome.write_state`): a converge
+    # run records the PR it is converging in the same file at intake, and
+    # that block must survive the loop's own exit.
+    run_outcome.write_state(
+        config.run_dir,
+        {
+            "status": status,
+            "run_id": config.run_id,
+            "branch": branch,
+            "worktree": str(wt),
+            "base_sha": base.start_sha,
+            "rounds": rounds_completed,
+            # Why a non-approved run stopped, for the offline `attach` summary
+            # (#188). Only the reason-bearing statuses set a real reason;
+            # approved + max_rounds describe themselves (and would otherwise
+            # leak the "no rounds ran" sentinel for an exhausted run).
+            "failure_reason": (
+                failure_reason if status in _REASON_BEARING_STATUSES else None
+            ),
+            # Review-metadata record (ADR 0003 §11) — the same profile +
+            # panel + findings-by-severity written to Lithos metadata, kept
+            # in the durable run-state for local outcome correlation.
+            "review_profile": config.review_profile,
+            "review_panel": [r.reviewer for r in final_reviews],
+            "findings_by_severity": findings_by_severity(final_reviews),
+            # What the LAST round actually left behind, from the ledgers
+            # rather than the prose: the spend, the gate's verdict and the
+            # open findings. `develop converge-push` reports these back to
+            # the operator deciding whether to push an exhausted run's
+            # rounds, and nothing else on disk carries them (#188's
+            # `failure_reason` is one sentence).
+            "cost_usd": round(total, 4),
+            "test_gate": (
+                {"verdict": gate.verdict, "command": gate.command} if gate else None
+            ),
+            "blocking_checks": [
+                {"name": c.name, "verdict": c.verdict} for c in blocking_checks
+            ],
+            "open_findings": [
+                {
+                    "reviewer": r.reviewer,
+                    "finding_id": f.finding_id,
+                    "severity": f.severity,
+                    "title": f.rationale.strip().splitlines()[0][:200]
+                    if f.rationale.strip()
+                    else "",
+                }
+                for r in final_reviews
+                for f in r.findings
+                if f.status == "open"
+            ],
+            "coder_session": coder_session,
+            "reviewers": {
+                r.spec.name: {"session": r.session, "tool": r.engine_now.name}
+                for r in reviewers
             },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+            "pause_budget_remaining_s": round(budget.remaining, 1),
+            "resume_after": (
+                resume_after.isoformat(timespec="seconds")
+                if resume_after is not None
+                else None
+            ),
+        },
     )
 
     return DevelopResult(

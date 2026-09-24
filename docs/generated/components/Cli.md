@@ -14,7 +14,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli` | XS | 0 | 0 |
 | `lithos_loom.cli._deliver_converge` | S | 1 | 3 |
 | `lithos_loom.cli._deliver_facts` | M | 2 | 9 |
-| `lithos_loom.cli._deliver_lithos` | L | 7 | 4 |
+| `lithos_loom.cli._deliver_lithos` | L | 8 | 4 |
 | `lithos_loom.cli._deliver_output` | M | 0 | 7 |
 | `lithos_loom.cli._deliver_preflight` | S | 0 | 5 |
 | `lithos_loom.cli._deliver_repo` | M | 2 | 10 |
@@ -23,7 +23,8 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
-| `lithos_loom.cli.converge` | M | 0 | 1 |
+| `lithos_loom.cli.converge` | L | 0 | 2 |
+| `lithos_loom.cli.converge_push` | L | 4 | 8 |
 | `lithos_loom.cli.deliver` | L | 0 | 1 |
 | `lithos_loom.cli.develop` | XL | 4 | 6 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
@@ -58,6 +59,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 ### `lithos_loom.cli._deliver_lithos`
 - def `dispatch_hold_agent` — The identity the **dispatch hold** is taken under — deliberately NOT the host's own agent id.
 - class `DeliverRefused` — A precondition failed and nothing was written. Exits ``1``.
+- class `DeliverWrongCommand` — The run named is not this command's to deliver — another command owns it, and the message names that command. Nothing was written. Exits ``2``: a *usage* error, not a state the operator can resolve and retry here.
 - class `DeliverUncertain` — An external write may or may not have landed, and the read that would have settled it failed too. Never exit 1: "nothing was written" is exactly what this cannot be asserted. Exits ``2`` with what to re-run.
 - class `PrGateRef` — An open ``pr`` gate holding the story, and what it watches.
 - class `HumanGateRef` — An open loom ``human`` gate holding the story, and whose escalation it is: the *route* that raised it and the *run* it escalated.
@@ -145,6 +147,21 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 ### `lithos_loom.cli.converge`
 - def `converge_command` — Converge an existing PR to review-green (panel + gate), then push.
+- def `post_external_replies` — Answer each external finding where it was raised, by its reply mode. Returns how many replies were posted.
+
+### `lithos_loom.cli.converge_push`
+- class `ConvergePushRefused` — A precondition failed; nothing was written.
+- class `NotAConvergeRun` — The key names a run that is not a converge run (or no run at all).
+- class `ConvergeRun` — What the run dir says about an exhausted converge run.
+- def `read_run` — Read *run_dir* into :class:`ConvergeRun`, refusing what cannot be pushed.
+- def `resolve_converge_run` — Resolve *key* — a converge run id, or a PR number (its newest run).
+- class `PushPlan` — What a push would do, decided against the PR's LIVE remote head.
+- def `plan_push` — Read the worktree tip + the PR's live head and decide the verdict.
+- def `report` — The operator-facing report — every fact the decision rests on.
+- def `json_record` — The same facts as a stable object.
+- def `finding_summary` — ``[ConvergePushed]`` — what landed, and what it landed WITH.
+- def `replay_outcomes` — The dispositions this run's threads are owed, or ``()``.
+- def `converge_push_command` — Report an exhausted converge run's unpushed rounds — and push them.
 
 ### `lithos_loom.cli.deliver`
 - def `deliver_command` — Push a stopped run's branch, open its PR, and swap the needs-human gate for a pr gate.

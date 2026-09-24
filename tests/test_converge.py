@@ -520,6 +520,9 @@ def test_converge_result_json_round_trips_the_documented_shape(
     assert result.develop_result is not None
     assert data.pop("branch") == result.develop_result.branch
     assert data.pop("worktree") == str(result.develop_result.worktree)
+    # the run id, so an exhausted run's work dir can be found again
+    # (`develop converge-push`, and the gate the watcher raises on exhaustion)
+    assert data.pop("run_id") == result.develop_result.run_id
     assert data == {
         "deferred_findings": [],  # 819370e5: out-of-scope deferrals (none here)
         "status": "converged",

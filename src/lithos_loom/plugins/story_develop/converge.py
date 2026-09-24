@@ -47,6 +47,7 @@ from .conflict_resolve import (
 )
 from .converge_result import ConflictSummary, ConvergeResult, ConvergeStatus
 from .develop import DevelopResult, develop
+from .external_record import record_external_intake
 from .external_reviews import (
     ExternalFinding,
     ExternalOutcome,
@@ -280,6 +281,18 @@ def converge_pr(
             len(id_map),
         )
         surviving_ids = [f.finding_id for f in surviving]
+        # The injected batch, on disk before the first fix round: a run that
+        # stops exhausted answers no thread, and `develop converge-push` —
+        # the operator's decision to keep its rounds — owes the reviewers the
+        # replies this run would have posted.
+        record_external_intake(
+            config.run_dir,
+            id_map=id_map,
+            rejections=triage.rejections,
+            nothing_to_remediate=triage.nothing_to_remediate,
+            surviving_ids=surviving_ids,
+            generated_paths=config.generated_paths,
+        )
         entry = LoopEntry(
             worktree_factory=lambda cfg: worktree.create_on_branch(
                 cfg.repo, change.head_sha, cfg.description, parent=cfg.worktree_parent

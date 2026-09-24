@@ -33,6 +33,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
+| `lithos_loom.plugins.story_develop.external_record` | S | 1 | 2 |
 | `lithos_loom.plugins.story_develop.external_reviews` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.external_triage` | M | 1 | 5 |
 | `lithos_loom.plugins.story_develop.findings` | L | 4 | 6 |
@@ -50,7 +51,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.panel` | L | 3 | 2 |
 | `lithos_loom.plugins.story_develop.panel_prompts` | S | 0 | 5 |
 | `lithos_loom.plugins.story_develop.personas` | XS | 0 | 1 |
-| `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 15 |
+| `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 16 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.publish_text` | M | 0 | 3 |
@@ -58,7 +59,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
-| `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 21 |
+| `lithos_loom.plugins.story_develop.run_outcome` | M | 1 | 27 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
@@ -208,6 +209,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `is_supported` — Whether the container/exec layer can run *tool* (claude + codex, #94).
 - def `supported_tools` — The registered tool names, in registry order.
 - def `supported_tools_phrase` — Registry-derived ``'a' or 'b'`` list of tools, for operator error messages.
+
+### `lithos_loom.plugins.story_develop.external_record`
+- class `ExternalIntake` — The injected batch, as the fix loop received it.
+- def `record_external_intake` — Write the injected batch into *run_dir* (best-effort).
+- def `read_external_intake` — The injected batch, or ``None`` — no record, or one we cannot read.
 
 ### `lithos_loom.plugins.story_develop.external_reviews`
 - class `ExternalFinding` — One external review finding, with enough provenance to reply to it.
@@ -368,6 +374,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `push_branch` — Host-side push of the worktree branch to origin. Raises on failure.
 - class `ForkPushUnsupported` — The PR's head ref is not on ``origin`` (a fork PR), so converge cannot push to it under origin credentials (v1). The operator converges + fixes locally with ``--no-push``, or re-runs against a same-repo PR.
 - class `MergeRaceDetected` — The PR head ref advanced on the remote since converge resolved it, so a push would not be a fast-forward. Converge stops rather than ``--force`` (which would clobber the concurrent commit); the operator re-runs to pick up the new tip.
+- def `remote_head_sha` — ``origin``'s current sha for branch *remote_ref* — ``""`` when absent.
 - def `push_to_pr_ref` — Push the reviewed worktree ``HEAD`` onto the PR's head ref *remote_ref*.
 - def `create_pr` — Open the PR; returns its URL. Raises on failure.
 - def `pr_number_from_url` — Extract the PR number from a canonical GitHub PR URL; raise if it can't.
@@ -437,6 +444,12 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `is_run_dir` — A run dir is recognised by its seeded ``handoff/`` subdir.
 - def `resolve_run_dir` — Resolve *key* (a run_id or task_id) to a run dir, newest run if a task.
 - def `read_state` — The run's terminal ``state.json`` (status + rounds + branch), or ``None``.
+- def `write_state` — Write the run's ``state.json``, MERGING over whatever is already there.
+- def `is_converge_run_dir` — Whether *run_dir* is a ``develop converge`` run's (``<work_dir>/converge/<id>``).
+- def `record_converge_intake` — Record the PR a converge run is converging, at INTAKE.
+- def `converge_intake` — The PR facts :func:`record_converge_intake` wrote, or ``None``.
+- def `record_converge_push` — Record that ``develop converge-push`` put *pushed_sha* on the PR.
+- def `converge_pushed_sha` — The sha ``develop converge-push`` pushed for this run, or ``None``.
 - def `result_for_run` — THIS run's ``result.json`` (the plugin's final contract output), or ``None``.
 - def `delivery_complete` — Whether THIS approved run's post-dialogue PR delivery succeeded.
 - def `delivery_failed` — The reason THIS run's PR delivery FAILED (#194), or ``None``.

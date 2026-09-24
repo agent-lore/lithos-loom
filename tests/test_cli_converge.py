@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from lithos_loom.cli import converge as converge_cli
 from lithos_loom.cli.develop import develop_app
+from lithos_loom.plugins.story_develop import run_outcome
 from lithos_loom.plugins.story_develop.config import DEFAULT_IMAGE
 from lithos_loom.plugins.story_develop.converge import ConvergeResult
 from lithos_loom.plugins.story_develop.review_resolve import ResolvedChange
@@ -1340,3 +1341,88 @@ def test_converge_binds_its_lifetime_to_a_loom_parent(
     result = runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
     assert result.exit_code == 0, result.output
     assert bound
+
+
+# ── the PR facts recorded at intake (#425) ─────────────────────────────
+
+
+def test_records_the_pr_facts_before_the_first_paid_turn(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run killed after intake must still be resolvable by `converge-push`,
+    so the PR it is converging is written BEFORE converge_pr is entered."""
+    monkeypatch.setattr(converge_cli, "repo_name_with_owner", lambda repo: "o/r")
+    # --story's own resolution is another test's subject; here it is just the
+    # story id that must land in the record
+    monkeypatch.setattr(converge_cli, "story_settings_for", lambda host, s: ({}, None))
+    seen: dict = {}
+
+    def spy(config, change, **kwargs):
+        # what the run dir holds at the moment the paid work starts
+        seen["intake"] = run_outcome.converge_intake(config.run_dir)
+        return ConvergeResult(status="not_converged", change=change)
+
+    monkeypatch.setattr(converge_cli, "converge_pr", spy)
+
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--ac", "x", "--story", "story-1"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert seen["intake"] == {
+        "pr_url": "https://github.com/o/r/pull/142",
+        "pr_number": 142,
+        "pr_head_branch": "feature",
+        "intake_head_sha": "h" * 40,
+        "base_sha": "b" * 40,
+        "repo": "o/r",
+        "story_id": "story-1",
+    }
+
+
+def test_the_loop_exit_does_not_drop_the_pr_facts(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`develop()` writes the same state.json at run end — merged, not
+    overwritten, or the salvage path would lose the PR on every finished run."""
+    monkeypatch.setattr(converge_cli, "repo_name_with_owner", lambda repo: "o/r")
+    run_dirs: dict = {}
+
+    def spy(config, change, **kwargs):
+        run_dirs["dir"] = config.run_dir
+        # what the loop's own epilogue writes, through the shared writer
+        run_outcome.write_state(
+            config.run_dir, {"status": "max_rounds", "rounds": 5, "branch": "b"}
+        )
+        return ConvergeResult(status="not_converged", change=change)
+
+    monkeypatch.setattr(converge_cli, "converge_pr", spy)
+
+    runner.invoke(develop_app, ["converge", "#142", "--ac", "x"])
+
+    state = run_outcome.read_state(run_dirs["dir"]) or {}
+    assert state["status"] == "max_rounds"
+    assert (run_outcome.converge_intake(run_dirs["dir"]) or {})["pr_number"] == 142
+
+
+def test_a_spec_with_no_pr_number_records_nothing(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called: list[Path] = []
+    monkeypatch.setattr(
+        converge_cli, "repo_name_with_owner", lambda repo: called.append(repo) or "o/r"
+    )
+    seen: dict = {}
+
+    def spy(config, change, **kwargs):
+        seen["intake"] = run_outcome.converge_intake(config.run_dir)
+        return ConvergeResult(status="converged", change=change)
+
+    monkeypatch.setattr(converge_cli, "converge_pr", spy)
+
+    # `resolve_change` is stubbed, so a branch spec still resolves — what
+    # matters is that nothing names a PR to push onto
+    runner.invoke(develop_app, ["converge", "my-branch", "--ac", "x"])
+
+    assert seen["intake"] is None
+    assert called == []  # and no `gh` call was made to find out

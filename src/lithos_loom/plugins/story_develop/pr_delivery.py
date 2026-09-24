@@ -268,6 +268,28 @@ class MergeRaceDetected(RuntimeError):
     new tip."""
 
 
+def remote_head_sha(wt: Path, remote_ref: str) -> str:
+    """``origin``'s current sha for branch *remote_ref* — ``""`` when absent.
+
+    The exact-ref read the push seam leases against, and the same read
+    ``develop converge-push`` reports the PR's live head from: ``ls-remote``
+    treats its argument as a tail *pattern* (``feature`` also matches
+    ``refs/heads/a/feature``, which sorts first), so the query is
+    fully-qualified and the lookup keys on the exact ref name, never on line
+    order. An absent ref is ``""`` — for the push seam a fork, for the report
+    a deleted branch — never a wrong sha. Raises on a transport failure.
+    """
+    dst = f"refs/heads/{remote_ref}"
+    ls = _run(["git", "ls-remote", "--heads", "origin", dst], cwd=wt, timeout=120)
+    if ls.returncode != 0:
+        raise RuntimeError(f"git ls-remote origin {dst} failed: {ls.stderr.strip()}")
+    for line in ls.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == dst:
+            return parts[0]
+    return ""
+
+
 def push_to_pr_ref(
     wt: Path,
     local_branch: str,
@@ -308,19 +330,8 @@ def push_to_pr_ref(
     network) push failure.
     """
     # The lease, the push, and the preflight must all name the SAME exact ref.
-    # ls-remote treats its argument as a tail *pattern* — `feature` also matches
-    # refs/heads/a/feature (which sorts first) — so query the fully-qualified ref
-    # and key the lookup on the exact ref name, never on line order.
     dst = f"refs/heads/{remote_ref}"
-    ls = _run(["git", "ls-remote", "--heads", "origin", dst], cwd=wt, timeout=120)
-    if ls.returncode != 0:
-        raise RuntimeError(f"git ls-remote origin {dst} failed: {ls.stderr.strip()}")
-    remote_sha = ""
-    for line in ls.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[1] == dst:
-            remote_sha = parts[0]
-            break
+    remote_sha = remote_head_sha(wt, remote_ref)
     if not remote_sha:
         raise ForkPushUnsupported(
             f"PR head ref {remote_ref!r} is not on origin (fork PR?); "

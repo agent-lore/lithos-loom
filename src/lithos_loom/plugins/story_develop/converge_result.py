@@ -198,6 +198,11 @@ class ConvergeResult:
             "head_branch": self.change.head_branch,
             "base_sha": self.change.base_sha,
             "head_sha": self.change.head_sha,
+            # The RUN's own id: the work dir its rounds are committed in
+            # (`<work_dir>/converge/<run_id>`), so an exhausted run can be
+            # found again — `develop converge-push` takes it, and the
+            # watcher records it on the exhaustion gate it raises.
+            "run_id": dev.run_id if dev is not None else None,
             "rounds": dev.rounds if dev is not None else 0,
             "develop_status": dev.status if dev is not None else None,
             # #412: the RUN's own branch + worktree — where a coder's commits

@@ -158,6 +158,12 @@ class DeliverRefused(LithosLoomError):
     """A precondition failed and nothing was written. Exits ``1``."""
 
 
+class DeliverWrongCommand(LithosLoomError):
+    """The run named is not this command's to deliver — another command owns
+    it, and the message names that command. Nothing was written. Exits ``2``:
+    a *usage* error, not a state the operator can resolve and retry here."""
+
+
 class DeliverUncertain(LithosLoomError):
     """An external write may or may not have landed, and the read that would
     have settled it failed too. Never exit 1: "nothing was written" is exactly
