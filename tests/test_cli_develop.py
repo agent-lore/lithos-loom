@@ -856,8 +856,8 @@ def test_prune_removes_run_whose_owner_process_is_gone(
     # The same marker, for a process that is positively gone (a live pid whose
     # recorded start time does not match it — a reused pid, which is why the
     # marker records an identity and not a bare number). Docker answers "no
-    # containers", so the two halves together are a definitive "nothing is
-    # alive": finished, without consulting the idle window at all.
+    # containers", so nothing is alive — and the tree went quiet two hours ago,
+    # which is the other half of the rule.
     dead = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
     (dead / run_owner.OWNER_FILE).write_text(
         json.dumps(
@@ -1070,7 +1070,11 @@ def test_prune_classifies_a_dead_run_with_an_unreadable_subdir(
 
         rows = json.loads(capsys.readouterr().out)
         assert [(r["run_id"], r["state"]) for r in rows] == [("dead", "finished")]
+        # the age still had to pass (the tree went quiet two hours ago), and the
+        # line says the timestamp is the newest one it could SEE, not the total
         assert "is gone" in rows[0]["reason"]
+        assert "nothing written since" in rows[0]["reason"]
+        assert "as far as could be read" in rows[0]["reason"]
     finally:
         locked.chmod(0o700)
 
@@ -1143,6 +1147,76 @@ def test_prune_keeps_a_signal_less_run_it_cannot_walk_to_the_end(
 
     assert legacy.exists()
     assert "more entries than the sweep walks" in capsys.readouterr().out
+
+
+# ── prune: the round-4 review findings ─────────────────────────────────
+
+
+def test_prune_keeps_a_just_stopped_run_through_the_grace_window(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # correctness/f-005: "nothing is alive" is only HALF the rule. A run whose
+    # owner died seconds ago is not swept out from under the operator (or from
+    # under the route-runner still reading its result) — the idle window is the
+    # post-crash grace period, and it applies however liveness was settled.
+    crashed = _make_run(patched, task_id="t-1", run_id="crashed", rounds={1: ["cq"]})
+    (crashed / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {"pid": os.getpid(), "start_ticks": 1, "host_boot": orphans.host_boot_id()}
+        )
+    )
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+
+    out = capsys.readouterr().out
+    assert crashed.exists()
+    assert "in flight — kept crashed" in out
+    assert "is gone" in out and "inside the 3600s grace window" in out
+
+    # ...and an hour later the same run, untouched, goes.
+    _backdate(crashed, 7200)
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert not crashed.exists()
+    assert "is gone" in out and "nothing written since" in out
+
+
+def test_prune_strips_terminal_escapes_from_an_agent_named_path(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """security/f-008: the unreadable entry named in the reason is a path the
+    AGENT chose (any byte but NUL and `/` is a legal filename), and prune is the
+    one command that deletes things — a crafted name must not be able to erase
+    or forge the line beside it on the operator's terminal.
+
+    The probe is a bare CR, not an ANSI CSI: ``click.echo`` strips ANSI itself
+    when stdout is not a tty (as under capsys), so an escape-only fixture would
+    pass with or without the fix, while the operator at a real terminal is
+    exactly who is unprotected. ``\r`` is stripped by `_sanitize` and by nobody
+    else, and it is enough on its own to overwrite the previous line. The json
+    view carries the raw bytes escaped, so it is checked for both.
+    """
+    legacy = _make_run(patched, task_id="t-1", run_id="legacy", rounds={1: ["cq"]})
+    locked = legacy / "worktree" / "\x1b[2K\rremoved 54 finished runs"
+    locked.mkdir(parents=True)
+    _backdate(legacy, 7200)
+    locked.chmod(0o000)
+    try:
+        monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+        develop.develop_prune(config=None, dry_run=False, output_format="text")
+        out = capsys.readouterr().out
+        assert legacy.exists()  # unreadable + no liveness signal → kept
+        assert "\r" not in out and "\x1b" not in out
+        assert "removed 54 finished runs" in out  # the text, stripped of controls
+
+        develop.develop_prune(config=None, dry_run=False, output_format="json")
+        raw = capsys.readouterr().out
+        assert r"\u001b" not in raw and r"\r" not in raw
+        assert "removed 54 finished runs" in json.loads(raw)[0]["reason"]
+    finally:
+        locked.chmod(0o700)
 
 
 def test_attach_stops_when_seen_containers_vanish_without_marker(

@@ -17,12 +17,13 @@ commands:
 * ``develop prune`` — delete the on-disk run-state dirs of finished runs
   (``--dry-run`` previews, naming the reason + size per candidate). Finished is
   read from **liveness**, not from one file: the run wrote its terminal
-  ``state.json`` / ``conversation.md``, or nothing is alive for it — no running
-  agent container and the owner process it stamped into its run dir
-  (``story_develop.run_owner``) provably gone; failing any signal at all, an
-  idle window of one agent turn. An in-flight run is never removed out from
-  under a live daemon, and a dir the rule cannot classify — docker unavailable
-  included — is kept and named ``unknown``.
+  ``state.json`` / ``conversation.md``, or **both**: nothing is alive for it —
+  no running agent container, and the owner process it stamped into its run dir
+  (``story_develop.run_owner``) provably gone — *and* nothing anywhere under it
+  written for longer than one agent turn, the grace window a just-stopped run
+  gets. An in-flight run is never removed out from under a live daemon, and a
+  dir the rule cannot classify — docker unavailable included — is kept and
+  named ``unknown``.
 
 The mutating commands registered in this namespace live in their own modules:
 ``review`` / ``converge`` / ``merge-gate`` / ``deliver`` (the last turns a
@@ -444,12 +445,12 @@ _UNCLASSIFIED = "unknown"
 _GONE = "gone"
 _NO_SIGNAL = "no signal"
 
-# How long a run dir must sit untouched before "nothing is alive for it" reads
-# as finished rather than mid-turn: one agent turn, the longest a healthy run
-# can go without writing anything. It is the LAST resort, not the main signal —
-# a live run is recognised by its containers or its owner marker
-# (``story_develop.run_owner``), and only a run that left neither is judged on
-# its idle time.
+# How long a run dir must sit untouched before it counts as finished: one agent
+# turn, the longest a healthy run can go without writing anything. It is the
+# second half of the rule, never a substitute for the first — a live run is
+# recognised by its containers or its owner marker (``story_develop.run_owner``)
+# — and it doubles as the grace window a just-stopped run gets, so a crash stays
+# on disk long enough to be looked at.
 _DEFAULT_IDLE_SECONDS = float(DEFAULT_CODER_TIMEOUT)
 
 # A converge run's intake pass runs under its own run id (``<run>-intake``, see
@@ -753,19 +754,23 @@ def _prune_verdict(
 ) -> PruneVerdict:
     """Classify *run_dir* for ``prune``: finished, in flight, or unclassifiable.
 
-    Finished is decided from **liveness**, not from one file: either the run
-    wrote its epilogue (:func:`_has_terminal_log`), or the liveness probes
-    positively established that nothing is alive for it
-    (:func:`_run_liveness` → :data:`_GONE`), or — when there is no signal to
-    read at all, which since the owner marker means a run dir that predates it
-    — its whole tree has been untouched for longer than one agent turn.
+    Finished is the run's epilogue (:func:`_has_terminal_log`), or **both**
+    halves of the liveness rule: nothing is alive for it *and* nothing anywhere
+    under it has been written for longer than one agent turn. The second half
+    is not a proxy for the first — it is the grace window a just-stopped run
+    gets, so a crash stays on disk long enough to be looked at (and long enough
+    for the route-runner to finish reading its result). Neither half alone
+    deletes anything.
 
-    That last branch is the weakest link and the only one that reads mtimes an
-    agent can write, so it is also the only one a partially-unreadable or
-    truncated walk can veto: age is all it has. A verdict liveness already
-    settled stands regardless — otherwise ``mkdir -m 000 x`` in a worktree
-    would be a one-command "keep my run dir forever", which is the very thing
-    this sweep exists to make impossible.
+    What :func:`_run_liveness` established changes only what an **incomplete
+    age reading** may do. With a :data:`_GONE` answer — the process that ran it
+    provably dead, docker reporting no container up — nothing can be writing
+    under the dir, so the newest mtime the walk *could* read is the age, noted
+    as partial in the reason. With no liveness answer at all (:data:`_NO_SIGNAL`
+    — a run dir predating the owner marker) age is the only evidence there is,
+    so a partially-unreadable or truncated walk decides nothing. Letting the
+    hole veto a settled verdict too is what made ``mkdir -m 000 x`` in a
+    worktree a one-command "keep my run dir forever".
     """
     live = _run_liveness(run_dir)
     if live.state == _IN_FLIGHT:
@@ -789,33 +794,62 @@ def _prune_verdict(
             )
     if live.state == _UNCLASSIFIED:
         return PruneVerdict(_UNCLASSIFIED, live.reason)
-    if live.state == _GONE:
-        return PruneVerdict(_FINISHED, live.reason)
+    settled = live.state == _GONE
     scan = scans.get(run_dir) or _scan_tree(run_dir, now=now)
-    if scan.unreadable:
-        return PruneVerdict(
-            _UNCLASSIFIED,
-            "this run left no owner marker and part of its dir could not be "
-            f"read ({scan.unreadable}), so its age is unknown",
+    if not settled and (scan.unreadable or scan.truncated):
+        # No liveness answer: age is the ONLY evidence, and this walk has a
+        # hole in it. Nothing may be concluded from a tree we could not see.
+        gap = (
+            f"part of its dir could not be read ({_sanitize(scan.unreadable)})"
+            if scan.unreadable
+            else f"its dir holds more entries than the sweep walks "
+            f"({_MAX_SCAN_ENTRIES})"
         )
-    if scan.truncated:
         return PruneVerdict(
             _UNCLASSIFIED,
-            "this run left no owner marker and its dir holds more entries than "
-            f"the sweep walks ({_MAX_SCAN_ENTRIES}), so its age is unknown",
+            f"this run left no owner marker and {gap}, so its age is unknown",
         )
     if not scan.newest_mtime:
         return PruneVerdict(_UNCLASSIFIED, "nothing under the run dir can be stat-ed")
+    written = _format_mtime(scan.newest_mtime)
     if now - scan.newest_mtime <= idle_seconds:
+        # Both halves of the rule must hold, so a run that stopped moments ago
+        # is kept even once liveness has settled: that window is the operator's
+        # (and the route-runner's) chance to look at what a crash left behind.
         return PruneVerdict(
             _IN_FLIGHT,
-            f"no terminal log, but written at {_format_mtime(scan.newest_mtime)} — "
-            f"inside the {int(idle_seconds)}s agent-turn window",
+            (
+                f"{live.reason}, but it wrote at {written} — inside the "
+                f"{int(idle_seconds)}s grace window"
+                if settled
+                else f"no terminal log, but written at {written} — inside the "
+                f"{int(idle_seconds)}s agent-turn window"
+            ),
+        )
+    if not settled:
+        return PruneVerdict(
+            _FINISHED, f"no live process and nothing written since {written}"
         )
     return PruneVerdict(
-        _FINISHED,
-        f"no live process and nothing written since {_format_mtime(scan.newest_mtime)}",
+        _FINISHED, f"{live.reason}; nothing written since {written}{_gap_note(scan)}"
     )
+
+
+def _gap_note(scan: _TreeScan) -> str:
+    """What the age reading could not see, for a verdict liveness already settled.
+
+    A partial walk cannot age a run *up* — only a live writer could, and the
+    liveness probes established there is none — so it does not veto the verdict
+    (that is how ``mkdir -m 000 x`` in a worktree became a permanent
+    ``unknown — kept`` before). It does mean the timestamp is the newest one
+    *visible*, so the line says so rather than overstating it. The path is
+    agent-chosen: sanitise it before it reaches a terminal.
+    """
+    if scan.unreadable:
+        return f" (as far as could be read; {_sanitize(scan.unreadable)} could not be)"
+    if scan.truncated:
+        return " (as far as could be read; the tree was too large to walk to the end)"
+    return ""
 
 
 def _format_size(size: int, *, at_least: bool = False) -> str:
@@ -1069,16 +1103,17 @@ def develop_prune(
     Succeeded runs are reaped by the route-runner; this clears the failed /
     interrupted / killed dirs (and the on-demand ``converge`` / ``review``
     worktrees) that accumulate. A run is *finished* when it wrote its terminal
-    ``state.json`` / ``conversation.md``, **or** when nothing is alive for it:
-    no running agent container and the process it stamped into its run dir at
-    start provably gone — or, for a run dir that left no signal at all, nothing
-    anywhere under it written for longer than one agent turn. A converge
-    ``-intake`` pass, which never writes an epilogue, is finished with its
-    parent run; a ``merge-gate`` worktree, which has no handoff dir either, is
-    judged by the same rule. Every in-flight run — including one still in its
-    startup window — is left untouched, and so is any dir the rule cannot
-    classify (docker unavailable, an owner it cannot check, a tree it cannot
-    walk to the end): those are reported as ``unknown — kept``.
+    ``state.json`` / ``conversation.md``, **or** when both halves of the
+    liveness rule hold: nothing is alive for it — no running agent container,
+    and the process it stamped into its run dir at start provably gone — *and*
+    nothing anywhere under it written for longer than one agent turn (the grace
+    window a just-stopped run gets). A converge ``-intake`` pass, which never
+    writes an epilogue, is finished with its parent run; a ``merge-gate``
+    worktree, which has no handoff dir either, is judged by the same rule. Every
+    in-flight run — including one still in its startup window — is left
+    untouched, and so is any dir the rule cannot classify (docker unavailable,
+    an owner it cannot check, or, with no liveness answer at all, a tree it
+    cannot walk to the end): those are reported as ``unknown — kept``.
     ``--dry-run`` previews without deleting, naming why each candidate counts as
     finished and how much disk it holds. A deletion that fails (permissions,
     busy filesystem) is reported as an error, never as a success, and makes the
@@ -1177,9 +1212,14 @@ def develop_prune(
         else:
             kept.append(verdict.state)
             label = f"{verdict.state} — kept"
+        # The reason can quote a path an agent named (an unreadable entry), and
+        # this is the one command that deletes things — a crafted name must not
+        # be able to erase or forge a line beside it. Sanitised at construction
+        # too; this is the sink, and the sink is where the rule holds.
         typer.echo(
             f"{label} {info.run_id} (task {info.task_id})  {info.run_dir}  "
-            f"{_format_size(scan.size, at_least=scan.truncated)}  — {verdict.reason}"
+            f"{_format_size(scan.size, at_least=scan.truncated)}  "
+            f"— {_sanitize(verdict.reason)}"
         )
     if done or not kept:
         typer.echo(f"{verb} {done} finished run{'s' if done != 1 else ''}")
