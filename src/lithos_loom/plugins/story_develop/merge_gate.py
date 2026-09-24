@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ...runner import git, worktree
-from . import check_catalog, profiles
+from . import check_catalog, profiles, run_owner
 from .check_runner import (
     build_check_set,
     check_result_blocks,
@@ -406,6 +406,10 @@ def run_merge_gate(
     head_sha = change.head_sha
     behind = not git.is_ancestor(config.repo, base_sha, head_sha)
 
+    # A merge-gate run dir holds only a worktree — no handoff, no epilogue — so
+    # the owner stamp is the ONLY thing that tells prune it is alive.
+    config.run_dir.mkdir(parents=True, exist_ok=True)
+    run_owner.record_owner(config.run_dir)
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
     wt = worktree.create_on_branch(
         config.repo,

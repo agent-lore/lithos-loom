@@ -24,7 +24,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
 | `lithos_loom.cli.deliver` | L | 0 | 1 |
-| `lithos_loom.cli.develop` | L | 2 | 4 |
+| `lithos_loom.cli.develop` | XL | 3 | 4 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
 | `lithos_loom.cli.merge_gate` | M | 0 | 1 |
@@ -139,6 +139,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 ### `lithos_loom.cli.develop`
 - class `RunInfo` — A story-develop run discovered on disk.
 - class `ContainerStatus`
+- class `PruneVerdict` — Why ``prune`` will — or won't — remove a run dir.
 - def `develop_list` — List inspectable story-develop runs (in-flight + failed/interrupted).
 - def `develop_prune` — Remove the on-disk run-state dirs of **finished** story-develop runs.
 - def `develop_dump` — Print the assembled conversation log for a run (finished or in-flight).
