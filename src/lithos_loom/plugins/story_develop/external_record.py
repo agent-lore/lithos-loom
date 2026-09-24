@@ -43,6 +43,7 @@ __all__ = [
     "ExternalIntake",
     "read_external_intake",
     "record_external_intake",
+    "record_replied",
 ]
 
 EXTERNAL_RECORD = "external.json"
@@ -57,6 +58,14 @@ class ExternalIntake:
     nothing_to_remediate: dict[str, str]
     surviving_ids: tuple[str, ...]
     generated_paths: tuple[str, ...] = ()
+    replied: frozenset[str] = frozenset()
+    """The ids whose thread reply has actually been POSTED, accumulated by
+    whoever posted it (:func:`record_replied`). The dedup key for a later
+    ``develop converge-push``: what a run was *eligible* to answer is not what
+    it *did* answer — a SIGTERM between the loop's terminal state and the
+    reply epilogue, or a transport that returned ``False``, leaves the thread
+    unanswered — and eligibility reconstructed after the fact would suppress a
+    reply that was never posted."""
 
 
 def _finding_to_json(f: ExternalFinding) -> dict:
@@ -100,6 +109,29 @@ def _finding_from_json(data: Mapping) -> ExternalFinding:
         raise ValueError(f"unreadable external finding record: {exc}") from exc
 
 
+def record_replied(run_dir: Path, finding_ids: Sequence[str]) -> None:
+    """Add *finding_ids* to the run's record of threads actually ANSWERED.
+
+    Called by every poster — the converge run's own epilogue and
+    ``develop converge-push``'s replay — right after the transport confirms
+    the reply landed. Union, never a replacement: two posters write this file
+    at different times, and neither may forget the other's.
+
+    Best-effort, like the record it merges into: a reply that posts and then
+    fails to record can be posted twice by a later salvage, which is a far
+    narrower window than answering from eligibility — and the safe direction
+    is to say something twice rather than never.
+    """
+    if not finding_ids:
+        return
+    data = _read(run_dir)
+    if data is None:
+        return
+    already = {i for i in data.get("replied") or () if isinstance(i, str)}
+    data["replied"] = sorted(already | {str(i) for i in finding_ids})
+    _write(run_dir, data)
+
+
 def record_external_intake(
     run_dir: Path,
     *,
@@ -117,6 +149,10 @@ def record_external_intake(
         "surviving_ids": list(surviving_ids),
         "generated_paths": list(generated_paths),
     }
+    _write(run_dir, payload)
+
+
+def _write(run_dir: Path, payload: dict) -> None:
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / EXTERNAL_RECORD).write_text(
@@ -124,11 +160,20 @@ def record_external_intake(
         )
     except OSError as exc:
         logger.warning(
-            "could not record the external intake in %s (%s); a later "
+            "could not write the external record in %s (%s); a later "
             "`develop converge-push` will have no threads to answer",
             run_dir,
             exc,
         )
+
+
+def _read(run_dir: Path) -> dict | None:
+    """The raw record, or ``None`` when there is none to merge into."""
+    try:
+        data = json.loads((run_dir / EXTERNAL_RECORD).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def read_external_intake(run_dir: Path) -> ExternalIntake | None:
@@ -138,11 +183,8 @@ def read_external_intake(run_dir: Path) -> ExternalIntake | None:
     injected), which is why an absent record is not an error: the caller
     simply has no thread to answer.
     """
-    try:
-        data = json.loads((run_dir / EXTERNAL_RECORD).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict) or not isinstance(data.get("findings"), dict):
+    data = _read(run_dir)
+    if data is None or not isinstance(data.get("findings"), dict):
         return None
     id_map: dict[str, ExternalFinding] = {}
     for fid, raw in data["findings"].items():
@@ -164,6 +206,9 @@ def read_external_intake(run_dir: Path) -> ExternalIntake | None:
         ),
         generated_paths=tuple(
             str(p) for p in data.get("generated_paths") or () if isinstance(p, str)
+        ),
+        replied=frozenset(
+            str(i) for i in data.get("replied") or () if isinstance(i, str)
         ),
     )
 

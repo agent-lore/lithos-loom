@@ -1426,3 +1426,65 @@ def test_a_spec_with_no_pr_number_records_nothing(
 
     assert seen["intake"] is None
     assert called == []  # and no `gh` call was made to find out
+
+
+def test_the_replies_that_land_are_recorded_for_a_later_salvage(
+    github_stubs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """correctness/f-005: `develop converge-push` must dedup on what was
+    actually POSTED, not on what this run's status says it was eligible to
+    post — so the poster records each id the transport confirmed."""
+    from lithos_loom.plugins.story_develop.converge import ConvergeResult
+    from lithos_loom.plugins.story_develop.external_record import (
+        read_external_intake,
+        record_external_intake,
+    )
+    from lithos_loom.plugins.story_develop.external_reviews import ExternalOutcome
+
+    github_stubs["trusted"] = [_ext(7), _ext(8)]
+    landed: list[int] = []
+
+    def flaky_reply(repo, pr, comment_id, body):
+        # the second thread's transport refuses — best-effort, as ever
+        if comment_id == 8:
+            return False
+        landed.append(comment_id)
+        return True
+
+    monkeypatch.setattr(converge_cli, "post_thread_reply", flaky_reply)
+
+    def fake_converge_pr(
+        config, change, *, no_push=False, external_findings=None, **_mode
+    ):
+        github_stubs["run_dir"] = config.run_dir
+        assert external_findings is not None
+        # what the real converge_pr writes before the fix loop: the batch the
+        # replies below are recorded against
+        record_external_intake(
+            config.run_dir,
+            id_map={"f-001": external_findings[0], "f-002": external_findings[1]},
+            rejections={"f-001": "refuted"},
+            nothing_to_remediate={},
+            surviving_ids=["f-002"],
+        )
+        return ConvergeResult(
+            status="not_converged",  # the exhausted run `converge-push` is for
+            change=change,
+            external_outcomes=(
+                ExternalOutcome("f-001", external_findings[0], "rejected", "refuted"),
+                ExternalOutcome("f-002", external_findings[1], "disputed", "no"),
+            ),
+        )
+
+    monkeypatch.setattr(converge_cli, "converge_pr", fake_converge_pr)
+
+    result = runner.invoke(
+        develop_app, ["converge", "#142", "--from-github", "--ac", "x"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert landed == [7]
+    # only the reply that LANDED is recorded; the refused one stays owed
+    intake = read_external_intake(github_stubs["run_dir"])
+    assert intake is not None
+    assert intake.replied == frozenset({"f-001"})

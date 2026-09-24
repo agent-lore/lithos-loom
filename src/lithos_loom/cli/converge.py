@@ -47,6 +47,7 @@ from lithos_loom.plugins.story_develop.config import (
     parse_test_command,
 )
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
+from lithos_loom.plugins.story_develop.external_record import record_replied
 from lithos_loom.plugins.story_develop.external_reviews import (
     ExternalFinding,
     ExternalOutcome,
@@ -546,7 +547,12 @@ def converge_command(
         # #377: an infra death is retried after the host is fixed; a reply
         # now would be re-posted then (nothing has been decided about the
         # material — the watcher re-parks the trigger).
-        _post_external_replies(result, repo=gh_repo, pr_number=pr_number)
+        _post_external_replies(
+            result,
+            repo=gh_repo,
+            pr_number=pr_number,
+            run_dir=develop_config.run_dir,
+        )
 
     typer.echo(_render(result))
     if json_out is not None:
@@ -678,7 +684,7 @@ def _reply_transport(mode: ReplyMode) -> Transport | None:
 
 
 def _post_external_replies(
-    result: ConvergeResult, *, repo: str, pr_number: int
+    result: ConvergeResult, *, repo: str, pr_number: int, run_dir: Path
 ) -> None:
     """Answer this run's external findings (see :func:`post_external_replies`)."""
     post_external_replies(
@@ -687,6 +693,7 @@ def _post_external_replies(
         pr_number=pr_number,
         pushed=result.pushed,
         pushed_sha=result.pushed_sha,
+        run_dir=run_dir,
     )
 
 
@@ -732,6 +739,7 @@ def post_external_replies(
     pr_number: int,
     pushed: bool,
     pushed_sha: str,
+    run_dir: Path | None = None,
 ) -> int:
     """Answer each external finding where it was raised, by its reply mode.
     Returns how many replies were posted.
@@ -746,8 +754,14 @@ def post_external_replies(
     Shared with ``develop converge-push``, which posts the replies an
     exhausted run never got to post once the operator pushes its rounds —
     the same rules, from the same dispositions.
+
+    *run_dir*, when given, is where the ids that ACTUALLY posted are recorded
+    (:func:`record_replied`). That record — not the run's status, and not what
+    this function was eligible to post — is what a later ``converge-push``
+    subtracts, so a reply the transport refused, or one this process was
+    killed before making, is still owed.
     """
-    posted = 0
+    posted: list[str] = []
     for o in outcomes:
         transport = _reply_transport(o.finding.reply_mode)
         if transport is None:
@@ -756,7 +770,11 @@ def post_external_replies(
         if body is None:
             continue  # unaddressed, or a fix that never landed — assert nothing
         if transport(repo, pr_number, o.finding, body):
-            posted += 1
+            posted.append(o.finding_id)
     if posted:
-        typer.echo(f"posted {posted} external review repl(ies) on {repo}#{pr_number}")
-    return posted
+        typer.echo(
+            f"posted {len(posted)} external review repl(ies) on {repo}#{pr_number}"
+        )
+    if run_dir is not None:
+        record_replied(run_dir, posted)
+    return len(posted)

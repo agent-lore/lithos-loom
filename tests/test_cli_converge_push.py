@@ -43,9 +43,16 @@ from lithos_loom.github_models import PullRequest
 from lithos_loom.github_review_activity import ReviewStream
 from lithos_loom.github_review_streams import ReplyMode
 from lithos_loom.plugins.story_develop import run_outcome
-from lithos_loom.plugins.story_develop.external_record import record_external_intake
+from lithos_loom.plugins.story_develop.external_record import (
+    read_external_intake,
+    record_external_intake,
+    record_replied,
+)
 from lithos_loom.plugins.story_develop.external_reviews import ExternalFinding
-from lithos_loom.plugins.story_develop.pr_delivery import AUTOMATED_MARKER
+from lithos_loom.plugins.story_develop.pr_delivery import (
+    AUTOMATED_MARKER,
+    MergeRaceDetected,
+)
 from tests.support import FakeLithosClient, make_task
 
 runner = CliRunner()
@@ -631,6 +638,9 @@ def test_replies_only_to_the_threads_the_push_newly_answers(
         nothing_to_remediate={},
         surviving_ids=["f-001"],
     )
+    # …and the run RECORDED that it posted that rejection (f-005: the record of
+    # what landed is the dedup key, never the run's status)
+    record_replied(run_dir, ["f-002"])
     (run_dir / "handoff" / "round_05_coder_done.md").write_text(
         "## Status: LGTM\n\n## Summary\nfixed it\n\n"
         "## External findings\n- f-001: FIXED — inverted the guard\n",
@@ -647,6 +657,41 @@ def test_replies_only_to_the_threads_the_push_newly_answers(
 
     assert [activity_id for activity_id, _ in replies] == [7]
     assert replies[0][1].startswith("Fixed in ")
+
+
+def test_a_reply_the_run_never_posted_is_still_owed(
+    host,
+    run_dir: Path,
+    worktree: Path,
+    lithos: FakeLithosClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """correctness/f-005: a terminal status is written by the loop BEFORE the
+    CLI reaches its reply epilogue, and the transport can refuse — so what the
+    run was *eligible* to answer is not what it answered. Only the record of
+    replies that actually landed may suppress one."""
+    record_external_intake(
+        run_dir,
+        id_map={"f-002": _external_finding(8)},
+        rejections={"f-002": "the guard is already there, see line 40"},
+        nothing_to_remediate={},
+        surviving_ids=[],
+    )
+    # the run died (or its transport failed) before answering: nothing recorded
+    replies: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        converge_cli,
+        "post_thread_reply",
+        lambda repo, pr, activity_id, body: replies.append((activity_id, body)) or True,
+    )
+
+    assert _invoke(_RUN, "--yes").exit_code == 0
+
+    assert [activity_id for activity_id, _ in replies] == [8]
+    assert "triage:" in replies[0][1]
+    # …and THIS push records what it posted, so nothing answers it again
+    intake = read_external_intake(run_dir)
+    assert intake is not None and intake.replied == frozenset({"f-002"})
 
 
 def test_an_infra_failed_run_still_owes_every_thread(
@@ -813,9 +858,16 @@ def test_the_report_measures_from_the_head_the_push_is_leased_against(
     [
         (_pull_request(state="closed", merged=True), "MERGED"),
         (_pull_request(state="closed"), "closed"),
-        (_pull_request(head_ref="someone-elses-branch"), "now heads"),
+        (_pull_request(head_ref="someone-elses-branch"), "heads"),
         (_pull_request(head_repo="a-fork/lithos-loom"), "fork"),
         (None, "no longer exists"),
+        # security/f-004: a field the payload does not carry is not a pass.
+        # GitHub returns `"head": {"repo": null}` once the head FORK is
+        # deleted, and an `x and x != y` check would skip the fork guard there
+        # — letting a third party's head land on an origin branch of the same
+        # name under the operator's credentials.
+        (_pull_request(head_repo=""), "deleted fork"),
+        (_pull_request(head_ref=""), "no head branch in the payload"),
     ],
 )
 def test_refuses_when_the_pr_is_no_longer_the_one_recorded(
@@ -854,6 +906,27 @@ def test_refuses_when_the_pr_cannot_be_re_read(
     assert _remote_head(worktree) == before
 
 
+def test_refuses_a_run_that_recorded_no_repository(
+    host, run_dir: Path, worktree: Path, lithos: FakeLithosClient, gh: dict
+) -> None:
+    """security/f-004: `_record_pr_facts` writes an empty repo when the origin
+    read failed at intake. There is then nothing to compare origin against and
+    nothing to address the replies to — not a pass."""
+    state = run_outcome.read_state(run_dir) or {}
+    block = dict(state[run_outcome.CONVERGE_KEY])
+    block["repo"] = ""
+    run_outcome.write_state(run_dir, {run_outcome.CONVERGE_KEY: block})
+    before = _remote_head(worktree)
+
+    result = _invoke(_RUN, "--yes")
+
+    assert result.exit_code == 1, result.output
+    assert "recorded no repository" in result.output
+    assert _remote_head(worktree) == before
+    assert gh.get("fetched") is None  # refused before any GitHub read
+    assert lithos.calls == []
+
+
 def test_refuses_when_the_worktrees_origin_is_not_the_recorded_repo(
     host, run_dir: Path, worktree: Path, lithos: FakeLithosClient, gh: dict
 ) -> None:
@@ -865,3 +938,91 @@ def test_refuses_when_the_worktrees_origin_is_not_the_recorded_repo(
     assert result.exit_code == 1, result.output
     assert "not the" in result.output and "recorded" in result.output
     assert _remote_head(worktree) == before
+
+
+# ── round 3: the reviewers' findings ───────────────────────────────────
+
+
+def test_refuses_cleanly_when_the_pr_head_cannot_be_fetched(
+    host,
+    run_dir: Path,
+    worktree: Path,
+    lithos: FakeLithosClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """correctness/f-006: `ls-remote` can see a commit this clone lacks. If
+    the fetch then fails, every range command against that sha raises — and
+    the operator gets a traceback where the verdict should be."""
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "clone", str(tmp_path / "origin.git"), str(other)],
+        check=True,
+        capture_output=True,
+    )
+    _git(other, "config", "user.email", "o@example.com")
+    _git(other, "config", "user.name", "O")
+    _git(other, "checkout", _PR_BRANCH)
+    (other / "theirs.py").write_text("z = 3\n", encoding="utf-8")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-m", "someone else's commit")
+    _git(other, "push", "origin", _PR_BRANCH)
+    monkeypatch.setattr(
+        cli_facts.git, "fetch_refspecs", lambda repo, refspecs, **kw: "network is down"
+    )
+    out = tmp_path / "record.json"
+
+    result = _invoke(_RUN, "--yes", "--json", str(out))
+
+    assert result.exit_code == 1, result.output
+    assert "Traceback" not in result.output
+    # the refusal names the head it could not resolve, whichever guard caught it
+    assert _remote_head(worktree)[:12] in result.output
+    assert "refused" in result.output
+    # the stable record is still written, and nothing was touched
+    assert json.loads(out.read_text(encoding="utf-8"))["verdict"] == "refused"
+    assert lithos.calls == []
+    assert run_outcome.converge_pushed_sha(run_dir) is None
+
+
+def test_a_proven_non_landing_is_refused_not_uncertain(
+    host,
+    run_dir: Path,
+    worktree: Path,
+    lithos: FakeLithosClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """correctness/f-007: `MergeRaceDetected` is raised from the push seam's
+    own pre-push read or from a push the SERVER rejected — both prove nothing
+    landed, so the read-back's "uncertain" must not apply to them even when
+    the ref has meanwhile moved to a third sha."""
+    other = tmp_path / "other"
+    subprocess.run(
+        ["git", "clone", str(tmp_path / "origin.git"), str(other)],
+        check=True,
+        capture_output=True,
+    )
+    _git(other, "config", "user.email", "o@example.com")
+    _git(other, "config", "user.name", "O")
+    _git(other, "checkout", _PR_BRANCH)
+    (other / "theirs.py").write_text("z = 3\n", encoding="utf-8")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-m", "someone else's commit")
+
+    def moves_then_refuses(*a, **k):
+        # the race the seam itself detects: the plan saw an ancestor, another
+        # actor diverges the branch, and the seam's own pre-push read refuses
+        _git(other, "push", "origin", _PR_BRANCH)
+        raise MergeRaceDetected("PR head ref advanced remotely; re-run converge")
+
+    monkeypatch.setattr(cli, "push_to_pr_ref", moves_then_refuses)
+
+    result = _invoke(_RUN, "--yes")
+    moved = _remote_head(worktree)
+
+    assert result.exit_code == 1, result.output  # refused, never uncertain (2)
+    assert "push refused" in result.output
+    assert _remote_head(worktree) == moved
+    assert lithos.calls == []
+    assert run_outcome.converge_pushed_sha(run_dir) is None

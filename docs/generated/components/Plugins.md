@@ -33,7 +33,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
 | `lithos_loom.plugins.story_develop.develop` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
-| `lithos_loom.plugins.story_develop.external_record` | S | 1 | 2 |
+| `lithos_loom.plugins.story_develop.external_record` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.external_reviews` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.external_triage` | M | 1 | 5 |
 | `lithos_loom.plugins.story_develop.findings` | L | 4 | 6 |
@@ -212,6 +212,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.external_record`
 - class `ExternalIntake` — The injected batch, as the fix loop received it.
+- def `record_replied` — Add *finding_ids* to the run's record of threads actually ANSWERED.
 - def `record_external_intake` — Write the injected batch into *run_dir* (best-effort).
 - def `read_external_intake` — The injected batch, or ``None`` — no record, or one we cannot read.
 

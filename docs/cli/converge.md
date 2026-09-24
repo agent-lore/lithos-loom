@@ -123,7 +123,10 @@ converge merges the **whole-command** spend in beside the loop's own
 only `cost_usd`). In `--from-github`
 mode the run also records the injected batch (`external.json`: the id→row map,
 triage's verdicts, the surviving ids), which is what the replayed thread replies
-are composed from.
+are composed from — and the run's own reply epilogue adds each id whose reply
+the transport **confirmed** to that file's `replied` set, so the salvage
+answers only the threads still owed one rather than inferring that from the
+run's status (which the loop writes before the epilogue runs).
 
 ## v1 limit — dispute-all round 1
 

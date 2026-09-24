@@ -167,7 +167,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `report` — The operator-facing report — every fact the decision rests on.
 - def `json_record` — The same facts as a stable object.
 - def `finding_summary` — ``[ConvergePushed]`` — what landed, and what it landed WITH.
-- def `replay_outcomes` — The threads this push newly owes an answer — never the ones the run already answered when it exited.
+- def `replay_outcomes` — The threads this push owes an answer — never one already answered.
 - def `converge_push_command` — Report an exhausted converge run's unpushed rounds — and push them.
 
 ### `lithos_loom.cli.deliver`

@@ -290,20 +290,29 @@ def verify_pr(run: ConvergeRun) -> PrCheck:
     """
     if run.pr_number is None:
         return PrCheck(False, "the run recorded no PR number — nothing to verify")
-    if run.repo:
-        # The push goes to the worktree's `origin`; the replies and the finding
-        # are addressed to the recorded repo. They must be the same place.
-        try:
-            origin = origin_repo_name(run.worktree)
-        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
-            return PrCheck(False, f"could not read the worktree's origin ({exc})")
-        if origin.lower() != run.repo.lower():
-            return PrCheck(
-                False,
-                f"the worktree's origin is {origin!r}, not the {run.repo!r} this "
-                "run recorded — the PR, the thread replies and the push would "
-                "not be the same repository",
-            )
+    if not run.repo:
+        # Written empty when the origin read failed at intake. Without it there
+        # is nothing to compare the worktree's origin against and nothing to
+        # address the replies to — "I do not know which repository" is not a
+        # pass.
+        return PrCheck(
+            False,
+            "the run recorded no repository (its origin could not be read at "
+            "intake), so the PR it names cannot be confirmed — push by hand",
+        )
+    # The push goes to the worktree's `origin`; the replies and the finding
+    # are addressed to the recorded repo. They must be the same place.
+    try:
+        origin = origin_repo_name(run.worktree)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        return PrCheck(False, f"could not read the worktree's origin ({exc})")
+    if origin.lower() != run.repo.lower():
+        return PrCheck(
+            False,
+            f"the worktree's origin is {origin!r}, not the {run.repo!r} this "
+            "run recorded — the PR, the thread replies and the push would "
+            "not be the same repository",
+        )
     try:
         pr = fetch_pull_request(run.repo, run.pr_number)
     except (GitHubError, RuntimeError, OSError) as exc:
@@ -326,20 +335,33 @@ def verify_pr(run: ConvergeRun) -> PrCheck:
             head_ref=pr.head_ref,
             state=pr.state,
         )
-    if pr.head_ref and pr.head_ref != run.pr_head_branch:
+    # Each check below refuses on a field it cannot READ, not only on one that
+    # disagrees: `head_ref` is the single field binding "PR #N" to "the branch
+    # we are about to push to", and an `x and x != y` shape would skip it on an
+    # empty payload and degrade the guard to "the PR exists and is open".
+    if not pr.head_ref or pr.head_ref != run.pr_head_branch:
         return PrCheck(
             False,
-            f"{run.repo}#{run.pr_number} now heads {pr.head_ref!r}, not the "
+            f"{run.repo}#{run.pr_number} heads "
+            f"{pr.head_ref or '(no head branch in the payload)'}, not the "
             f"{run.pr_head_branch!r} this run recorded — the branch under that "
-            "name is no longer this PR's",
+            "name is not confirmed to be this PR's",
             head_ref=pr.head_ref,
             state=pr.state,
         )
-    if pr.head_repo and pr.base_repo and pr.head_repo != pr.base_repo:
+    # GitHub returns `"head": {"repo": null}` for a PR whose head FORK was
+    # deleted, which parses to an empty `head_repo`. Skipping the fork check
+    # there is how an unreviewed third-party head lands on an origin branch of
+    # the same name (this command leases against the LIVE head, so converge's
+    # accidental protection — leasing against the fork's own sha — is gone).
+    if not pr.head_repo or not pr.base_repo or pr.head_repo != pr.base_repo:
         return PrCheck(
             False,
-            f"{run.repo}#{run.pr_number} heads a fork ({pr.head_repo}) — loom "
-            "cannot push to it under origin credentials",
+            f"{run.repo}#{run.pr_number} is not confirmed to head this "
+            f"repository (head {pr.head_repo or 'unknown — a deleted fork?'}, "
+            f"base {pr.base_repo or 'unknown'}) — loom cannot push to a fork "
+            "under origin credentials, and a head it cannot identify is not a "
+            "head it may push to",
             head_ref=pr.head_ref,
             state=pr.state,
         )
@@ -385,19 +407,36 @@ def plan_push(run: ConvergeRun) -> PushPlan:
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
         raise ConvergePushRefused(f"could not read the PR's head: {exc}") from exc
     if remote_sha:
-        # The ancestry question is only answerable about commits this clone
-        # HAS: a head someone else pushed while the run was working is not in
-        # the worktree's object store, and `--is-ancestor` on it errors rather
-        # than answering "no". Fetch the ref first (read-only), so the verdict
-        # below is git's real answer about the real commits.
+        # The ancestry question — and every range below it — is only answerable
+        # about commits this clone HAS: a head someone else pushed while the
+        # run was working is not in the worktree's object store, and `git
+        # rev-list` / `--is-ancestor` on it ERROR rather than answering. Fetch
+        # the ref (read-only); if the object is still not here afterwards there
+        # is no honest verdict to give, so refuse rather than raise past the
+        # report.
         problem = git.fetch_refspecs(run.worktree, [f"refs/heads/{run.pr_head_branch}"])
-        if problem:
+        try:
+            git.commit_sha(run.worktree, remote_sha)
+        except (RuntimeError, OSError) as exc:
             logger.info(
-                "converge-push %s: could not fetch %s (%s); judging on what "
-                "this clone already has",
+                "converge-push %s: the PR head %s is not in this clone after "
+                "fetching %s (%s): %s",
                 run.run_id,
+                remote_sha[:12],
                 run.pr_head_branch,
-                problem,
+                problem or "the fetch reported success",
+                exc,
+            )
+            return PushPlan(
+                verdict=REFUSED,
+                detail=(
+                    f"the PR head is {remote_sha[:12]}, which this clone does "
+                    f"not have and could not fetch ({problem or exc}) — the "
+                    "push can only be proved append-only against an object "
+                    "that is here. Re-run when the remote answers"
+                ),
+                tip=tip,
+                remote_sha=remote_sha,
             )
 
     if not remote_sha:
@@ -417,9 +456,24 @@ def plan_push(run: ConvergeRun) -> PushPlan:
     # ancestry guard, and measuring from the intake head would show the
     # operator "2 commits" while the push silently restores the removed ones.
     # `intake_head_sha` stays a reported fact of its own.
-    commits = tuple(git.commits_since(run.worktree, remote_sha))
-    log = git.log_between(run.worktree, remote_sha)
-    diffstat = git.diff_stat(run.worktree, remote_sha)
+    try:
+        commits = tuple(git.commits_since(run.worktree, remote_sha))
+        log = git.log_between(run.worktree, remote_sha)
+        diffstat = git.diff_stat(run.worktree, remote_sha)
+    except (RuntimeError, OSError) as exc:
+        # Defensive beside the presence check above: a range this clone cannot
+        # build is a report it cannot make, and the operator gets a refusal
+        # rather than a traceback where the verdict should be.
+        return PushPlan(
+            verdict=REFUSED,
+            detail=(
+                f"the commits between the PR head {remote_sha[:12]} and this "
+                f"run's tip {tip[:12]} could not be read ({exc}); nothing can "
+                "be reported or pushed"
+            ),
+            tip=tip,
+            remote_sha=remote_sha,
+        )
     if remote_sha == tip:
         return PushPlan(
             verdict=ALREADY_PUSHED,

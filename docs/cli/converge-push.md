@@ -54,8 +54,10 @@ write. It prints, from the run dir and one read-only `ls-remote` / `fetch`:
 | `refused` | The remote head is not an ancestor of the tip (someone else pushed), the head branch is gone, or the PR is no longer the one recorded (below). `--yes` writes nothing. | 1 |
 
 The remote ref is fetched before the ancestry question is asked, because
-`--is-ancestor` can only answer about commits this clone *has*; a head that
-still cannot be resolved is **refused**, never assumed safe.
+`--is-ancestor` — and every commit range in the report — can only answer about
+commits this clone *has*. A head that is still not here after the fetch (a
+collaborator's commit plus a transport that failed) is **refused** with that
+said, never assumed safe and never allowed to raise past the report.
 
 The commit list, the log and the diffstat are measured from the **live remote
 head** — the base the push is actually leased against — not from
@@ -76,10 +78,16 @@ before the verdict is printed — `gh`'s PR payload plus the worktree's `origin`
   same guard `converge` itself applies) or is otherwise not open;
 - its head branch is no longer the recorded one (deleted and recreated under
   the same deterministic name is the realistic case);
-- the head is on a fork, which loom cannot push to under origin credentials;
-- the worktree's `origin` is not the repository the run recorded — the push,
-  the thread replies and the `[ConvergePushed]` provenance must all be the
-  same place;
+- the head is on a fork, or the payload does not say **whose** repository it
+  is on (GitHub returns `"head": {"repo": null}` once a head fork is deleted —
+  a field the guard cannot read is refused, not skipped, or a third party's
+  head could land on an origin branch of the same name);
+- the payload does not name the head branch at all — that field is the only
+  thing binding "PR #N" to "the branch we are about to push to";
+- the worktree's `origin` is not the repository the run recorded, or the run
+  recorded none (its origin read failed at intake) — the push, the thread
+  replies and the `[ConvergePushed]` provenance must all be the same place,
+  and "I do not know which repository" is not a pass;
 - **or the read did not answer at all.** It fails closed: the same stale record
   addresses the replies and the audit finding, so "could not verify" is not a
   pass. The refusal is stated in the **report**, not only under `--yes` — the
@@ -92,19 +100,23 @@ before the verdict is printed — `gh`'s PR payload plus the worktree's `origin`
    `--force-with-lease` against the head just read — never a force, never a
    non-descendant. The lease makes the push atomic: a head that moves between
    the report and the push is rejected, and nothing lands.
-2. **Answer the reviewers — the threads the push newly answers, and only
-   those.** An exhausted `--from-github` run already replied to part of its
-   batch when it exited: a triage rejection and a coder dispute stand without a
-   push, and `converge` posts them. What it could *not* assert is a fix. So the
-   recorded batch (`external.json`) plus the handoffs on disk are read twice —
-   once as the run left it, once with `loop_approved=True` and pushed (the
-   operator's `--yes` **is** the approval the loop never gave) — and only the
-   difference is posted. Nothing is replied to twice. The rules themselves are
-   unchanged (#387 / #399): `Fixed in <sha>` needs the coder's own `FIXED`
-   acknowledgement for that id in its final handoff, and every reply ends with
-   the automated marker so the watcher's trust filter ignores it. (An
-   `infra_failed` run answered nothing — `converge` skips its epilogue there —
-   so its whole batch is owed.)
+2. **Answer the reviewers — every thread still owed one.** The dispositions
+   come from the recorded batch (`external.json`) plus the handoffs on disk,
+   read with `loop_approved=True` (the operator's `--yes` **is** the approval
+   the loop never gave), under the unchanged rules (#387 / #399): `Fixed in
+   <sha>` needs the coder's own `FIXED` acknowledgement for that id in its
+   final handoff, and every reply ends with the automated marker so the
+   watcher's trust filter ignores it.
+
+   What is **subtracted** is the run's record of the threads it *actually
+   posted to* — `external.json`'s `replied`, written by whichever process
+   posted each reply, right after the transport confirmed it. Deliberately not
+   what the run was *eligible* to answer: its terminal status is written by the
+   loop before the CLI reaches its reply epilogue, so a SIGTERM in that window
+   — or a transport that simply returned `False` — leaves a rejection
+   unanswered on a run that, by its status alone, looks as though it had
+   answered. `converge-push` records its own replies the same way, so a re-run
+   after a lost push acknowledgement answers nobody twice.
 3. **Record the decision.** `[ConvergePushed]` on the story, naming the pushed
    sha, the rounds, the gate verdict and **the findings it was pushed with**.
    A run with an unapproved last round is still pushed — the operator has read
@@ -117,9 +129,13 @@ Everything after the push is best-effort and degrades into a `note:` line (and
 into `notes` in `--json`): the commits are on the PR, and no later failure may
 be reported as a failure to push.
 
-**A failed push is read back before it is called one.** A nonzero `git push` is
-not proof that the server did not apply the update — it can accept it and the
-connection drop before the client sees the answer. So the ref is re-read and
+**An ambiguous failed push is read back before it is called one.** The two
+typed refusals the push seam raises — the head ref absent from origin, and a
+head that no longer holds the sha the lease names (including a push the server
+itself **rejected**, which is its own report-status) — prove that nothing
+landed, and are refused directly (exit 1). Everything else is ambiguous: the
+server can accept the update and the connection drop before the client sees the
+answer. There the ref is re-read and
 the three answers kept apart: at our tip (or at a third sha that *contains* it)
 → the push **landed**, and the record, the replies and the finding are owed
 exactly as on a clean push, with a note saying the acknowledgement was lost;

@@ -224,28 +224,25 @@ def finding_summary(run: ConvergeRun, *, pushed_sha: str) -> str:
 
 
 def replay_outcomes(run: ConvergeRun) -> tuple[ExternalOutcome, ...]:
-    """The threads this push newly owes an answer — never the ones the run
-    already answered when it exited.
+    """The threads this push owes an answer — never one already answered.
 
-    Two readings of the same recorded batch (the intake record plus the coder
-    handoffs on disk, through the same ``final_round_outcomes`` and the same
-    #387 / #399 acknowledgement rules):
+    The dispositions are the recorded batch (the intake record plus the coder
+    handoffs on disk) read through the same ``final_round_outcomes`` and the
+    same #387 / #399 acknowledgement rules, with ``loop_approved=True``: the
+    operator's ``--yes`` IS the approval the loop never gave (they have read
+    the open findings and decided the rounds should land), and that is what
+    turns an acknowledged ``FIXED`` from an unassertable claim into
+    ``Fixed in <sha>``.
 
-    * **as the run exited** — its own ``loop_approved`` and nothing pushed.
-      ``converge`` posts its epilogue for every status but ``infra_failed``,
-      so whatever *that* reading answers is already on the reviewers' threads:
-      a triage rejection, a dispute, a reverted fix. Re-posting them would
-      duplicate on a public thread that nobody can tidy up.
-    * **as the push makes it** — ``loop_approved=True`` (the operator's
-      ``--yes`` IS the approval the loop never gave: they have read the open
-      findings and decided the rounds should land) and pushed. This is what
-      turns an acknowledged ``FIXED`` from an unassertable claim into
-      ``Fixed in <sha>``.
-
-    What is returned is the second reading minus every id the first one
-    answered. An ``infra_failed`` run answered nothing (``converge`` skips its
-    epilogue there, since the host is to be fixed and the run retried), so for
-    that one the whole batch is owed.
+    What is subtracted is the run's record of the threads it **actually
+    posted** to (``external.json``'s ``replied``, written by whichever process
+    posted each one — see :func:`~.external_record.record_replied`). Not what
+    the run was *eligible* to answer: its terminal status is written by the
+    loop *before* ``converge_pr`` returns and before the CLI reaches its reply
+    epilogue, so a SIGTERM in that window — or a transport that simply
+    returned ``False`` — leaves a rejection or a dispute unanswered on a run
+    that looks, from its status alone, as though it had answered. Reconstructed
+    eligibility would suppress exactly those.
 
     ``()`` for a local-panel run (no external material was injected) and for
     one whose record is missing or unreadable — there is then no thread this
@@ -254,35 +251,20 @@ def replay_outcomes(run: ConvergeRun) -> tuple[ExternalOutcome, ...]:
     intake = read_external_intake(run.run_dir)
     if intake is None or not intake.id_map:
         return ()
-
-    def _outcomes(*, loop_approved: bool) -> tuple[ExternalOutcome, ...]:
-        return final_round_outcomes(
-            handoff_dir=run.run_dir / "handoff",
-            run_id=run.run_id,
-            rounds=run.rounds or 1,
-            loop_approved=loop_approved,
-            worktree=run.worktree,
-            head_sha=run.intake_head_sha,
-            generated_paths=intake.generated_paths,
-            id_map=intake.id_map,
-            rejections=intake.rejections,
-            nothing_to_remediate=intake.nothing_to_remediate,
-            surviving_ids=intake.surviving_ids,
-        )
-
-    owed = _outcomes(loop_approved=True)
-    if run.status == "infra_failed":
-        return owed
-    # The reply rule is the converge command's own (imported where it is used,
-    # so this module does not depend on the whole converge CLI to report).
-    from lithos_loom.cli.converge import reply_for
-
-    already = {
-        o.finding_id
-        for o in _outcomes(loop_approved=run.status == run_outcome.APPROVED)
-        if reply_for(o, pushed=False, pushed_sha="") is not None
-    }
-    return tuple(o for o in owed if o.finding_id not in already)
+    owed = final_round_outcomes(
+        handoff_dir=run.run_dir / "handoff",
+        run_id=run.run_id,
+        rounds=run.rounds or 1,
+        loop_approved=True,
+        worktree=run.worktree,
+        head_sha=run.intake_head_sha,
+        generated_paths=intake.generated_paths,
+        id_map=intake.id_map,
+        rejections=intake.rejections,
+        nothing_to_remediate=intake.nothing_to_remediate,
+        surviving_ids=intake.surviving_ids,
+    )
+    return tuple(o for o in owed if o.finding_id not in intake.replied)
 
 
 # ── the Lithos epilogue ────────────────────────────────────────────────
@@ -404,11 +386,22 @@ def converge_push_command(
                 facts.pr_head_branch,
                 expected_remote_sha=plan.remote_sha,
             )
-        except (MergeRaceDetected, ForkPushUnsupported, RuntimeError, OSError) as exc:
-            # A nonzero push is NOT proof that nothing landed: the server can
-            # accept the update and the connection drop before the client sees
-            # the answer. The lease proves atomicity, not observability — so
-            # read the ref back and classify.
+        except (MergeRaceDetected, ForkPushUnsupported) as exc:
+            # PROVEN non-landings, and the only ones: the push seam raises
+            # these from its pre-push reads (the ref is absent from origin, or
+            # it no longer holds the head the lease names) and from a push the
+            # server itself REJECTED — a rejection is the server's own
+            # report-status, so the update was not applied. Reading the ref
+            # back here would see whatever the other actor left and report
+            # "uncertain" about an invocation that is known to have written
+            # nothing.
+            _error(f"push refused: {exc}")
+            raise typer.Exit(EXIT_CODES["refused"]) from exc
+        except (RuntimeError, OSError) as exc:
+            # Everything else is ambiguous: the server can accept the update
+            # and the connection drop before the client sees the answer. The
+            # lease proves atomicity, not observability — so read the ref back
+            # and classify.
             pushed_sha, problem, code = _classify_failed_push(facts, plan, exc)
             if not pushed_sha:
                 _error(problem)
@@ -570,6 +563,9 @@ def _post_epilogue(
                 pr_number=facts.pr_number,
                 pushed=True,
                 pushed_sha=pushed_sha,
+                # every reply that lands is recorded, so a re-run after a lost
+                # push acknowledgement answers nobody twice
+                run_dir=facts.run_dir,
             )
         except (RuntimeError, OSError) as exc:
             notes.append(f"external thread replies failed ({exc})")
