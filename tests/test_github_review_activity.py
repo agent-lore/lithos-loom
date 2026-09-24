@@ -34,6 +34,7 @@ from lithos_loom.github_review_streams import (
     ReplyMode,
     actionable,
     adapter_for,
+    dispositions,
     fetch_activity,
     handled_review_ids,
     landed_fix_claims,
@@ -333,6 +334,124 @@ def test_actionable_candidates_can_be_a_subset_of_the_context() -> None:
     ]  # no context → no roots known
 
 
+# ── an approval is not a finding (827cedf8 / lens #100) ───────────────
+
+
+def test_dispositions_splits_approvals_out_of_the_actionable_batch() -> None:
+    rows = [
+        from_review(_review(500, state="APPROVED", body=""), repo=_REPO, pr_number=_PR),
+        from_conversation_comment(
+            _conversation(20, body="**No findings.** Ready to merge.")
+        ),
+        from_inline_comment(_inline(7)),  # a real claim
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert [a.activity_id for a in act] == [7]
+    assert [a.activity_id for a in appr] == [500, 20]
+
+
+def test_an_approved_review_that_asks_is_actionable_not_silent() -> None:
+    """PR #425 review, correctness f-001: it matched neither rule and was
+    consumed by the marker."""
+    rows = [
+        from_review(
+            _review(500, state="APPROVED", body="LGTM, but rename `foo`"),
+            repo=_REPO,
+            pr_number=_PR,
+        ),
+        from_review(
+            _review(501, state="APPROVED", body="LGTM"), repo=_REPO, pr_number=_PR
+        ),
+        from_review(
+            _review(502, state="DISMISSED", body="rename `foo`"),
+            repo=_REPO,
+            pr_number=_PR,
+        ),
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert [a.activity_id for a in act] == [500]
+    assert [a.activity_id for a in appr] == [501]  # 502 is silent, as ever
+
+
+def test_an_approval_that_asks_stays_in_the_actionable_batch() -> None:
+    rows = [
+        from_conversation_comment(_conversation(20, body="LGTM, but rename `foo`")),
+        from_inline_comment(_inline(7, body="looks good to me")),
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert [a.activity_id for a in act] == [20]
+    assert [a.activity_id for a in appr] == [7]  # a bare "looks good" inline root
+
+
+def test_a_review_that_owns_comments_still_reports_what_it_WROTE() -> None:
+    """Security f-004: an approval-prose body on a review that owns inline
+    roots was refused by both buckets and left the sweep unreported. Only the
+    WORDLESS approve-and-comment case has nothing of its own to say."""
+    wrote = [
+        from_review(
+            _review(500, state="APPROVED", body="LGTM overall"),
+            repo=_REPO,
+            pr_number=_PR,
+        ),
+        from_inline_comment(_inline(7, review_id=500)),
+    ]
+    act, appr = dispositions(wrote, frozenset())
+    assert [a.activity_id for a in act] == [7]
+    assert [a.activity_id for a in appr] == [500]  # never silently dropped
+
+    wordless = [
+        from_review(_review(501, state="APPROVED", body=""), repo=_REPO, pr_number=_PR),
+        from_inline_comment(_inline(8, review_id=501)),
+    ]
+    act, appr = dispositions(wordless, frozenset())
+    assert [a.activity_id for a in act] == [8]
+    assert appr == []  # its comments speak for it (the AC's "no inline comments")
+
+
+def test_dismissals_replies_and_loom_replies_are_neither() -> None:
+    rows = [
+        from_review(
+            _review(501, state="DISMISSED", body="LGTM"), repo=_REPO, pr_number=_PR
+        ),
+        from_inline_comment(_inline(8, body="LGTM", in_reply_to_id=7)),
+        from_conversation_comment(
+            _conversation(21, body=issue_comment_reply_body(_FIXED, "x#issuecomment-1"))
+        ),
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert act == [] and appr == []
+
+
+def test_changes_requested_is_never_an_approval_whatever_its_body_says() -> None:
+    """PR #426 review, f-001: the approval rule is asked BEFORE the actionable
+    one and excluded only DISMISSED, so a blocking review whose body reads
+    like an approval landed in the approvals bucket — nothing dispatched, and
+    the operator told the review that blocks the PR asks for nothing."""
+    rows = [
+        from_review(
+            _review(
+                500, state="CHANGES_REQUESTED", body="**No findings.** Ready to merge."
+            ),
+            repo=_REPO,
+            pr_number=_PR,
+        ),
+        from_review(
+            _review(501, state="CHANGES_REQUESTED", body="LGTM"),
+            repo=_REPO,
+            pr_number=_PR,
+        ),
+    ]
+    act, appr = dispositions(rows, frozenset())
+    assert [a.activity_id for a in act] == [500, 501]
+    assert appr == []
+
+
+def test_a_handled_root_is_suppressed_rather_than_reported_as_an_approval() -> None:
+    root = from_inline_comment(_inline(7, body="LGTM"))
+    act, appr = dispositions([root], frozenset({root.key}))
+    assert act == [] and appr == []
+
+
 # ── the registry is the ONLY policy site (PR #356 review, finding 1) ──
 
 
@@ -341,6 +460,7 @@ def test_every_stream_policy_is_registered_exhaustively() -> None:
     for a in STREAM_ADAPTERS:
         assert adapter_for(a.stream) is a
         assert callable(a.fetch) and callable(a.is_actionable) and callable(a.render)
+        assert callable(a.is_approval)
         assert a.label and a.reply_mode in set(ReplyMode)
 
 
@@ -362,6 +482,8 @@ def test_an_unregistered_stream_fails_loudly_never_as_a_catch_all(
         adapter_for(ReviewStream.CONVERSATION)
     with pytest.raises(LookupError):
         actionable([row], frozenset())
+    with pytest.raises(LookupError):
+        dispositions([row], frozenset())
     with pytest.raises(LookupError):
         render_row(row)
 

@@ -371,14 +371,17 @@ async def reconcile_pr_gate(
             ),
         )
         if remediation is not None and budget is not None:
-            if ingest.posted:
+            if ingest.actionable:
                 label: str | None = await remediation.consider(
                     gate, spec, story_id, budget, ingest, github, ctx
                 )
             else:
-                # A quiet sweep may still owe a dispatch: a batch deferred
-                # behind the busy slot parked a pending trigger (its marks
-                # were consumed when it posted — PR #346 review F1).
+                # Nothing dispatchable this sweep — no news, or news that
+                # only approves (an approval is not a finding: it owes no
+                # dispatch and spends no round). Such a sweep may still owe
+                # an OLDER dispatch: a batch deferred behind the busy slot
+                # parked a pending trigger (its marks were consumed when it
+                # posted — PR #346 review F1).
                 label = await remediation.resume_pending(
                     gate, spec, story_id, budget, github, ctx
                 )

@@ -166,3 +166,27 @@ def test_lens43_batch_rebuilds_the_pre_squash_tip_and_its_refutations_hold(
         ]
     finally:
         cleanup()  # type: ignore[operator]
+
+
+# ── approval-and-ask ────────────────────────────────────────────────────
+
+
+def test_approval_batch_pairs_a_pure_approval_with_an_approval_that_asks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """827cedf8: the fixture only measures what it is for if BOTH shapes are
+    present — a pure approval that must be answered NOTHING_TO_REMEDIATE, and
+    an approval carrying an ask that must PROCEED."""
+    case = load_triage_case(_SHIPPED / "approval-and-ask")
+    assert [f.expected for f in case.findings] == ["nothing", "proceed"]
+    (approval,) = case.approvals
+    assert "No findings" in approval.body and "Ready to merge" in approval.body
+    (ask,) = case.known_true
+    assert ask.body.lower().startswith("lgtm")  # approves…
+    assert "please" in ask.body.lower()  # …and asks
+    assert not any(f.refutation for f in case.findings)  # nothing to cite
+    repo, sha, cleanup = _built(case, monkeypatch)
+    try:
+        assert _git(repo, "rev-parse", f"{sha}^{{commit}}").strip() == case.sha
+    finally:
+        cleanup()  # type: ignore[operator]

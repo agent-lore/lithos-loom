@@ -246,6 +246,42 @@ def test_empty_batch_and_empty_ac_are_rejected(tmp_path: Path) -> None:
         load_triage_case(_write(tmp_path / "noac", _VALID, ac="  \n"))
 
 
+def test_an_approval_finding_loads_and_is_neither_true_nor_false(
+    tmp_path: Path,
+) -> None:
+    """827cedf8: ``nothing`` is its own expectation — it is not a must-proceed
+    (so it never counts towards over-suppression) and not a known-false (so it
+    needs no refutation, and may not carry one)."""
+    toml = _VALID + (
+        '\n[[finding]]\nid = "f-004"\n'
+        'body = "**No findings.** Ready to merge."\n'
+        'expected = "nothing"\n'
+    )
+    case = load_triage_case(_write(tmp_path / "ap", toml))
+    assert [f.finding_id for f in case.approvals] == ["f-004"]
+    assert [f.finding_id for f in case.known_true] == ["f-001", "f-002"]
+    assert [f.finding_id for f in case.known_false] == ["f-003"]
+    with pytest.raises(ValueError, match="refutation"):
+        load_triage_case(
+            _write(
+                tmp_path / "bad",
+                toml.replace(
+                    'expected = "nothing"',
+                    'expected = "nothing"\nrefutation = ["src/a.py:1"]',
+                ),
+            )
+        )
+    with pytest.raises(ValueError, match="ambiguous"):
+        load_triage_case(
+            _write(
+                tmp_path / "bad2",
+                toml.replace(
+                    'expected = "nothing"', 'expected = "nothing"\nambiguous = true'
+                ),
+            )
+        )
+
+
 def test_a_batch_of_only_proceeds_is_allowed(tmp_path: Path) -> None:
     # An over-suppression-only probe: no known-false, every finding must
     # survive. Legal — the reject rate is then simply not measured.
