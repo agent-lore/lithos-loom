@@ -287,6 +287,21 @@ _NOT_AN_APPROVAL = [
     "- > LGTM\n\nThe token is logged at src/api.py:88.",
     "    LGTM\nThe token is logged at src/api.py:88.",
     "\tApproved\nThe token is logged at src/api.py:88.",
+    # round-5 panel (PR #425), correctness f-001: a block start must be able to
+    # INTERRUPT the paragraph above it. CommonMark lets an ordered list do so
+    # only when it starts at 1, and an indented code block never — so each of
+    # these second lines is paragraph continuation text GitHub renders after
+    # the approval word, not a block that leaves it standing alone. A marker of
+    # ten or more digits is not a list marker at all.
+    (
+        "LGTM\n2. The token is logged at src/api.py:88.\n\nThe endpoint never "
+        "redacts it."
+    ),
+    (
+        "LGTM\n    The token is logged at src/api.py:88.\n\nThe endpoint never "
+        "redacts it."
+    ),
+    "LGTM\n1234567890. The token is logged at src/api.py:88.",
     # round-5 panel, correctness f-002: a code span's closing delimiter must be
     # at least as long as its opening one, or a four-backtick fence holding a
     # three-backtick example leaves the fenced approval word bare.
@@ -470,6 +485,33 @@ def test_a_list_or_tables_continuation_belongs_to_the_block() -> None:
     table = "| check |\n| --- |\n| missing at src/api.py:12 |\n"
     assert not carries_approval(table + "approved")
     assert carries_approval(table + "\napproved")
+
+
+def test_a_block_that_cannot_interrupt_a_paragraph_continues_it() -> None:
+    """Round-5 panel (PR #425) correctness f-001: CommonMark §5.3 / §4.4 — an
+    ordered list interrupts a paragraph only when it starts at 1, and an
+    indented code block cannot interrupt one at all. GitHub therefore renders
+    "LGTM\\n2. the token…" and "LGTM\\n    the token…" as ONE paragraph, so the
+    line after the approval word joins it rather than being masked as a block
+    that leaves ``LGTM`` bare. After a blank line the same lines really do
+    start blocks, and an ordered item that continues an open ordered list is
+    an item whatever its number."""
+    assert not carries_approval("LGTM\n2. The token is logged at src/api.py:88.")
+    assert not carries_approval("LGTM\n    The token is logged at src/api.py:88.")
+    assert not carries_approval("LGTM\n\tThe token is logged at src/api.py:88.")
+    # A ten-digit "marker" is prose under CommonMark's nine-digit limit.
+    assert not carries_approval(
+        "LGTM\n1234567890. The token is logged at src/api.py:88."
+    )
+    # The paragraph break makes them blocks again: the list is an enumeration
+    # (masked as data) and the code block is code, so the verdict above each
+    # stands as the author's own.
+    assert carries_approval("LGTM\n\n2. The token is logged at src/api.py:88.")
+    assert carries_approval("LGTM\n\n    The token is logged at src/api.py:88.")
+    # `1.` may interrupt a paragraph — and item 2 of an open ordered list is an
+    # item, so the existing enumeration corpus still masks as data.
+    assert carries_approval("LGTM\n1. The token is logged at src/api.py:88.")
+    assert not carries_approval("1. approved\n2. pending\n\nNeither is checked.")
 
 
 def test_review_state_policy_follows_the_body_not_just_the_state() -> None:

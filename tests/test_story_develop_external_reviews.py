@@ -391,6 +391,14 @@ _NOT_THE_AUTHORS_VERDICT = [
     "> the token is logged at src/api.py:88\nLGTM",
     "This is not |\nLGTM\n\nThe token is logged at src/api.py:88.",
     "- the token is logged at src/api.py:88\nLGTM",
+    (
+        "LGTM\n2. The token is logged at src/api.py:88.\n\nThe endpoint never "
+        "redacts it."
+    ),
+    (
+        "LGTM\n    The token is logged at src/api.py:88.\n\nThe endpoint never "
+        "redacts it."
+    ),
     "| check | result |\n| --- | --- |\n| authz | missing at src/api.py:12 |\napproved",
 ]
 

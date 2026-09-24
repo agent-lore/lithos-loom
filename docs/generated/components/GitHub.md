@@ -11,7 +11,7 @@ gh / GitHub API client and its data types (Issue, PullRequest, GitHubClient).
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.github_approval` | M | 0 | 2 |
+| `lithos_loom.github_approval` | L | 0 | 2 |
 | `lithos_loom.github_client` | M | 7 | 0 |
 | `lithos_loom.github_models` | M | 6 | 16 |
 | `lithos_loom.github_review_activity` | S | 2 | 3 |

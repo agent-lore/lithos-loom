@@ -233,7 +233,10 @@ _TILDE_RUN_RE = re.compile(r"~~?")  # GFM strike-through
 # fence may not itself contain a backtick, which is what keeps a one-line
 # "```LGTM``` the token is logged" an inline span rather than a fence.
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^\n]*)$")
-_LIST_MARKER = r"(?:[-*+]|\d+[.)])"
+# CommonMark §5.2: an ordered marker is one to nine digits — a longer run is
+# prose (round-5 panel, PR #425, correctness f-001). The groups feed the
+# interruption rule in :func:`_list_item`.
+_LIST_MARKER = r"(?:[-*+]|(?P<number>\d{1,9})(?P<delim>[.)]))"
 # A quoted line, with or without the bullet it hangs off ("- > LGTM"); an
 # indented code block — the fence's other spelling — is below.
 _QUOTE_LINE_RE = re.compile(rf"^[ \t]*(?:{_LIST_MARKER}[ \t]+)?>[^\n]*")
@@ -253,7 +256,7 @@ _LIST_ITEM_RE = re.compile(rf"^[ \t]*{_LIST_MARKER}[ \t]+(?P<text>\S.*)$")
 _TABLE_DELIM_RE = re.compile(
     r"^ {0,3}\|?(?:[ \t]*:?-+:?[ \t]*\|)*[ \t]*:?-+:?[ \t]*\|?[ \t]*$"
 )
-_INDENTED_LINE_RE = re.compile(r"^(?: {4,}|\t)[^\n]*", re.MULTILINE)
+_INDENTED_LINE_RE = re.compile(r"^(?: {4,}|\t)")
 # Lines that start a block of their own, so the line break before/after them is
 # a real boundary rather than a soft wrap (see :func:`_join_soft_wraps`) and
 # never another block's lazy continuation (see :func:`_mask_quotes`): headings,
@@ -264,14 +267,76 @@ _INDENTED_LINE_RE = re.compile(r"^(?: {4,}|\t)[^\n]*", re.MULTILINE)
 _BLOCK_START_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]|>|-{3,}$|\*{3,}$|_{3,}$)")
 
 
-def _starts_a_block(line: str) -> bool:
-    """True when *line* opens a Markdown block of its own rather than
-    continuing the paragraph above it."""
+def _open_paragraph(lines: list[str], i: int) -> bool:
+    """True when ``lines[i]`` directly follows a paragraph line — no blank line
+    between, and the line above is not a masked block — so CommonMark's
+    interruption rules decide whether it starts a block or continues that
+    paragraph."""
+    if i == 0:
+        return False
+    prev = lines[i - 1].strip()
+    return bool(prev) and prev != _MASK.strip()
+
+
+def _list_item(lines: list[str], i: int) -> re.Match[str] | None:
+    """The list-item match for ``lines[i]``, or None when the line only LOOKS
+    like one.
+
+    CommonMark §5.3: a list may interrupt a paragraph only when it is a
+    bullet list or an ordered list starting at 1 (round-5 panel, PR #425,
+    correctness f-001) — so "LGTM\\n2. the token is logged" is ONE paragraph on
+    GitHub, and reading its second line as an item masked it and left ``LGTM``
+    bare. An ordered item with another number is an item only where no
+    paragraph is open, or where it continues an already open ordered list
+    with the same delimiter (walking back over that list's lazy
+    continuations).
+    """
+    m = _LIST_ITEM_RE.match(lines[i])
+    if m is None or m["number"] is None or int(m["number"]) == 1:
+        return m
+    if not _open_paragraph(lines, i):
+        return m
+    for j in range(i - 1, -1, -1):
+        above = lines[j].strip()
+        if not above or above == _MASK.strip():
+            return None
+        item = _LIST_ITEM_RE.match(lines[j])
+        if item is not None:
+            return m if item["delim"] == m["delim"] else None
+    return None
+
+
+def _starts_a_block(lines: list[str], i: int) -> bool:
+    """True when ``lines[i]`` opens a Markdown block of its own rather than
+    continuing the paragraph above it — with CommonMark's interruption rules
+    applied, which is why it needs the lines above (:func:`_list_item`)."""
+    line = lines[i]
     return bool(
-        _LIST_ITEM_RE.match(line)
-        or _BLOCK_START_RE.match(line)
+        _BLOCK_START_RE.match(line)
         or _FENCE_OPEN_RE.match(line)
+        or _list_item(lines, i) is not None
     )
+
+
+def _mask_indented_code(text: str) -> str:
+    """*text* with every indented code line masked.
+
+    CommonMark §4.4: an indented code block CANNOT interrupt a paragraph
+    (round-5 panel, PR #425, correctness f-001) — a four-space line straight
+    after prose is that paragraph's continuation, which GitHub renders on the
+    same line, so masking it as code left "LGTM\\n    the token is logged"
+    with a bare ``LGTM``. An indented line is code only at the start of the
+    body, after a blank line, or after a line already masked (the rest of its
+    own block, or a block it cannot lazily continue).
+    """
+    lines = text.split("\n")
+    out = list(lines)
+    for i, line in enumerate(lines):
+        if _INDENTED_LINE_RE.match(line) and (
+            i == 0 or not lines[i - 1].strip() or out[i - 1] == _MASK
+        ):
+            out[i] = _MASK
+    return "\n".join(out)
 
 
 def _mask_quotes(text: str) -> str:
@@ -287,13 +352,14 @@ def _mask_quotes(text: str) -> str:
     approval after one stays their verdict — and at any line that starts a
     block of its own, which is not paragraph continuation text.
     """
+    lines = text.split("\n")
     out: list[str] = []
     quoted = False
-    for line in text.split("\n"):
+    for i, line in enumerate(lines):
         if _QUOTE_LINE_RE.match(line):
             quoted = True
             out.append(_MASK)
-        elif quoted and line.strip() and not _starts_a_block(line):
+        elif quoted and line.strip() and not _starts_a_block(lines, i):
             out.append(_MASK)  # lazy continuation: still inside the quote
         else:
             quoted = False
@@ -327,7 +393,7 @@ def _mask_tables(text: str) -> str:
         ):
             out[i] = _MASK
             i += 1
-            while i < len(lines) and lines[i].strip() and not _starts_a_block(lines[i]):
+            while i < len(lines) and lines[i].strip() and not _starts_a_block(lines, i):
                 out[i] = _MASK
                 i += 1
             continue
@@ -409,15 +475,16 @@ def _join_soft_wraps(text: str) -> str:
     line-structured mask above needs the real line breaks.
     """
 
-    def prose(line: str) -> bool:
-        stripped = line.strip()
-        return (
-            bool(stripped) and stripped != _MASK.strip() and not _starts_a_block(line)
-        )
-
+    lines = text.split("\n")
+    prose = [
+        bool(line.strip())
+        and line.strip() != _MASK.strip()
+        and not _starts_a_block(lines, i)
+        for i, line in enumerate(lines)
+    ]
     out: list[str] = []
-    for line in text.split("\n"):
-        if out and prose(line) and prose(out[-1]):
+    for i, line in enumerate(lines):
+        if out and prose[i] and prose[i - 1]:
             out[-1] = f"{out[-1]} {line.strip()}"
         else:
             out.append(line)
@@ -473,6 +540,10 @@ def _mask_data_lists(text: str) -> str:
     lines = text.split("\n")
     out = list(lines)
     run: list[int] = []
+    run_indent = 0
+
+    def indent(line: str) -> int:
+        return len(line) - len(line.lstrip())
 
     def flush() -> None:
         if not run:
@@ -492,13 +563,23 @@ def _mask_data_lists(text: str) -> str:
             # a loose list keeps the run open, and folding from there would
             # swallow the author's own approval two blocks down.
             for j in range(run[-1] + 1, len(lines)):
-                if not lines[j].strip() or _starts_a_block(lines[j]):
+                if not lines[j].strip() or _starts_a_block(lines, j):
                     break
                 out[j] = _MASK
         run.clear()
 
     for idx, line in enumerate(lines):
-        if _LIST_ITEM_RE.match(line):
+        if _list_item(lines, idx) is not None:
+            if run and indent(line) > run_indent:
+                # A NESTED item is detail under its parent, not one of the
+                # values (or verdicts) the outer list enumerates: masked on its
+                # own, so "- No findings.\n    - the three streams look
+                # right\n- Ready to merge." keeps its top-level verdicts (it
+                # used to hide as indented code by accident).
+                out[idx] = _MASK
+                continue
+            if not run:
+                run_indent = indent(line)
             run.append(idx)
         elif run and not line.strip():
             continue  # a blank line inside a loose list does not end it
@@ -523,7 +604,7 @@ def _authorial_text(body: str) -> str:
     text = _mask_inline_runs(text, _TILDE_RUN_RE)
     text = _mask_quotes(text)
     text = _mask_tables(text)
-    text = _INDENTED_LINE_RE.sub(_MASK, text)
+    text = _mask_indented_code(text)
     return _join_soft_wraps(_mask_data_lists(text))
 
 
