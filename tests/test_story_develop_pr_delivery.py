@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,15 @@ from lithos_loom.plugins.story_develop.pr_delivery import (
     parse_issue_ref,
     pr_number_from_url,
     reply_body,
+)
+from lithos_loom.plugins.story_develop.publish_text import (
+    CONTROL_CHARS_RE,
+    MAX_SECTION_CHARS,
+    MAX_TITLE_CHARS,
+    MIN_SECTION_CHARS,
+    defang_markup,
+    fence_untrusted,
+    publish_title,
 )
 
 # --- pure builders --------------------------------------------------------------
@@ -85,6 +96,471 @@ def test_build_pr_body_minimal() -> None:
     assert "Acceptance criteria" not in body
     assert "Closes" not in body
     assert "Lithos task" not in body
+
+
+_FENCE_LINE_RE = re.compile(r"(`{3,}|~{3,})")
+
+
+def _interior(quoted: str) -> str:
+    """The quoted content of a `fence_untrusted` block — what *limit* bounds
+    (the fence's own two lines are loom's markup, not the author's)."""
+    return "\n".join(quoted.splitlines()[1:-1])
+
+
+def _outside_fences(body: str) -> str:
+    """The part of *body* GitHub renders as live markup.
+
+    GFM: a fenced block opens on a run of three-or-more backticks **or** tildes
+    indented at most three spaces, and closes on a run of the same character at
+    least as long with nothing else on the line. Everything between is inert —
+    which is exactly the claim the untrusted sections rest on, so the tests
+    check it the way the renderer does rather than by looking for a literal
+    ``` `` ` ``` ``` `` `.
+    """
+    live: list[str] = []
+    fence = ""
+    for line in body.splitlines():
+        stripped = line.lstrip(" ")
+        indented = len(line) - len(stripped) > 3
+        match = None if indented else _FENCE_LINE_RE.match(stripped)
+        run = match.group(1) if match else ""
+        if fence:
+            closes = (
+                run
+                and run[0] == fence[0]
+                and len(run) >= len(fence)
+                and not stripped[len(run) :].strip()
+            )
+            if closes:
+                fence = ""
+            continue
+        if run:
+            fence = run
+            continue
+        live.append(line)
+    return "\n".join(live)
+
+
+# A GitHub issue body is arbitrary markdown, so the fixture carries one of
+# every live construct the reviews named: the keyword forms (plain, `GH-`,
+# cross-repo, full-url, emphasised, `&nbsp;`-separated, reference-wrapped), a
+# mention behind a lone backtick, inline HTML, inline / nested / reference /
+# shortcut links and a reference IMAGE with its definitions, both fence
+# characters, and two invisibles.
+_HOSTILE_ISSUE_BODY = (
+    "Please fix the parser.\n\n"
+    "<!-- Closes #1 -->\n"
+    "Closes GH-2 and fixes agent-lore/other#3\n"
+    "Closes https://github.com/agent-lore/lithos-loom/issues/5\n"
+    "**Closes** #6, Closes&nbsp;#8, and Closes [#9][r]\n"
+    "cc @agent-lore/security and `@evil-user\n"
+    "<img src=//evil.example/p.png>\n"
+    "see [details](//evil.example/x) and [outer [inner]](//evil.example/y)\n"
+    "[click here][a], ![beacon][b], [evil.example][]\n\n"
+    "[a]: https://evil.example/phish\n"
+    "> [c]: https://evil.example/quoted\n"
+    "- [d\\]e]: https://evil.example/escaped\n"
+    "[b]: https://evil.example/beacon.png\n"
+    "[evil.example]: https://evil.example\n"
+    "[r]: https://github.com/o/r/issues/9\n"
+    "```\nnot a fence escape\n```\n"
+    "reorder\u202ethis, smuggle\U000e0001d, so\u00adft\n"
+    "~~~"
+)
+
+
+def _hostile_body(**overrides: object) -> str:
+    kwargs: dict[str, object] = {
+        "description": _HOSTILE_ISSUE_BODY,
+        "acceptance_criteria": "1. parses. Resolves #4 — ask @octocat",
+        "reviews_summary": "[cq]=LGTM",
+        "rounds": 1,
+        "gate_verdict": "GREEN",
+        "cost_usd": 0.5,
+        "task_id": "task-9",
+        "issue_closes": "Closes #7",
+    }
+    kwargs.update(overrides)
+    return build_pr_body(**kwargs)  # type: ignore[arg-type]
+
+
+def test_build_pr_body_defangs_the_story_text_a_stranger_wrote() -> None:
+    """security/f-004: for a story the github-issue watcher materialised, the
+    description IS the external issue body (and the acceptance criteria can be
+    too), so the body must publish neither as live markup under the operator's
+    `gh` identity: a hidden `Closes #1` would close an unrelated issue on
+    merge, an @mention pings real people, an HTML comment hides text and an
+    `<img>` — or a reference image, which needs no `<` — is an off-site
+    request for every viewer."""
+    body = _hostile_body()
+
+    # the text still READS as written…
+    assert "Please fix the parser." in body and "1. parses." in body
+    # …but nothing in it binds: no closing keyword survives next to its ref,
+    # in any of its forms, in either section
+    for live in (
+        "Closes #1",
+        "Closes GH-2",
+        "fixes agent-lore/other#3",
+        "Closes https://github.com/agent-lore/lithos-loom/issues/5",
+        "Closes** #6",
+        "Closes&nbsp;#8",
+        "Closes [#9][r]",
+        "Resolves #4",
+    ):
+        assert live not in body
+    assert "#1" in body and "GH-2" in body  # the refs still read
+    # …nobody is notified (a stray backtick is no exemption)…
+    assert "@agent-lore/security" not in body and "&#64;agent-lore/security" in body
+    assert "@evil-user" not in body and "@octocat" not in body
+    # …no tag opens (the comment that hides text, the beacon that fires)…
+    assert "<!--" not in body and "&lt;!--" in body
+    assert "<img" not in body and "&lt;img" in body
+    # …no link binds, in any form: inline, nested-label, and the reference
+    # definitions every `[label][ref]` / `[ref][]` / `[ref]` resolves through
+    # (broken, so each one degrades to the literal text of its label)…
+    assert "[details](" not in body and "[details]&#40;" in body
+    assert "[outer [inner]](" not in body and "[outer [inner]]&#40;" in body
+    # …including the two spellings no label pattern reached: a definition
+    # inside a container block (definitions are collected document-globally)
+    # and a backslash-escaped `]` in the label
+    for definition in ("[a]", "[b]", "[evil.example]", "[r]", "[c]", "[d\\]e]"):
+        assert f"{definition}: " not in body
+        assert f"{definition}&#58; " in body
+    # …and no formatter reorders or hides what the reader sees
+    assert "\u202e" not in body and "reorderthis" in body
+    assert "\U000e0001" not in body and "smuggled" in body
+    assert "\u00ad" not in body and "soft" in body
+    # the one live closing keyword is the one loom composed itself
+    assert "\nCloses #7\n" in body
+
+
+def test_the_story_text_cannot_reach_out_of_its_fence() -> None:
+    """correctness/f-001 + security/f-002: defanging enumerates GFM and GFM
+    keeps growing (`~~~` opens a fence exactly like ``` `` ` ``` `` ` `` does,
+    reference links need no `](`). So the untrusted sections are FENCED, with a
+    fence measured against their own content — and everything loom composes
+    around them stays live markup, above all the `Closes #7` that makes the
+    delivered PR close its source issue on merge."""
+    live = _outside_fences(_hostile_body())
+
+    # loom's own sections are outside every fence — they still render, and the
+    # closing keyword still binds
+    assert "Closes #7" in live
+    assert "## What" in live and "## Acceptance criteria" in live
+    assert "- verdicts: [cq]=LGTM" in live and "- test gate: GREEN" in live
+    assert "- Lithos task: `task-9`" in live
+    # …while not one line the reporter wrote is
+    for quoted in ("Please fix the parser.", "not a fence escape", "1. parses."):
+        assert quoted not in live
+
+
+def test_a_trailing_tilde_fence_cannot_swallow_the_rest_of_the_body() -> None:
+    """security/f-002, minimal shape: an issue body that ends on `~~~` opened a
+    code block that ran to the end of the document — taking loom's `Closes #N`,
+    the panel verdicts and the test-gate result into it."""
+    live = _outside_fences(
+        _hostile_body(description="ok\n\n~~~", acceptance_criteria="```\nand")
+    )
+
+    assert "Closes #7" in live
+    assert "- verdicts: [cq]=LGTM" in live and "- test gate: GREEN" in live
+
+
+def test_fence_untrusted_cannot_be_closed_by_its_own_content() -> None:
+    """The fence is measured against the text it quotes, so no line of that
+    text can close it early and resume live markup."""
+    quoted = fence_untrusted("try\n``````\nto escape\n~~~~~~\nor this")
+
+    assert quoted.startswith("```")
+    assert "try" in quoted and "to escape" in quoted
+    assert _outside_fences(quoted) == ""  # every line of it is inert
+    assert fence_untrusted("   ") == ""  # nothing to quote, no empty block
+
+
+def test_an_untrusted_section_is_bounded_before_the_rewrites_run() -> None:
+    """security/f-007: the reporter picks the length of their issue body, so
+    they must not also pick how much regex work the host does on it — the
+    input is cut before a single pattern runs, as `redact_for_publication`
+    already cuts its own. 64 KiB of `[]` (GitHub's issue-body ceiling, and the
+    shape that made a label-scanning lookahead quadratic) cost ~2s of delivery
+    CPU per section; the cut plus a fixed-width pattern make it milliseconds."""
+    for payload in (
+        "[]" * 32768,
+        # …and the shape the budget passes themselves invite: a run of spaces
+        # that never reaches a line end, which the trailing-whitespace strip
+        # rescans from every position in — quadratic (0.25 s at 10 KiB, 4x per
+        # doubling) unless the run collapse has already capped it
+        " " * 100_000 + "still here",
+    ):
+        start = time.perf_counter()
+        quoted = fence_untrusted(payload)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 1.0
+        assert len(quoted) < MAX_SECTION_CHARS + 200
+
+
+def test_padding_cannot_spend_the_whole_input_budget() -> None:
+    """security/f-009 + f-010: the budget buys characters the published section
+    can actually carry. What this pipeline drops or collapses anyway — the
+    invisibles and a fence run — must be taken out BEFORE the input cut, or
+    padding with it pushes every visible word past the slice and the section
+    is published as nothing but the truncation note.
+
+    Whitespace is NOT in that set and has its own test below: a fenced block
+    carries it, so it is content, and padding with it earns an honest
+    truncation rather than a silent reflow.
+    """
+    story = "The parser crashes on empty input."
+    wall = MAX_SECTION_CHARS * 4
+    for filler in (
+        "\u200b" * wall,  # zero-widths, the tag block, a soft hyphen, a filler
+        "\U000e0041" * wall,
+        "\u00ad" * wall,
+        "\u3164" * wall,
+        "\u061c" * wall,  # …and the blocks the hand-written ranges had missed
+        "\U000e0101" * wall,
+        "`" * wall + "\n",
+    ):
+        quoted = fence_untrusted(filler + story)
+
+        assert story in quoted
+        assert "(truncated" not in quoted  # nothing the section carries was lost
+        assert len(_interior(quoted)) < 100  # …and the padding is not it
+
+
+def test_in_budget_whitespace_is_published_exactly_as_written() -> None:
+    """[davesnowdon] Medium: a fenced code block preserves every space, tab and
+    blank line in it, so the story's whitespace is CONTENT — deeply indented
+    code, an exact-output fixture, an ASCII diagram, a whitespace-sensitive
+    example. Silently capping space runs at 40, rewriting a mixed space/tab run
+    as repetitions of its first character, stripping every line's trailing
+    whitespace and cutting newline runs to three altered technical
+    requirements while still presenting them as complete — and with no
+    truncation marker to say anything had been touched."""
+    fixture = (
+        "Expected output:\n"
+        + " " * 48  # deeper than any cap: the reporter's real indentation
+        + "child\n"
+        + "\t" * 12  # …and a mixed run, which the collapse rewrote to one char
+        + " \t mixed\n"
+        + "trailing   \n"  # …trailing whitespace, significant in a fixture
+        + "\n" * 6  # …and more blank lines than the collapse allowed
+        + "end"
+    )
+
+    assert _interior(fence_untrusted(fixture)) == fixture
+    # the whole story still travels — nothing was lost, so nothing claims to be
+    assert "(truncated" not in fence_untrusted(fixture)
+
+
+def test_whitespace_padding_truncates_honestly_rather_than_silently() -> None:
+    """[davesnowdon] Medium, the other half: whitespace is not free, so a
+    reporter CAN still spend a section's budget on it — but the outcome is the
+    explicit marker, never a section quietly squeezed to fit."""
+    quoted = fence_untrusted(" " * (MAX_SECTION_CHARS * 4) + "story")
+
+    assert "(truncated" in quoted
+    assert len(_interior(quoted)) <= MAX_SECTION_CHARS
+
+
+def test_the_stripped_class_tracks_the_unicode_property() -> None:
+    """[davesnowdon] Low: the class is measured against Unicode's
+    Default_Ignorable_Code_Point property rather than hand-listed, so it does
+    not drift from it. U+061C (a bidi formatter, which also changes bidi
+    rendering), U+2065, the deprecated U+206A–U+206F, U+FFF0–U+FFF8 and every
+    tag / variation selector past U+E007F all survived the earlier ranges into
+    a published body — and, since the budget is counted AFTER the strip, each
+    was also a character an external author could pad a section down to its
+    truncation marker with."""
+    for missed in (
+        "\u061c",
+        "\u2065",
+        "\u206a",
+        "\u206f",
+        "\ufff0",
+        "\ufff8",
+        "\U000e0101",
+        "\U000e0fff",
+        "\U0001bca0",
+        "\U0001d173",
+    ):
+        assert CONTROL_CHARS_RE.sub("", missed) == ""
+        assert defang_markup(f"vis{missed}ible") == "visible"
+
+    # …and the only two whitespace characters a PR body renders stay untouched
+    assert defang_markup("a\tb\nc") == "a\tb\nc"
+
+
+def test_whitespace_at_a_section_boundary_is_published_too() -> None:
+    """correctness/f-001: the contract is that whitespace is published exactly
+    as written, and a section's EDGES are part of it. `.strip()` on the body
+    was the last place this function still normalised silently — acceptance
+    criteria that open on an indented exact-output line were published
+    un-indented, and a final line's significant trailing spaces vanished, both
+    with no truncation marker to say anything had gone."""
+    for fixture in (
+        "   expected   ",  # the reviewer's own repro
+        # an exact-output fixture that OPENS on its indented line
+        "    $ loom run --flag\n    ok\nthat is the whole output",
+        "run it and compare:\n    exact   ",  # trailing spaces on the last line
+        "\n\n  leading blank lines are a paragraph break\n\n",
+        "\ttab-indented first line",
+    ):
+        assert _interior(fence_untrusted(fixture)) == fixture
+        assert "(truncated" not in fence_untrusted(fixture)
+
+
+def test_a_section_of_nothing_but_whitespace_is_still_no_section() -> None:
+    """…while emptiness stays a question about the CONTENT: text that carries
+    nothing publishes no fenced block at all, rather than an empty one."""
+    for blank in ("", "   ", "\n\n", " \t \n \t "):
+        assert fence_untrusted(blank) == ""
+
+
+def test_fence_untrusted_publishes_no_more_than_its_limit() -> None:
+    """correctness/f-002: *limit* is a cap on the quoted content, marker
+    included — appending the note after the cut would publish 53 characters
+    more than the caller asked for, and a cap with no room for the note (or a
+    negative one, which Python's slicing reads as "keep nearly everything") is
+    a bug in the caller, not a section to publish anyway."""
+    for limit in (MIN_SECTION_CHARS, 100, MAX_SECTION_CHARS):
+        interior = _interior(fence_untrusted("x" * (limit * 4), limit=limit))
+        assert len(interior) <= limit
+        assert interior.endswith("(truncated — the whole text is on the Lithos story)")
+        assert interior.startswith("x")  # …and text still travels beside it
+
+    # the default cap, exactly at and one past the boundary
+    exact = _interior(fence_untrusted("x" * MAX_SECTION_CHARS))
+    assert len(exact) == MAX_SECTION_CHARS and "(truncated" not in exact
+    over = _interior(fence_untrusted("x" * (MAX_SECTION_CHARS + 1)))
+    assert len(over) <= MAX_SECTION_CHARS and "(truncated" in over
+
+    for unusable in (0, -1, -MAX_SECTION_CHARS, MIN_SECTION_CHARS - 1):
+        with pytest.raises(ValueError, match="at least"):
+            fence_untrusted("x" * 500, limit=unusable)
+
+
+def test_publish_title_breaks_the_keyword_that_reaches_the_commit_subject() -> None:
+    """security/f-001: the story's title is the external issue's title for a
+    mirrored story, and with the repo default squash-merge message a
+    multi-commit PR (loom's always are) takes its COMMIT SUBJECT from the PR
+    title. GitHub honours closing keywords in commit messages on the default
+    branch — a raw-text channel no fence reaches — so `Closes #1 parser
+    crashes` would close issue #1 under the operator's account on merge."""
+    for live, dead in (
+        ("Closes #1 fix the parser", "Closes → #1 fix the parser"),
+        ("Fixes GH-9 in the lexer", "Fixes → GH-9 in the lexer"),
+        ("resolve agent-lore/other#3", "resolve → agent-lore/other#3"),
+        (
+            "Closes https://github.com/o/r/issues/5",
+            "Closes → https://github.com/o/r/issues/5",
+        ),
+    ):
+        assert publish_title(live) == dead
+
+    # …nobody is notified either: a commit message DOES link and notify a
+    # mention. Broken with a space, not an entity — a title is plain text, so
+    # `&#64;` would be published literally instead of rendering as `@`.
+    assert publish_title("crash, cc @agent-lore/security") == (
+        "crash, cc @ agent-lore/security"
+    )
+    assert "&#" not in publish_title("<img> & [a](b) stay readable")
+
+    # …and no formatter reorders the PR list, the notification email or the
+    # commit subject
+    assert publish_title("re\u202eorder me") == "reorder me"
+    assert publish_title("smuggle\U000e0001d") == "smuggled"
+
+    # the ordinary rules survive: first line only, trimmed, capped
+    assert publish_title("  Add a flag\n\nDetails.  ") == "Add a flag"
+    assert publish_title("") == ""  # the caller's cue to fall back
+    assert len(publish_title("x" * 200)) == MAX_TITLE_CHARS
+
+
+def test_publish_title_never_falls_through_to_the_issue_body() -> None:
+    """correctness/f-002: *text* is the whole task text
+    (``f"{title}\n\n{body}"``), so the line has to be chosen BEFORE the text
+    is trimmed. Trimming first let a story whose issue title is empty — or
+    nothing but default-ignorable code points, which this helper strips — fall
+    through to the first line of the issue BODY, publishing as the PR title a
+    line the reporter wrote as prose and nobody chose as a subject."""
+    # an invisible-only title, with a body under it and with none
+    assert publish_title("\u200b\n\nBody becomes title") == ""
+    assert publish_title("\U000e0101\n\nBody becomes title") == ""
+    assert publish_title("\u200b") == ""
+    # …and a blank first line is not a licence to promote line two either
+    assert publish_title("\n\nBody becomes title") == ""
+    assert publish_title("   \n\nBody becomes title") == ""
+    # the well-formed case is unchanged: first line, trimmed, body ignored
+    assert publish_title("  Add a flag\n\nDetails.  ") == "Add a flag"
+
+
+def test_publish_title_rejects_a_limit_that_is_no_cap() -> None:
+    """correctness/f-003: *limit* is a character count, and Python's negative
+    slicing would read a negative one as "keep nearly everything" — five
+    characters for a cap of -1, which cannot satisfy a cap at all. Out of
+    domain is a caller's bug, the same contract `fence_untrusted` holds its
+    own limit to."""
+    for unusable in (0, -1, -MAX_TITLE_CHARS):
+        with pytest.raises(ValueError, match="at least 1 character"):
+            publish_title("abcdef", limit=unusable)
+
+    assert publish_title("abcdef", limit=1) == "a"  # …and 1 is honoured
+
+
+def test_delivery_falls_back_when_the_story_leaves_no_title(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """security/f-003 + correctness/f-002: `publish_title` documents `""` as
+    the caller's cue to fall back, and `develop deliver` takes it — the daemon
+    did not. An issue titled with nothing but default-ignorable code points
+    leaves no title, and `gh pr create --title ""` is rejected: a repeatable
+    way for the reporter to fail EVERY delivery of the story they filed, after
+    the branch has already been pushed. Both paths now fall back to the
+    branch."""
+    degenerate = replace(config, description="\u200b\U000e0101\u061c\n\n")
+    state = _install(monkeypatch, degenerate)
+    wt = _make_wt(degenerate)
+    result = _result(degenerate, wt)
+
+    deliver(degenerate, result)
+
+    assert state["pr_kwargs"]["title"] == result.branch
+    assert state["pr_kwargs"]["title"]  # …and above all, not empty
+
+
+def test_delivery_hands_gh_a_title_that_binds_nothing(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """security/f-001, the daemon half: `deliver()` takes the PR title straight
+    off the task text, whose first line is the mirrored issue's title. The
+    suite only ever asserted about `build_pr_body`'s return value, so this
+    channel had no coverage at all."""
+    mirrored = replace(
+        config, description="Closes #1 parser crashes on empty input\n\nDetails."
+    )
+    state = _install(monkeypatch, mirrored)
+    wt = _make_wt(mirrored)
+
+    deliver(mirrored, _result(mirrored, wt))
+
+    title = state["pr_kwargs"]["title"]
+    assert title == "Closes → #1 parser crashes on empty input"
+    assert "Closes #1" not in title
+
+
+def test_an_oversized_story_description_is_bounded() -> None:
+    """security/f-005 (CWE-770): a GitHub issue body may be 64 KiB and GitHub
+    rejects a PR body over the same limit — an unbounded section would let a
+    reporter fail `gh pr create` for every delivery of the story they filed,
+    burning a run and an operator interrupt each time."""
+    body = _hostile_body(description="x" * (MAX_SECTION_CHARS * 3))
+
+    assert len(body) < MAX_SECTION_CHARS + 2000
+    assert "(truncated" in body  # never silently misrepresented
+    assert "Closes #7" in _outside_fences(body)
 
 
 def test_reply_body_variants() -> None:

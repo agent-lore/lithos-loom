@@ -37,6 +37,10 @@ from typing import Any, NamedTuple
 from lithos_loom.cli._deliver_lithos import StoryState
 from lithos_loom.plugins.story_develop import run_outcome
 from lithos_loom.plugins.story_develop.pr_delivery import build_pr_body, closes_line
+from lithos_loom.plugins.story_develop.publish_text import (
+    CONTROL_CHARS_RE,
+    defang_markup,
+)
 
 __all__ = [
     "RunFacts",
@@ -145,16 +149,6 @@ def _verbatim(value: Any) -> str:
 _CODER_DONE_RE = re.compile(r"^round_(\d+)_coder_done\.md$")
 _MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
 _MAX_SUMMARY_CHARS = 600
-# C0 / C1 *and* the Unicode characters that reorder or hide text without
-# being control codes: bidi overrides + isolates (trojan source — GitHub warns
-# about it in diffs) and the zero-width / invisible formatters. The hazard is
-# the one this module already accepts for ANSI escapes: `--dry-run` is the
-# screen the operator decides on, and a PR body is read by strangers, so a
-# line must not be able to render differently from the text it carries.
-_CONTROL_CHARS_RE = re.compile(
-    "[\x00-\x08\x0b-\x1f\x7f-\x9f"
-    "\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
-)
 _SUMMARY_HEADING_RE = re.compile(r"^\s*#{1,6}\s*summary\s*$", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^\s*#{1,6}\s")
 
@@ -168,9 +162,12 @@ def sanitize_for_terminal(text: str) -> str:
     GitHub issue supplied, the ``gh`` stderr inside an exception string. None
     of those strippers may be skipped on a screen the operator uses to DECIDE:
     an ANSI escape can forge a "push: REFUSE" line, erase it, or retitle the
-    window (CWE-117 / CWE-150).
+    window (CWE-117 / CWE-150). The character class is the publishing one
+    (:data:`~lithos_loom.plugins.story_develop.publish_text.CONTROL_CHARS_RE`,
+    bidi and zero-width formatters included): the hazard is the same on the
+    screen the operator DECIDES on as on the PR strangers read.
     """
-    return _CONTROL_CHARS_RE.sub("", text)
+    return CONTROL_CHARS_RE.sub("", text)
 
 
 def _read_regular_file(path: Path, limit: int) -> bytes | None:
@@ -244,63 +241,6 @@ def coder_summary(handoff_dir: Path) -> str:
     # host paths, urls and credential-shaped runs must not ride along. The
     # fence `pr_body` puts around it neutralises markup, never content.
     return redact_for_publication(" ".join(body), limit=_MAX_SUMMARY_CHARS)
-
-
-# GitHub honours closing keywords anywhere in a PR *description*, and @-names
-# notify real people. Agent-written text is quoted into the body, so neutralise
-# both before it leaves the host (the fence in `build_pr_body` is the other
-# half: keywords and mentions inside a code block are inert).
-# `GH-123` is a closing ref exactly like `#123` (GitHub's documented
-# `KEYWORD GH-ISSUE-NUMBER` form), so the lookahead admits it too.
-_CLOSES_RE = re.compile(
-    r"\b(close[sd]?|fix(e[sd])?|resolve[sd]?)(\s+|\s*:\s*)"
-    r"(?=#\d|GH-\d|[\w.-]+/[\w.-]+#\d)",
-    re.IGNORECASE,
-)
-# No `\`` in the lookbehind: a preceding backtick does NOT make a mention
-# inert (a single unmatched backtick opens no code span in GFM), so exempting
-# one would hand the author a one-character bypass.
-_MENTION_RE = re.compile(r"(?<!\w)@([A-Za-z0-9][-A-Za-z0-9/]*)")
-# Backtick runs would break out of the fence that quotes this text.
-_FENCE_RE = re.compile(r"`{3,}")
-# GitHub renders inline HTML in a PR description, so `<img src=…>` is a live
-# off-site request (a tracking beacon on every viewer). Only a `<` that starts
-# a tag is escaped — `a < b` stays readable.
-_HTML_OPEN_RE = re.compile(r"<(?=[A-Za-z/!?])")
-# `[text](target)` is a live link. Break the syntax at the bracket.
-_LINK_RE = re.compile(r"\[(?=[^\]]*\]\()")
-
-
-def defang_markup(text: str) -> str:
-    """Neutralise the markup GitHub treats as *live* in a PR description.
-
-    This is the SOLE defence on the unfenced provenance bullet (the redacted
-    stop reason) and belt-and-braces behind the fence that quotes the coder's
-    handoff, so it must stand alone: GitHub closes issues named by a closing
-    keyword anywhere in a description, notifies every ``@name``, renders inline
-    HTML, and follows markdown links — a line saying
-    ``Closes #1337 cc @org/sec <img src=//evil.example/p.png>`` would close an
-    unrelated issue on merge, ping strangers and fire an off-site request for
-    every viewer, all under the operator's identity.
-
-    Each construct is rewritten so it still READS the same and binds nothing:
-    the keyword keeps its word, the mention's ``@`` becomes the entity that
-    renders as one and notifies nobody, a tag-opening ``<`` and a link's ``[``
-    are HTML-escaped, and backtick runs that would escape the fence are
-    defused. **Nothing here leans on code spans**: quoting a mention in
-    backticks only works while the backticks pair up, and the author of this
-    text chooses how many of those it contains.
-
-    Control bytes go first — C0/C1 *and* the bidi / zero-width formatters
-    (:data:`_CONTROL_CHARS_RE`) — because a construct that renders in a
-    different order than it was written defeats every rewrite below it.
-    """
-    out = _CONTROL_CHARS_RE.sub("", text)
-    out = _CLOSES_RE.sub(lambda m: f"{m.group(1)} → ", out)
-    out = _MENTION_RE.sub(r"&#64;\1", out)
-    out = _HTML_OPEN_RE.sub("&lt;", out)
-    out = _LINK_RE.sub("&#91;", out)
-    return _FENCE_RE.sub("``", out)
 
 
 def _delivery_failure(run_dir: Path, status: str) -> str:

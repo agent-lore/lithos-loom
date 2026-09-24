@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 
+from .publish_text import CONTROL_CHARS_RE
+
 _PROMPTS = "lithos_loom.plugins.story_develop.prompts"
 
 # --- severity (ported from Ralph++ tools/base.py) --------------------------
@@ -79,24 +81,26 @@ def max_severity(severities: list[str]) -> str | None:
 # plus the bidi overrides / isolates and the zero-width formatters (trojan
 # source) — keeping TAB and LF, since folded scalars are multi-line.
 #
-# The same hazard is stripped at two other boundaries by the identical pattern
-# (`cli/develop._sanitize` and `cli/_deliver_facts.sanitize_for_terminal`, both
-# of which strip raw FILE BODIES this parser never sees). This copy lives here,
-# not in a shared module, because `cli` and `plugins` are sibling components:
-# a common home would be a new Foundation component and three new cross-
-# component edges against a budget already at its cap (docs/architecture.toml).
+# The class is `publish_text.CONTROL_CHARS_RE`, the ONE definition of it
+# (security/f-002). It used to be copied here, and into `cli/develop._sanitize`
+# and `cli/_deliver_facts.sanitize_for_terminal`, as three literals declared
+# identical by comment — and they drifted: the canonical one now covers
+# `Default_Ignorable_Code_Point` in full, and the copies did not, so a
+# `rationale` of nothing but U+E0001 tag characters or U+061C sanitised to
+# itself and passed the non-blank check below (a follow-up task whose rationale
+# renders as nothing — exactly the hazard that check exists for). `publish_text`
+# is this package's own module, so there is no cross-component edge to spend on
+# sharing it; `_deliver_facts` reaches the same definition from `cli`, which
+# already imports from here.
+#
 # Stripping at the PARSE — where agent bytes become domain objects — is also
 # strictly wider than stripping per-sink: the ledger, the prompts, the run
 # result, the gate brief and every future consumer inherit it (security/f-001).
-_AGENT_CONTROL_RE = re.compile(
-    "[\x00-\x08\x0b-\x1f\x7f-\x9f"
-    "\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
-)
 
 
 def sanitize_agent_text(text: str) -> str:
     """Strip terminal-control / text-reordering bytes from agent-written text."""
-    return _AGENT_CONTROL_RE.sub("", text)
+    return CONTROL_CHARS_RE.sub("", text)
 
 
 class HandoffError(ValueError):
