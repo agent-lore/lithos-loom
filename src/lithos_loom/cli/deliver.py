@@ -50,7 +50,12 @@ From there the PR is a first-class PR-maintenance object: landability, external
 review ingestion, the base-move re-gate, the conflict resolver, merge → story
 completed + dependents nudged, and the S6 admission count.
 
-``--converge`` adds an optional sixth step (:mod:`cli._deliver_converge`): the
+``--converge`` adds an optional step **between 2 and 3**
+(:mod:`cli._deliver_converge`) — after the PR exists, BEFORE the ``pr`` gate:
+the watcher's dispatchers act only on open ``pr`` gates and the runner only on
+a story on the ready frontier, so while the chained run works nothing can see
+the PR and the needs-human gate still holds the story; no lease is needed, the
+PR is simply not yet observable (PR #427 review, Medium 1). The chain: the
 delivered PR, re-reviewed by ``develop converge`` under the story's **current**
 acceptance criteria, whose exit code becomes this command's. It runs only after
 a delivery that finished — a partial one owes the operator something, and
@@ -87,6 +92,7 @@ import typer
 from lithos_loom.cli._deliver_converge import (
     ConvergeChain,
     converge_chain,
+    run_chained_converge,
     run_converge,
 )
 from lithos_loom.cli._deliver_facts import (
@@ -273,36 +279,24 @@ def deliver_command(
     # not land, a finding that would not post, a `--json` record that could not
     # be written — is a PARTIAL delivery with its own exit code. Exit 1 is only
     # ever a refusal that wrote nothing.
+    converge_result = record.get("converge")
     if not record["complete"]:
-        if delivered.converge is not None:
-            # The delivery owes the operator something; converge would spend
-            # money on a PR whose gate, head or provenance is unsettled, and
-            # its own exit code would then hide that. Say so and stop.
+        if delivered.converge is not None and converge_result is None:
+            # The delivery was unfinished before converge's turn (an unverified
+            # or moved PR head): converge would have spent on it and hidden
+            # that behind its own exit code. Said so; the partial exit wins.
             typer.echo(
-                "  --converge SKIPPED: the delivery above is unfinished. "
-                "Re-run to finish it, then converge."
+                "  --converge SKIPPED: the delivery above was unfinished before "
+                "converge's turn. Re-run to finish it, then converge."
             )
         raise typer.Exit(EXIT_CODES["ungated"])
-    if delivered.converge is None:
-        raise typer.Exit(EXIT_CODES["delivered"])
-    # The PR is delivered and monitored either way from here: converge's exit
-    # code and summary become this command's, and a run that ends
-    # `not_converged` leaves the `pr` gate exactly where step 3 put it — the
-    # operator's next move is the one after any non-converged remediation.
-    number = record["pr_number"]
-    # converge takes `#142` / `142` / a url; the url is the fallback for a PR
-    # whose number could not be read back (already a `[Friction]` above)
-    pr = str(number) if number is not None else str(record["pr_url"])
-    label = f"#{number}" if number is not None else pr
-    for line in converge_lines(delivered.converge, pr=label, verb="converging"):
-        # the criteria are the story's own text (an outside issue body for a
-        # mirrored story) — shown, so the operator sees what a paid, pushing
-        # agent is about to work against, and stripped like every other line
-        typer.echo(sanitize_for_terminal(f"  {line}"))
-    # pinned to the head the delivery VERIFIED behind the PR (step 2b), not
-    # the sha it pushed: converge refuses outright if the branch moved since
-    head = str(record["pr_head_sha"] or "")
-    raise typer.Exit(run_converge(delivered.converge.argv(pr, head=head)))
+    if converge_result is not None and converge_result["exit_code"] != 0:
+        # The PR is delivered and monitored: a run that ended `not_converged`
+        # (or crashed) leaves the `pr` gate exactly where step 3 put it, and
+        # its exit code becomes this command's — the operator's next move is
+        # the one after any non-converged remediation.
+        raise typer.Exit(int(converge_result["exit_code"]))
+    raise typer.Exit(EXIT_CODES["delivered"])
 
 
 @dataclass(frozen=True)
@@ -396,6 +390,18 @@ def _deliver(
         if converge
         else None
     )
+    if chain is not None and story.pr_gates:
+        # A story already behind an open `pr` gate is a delivered, MONITORED
+        # PR: the watcher's dispatchers may act on it at any sweep, and the
+        # chain's whole safety is that it runs while no `pr` gate exists.
+        # The standalone command is the tool for a PR that is already watched.
+        gates = ", ".join(g.gate_id for g in story.pr_gates)
+        raise DeliverRefused(
+            f"story {story.story_id} is already behind a pr gate ({gates}) — "
+            "its PR is delivered and monitored, so a chained converge could "
+            "overlap the watcher's own runs on it. Re-review it with "
+            "`lithos-loom develop converge <pr> --story <id>` instead"
+        )
     if dry_run:
         preview(
             facts=facts,
@@ -460,6 +466,7 @@ def _deliver(
                 json_out=json_out,
                 claim=claim,
                 routes=routes,
+                chain=chain,
             ),
             chain,
         )
@@ -481,8 +488,10 @@ def _deliver_claimed(
     json_out: Path | None,
     claim: Claim,
     routes: Sequence[str],
+    chain: ConvergeChain | None = None,
 ) -> dict[str, Any]:
-    """Steps 1-5, under the story's ``deliver`` claim.
+    """Steps 1-5 — and the chained converge between 2 and 3 — under the
+    story's ``deliver`` claim and its dispatch hold.
 
     The record is built BEFORE the first external write and filled in as each
     step lands, so a failure is classified by what has already been committed
@@ -594,9 +603,11 @@ def _deliver_claimed(
         # marker, hand-delivery half). The story's `pr` gate is authoritative
         # and is what a second host reads; this is what keeps the LOCAL
         # inventories honest — `develop list` shows the PR beside the run
-        # instead of listing it with the runs still waiting on a decision, and
-        # `develop prune` stops holding a run whose work is already delivered.
-        # Best-effort by construction (see `record_manual_delivery`).
+        # instead of listing it with the runs still waiting on a decision.
+        # The url only: the completion bit `develop prune` keys on is written
+        # at the very end, once every step landed (see `record_manual_delivery`
+        # — a partial delivery must stay re-runnable on this dir). Best-effort
+        # by construction.
         run_outcome.record_manual_delivery(Path(facts.run_dir), pr_url=pr_url)
 
     # 2b — read back the revision GitHub actually put behind the PR. `gh pr
@@ -650,6 +661,29 @@ def _deliver_claimed(
         "failed"
     ):
         notes.append(f"could not notify @{login} of the PR")
+
+    # 2c — the chained converge, BEFORE the gate swap (PR #427 review, Medium
+    # 1). The watcher's dispatchers — merge-gate, conflict resolver,
+    # external-review remediation — act only on OPEN `pr` gates, and the
+    # runner only on a story on the ready frontier: while converge runs there
+    # is no `pr` gate for any of them to see, and the needs-human gate still
+    # holds the story off the frontier — with this delivery's own claims held
+    # across the run. Nothing can race the chain's coder or its push, and no
+    # lease or second coordination protocol is needed: the PR is simply not
+    # yet observable to anything that could. (A claim that expires under a
+    # long run changes none of that — the human gate is the guard; the gate
+    # phase below re-proves the lease before it writes.) Only a delivery that
+    # is still complete at this point runs it: an unverified or moved PR head
+    # is owed a re-run first, and converge would spend on it and hide that.
+    if chain is not None:
+        run_chained_converge(
+            chain,
+            record=record,
+            notes=notes,
+            pr_url=pr_url,
+            describe=lambda label: converge_lines(chain, pr=label, verb="converging"),
+            run=run_converge,
+        )
 
     # 3 + 4 — the gate swap. A transport failure here is NOT a refusal: the PR
     # is open, so it degrades to a note and the partial exit code.
@@ -786,4 +820,10 @@ def _deliver_claimed(
             record["gate_complete"] = False
             record["complete"] = False
     file_record(json_out, record, notes)
+    if facts.run_dir and record["complete"]:
+        # …and only now the completion bit: every step landed, the record the
+        # operator asked for included, so the run dir may become prunable.
+        run_outcome.record_manual_delivery(
+            Path(facts.run_dir), pr_url=pr_url, complete=True
+        )
     return record

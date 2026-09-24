@@ -3586,22 +3586,47 @@ def converge(monkeypatch: pytest.MonkeyPatch, lithos: FakeLithosClient) -> dict:
     so the story is read at CALL time, which is what says the five steps ran
     first.
     """
-    calls: dict[str, Any] = {"argv": [], "story_at_call": [], "exit_code": 0}
+    calls: dict[str, Any] = {
+        "argv": [],
+        "story_at_call": [],
+        "human_at_call": [],
+        "claims_at_call": [],
+        "exit_code": 0,
+        "raise": None,
+    }
 
     def _run(argv: Any) -> int:
         calls["argv"].append(list(argv))
-        calls["story_at_call"].append(dict(_get(lithos, _STORY).metadata))
+        story = _get(lithos, _STORY)
+        calls["story_at_call"].append(dict(story.metadata))
+        calls["human_at_call"].append(_get(lithos, "gate-human").status)
+        claims = getattr(story, "claims", None) or []
+        calls["claims_at_call"].append(
+            sorted((c["agent"], c["aspect"]) for c in claims)
+        )
+        if calls["raise"] is not None:
+            raise calls["raise"]
         return int(calls["exit_code"])
 
     monkeypatch.setattr(cli, "run_converge", _run)
     return calls
 
 
-def test_converge_runs_after_the_delivery_under_the_storys_current_description(
+def test_converge_runs_after_the_pr_exists_and_before_the_gate_is_observable(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
 ) -> None:
     """The #99 / #101 / #423 sequence in one command: deliver, then re-review
     the PR it produced under the story's CURRENT description.
+
+    The order is the whole coordination story (PR #427 review, Medium 1): the
+    watcher's dispatchers — merge-gate, conflict resolver, external-review
+    remediation — act only on OPEN ``pr`` gates, and the runner only on a
+    story that is on the ready frontier. So converge runs after the PR exists
+    (steps 1-2) and BEFORE the gate swap (steps 3-4): while it runs there is
+    no ``pr`` gate for any dispatcher to see and the needs-human gate still
+    holds the story off the frontier, with the delivery's own claims held
+    across it. No lease, no second protocol — the PR is simply not yet
+    observable to anything that could race the chain.
 
     The fixture's description and its ``metadata.acceptance_criteria`` differ
     deliberately (correctness/f-001): a dispute is settled by editing the
@@ -3613,9 +3638,19 @@ def test_converge_runs_after_the_delivery_under_the_storys_current_description(
     result = _invoke(_RUN, "--converge")
 
     assert result.exit_code == 0, result.output
-    # steps 1-5 first: the PR exists, the gate holds the story, and the
-    # story already records it by the time converge is called
+    # the PR exists by the time converge is called…
     assert len(gh["created"]) == 1
+    # …but NOT the pr gate, and the human gate still holds the story
+    assert not converge["story_at_call"][0].get(STORY_GATE_ID_KEY)
+    assert converge["human_at_call"] == ["open"]
+    # …and the delivery's claims are held across the run: its own lease and
+    # the dispatch hold on the route, so neither a second delivery nor a
+    # daemon dispatch can interleave
+    (claims,) = converge["claims_at_call"]
+    assert ("loom", "deliver") in claims
+    assert (cli_lithos.dispatch_hold_agent("loom"), "story-develop") in claims
+    # after the command the swap has happened
+    assert _get(lithos, _STORY).metadata[STORY_GATE_ID_KEY]
     (argv,) = converge["argv"]
     assert argv[0] == "99"  # the delivered PR's number
     assert argv[1:5] == ["--story", _STORY, "--repo", str(repo)]
@@ -3629,7 +3664,6 @@ def test_converge_runs_after_the_delivery_under_the_storys_current_description(
         "The gap: a stopped run leaves a branch with no PR."
     )
     assert "Done when the PR is open and gated." not in argv[10]
-    assert converge["story_at_call"][0][STORY_GATE_ID_KEY]
     assert _get(lithos, "gate-human").status == "completed"
     assert "converging #99 under the story's description" in result.output
     # …and the criteria themselves are SHOWN before a paid, pushing agent acts
@@ -3812,8 +3846,33 @@ def test_converge_is_skipped_when_the_delivery_is_unfinished(
     converge: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A partial delivery owes the operator something; converge would spend on
-    a PR whose gate never landed and hide that behind its own exit code."""
+    """A delivery that is already unfinished when converge's turn comes — the
+    PR's head could not be read back, so the revision behind it is unverified
+    — owes the operator something; converge would spend on a PR nothing
+    verified and hide that behind its own exit code."""
+    monkeypatch.setattr(cli, "delivered_pr_head", lambda *a, **k: "")
+
+    result = _invoke(_RUN, "--converge")
+
+    assert result.exit_code == cli.EXIT_CODES["ungated"], result.output
+    assert "--converge SKIPPED" in result.output
+    assert converge["argv"] == []
+    # the PR IS open — what is owed is the verification, and a re-run settles it
+    assert len(gh["created"]) == 1
+
+
+def test_a_gate_failure_after_converge_ran_is_still_a_partial_delivery(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    converge: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Converge ran (before the gate, as designed); the gate then failed. The
+    delivery is partial — exit 2, the note says the story is not gated — and
+    converge's outcome is on the record rather than hiding the partial."""
 
     def _boom(*a: Any, **k: Any) -> Any:
         raise cli_lithos.DeliverRefused("lithos is down")
@@ -3823,10 +3882,58 @@ def test_converge_is_skipped_when_the_delivery_is_unfinished(
     result = _invoke(_RUN, "--converge")
 
     assert result.exit_code == cli.EXIT_CODES["ungated"], result.output
-    assert "--converge SKIPPED" in result.output
+    assert len(converge["argv"]) == 1
+    assert "the story is NOT gated" in result.output
+    assert "converge: exit 0" in result.output
+
+
+def test_a_converge_crash_still_gates_the_pr(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
+) -> None:
+    """A chained converge that dies (not a verdict — an exception out of the
+    seam) must not leave the delivered PR unmonitored: the gate swap still
+    runs, the crash is on the record, and the command exits as a failed
+    converge does."""
+    converge["raise"] = RuntimeError("container runtime went away")
+
+    result = _invoke(_RUN, "--converge")
+
+    assert result.exit_code == 1, result.output
+    gate_id = _get(lithos, _STORY).metadata[STORY_GATE_ID_KEY]
+    assert _get(lithos, gate_id).status == "open"
+    assert _get(lithos, "gate-human").status == "completed"
+    assert "container runtime went away" in result.output
+
+
+def test_converge_is_refused_when_the_story_is_already_behind_a_pr_gate(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
+) -> None:
+    """A story already behind an open ``pr`` gate is a delivered, MONITORED
+    PR: the watcher's dispatchers can act on it at any sweep, so a chained
+    converge there would be exactly the overlap the before-the-gate order
+    exists to rule out. Refused before anything is written; the standalone
+    `develop converge <pr>` is the tool for a PR that is already watched."""
+    from lithos_loom.gates import create_pr_gate
+
+    asyncio.run(
+        create_pr_gate(
+            lithos,
+            story_id=_STORY,
+            story_title="t",
+            pr_url=_PR_URL,
+            project=None,
+            agent="loom",
+        )
+    )
+    writes = len(lithos.mutating_calls)
+
+    result = _invoke(_RUN, "--converge")
+
+    assert result.exit_code == cli.EXIT_CODES["refused"], result.output
+    assert "already behind" in result.output and "develop converge" in result.output
     assert converge["argv"] == []
-    # the PR IS open — what is owed is the gate, and the operator finishes it
-    assert len(gh["created"]) == 1
+    assert gh["created"] == [] and len(lithos.mutating_calls) == writes
+    assert _git(repo, "ls-remote", "origin", f"refs/heads/{_BRANCH}") == ""
 
 
 # ── the run dir records the hand delivery (develop list / prune) ───────
@@ -3846,3 +3953,30 @@ def test_the_delivery_is_recorded_in_the_runs_own_delivery_marker(
 
     assert run_outcome.manual_delivery_pr(run_dir) == _PR_URL
     assert run_outcome.run_pr_url(run_dir) == _PR_URL
+    assert run_outcome.manual_delivery_complete(run_dir)
+
+
+def test_a_partial_delivery_marks_the_pr_but_not_completion(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #427 review, Medium 2: the marker written the moment the PR exists
+    used to make the run dir prune-safe — so a gate that never landed left a
+    run `develop prune` would delete while the exit-2 text told the operator
+    to re-run it. The PR is recorded at once (`develop list` shows it), but
+    the run is finished only when the delivery is."""
+    from lithos_loom.plugins.story_develop import run_outcome
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise cli_lithos.DeliverRefused("lithos is down")
+
+    monkeypatch.setattr(cli, "run_gate_delivery", _boom)
+
+    assert _invoke(_RUN).exit_code == cli.EXIT_CODES["ungated"]
+
+    assert run_outcome.manual_delivery_pr(run_dir) == _PR_URL
+    assert not run_outcome.manual_delivery_complete(run_dir)  # prune keeps it

@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass
 
 from ...runner import git, worktree
-from . import check_artifacts, containers, engines, sandbox_facts
+from . import check_artifacts, containers, engines, run_owner, sandbox_facts
 from .agent_session import PauseBudget, build_run_cmd
 from .check_runner import (
     build_check_set,
@@ -201,6 +201,10 @@ def review_head(
     if len(set(names)) != len(names):
         raise ValueError(f"duplicate reviewer names: {names}")
 
+    # Before the worktree checkout: the run dir must name its owner while it
+    # still has no container, or `develop prune` cannot tell it from a corpse.
+    config.run_dir.mkdir(parents=True, exist_ok=True)
+    run_owner.record_owner(config.run_dir, turn_timeout_seconds=reviewer_timeout)
     config.worktree_parent.mkdir(parents=True, exist_ok=True)
     for spec in specs:
         config.reviewer_config_dir(spec.name).mkdir(parents=True, exist_ok=True)

@@ -12,7 +12,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.cli` | XS | 0 | 0 |
-| `lithos_loom.cli._deliver_converge` | S | 1 | 2 |
+| `lithos_loom.cli._deliver_converge` | S | 1 | 3 |
 | `lithos_loom.cli._deliver_facts` | M | 2 | 9 |
 | `lithos_loom.cli._deliver_lithos` | L | 7 | 4 |
 | `lithos_loom.cli._deliver_output` | M | 0 | 7 |
@@ -25,7 +25,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.converge` | M | 0 | 1 |
 | `lithos_loom.cli.deliver` | L | 0 | 1 |
-| `lithos_loom.cli.develop` | L | 3 | 6 |
+| `lithos_loom.cli.develop` | XL | 4 | 6 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
 | `lithos_loom.cli.merge_gate` | M | 0 | 1 |
@@ -39,6 +39,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 ### `lithos_loom.cli._deliver_converge`
 - class `ConvergeChain` — What ``--converge`` runs once the delivery has landed.
 - def `run_converge` — Run ``develop converge`` in THIS process and return its exit code.
+- def `run_chained_converge` — Step 2c of ``develop deliver``: the chained converge, run on *record*'s PR — after the PR exists, BEFORE the ``pr`` gate.
 - def `converge_chain` — The ``--converge`` chain for *story*, with its acceptance criteria resolved from the live story read (never from the PR body).
 
 ### `lithos_loom.cli._deliver_facts`
@@ -154,6 +155,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - class `GateDelivery` — A story's delivered PR, as its own state records it.
 - def `gate_delivered_prs` — ``{task_id: GateDelivery}`` from each story's OPEN ``pr`` gate (best-effort).
 - def `delivered_runs` — ``{(task_id, run_id): pr_url}`` for the runs a story's open ``pr`` gate can be attributed to.
+- class `PruneVerdict` — Why ``prune`` will — or won't — remove a run dir.
 - def `develop_list` — List inspectable story-develop runs (in-flight + failed/interrupted).
 - def `develop_prune` — Remove the on-disk run-state dirs of **finished** story-develop runs.
 - def `develop_dump` — Print the assembled conversation log for a run (finished or in-flight).

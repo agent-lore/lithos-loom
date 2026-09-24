@@ -22,7 +22,8 @@ import pytest
 
 from lithos_loom.cli import develop
 from lithos_loom.gates import STORY_GATE_ID_KEY
-from lithos_loom.plugins.story_develop import run_outcome
+from lithos_loom.plugins.story_develop import run_outcome, run_owner
+from lithos_loom.runner import orphans
 from tests.support import FakeLithosClient, make_task
 
 
@@ -611,6 +612,668 @@ def test_prune_json_shape_and_empty(
     rows = json.loads(capsys.readouterr().out)
     assert len(rows) == 1
     assert rows[0]["run_id"] == "rr" and rows[0]["pruned"] is False
+
+
+# ── prune: finished from liveness, not from one file ───────────────────
+#
+# The 2026-09-21 residue (54 dirs / 8.9 GB): every leftover lacked the terminal
+# log — killed before the epilogue, a converge `-intake` pass that never writes
+# one, a run that died in its startup window — so the old rule called them all
+# "in flight" forever. These pin the liveness rule that replaced it.
+
+
+def _backdate(run_dir: Path, seconds: float) -> float:
+    """Age the WHOLE tree under *run_dir*, and return the resulting time.
+
+    Every descendant, not just the handoff dir: prune reads the newest mtime
+    anywhere under the run dir (a run writes into `worktree/` / `agents/` /
+    `test_gate/` far more often than into `handoff/`), so a helper that aged
+    only some of it would manufacture a "stale" dir that isn't one — the shape
+    that masked the partial-mtime defect in round 1.
+    """
+    when = time.time() - seconds
+    paths = sorted(run_dir.rglob("*"), key=lambda p: len(p.parts), reverse=True)
+    for path in (*paths, run_dir):
+        os.utime(path, (when, when), follow_symlinks=False)
+    return when
+
+
+def test_prune_removes_killed_run_with_no_live_process_and_old_mtime(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The headline case: handoffs but no terminal log (a harness/OOM kill took
+    # the epilogue with it), nothing alive for it, and untouched for longer than
+    # an agent turn. Finished — and the line says why, and how much disk.
+    killed = _make_run(patched, task_id="t-1", run_id="killed", rounds={1: ["cq"]})
+    (killed / "worktree").mkdir()
+    (killed / "worktree" / "big.bin").write_bytes(b"x" * 4096)
+    _backdate(killed, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])  # docker: none
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert not killed.exists()
+    assert "removed killed" in out and "removed 1 finished run" in out
+    assert "no live process and nothing written since" in out
+    assert "KiB" in out  # the size of what was reclaimed
+
+
+def test_prune_keeps_recent_run_with_no_terminal_log(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same shape, fresh mtime: a run in its startup window looks exactly like a
+    # finished one to docker (agent containers are `--rm`), so only freshness
+    # tells them apart. Kept, and named as in flight.
+    fresh = _make_run(patched, task_id="t-1", run_id="boot", rounds={1: ["cq"]})
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert fresh.exists()
+    assert "in flight — kept boot" in out
+    assert "agent-turn window" in out
+    assert "no finished story-develop runs to prune" in out
+
+
+def test_prune_keeps_run_with_a_matching_docker_ps_row(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Old mtime, but docker still lists a running container for the run id (a
+    # coder mid-turn writes nothing for up to its whole timeout). Kept — through
+    # the real `docker ps` parse, owner-pid column included.
+    live = _make_run(patched, task_id="t-1", run_id="live", rounds={1: ["cq"]})
+    _backdate(live, 7200)
+    monkeypatch.setattr(
+        develop,
+        "_docker",
+        lambda args: "loom-develop-live-coder\tUp 3 hours\t4242\n",
+    )
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert live.exists()
+    assert "agent container loom-develop-live-coder is up" in capsys.readouterr().out
+
+
+def test_prune_keeps_run_whose_owner_process_is_still_alive(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No container is up, but an exited one carries the `loom.pid` of a process
+    # that is: the run is between phases (gate / commit / epilogue), not dead.
+    between = _make_run(patched, task_id="t-1", run_id="mid", rounds={1: ["cq"]})
+    _backdate(between, 7200)
+    monkeypatch.setattr(
+        develop,
+        "_docker",
+        lambda args: "loom-develop-mid-coder\tExited (0) 2 hours ago\t777\n",
+    )
+    monkeypatch.setattr(develop, "pid_alive", lambda pid: pid == 777)
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert between.exists()
+    assert "owner process (pid 777) is alive" in capsys.readouterr().out
+
+
+def test_prune_keeps_run_whose_owner_pid_cannot_be_checked(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `pid_alive` returning None is "can't tell", never "dead" — unknown, kept.
+    opaque = _make_run(patched, task_id="t-1", run_id="opaque", rounds={1: ["cq"]})
+    _backdate(opaque, 7200)
+    monkeypatch.setattr(
+        develop,
+        "_docker",
+        lambda args: "loom-develop-opaque-coder\tExited (137) 2 hours ago\t999\n",
+    )
+    monkeypatch.setattr(develop, "pid_alive", lambda pid: None)
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert opaque.exists()
+    out = capsys.readouterr().out
+    assert "unknown — kept opaque" in out and "cannot be checked" in out
+    assert "1 unknown (never deleted)" in out
+
+
+def test_prune_reports_unknown_when_docker_is_unavailable(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The `patched` fixture has docker absent: an old dir with no terminal log
+    # cannot be classified, so it is named and kept — never deleted on a guess.
+    stale = _make_run(patched, task_id="t-1", run_id="nodocker", rounds={1: ["cq"]})
+    _backdate(stale, 7200)
+    develop.develop_prune(config=None, dry_run=False, output_format="json")
+    rows = json.loads(capsys.readouterr().out)
+    assert [(r["run_id"], r["state"], r["pruned"]) for r in rows] == [
+        ("nodocker", "unknown", False)
+    ]
+    assert "docker is unavailable" in rows[0]["reason"]
+    assert stale.exists()
+
+
+def test_prune_intake_dir_is_finished_with_its_parent_run(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A converge intake pass (`<run>-intake`) is review-only: it never writes a
+    # conversation.md, so it is finished with the run it belongs to. Here the
+    # parent is still live (fresh), so the intake — old on its own — is held.
+    parent = _make_run(patched, task_id="converge", run_id="cv1", rounds={1: ["cq"]})
+    intake = _make_run(
+        patched, task_id="converge", run_id="cv1-intake", rounds={1: ["cq"]}
+    )
+    _backdate(intake, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert parent.exists() and intake.exists()
+    assert "in flight — kept cv1-intake" in out
+    assert "intake pass of run cv1" in out
+
+    # Once the parent reaches its epilogue, both go.
+    (parent / "conversation.md").write_text("done")
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert not parent.exists() and not intake.exists()
+    assert "removed 2 finished runs" in out
+    assert "intake pass of run cv1, finished: terminal log written" in out
+
+
+def test_prune_dry_run_names_reason_and_size_per_candidate(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --dry-run is the operator's audit: every candidate with WHY it counts as
+    # finished and what it is holding, and nothing deleted.
+    killed = _make_run(patched, task_id="t-1", run_id="killed", rounds={1: ["cq"]})
+    (killed / "worktree").mkdir()
+    (killed / "worktree" / "big.bin").write_bytes(b"x" * 2048)
+    _backdate(killed, 7200)
+    logged = _make_run(patched, task_id="t-2", run_id="logged", conversation="end")
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    out = capsys.readouterr().out
+    assert "would remove killed" in out and "would remove logged" in out
+    assert "no live process and nothing written since" in out
+    assert "terminal log written" in out
+    assert "would remove 2 finished runs" in out
+    assert killed.exists() and logged.exists()  # dry run deletes nothing
+
+    develop.develop_prune(config=None, dry_run=True, output_format="json")
+    rows = {r["run_id"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["killed"]["state"] == "finished"
+    assert rows["killed"]["size_bytes"] >= 2048
+    assert rows["logged"]["reason"] == "terminal log written"
+    assert all(r["pruned"] is False for r in rows.values())
+
+
+# ── prune: the round-2 review findings ─────────────────────────────────
+
+
+def test_prune_keeps_run_whose_worktree_was_just_written(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # correctness/f-002: a run writes into `worktree/` (and `agents/`,
+    # `test_gate/`) far more often than into `handoff/`. Reading only the
+    # handoff dir ages a busy run into "idle" and deletes live work.
+    busy = _make_run(patched, task_id="t-1", run_id="busy", rounds={1: ["cq"]})
+    (busy / "worktree").mkdir()
+    _backdate(busy, 7200)
+    (busy / "worktree" / "just_committed.py").write_text("print()\n")  # now
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert busy.exists()
+    assert "in flight — kept busy" in capsys.readouterr().out
+
+
+def test_prune_idle_window_boundary_is_one_agent_turn(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The window is the agent-turn timeout: just inside it the run is held,
+    # just outside it is finished. (Deletion needs the tree to be OLDER than
+    # the timeout — the boundary itself keeps the dir.)
+    inside = _make_run(patched, task_id="t-1", run_id="inside", rounds={1: ["cq"]})
+    outside = _make_run(patched, task_id="t-2", run_id="outside", rounds={1: ["cq"]})
+    _backdate(inside, 3599)
+    _backdate(outside, 3601)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert inside.exists()
+    assert not outside.exists()
+
+
+def _dead_owner(run_dir: Path, **extra: object) -> None:
+    (run_dir / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "start_ticks": 1,  # not this process's start time: positively gone
+                "host_boot": orphans.host_boot_id(),
+                **extra,
+            }
+        )
+    )
+
+
+def test_prune_idle_window_is_the_runs_own_largest_turn_timeout(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #428 round-5 correctness: a run launched with `--coder-timeout 7200`
+    can legitimately go 7200 s without writing, so the window prune waits out
+    is THAT run's largest turn timeout (recorded with its owner marker), and
+    the host default is only the floor — a run that recorded a SHORTER timeout
+    still gets the default grace window, so a crash stays inspectable."""
+    long_recent = _make_run(patched, task_id="t-1", run_id="lr", rounds={1: ["cq"]})
+    long_old = _make_run(patched, task_id="t-2", run_id="lo", rounds={1: ["cq"]})
+    short = _make_run(patched, task_id="t-3", run_id="sh", rounds={1: ["cq"]})
+    for run_dir in (long_recent, long_old):
+        _dead_owner(run_dir, turn_timeout_seconds=7200)
+    _dead_owner(short, turn_timeout_seconds=600)
+    _backdate(long_recent, 3601)  # past the default, inside its own window
+    _backdate(long_old, 7201)  # past its own window
+    _backdate(short, 3599)  # past its own 600 s, inside the default floor
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+    assert long_recent.exists() and long_old.exists() and short.exists()
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert long_recent.exists()
+    assert not long_old.exists()
+    assert short.exists()
+
+
+def test_prune_keeps_run_whose_owner_marker_is_alive(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # correctness/f-001: agent containers are `--rm`, and a run has NO container
+    # between creating its dirs and finishing `worktree.create` (an unbounded
+    # fetch + checkout). The owner marker is the signal that survives both — so
+    # an old, containerless run dir whose owner process is alive is held.
+    starting = _make_run(patched, task_id="t-1", run_id="fetching", rounds={})
+    run_owner.record_owner(starting)  # this very pytest process: alive
+    _backdate(starting, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert starting.exists()
+    assert f"the process running it (pid {os.getpid()}) is alive" in (
+        capsys.readouterr().out
+    )
+
+
+def test_prune_removes_run_whose_owner_process_is_gone(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same marker, for a process that is positively gone (a live pid whose
+    # recorded start time does not match it — a reused pid, which is why the
+    # marker records an identity and not a bare number). Docker answers "no
+    # containers", so nothing is alive — and the tree went quiet two hours ago,
+    # which is the other half of the rule.
+    dead = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
+    (dead / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "start_ticks": 1,  # not this process's start time
+                "host_boot": orphans.host_boot_id(),
+            }
+        )
+    )
+    _backdate(dead, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert not dead.exists()
+
+
+def test_prune_keeps_run_whose_owner_marker_is_unreadable(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A marker that exists but cannot be made sense of is "can't tell", not
+    # "nobody home".
+    garbled = _make_run(patched, task_id="t-1", run_id="garbled", rounds={1: ["cq"]})
+    (garbled / run_owner.OWNER_FILE).write_text("{not json")
+    _backdate(garbled, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert garbled.exists()
+    assert "names no process this host can verify" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("label", ["", "0", "-5", "not-a-pid", "9" * 5000])
+def test_prune_keeps_run_whose_container_label_is_not_a_checkable_pid(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, label: str
+) -> None:
+    # correctness/f-004: a stopped container row is evidence loom started
+    # something for this run; if its owner label is absent, zero (which
+    # `os.kill(0, 0)` would report as our own process group — "alive" forever),
+    # negative, malformed, or too long to parse, the owner cannot be checked.
+    # Unknown — kept, never deleted on a guess.
+    opaque = _make_run(patched, task_id="t-1", run_id="opaque", rounds={1: ["cq"]})
+    _backdate(opaque, 7200)
+    monkeypatch.setattr(
+        develop,
+        "_docker",
+        lambda args: f"loom-develop-opaque-coder\tExited (0) 2 hours ago\t{label}\n",
+    )
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert opaque.exists()
+
+
+def test_prune_removes_killed_merge_gate_worktree(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # correctness/f-003: a merge-gate run dir holds only `worktree/` — no
+    # handoff, no epilogue, ever — so the old discovery never even saw it.
+    gate = patched / "merge-gate" / "mg1" / "worktree" / "mg-branch"
+    gate.mkdir(parents=True)
+    (gate / "file.txt").write_bytes(b"y" * 3072)
+    _backdate(patched / "merge-gate" / "mg1", 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert not (patched / "merge-gate" / "mg1").exists()
+    assert "removed mg1 (task merge-gate)" in out and "KiB" in out
+
+
+def test_prune_keeps_live_merge_gate_worktree(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ...and the live one it must never touch: same shape, owner still alive.
+    run_dir = patched / "merge-gate" / "mg2"
+    (run_dir / "worktree").mkdir(parents=True)
+    run_owner.record_owner(run_dir)
+    _backdate(run_dir, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert run_dir.exists()
+
+
+def test_prune_ignores_a_symlink_in_the_handoff_dir(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # security/f-001: the handoff dir is bind-mounted RW into agent containers,
+    # so an agent can plant a link to a host path that is written continuously
+    # and keep its own run dir (a git worktree) alive forever. The prune walk
+    # never follows a link out of the tree.
+    planted = _make_run(patched, task_id="t-1", run_id="planted", rounds={1: ["cq"]})
+    fresh = patched.parent / "continuously_written"
+    fresh.write_text("now")
+    (planted / "handoff" / "evil").symlink_to(fresh)
+    # the run itself — the link included — went quiet two hours ago; only the
+    # link's TARGET is still being written.
+    _backdate(planted, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    assert not planted.exists()
+    assert fresh.exists()  # the link target is never touched
+
+
+def test_prune_keeps_a_run_whose_tree_is_stamped_in_the_future(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A timestamp after `now` cannot describe past activity, so it is neither
+    # counted as the newest write (`utime(2)` on a file it owns needs no
+    # privilege, and counting it would let an agent pin its dir as "fresh")
+    # nor ignored (ignoring it would hide the real newest write behind an older
+    # visible one and license a delete the age never justified). It means the
+    # age is not established — which is `unknown — kept`, named.
+    forged = _make_run(patched, task_id="t-1", run_id="forged", rounds={1: ["cq"]})
+    _backdate(forged, 7200)
+    future = time.time() + 365 * 24 * 3600
+    os.utime(forged / "handoff" / "round_01_coder_done.md", (future, future))
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+
+    out = capsys.readouterr().out
+    assert forged.exists()
+    assert "unknown — kept forged" in out and "stamped in the future" in out
+
+
+def test_prune_never_follows_a_symlinked_run_dir(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # security/f-003: a symlink where a run dir should be pointed the
+    # privileged walk (and `rmtree`, which then fails forever) at a tree
+    # outside the work dir. Nothing loom creates is a symlink: skip it.
+    victim = patched.parent / "victim"
+    (victim / "handoff").mkdir(parents=True)
+    (victim / "handoff" / "round_01_coder_done.md").write_text("mine")
+    (patched / "t-1").mkdir(parents=True)
+    (patched / "t-1" / "linked").symlink_to(victim, target_is_directory=True)
+    _backdate(victim, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert victim.exists() and (patched / "t-1" / "linked").is_symlink()
+    assert "linked" not in out  # not classified, not walked, not reported
+    assert "no story-develop run dirs" in out
+
+
+# ── prune: the round-3 review findings ─────────────────────────────────
+
+
+def test_prune_keeps_everything_unlogged_when_docker_is_unavailable(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # correctness/f-001 (second branch): a dead owner settles the HOST PROCESS,
+    # never the container beside it — a killed plugin can leave its `--rm`
+    # container (and the `docker exec` inside it) running. With docker
+    # unaskable that cannot be ruled out, so, absent a terminal log, the dir is
+    # unknown no matter what the marker says. (`patched` has docker absent.)
+    dead_owner = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
+    (dead_owner / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {"pid": os.getpid(), "start_ticks": 1, "host_boot": orphans.host_boot_id()}
+        )
+    )
+    logged = _make_run(patched, task_id="t-2", run_id="logged", conversation="end")
+    _backdate(dead_owner, 7200)
+    _backdate(logged, 7200)
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+
+    out = capsys.readouterr().out
+    assert dead_owner.exists()  # cannot rule out a container we cannot see
+    assert "unknown — kept dead" in out and "docker is unavailable" in out
+    assert not logged.exists()  # a terminal log needs no liveness probe
+
+
+def test_prune_keeps_run_whose_host_cannot_identify_its_owner(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # correctness/f-001 (first branch): a host that cannot read process facts
+    # still stamps a marker — one that says so. The run then reads as "cannot
+    # tell" rather than falling through to the idle window, which would delete
+    # it while it was still fetching.
+    monkeypatch.setattr(run_owner, "process_identity", lambda pid: None)
+    blind = _make_run(patched, task_id="t-1", run_id="blind", rounds={1: ["cq"]})
+    run_owner.record_owner(blind)
+    _backdate(blind, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+
+    assert blind.exists()
+    assert "names no process this host can verify" in capsys.readouterr().out
+
+
+def test_prune_keeps_a_dead_run_whose_dir_it_cannot_fully_read(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A dead owner proves nothing is being written NOW; it cannot prove that an
+    # unseen file was not modified in place seconds before the run died (an
+    # in-place write bumps no visible ancestor). So a tree with a hole in it has
+    # no established age, and an unestablished age never licenses a delete —
+    # whichever way liveness went. The line says which path blocks it, so the
+    # operator can finish the job by hand.
+    dead = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
+    (dead / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {"pid": os.getpid(), "start_ticks": 1, "host_boot": orphans.host_boot_id()}
+        )
+    )
+    locked = dead / "test_gate" / "round_01" / "tree-check-abc" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "written_just_before_the_kill").write_text("x")
+    _backdate(dead, 7200)
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            list(os.scandir(locked))  # the shape the finding describes
+        monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+        develop.develop_prune(config=None, dry_run=False, output_format="json")
+
+        rows = json.loads(capsys.readouterr().out)
+        assert [(r["run_id"], r["state"], r["pruned"]) for r in rows] == [
+            ("dead", "unknown", False)
+        ]
+        assert "age cannot be established" in rows[0]["reason"]
+        assert "could not be read" in rows[0]["reason"]
+        assert "delete it by hand" in rows[0]["reason"]
+        assert dead.exists()
+    finally:
+        locked.chmod(0o700)
+
+
+def test_prune_keeps_a_signal_less_run_with_an_unreadable_subdir(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The other half of security/f-005: with NO liveness signal (a run dir from
+    # before the owner marker), age is the only evidence there is — and a tree
+    # that cannot be read has no trustworthy age. Unknown, and the reason names
+    # the path so the operator can act on it.
+    legacy = _make_run(patched, task_id="t-1", run_id="legacy", rounds={1: ["cq"]})
+    locked = legacy / "test_gate" / "round_01" / "tree-check-abc"
+    locked.mkdir(parents=True)
+    _backdate(legacy, 7200)
+    locked.chmod(0o000)
+    try:
+        monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+        develop.develop_prune(config=None, dry_run=False, output_format="text")
+        out = capsys.readouterr().out
+        assert legacy.exists()
+        assert "could not be read" in out and str(locked) in out
+    finally:
+        locked.chmod(0o700)
+
+
+def test_prune_bounds_the_walk_and_never_deletes_on_a_partial_one(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The walk is bounded (the file count under a run dir is agent-controlled,
+    # and every sweep — `--dry-run` included — walks every dir), and a walk that
+    # stopped early has not established an age: the dir is kept and its size is
+    # reported as the floor it is. The budget is set far above any honest tree
+    # for exactly that reason.
+    monkeypatch.setattr(develop, "_MAX_SCAN_ENTRIES", 3)
+    dead = _make_run(patched, task_id="t-1", run_id="dead", rounds={1: ["cq"]})
+    (dead / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {"pid": os.getpid(), "start_ticks": 1, "host_boot": orphans.host_boot_id()}
+        )
+    )
+    big = dead / "worktree"
+    big.mkdir()
+    for i in range(20):
+        (big / f"f{i}").write_bytes(b"z" * 100)
+    _backdate(dead, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert dead.exists()
+    assert ">= " in out  # a floor, not a claimed total
+    assert "more entries than the sweep walks" in out
+
+    develop.develop_prune(config=None, dry_run=True, output_format="json")
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["state"] == "unknown" and row["size_partial"] is True
+
+
+def test_prune_keeps_a_signal_less_run_it_cannot_walk_to_the_end(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ...and the same bound on the path where the walk IS the evidence: a
+    # truncated walk cannot prove a tree is idle, so it never licenses a delete.
+    monkeypatch.setattr(develop, "_MAX_SCAN_ENTRIES", 2)
+    legacy = _make_run(patched, task_id="t-1", run_id="legacy", rounds={1: ["cq"]})
+    (legacy / "worktree").mkdir()
+    for i in range(10):
+        (legacy / "worktree" / f"f{i}").write_text("z")
+    _backdate(legacy, 7200)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+
+    assert legacy.exists()
+    assert "more entries than the sweep walks" in capsys.readouterr().out
+
+
+# ── prune: the round-4 review findings ─────────────────────────────────
+
+
+def test_prune_keeps_a_just_stopped_run_through_the_grace_window(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # correctness/f-005: "nothing is alive" is only HALF the rule. A run whose
+    # owner died seconds ago is not swept out from under the operator (or from
+    # under the route-runner still reading its result) — the idle window is the
+    # post-crash grace period, and it applies however liveness was settled.
+    crashed = _make_run(patched, task_id="t-1", run_id="crashed", rounds={1: ["cq"]})
+    (crashed / run_owner.OWNER_FILE).write_text(
+        json.dumps(
+            {"pid": os.getpid(), "start_ticks": 1, "host_boot": orphans.host_boot_id()}
+        )
+    )
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+
+    out = capsys.readouterr().out
+    assert crashed.exists()
+    assert "in flight — kept crashed" in out
+    assert "is gone" in out and "inside the 3600s grace window" in out
+
+    # ...and an hour later the same run, untouched, goes.
+    _backdate(crashed, 7200)
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert not crashed.exists()
+    assert "is gone" in out and "nothing written since" in out
+
+
+def test_prune_renders_an_agent_named_path_line_safely(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """security/f-008 + f-009: the unreadable entry named in a reason is a path
+    the AGENT chose (any byte but NUL and `/` is a legal filename), and prune is
+    the one command that deletes things — a crafted name must not be able to
+    erase the line beside it (CR), forge whole records (LF, which the shared
+    body sanitiser deliberately keeps), or drive the terminal (CSI).
+
+    The probes are a CR and an LF, not only an ANSI CSI: ``click.echo`` strips
+    ANSI itself when stdout is not a tty (as under capsys), so an escape-only
+    fixture would be green with or without the fix while the operator at a real
+    terminal stayed exposed. The structural assertion is the record count.
+    """
+    legacy = _make_run(patched, task_id="t-1", run_id="legacy", rounds={1: ["cq"]})
+    forged_record = (
+        "\x1b[2K\rx\nremoved 99999999 (task t-9)  8.9 GiB  — terminal log written"
+    )
+    locked = legacy / "worktree" / forged_record
+    locked.mkdir(parents=True)
+    _backdate(legacy, 7200)
+    locked.chmod(0o000)
+    try:
+        monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+
+        develop.develop_prune(config=None, dry_run=False, output_format="text")
+        out = capsys.readouterr().out
+        assert legacy.exists()  # unreadable + no liveness signal → kept
+        assert not any(c in out for c in "\x1b\r\t")
+        # one record, one line: the kept run, the "nothing finished" line and
+        # the tally — and nothing the filename forged in between. Nothing was
+        # deleted, so no line may open like a deletion record either.
+        assert len(out.strip().splitlines()) == 3
+        assert not any(line.startswith("removed") for line in out.splitlines())
+
+        develop.develop_prune(config=None, dry_run=False, output_format="json")
+        reason = json.loads(capsys.readouterr().out)[0]["reason"]
+        assert not any(c in reason for c in "\x1b\r\n\t")
+    finally:
+        locked.chmod(0o700)
 
 
 def test_attach_stops_when_seen_containers_vanish_without_marker(
@@ -1334,8 +1997,9 @@ def test_list_and_prune_fall_back_to_the_storys_open_pr_gate(
     as finished on the same answer.
     """
     gate_pr = "https://github.com/agent-lore/lithos-loom/pull/7"
-    delivered = _make_run(patched, task_id="t-1", run_id="gated", status="disputed")
-    _make_run(patched, task_id="t-2", run_id="waiting", status="disputed")
+    # no terminal log on either: the gated run is finished by its DELIVERY
+    delivered = _make_run(patched, task_id="t-1", run_id="gated", rounds={1: ["cq"]})
+    _make_run(patched, task_id="t-2", run_id="waiting", rounds={1: ["cq"]})
     assert run_outcome.run_pr_url(delivered) is None  # nothing on disk
 
     client = FakeLithosClient(agent_id="loom")
@@ -1364,7 +2028,10 @@ def test_list_and_prune_fall_back_to_the_storys_open_pr_gate(
 
     develop.develop_prune(config=None, dry_run=True, output_format="text")
     out = capsys.readouterr().out
-    assert "would remove gated" in out and "waiting" not in out
+    # the gated run is finished by its delivery; the waiting one (no terminal
+    # log, docker unavailable here) is named as kept, never as removable
+    assert "would remove gated" in out and "would remove waiting" not in out
+    assert "delivered as" in out
 
 
 def _gated_story(
@@ -1425,7 +2092,7 @@ def test_a_storys_delivery_is_attributed_to_the_run_that_produced_it(
 
     develop.develop_prune(config=None, dry_run=False, output_format="text")
     out = capsys.readouterr().out
-    assert "removed new-run" in out and "old-run" not in out
+    assert "removed new-run" in out and "removed old-run" not in out
     assert not new_run.exists() and old_run.exists()
 
 
@@ -1621,12 +2288,22 @@ def test_prune_treats_a_hand_delivered_run_as_finished(
     # PR its lifecycle is provably over, whatever it wrote.
     delivered = _make_run(patched, task_id="t-1", run_id="handed", rounds={1: ["cq"]})
     run_outcome.record_manual_delivery(
-        delivered, pr_url="https://github.com/agent-lore/lithos-loom/pull/2"
+        delivered,
+        pr_url="https://github.com/agent-lore/lithos-loom/pull/2",
+        complete=True,
     )
     inflight = _make_run(patched, task_id="t-2", run_id="live", rounds={1: ["cq"]})
+    # …and a hand delivery that did not finish (the PR exists, the gate did
+    # not land): listed with its PR, but NOT finished — the exit-2 text tells
+    # the operator to re-run it, so prune must not take the run dir away.
+    partial = _make_run(patched, task_id="t-3", run_id="partial", rounds={1: ["cq"]})
+    run_outcome.record_manual_delivery(
+        partial, pr_url="https://github.com/agent-lore/lithos-loom/pull/3"
+    )
 
     develop.develop_prune(config=None, dry_run=True, output_format="text")
     out = capsys.readouterr().out
     assert "would remove handed" in out and "would remove 1 finished run" in out
-    assert "live" not in out
-    assert delivered.exists() and inflight.exists()  # dry run deletes nothing
+    assert "delivered as https://github.com/agent-lore/lithos-loom/pull/2" in out
+    assert "would remove live" not in out and "would remove partial" not in out
+    assert delivered.exists() and inflight.exists() and partial.exists()

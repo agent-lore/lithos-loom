@@ -29,6 +29,10 @@ Marker inventory (who writes / who reads each):
 - ``conversation.md`` (run dir) — the teardown marker (the plugin writes it just
   before ``state.json``); its presence means the run reached teardown. Read by
   :func:`capture_outcome`.
+- ``owner.json`` (run dir) — WHICH host process is running this run, stamped at
+  run start. Not in this module (it needs ``runner.orphans``, and this one stays
+  a stdlib leaf): see :mod:`run_owner`. It is what tells ``develop prune`` that a
+  run dir with no container and no epilogue is alive rather than abandoned.
 - run-dir **absence** — the route-runner reaps the dir after applying a succeeded
   result, so its absence is itself an end signal; the outcome is then recovered
   from the host-persistent completion store (:func:`recover_reaped_outcome`).
@@ -283,8 +287,21 @@ def record_delivery_failure(run_dir: Path, *, reason: str) -> None:
         marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
 
 
-def record_manual_delivery(run_dir: Path, *, pr_url: str) -> None:
-    """Record that ``develop deliver`` put this run's branch behind *pr_url*.
+def record_manual_delivery(
+    run_dir: Path, *, pr_url: str, complete: bool = False
+) -> None:
+    """Record that ``develop deliver`` put this run's branch behind *pr_url*
+    — and, once the delivery has FINISHED, that it did (*complete*).
+
+    Two facts, written at two moments (PR #427 review, Medium 2): the url the
+    moment the PR exists, so ``develop list`` can show it beside the run; the
+    completion bit only when every step landed — the gate swap, the
+    provenance, the record the operator asked for. ``prune`` reads the second
+    (:func:`manual_delivery_complete`), never the first: a partial delivery's
+    exit-2 text tells the operator to RE-RUN the command on this run dir, and
+    a run dir that has become prunable in the meantime is the one thing that
+    makes that instruction impossible to follow. Never downgraded: a later
+    partial pass over a completed delivery leaves the bit alone.
 
     A stopped run's own delivery never ran, so nothing in the run dir would
     otherwise say the work has since been delivered: ``develop list`` would
@@ -305,8 +322,23 @@ def record_manual_delivery(run_dir: Path, *, pr_url: str) -> None:
     except (OSError, json.JSONDecodeError):
         pass
     data["manual_pr_url"] = pr_url
+    if complete:
+        data["manual_delivery_complete"] = True
     with contextlib.suppress(OSError):
         marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+
+def manual_delivery_complete(run_dir: Path) -> bool:
+    """Whether a hand delivery of this run FINISHED — the bit ``prune`` reads.
+
+    False for no marker, a marker with only the url (a partial delivery the
+    operator was told to re-run), or anything unreadable.
+    """
+    try:
+        data = json.loads((run_dir / DELIVERY_MARKER).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("manual_delivery_complete") is True
 
 
 def manual_delivery_pr(run_dir: Path) -> str | None:

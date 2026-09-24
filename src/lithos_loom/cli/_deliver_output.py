@@ -358,7 +358,9 @@ def echo_plan(
         # `echo` strips and shapes: after the loom-authored headline these are
         # the story's own text, which for a mirrored story is an outside
         # issue body
-        echo(f"  6 converge: {converge[0]}")
+        # runs BETWEEN steps 2 and 3 — before the pr gate exists, so nothing
+        # the watcher dispatches can see the PR while it works
+        echo(f"  2c converge (before step 3): {converge[0]}")
         for line in converge[1:]:
             echo(f"              {line}")
 
@@ -479,6 +481,13 @@ def render(record: Mapping[str, Any]) -> list[str]:
         lines.append(
             f"  left needs-human gate {described} open — a different "
             "escalation, not this delivery's to retire"
+        )
+    converge = record.get("converge")
+    if converge is not None:
+        lines.append(
+            f"  converge: CRASHED — {converge['error']}"
+            if converge.get("error")
+            else f"  converge: exit {converge['exit_code']}"
         )
     if not record["changed"]:
         lines.append("  nothing changed — this branch was already delivered")

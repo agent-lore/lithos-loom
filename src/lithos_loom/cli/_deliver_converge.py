@@ -16,17 +16,19 @@ finished, on the PR they produced, and its exit code becomes the command's.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import typer
 import typer.main
 
+from lithos_loom.cli._deliver_facts import sanitize_for_terminal
 from lithos_loom.cli._deliver_lithos import DeliverRefused, StoryState
 from lithos_loom.cli.converge import converge_command
 
-__all__ = ["ConvergeChain", "converge_chain", "run_converge"]
+__all__ = ["ConvergeChain", "converge_chain", "run_chained_converge", "run_converge"]
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,56 @@ def run_converge(argv: Sequence[str]) -> int:
         code = exc.code
         return code if isinstance(code, int) else (0 if code is None else 1)
     return 0
+
+
+def run_chained_converge(
+    chain: ConvergeChain,
+    *,
+    record: dict[str, Any],
+    notes: list[str],
+    pr_url: str,
+    describe: Callable[[str], Sequence[str]],
+    run: Callable[[Sequence[str]], int],
+) -> None:
+    """Step 2c of ``develop deliver``: the chained converge, run on *record*'s
+    PR — after the PR exists, BEFORE the ``pr`` gate.
+
+    Runs only while the delivery is still complete: an unverified or moved PR
+    head is owed a re-run first, and converge would spend on it and hide that
+    behind its own exit code — then ``record["converge"]`` is ``None`` ("asked
+    for, skipped"). Otherwise the outcome is recorded as ``{"exit_code",
+    "error"}``: converge's own exit code, or ``1`` plus the message when the
+    seam raised (a crash out of the run, not a verdict on the PR — the gate
+    swap that follows still monitors it, and a note says so). The criteria
+    are shown before the paid, pushing run starts, stripped like every other
+    line; the run is pinned to the head the delivery VERIFIED behind the PR
+    (step 2b), not the sha it chose to push, so converge refuses outright if
+    the branch moved in between. *describe* renders the lines shown for the
+    PR label and *run* is the converge seam — both the caller's, so the
+    output module (which imports this one) is not imported back, and the
+    seam is the one name (``cli.deliver.run_converge``) tests stub.
+    """
+    if not record["complete"]:
+        record["converge"] = None
+        return
+    number = record["pr_number"]
+    # converge takes `#142` / `142` / a url; the url is the fallback for a PR
+    # whose number could not be read back (already a note on the record)
+    pr = str(number) if number is not None else str(pr_url)
+    label = f"#{number}" if number is not None else pr
+    for line in describe(label):
+        typer.echo(sanitize_for_terminal(f"  {line}"))
+    try:
+        code = run(chain.argv(pr, head=str(record["pr_head_sha"])))
+    except Exception as exc:  # noqa: BLE001 — a crash out of the seam
+        record["converge"] = {"exit_code": 1, "error": str(exc)}
+        notes.append(
+            f"the chained converge run crashed ({exc}) — not a verdict on the "
+            "PR, which is gated below and stands as delivered; re-review it "
+            "with `lithos-loom develop converge`"
+        )
+    else:
+        record["converge"] = {"exit_code": int(code), "error": ""}
 
 
 def _read_ac_file(path: Path) -> str:

@@ -56,6 +56,7 @@ from . import (
     handoff,
     panel,
     run_outcome,
+    run_owner,
     sandbox_facts,
 )
 from .config import (
@@ -423,6 +424,16 @@ def develop(
         raise ValueError(f"max_cost_usd must be > 0 (got {config.max_cost_usd})")
     _warn_if_ceiling_unmetered(config, specs)
 
+    # Stamp WHO is running this before anything slow: the worktree below starts
+    # with an unbounded fetch + checkout, during which the run has no container
+    # at all, and the operator's `develop prune` must be able to tell that
+    # containerless phase from a run that was killed an hour ago. It RAISES if
+    # it cannot stamp — a run dir prune can only guess about is worse than a
+    # run that never started, and __main__ turns the raise into a failed result.
+    config.run_dir.mkdir(parents=True, exist_ok=True)
+    run_owner.record_owner(
+        config.run_dir, turn_timeout_seconds=max(coder_timeout, reviewer_timeout)
+    )
     config.coder_config_dir.mkdir(parents=True, exist_ok=True)
     for spec in specs:
         config.reviewer_config_dir(spec.name).mkdir(parents=True, exist_ok=True)

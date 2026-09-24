@@ -9,12 +9,14 @@ needs containers).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from lithos_loom.plugins.story_develop import merge_gate as mg
+from lithos_loom.plugins.story_develop import run_owner
 from lithos_loom.plugins.story_develop.check_set import (
     Check,
     CheckResult,
@@ -281,6 +283,19 @@ def test_up_to_date_pr_gates_its_own_head_and_never_pushes(
     assert _remote_sha(fx.bare, "feature") == fx.head
     assert [c.name for c in result.checks] == ["test", "lint"]
     assert result.verdict == "GREEN"
+
+
+def test_run_dir_names_its_owner(fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A merge-gate run dir holds only a worktree — no handoff dir, no epilogue,
+    ever — so the owner stamp is the ONLY signal that tells the operator's
+    `develop prune` whether the tree belongs to a live run."""
+    _stub_checks(monkeypatch)
+    cfg = fx.config()
+
+    mg.run_merge_gate(cfg, fx.change())
+
+    identity = run_owner.read_owner(cfg.run_dir)
+    assert identity is not None and identity.pid == os.getpid()
 
 
 # ── behind, clean ────────────────────────────────────────────────────────────
