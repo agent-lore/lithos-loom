@@ -268,19 +268,25 @@ _NOT_AN_APPROVAL = [
     # the floor — and a mistaken NOTHING_TO_REMEDIATE verdict could then
     # consume the defect beside it at round 0.
     "> LGTM\nNo: the token is logged at src/api.py:88.",
-    "> LGTM\n> Ready to merge.\n\nActually the query concatenates user input "
-    "at src/db.py:44.",
+    (
+        "> LGTM\n> Ready to merge.\n\nActually the query concatenates user input "
+        "at src/db.py:44."
+    ),
     "```\nLGTM\n```\nThe token is logged at src/api.py:88 \u2014 redact it.",
     "`LGTM`\nThe token is logged at src/api.py:88.",
     "~~Approved~~\nThe session cookie has no Secure flag at src/api.py:20.",
     "~~LGTM~~, the token is logged at src/api.py:88.",
     # \u2026and a list of values is an enumeration the author is NAMING, not a
     # verdict they are asserting — with or without its lead-in line.
-    "The `state` field accepts:\n- approved\n- pending\n- denied\n\n"
-    "None of them is checked at src/api.py:12.",
+    (
+        "The `state` field accepts:\n- approved\n- pending\n- denied\n\n"
+        "None of them is checked at src/api.py:12."
+    ),
     "- approved\n- pending\n\nThe token is logged at src/api.py:88.",
-    "The field accepts one value:\n- approved\n\nIt is never validated at "
-    "src/api.py:12.",
+    (
+        "The field accepts one value:\n- approved\n\nIt is never validated at "
+        "src/api.py:12."
+    ),
     "1. approved\n2. pending\n\nNeither is authorized at src/api.py:9.",
     # …and the same markers still say "not my voice" when they hang off a
     # bullet, or spell a code block with an indent instead of a fence.
@@ -302,6 +308,19 @@ _NOT_AN_APPROVAL = [
         "redacts it."
     ),
     "LGTM\n1234567890. The token is logged at src/api.py:88.",
+    # PR #425 re-review of 6bba846: a list item's CONTINUATION lines are part
+    # of the item — the run must not flush at the first one, or the item
+    # before it is judged alone ("approved") while its sibling is masked.
+    (
+        "- approved\n  means approved by admin\n- pending\n  means awaiting review\n\n"
+        "The token is logged at src/api.py:88."
+    ),
+    # …and a one-column table's delimiter row may be a bare ``---``: the row
+    # is already matched, so it is masked, not re-read as a thematic break
+    # that ends the table before its ``LGTM`` cell.
+    "| verdict |\n---\n| LGTM |\n\nThe token is logged at src/api.py:88.",
+    "verdict |\n---\n LGTM |\n\nThe token is logged at src/api.py:88.",
+    "| verdict |\n-----\n| approved |\n\nThe token is logged at src/api.py:88.",
     # round-5 panel, correctness f-002: a code span's closing delimiter must be
     # at least as long as its opening one, or a four-backtick fence holding a
     # three-backtick example leaves the fenced approval word bare.
@@ -316,8 +335,10 @@ _NOT_AN_APPROVAL = [
     "<!-- LGTM\nThe token is logged at src/api.py:88.",  # unclosed
     # round-5 panel, security f-002: the un-backticked spelling of the label
     # line above — a dotted identifier in prose split into a bare `approved`.
-    "The flag task.approved, so nothing validates it. The admin token is "
-    "logged at src/api.py:88.",
+    (
+        "The flag task.approved, so nothing validates it. The admin token is "
+        "logged at src/api.py:88."
+    ),
     "metadata.approved.value is never checked; src/api.py:88 logs the token",
     # round-3 panel, correctness f-002: a fenced block ends at a line holding
     # nothing BUT its fence — a longer run with trailing text is content, so
@@ -327,29 +348,43 @@ _NOT_AN_APPROVAL = [
     # …and the identifier domain includes ``_``, which the decoration strip
     # deletes: keying the dot rule on letters and digits alone let
     # ``task._approved`` split and then lose its underscore.
-    "The flag task._approved, so nothing validates it. The token is logged at "
-    "src/api.py:88.",
+    (
+        "The flag task._approved, so nothing validates it. The token is logged at "
+        "src/api.py:88."
+    ),
     # round-3 panel, security f-003: GitHub renders consecutive lines as ONE
     # paragraph, so a hard-wrapped sentence must not be cut at the wrap — each
     # of these is correctly ineligible on a single line, so the break was the
     # whole cause.
-    "The endpoint returns 200 whether or not the caller is\napproved, so the "
-    "authz check is dead code at src/api.py:12.",
-    "The session is reused even when the user is not\napproved. The token is "
-    "logged at src/api.py:88.",
-    "Nothing about this cookie handling looks\ngood. It has no Secure flag at "
-    "src/api.py:20.",
+    (
+        "The endpoint returns 200 whether or not the caller is\napproved, so the "
+        "authz check is dead code at src/api.py:12."
+    ),
+    (
+        "The session is reused even when the user is not\napproved. The token is "
+        "logged at src/api.py:88."
+    ),
+    (
+        "Nothing about this cookie handling looks\ngood. It has no Secure flag at "
+        "src/api.py:20."
+    ),
     # round-6 panel, correctness f-002 / security f-004: a GFM table is the
     # table spelling of the enumeration the list rule already masks — a row
     # whose only populated cell is an approval word reduced to a bare verdict
     # once the decoration strip removed the pipes.
-    "Allowed values:\n\n| status |\n| --- |\n| approved |\n\nThe endpoint never "
-    "validates it at src/api.py:12.",
-    "| value |\n| --- |\n| approved |\n| pending |\nThe admin token is logged at "
-    "src/api.py:88.",
-    "| value | note |\n| --- | --- |\n| approved | |\nThe admin token is logged "
-    "at src/api.py:88.",
-    "| verdict |\n| --- |\n| LGTM |\nThe token is logged at src/api.py:88.",
+    (
+        "Allowed values:\n\n| status |\n| --- |\n| approved |\n\nThe endpoint never "
+        "validates it at src/api.py:12."
+    ),
+    (
+        "| value |\n| --- |\n| approved |\n| pending |\nThe admin token is logged at "
+        "src/api.py:88."
+    ),
+    (
+        "| value | note |\n| --- | --- |\n| approved | |\nThe admin token is logged "
+        "at src/api.py:88."
+    ),
+    "| verdict |\n| --- |\n| LGTM |\n\nThe token is logged at src/api.py:88.",
     # …and GFM's leading/trailing pipes are optional, so the pipeless spelling
     # of the same row is a row too.
     "status | note\n--- | ---\napproved |\n\nThe token is logged at src/api.py:88.",
@@ -364,19 +399,25 @@ _NOT_AN_APPROVAL = [
     # and handed the floor the bare unit behind it: the inverse of the hard-wrap
     # bug, and the reason tables are now recognised structurally.
     "This is not |\nLGTM\n\nThe token is logged at src/api.py:88.",
-    "Expected states are pending |\napproved\n\nThe endpoint never validates it "
-    "at src/api.py:12.",
+    (
+        "Expected states are pending |\napproved\n\nThe endpoint never validates it "
+        "at src/api.py:12."
+    ),
     "| this is not\nLGTM\n\nThe token is logged at src/api.py:88.",
     # round-7 panel, security f-006: the laziness rule holds for the other two
     # blocks too — a paragraph line straight after a bullet renders INSIDE that
     # item, and a pipeless line after a table is still one of its rows.
     "- the token is logged at src/api.py:88\nLGTM",
     "1. the token is logged at src/api.py:88\nApproved",
-    "- the token is logged at src/api.py:88\n- the cookie has no Secure flag\n"
-    "No findings overall",
+    (
+        "- the token is logged at src/api.py:88\n- the cookie has no Secure flag\n"
+        "No findings overall"
+    ),
     "| check | result |\n| --- | --- |\n| authz | missing at src/api.py:12 |\napproved",
-    "| check | result |\n| --- | --- |\n| authz | ok |\napproved\n\nThe token is "
-    "logged at src/api.py:88.",
+    (
+        "| check | result |\n| --- | --- |\n| authz | ok |\napproved\n\nThe token is "
+        "logged at src/api.py:88."
+    ),
     # The control: undecorated defect prose, which was never eligible.
     "The query builder concatenates user input at src/db.py:44.",
 ]
@@ -405,11 +446,15 @@ def test_a_body_with_no_approval_verdict_is_never_eligible(body: str) -> None:
         "**No findings.** … Ready to merge.",
         # Both `evals/triage/cases/approval-and-ask` bodies: the fixture is
         # only scorable while its rows stay eligible.
-        "**No findings.** The three streams and the marker scoping all look "
-        "right to me. Ready to merge.",
-        "LGTM overall, but the finding's last line names the story before the "
-        "gate — the operator reads the blocker second. Please put the gate id "
-        "first.",
+        (
+            "**No findings.** The three streams and the marker scoping all look "
+            "right to me. Ready to merge."
+        ),
+        (
+            "LGTM overall, but the finding's last line names the story before the "
+            "gate — the operator reads the blocker second. Please put the gate id "
+            "first."
+        ),
         # A verdict written AS a list is still a verdict: every item approves,
         # and no lead-in line makes it an enumeration of values.
         "- No findings.\n- Ready to merge.",
@@ -512,6 +557,39 @@ def test_a_block_that_cannot_interrupt_a_paragraph_continues_it() -> None:
     # item, so the existing enumeration corpus still masks as data.
     assert carries_approval("LGTM\n1. The token is logged at src/api.py:88.")
     assert not carries_approval("1. approved\n2. pending\n\nNeither is checked.")
+
+
+def test_a_list_items_continuation_lines_stay_in_its_block() -> None:
+    """PR #425 re-review of 6bba846, Medium: CommonMark keeps a continuation
+    line inside the current item and the next marker a sibling in the SAME
+    list, so the whole container is classified at once — an item's text is
+    read with its continuations folded in. A non-indented line after a blank
+    ends the list; an indented one after a blank is still the item's."""
+    body = (
+        "- approved\n  means approved by admin\n- pending\n  means awaiting review"
+        "\n\nThe token is logged at src/api.py:88."
+    )
+    assert not carries_approval(body)
+    assert not carries_approval(
+        "- approved\n\n  means approved by admin\n- pending\n\n"
+        "The token is logged at src/api.py:88."
+    )
+    # The paragraph after the (data) list is the author's own.
+    assert carries_approval("- approved\n- pending\n\nLGTM")
+
+
+def test_a_tables_bare_delimiter_row_is_part_of_the_table() -> None:
+    """PR #425 re-review of 6bba846, Low: ``| verdict |\\n---\\n| LGTM |`` is a
+    valid one-column GFM table. The delimiter is what recognised the table, so
+    it is masked with the header rather than re-read as a thematic break that
+    ends the table in front of its cell. A pipeless ``---`` under prose is still
+    a setext underline, and the paragraph after one is still the author's."""
+    assert not carries_approval("| verdict |\n---\n| LGTM |\n\nThe token is logged.")
+    assert not carries_approval(
+        "| verdict |\n-----\n| approved |\n\nThe token is logged."
+    )
+    assert carries_approval("approved\n---")
+    assert carries_approval("This is not\n---\nLGTM")
 
 
 def test_review_state_policy_follows_the_body_not_just_the_state() -> None:

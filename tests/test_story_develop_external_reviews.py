@@ -380,17 +380,28 @@ _NOT_THE_AUTHORS_VERDICT = [
     "````\n```\nLGTM\n```\n````\nThe token is logged at src/api.py:88.",
     "Allowed status\n- approved\n\nThe endpoint never validates it at src/api.py:12.",
     "<!-- LGTM -->\nThe admin token is logged at src/api.py:88 — redact it.",
-    "The flag task.approved, so nothing validates it. The token is logged at "
-    "src/api.py:88.",
-    "The flag task._approved, so nothing validates it. The token is logged at "
-    "src/api.py:88.",
+    (
+        "The flag task.approved, so nothing validates it. The token is logged at "
+        "src/api.py:88."
+    ),
+    (
+        "The flag task._approved, so nothing validates it. The token is logged at "
+        "src/api.py:88."
+    ),
     "````\n````` example\nLGTM\n````\nThe token is logged at src/api.py:88.",
-    "The session is reused even when the user is not\napproved. The token is "
-    "logged at src/api.py:88.",
-    "| verdict |\n| --- |\n| LGTM |\nThe token is logged at src/api.py:88.",
+    (
+        "The session is reused even when the user is not\napproved. The token is "
+        "logged at src/api.py:88."
+    ),
+    "| verdict |\n| --- |\n| LGTM |\n\nThe token is logged at src/api.py:88.",
     "> the token is logged at src/api.py:88\nLGTM",
     "This is not |\nLGTM\n\nThe token is logged at src/api.py:88.",
     "- the token is logged at src/api.py:88\nLGTM",
+    (
+        "- approved\n  means approved by admin\n- pending\n  means awaiting review"
+        "\n\nThe token is logged at src/api.py:88."
+    ),
+    "| verdict |\n---\n| LGTM |\n\nThe token is logged at src/api.py:88.",
     (
         "LGTM\n2. The token is logged at src/api.py:88.\n\nThe endpoint never "
         "redacts it."

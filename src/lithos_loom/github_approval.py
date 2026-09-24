@@ -391,8 +391,14 @@ def _mask_tables(text: str) -> str:
             and _TABLE_DELIM_RE.match(delim)
             and ("|" in header or "|" in delim)
         ):
+            # The delimiter row is what recognised the table, so it is masked
+            # with the header rather than re-read by the body loop as a
+            # thematic break — a bare ``---`` is a valid one-column delimiter,
+            # and stopping on it left the ``LGTM`` cell below exposed (PR #425
+            # re-review of 6bba846, Low).
             out[i] = _MASK
-            i += 1
+            out[i + 1] = _MASK
+            i += 2
             while i < len(lines) and lines[i].strip() and not _starts_a_block(lines, i):
                 out[i] = _MASK
                 i += 1
@@ -536,53 +542,72 @@ def _mask_data_lists(text: str) -> str:
     three streams.\n- No findings.") loses its eligibility and pays a
     remediation round, while an enum listing ``approved`` beside a real defect
     can no longer be dropped at round 0.
+
+    The WHOLE container is accumulated before it is classified (PR #425
+    re-review of 6bba846, Medium): CommonMark keeps a paragraph line straight
+    after an item inside that item (the same laziness :func:`_mask_quotes`
+    folds for quotes — round-7 panel security f-006), an indented line after a
+    blank inside a loose list is the item's next paragraph, and the marker
+    after either is a SIBLING in the same list. Flushing at the first
+    continuation judged "- approved" alone as a one-item verdict while its
+    sibling "- pending" was masked. So each item's text is read with its
+    continuations folded in, and the block is masked or kept as one. A nested
+    item is detail under its parent, not one of the values (or verdicts) the
+    outer list enumerates: masked on its own, so "- No findings.\n    - the
+    three streams look right\n- Ready to merge." keeps its top-level
+    verdicts (it used to hide as indented code by accident). A non-indented
+    line after a blank ends the list; a line that starts a block of its own
+    ends it too.
     """
     lines = text.split("\n")
     out = list(lines)
-    run: list[int] = []
+    run: list[int] = []  # the top-level item lines
+    members: list[int] = []  # every line of the block: items + continuations
+    texts: list[str] = []  # each item's text, continuations folded in
     run_indent = 0
+    after_blank = False
 
     def indent(line: str) -> int:
         return len(line) - len(line.lstrip())
 
     def flush() -> None:
-        if not run:
-            return
-        items = [_LIST_ITEM_RE.match(lines[i]) for i in run]
-        if _introduced_as_data(lines, run[0]) or not all(
-            m is not None and _reads_as_verdict(m["text"]) for m in items
+        nonlocal after_blank
+        if run and (
+            _introduced_as_data(lines, run[0])
+            or not all(_reads_as_verdict(item_text) for item_text in texts)
         ):
-            for i in run:
+            for i in members:
                 out[i] = _MASK
-            # …and the last item's LAZY CONTINUATION: a paragraph line straight
-            # after a bullet, with no blank line, renders INSIDE that item
-            # (round-7 panel security f-006 — the same CommonMark laziness
-            # :func:`_mask_quotes` folds for quotes; forgetting the blank line
-            # after a list is the commoner slip). It is counted from the last
-            # ITEM, not from the line that flushed the run: a blank line inside
-            # a loose list keeps the run open, and folding from there would
-            # swallow the author's own approval two blocks down.
-            for j in range(run[-1] + 1, len(lines)):
-                if not lines[j].strip() or _starts_a_block(lines, j):
-                    break
-                out[j] = _MASK
         run.clear()
+        members.clear()
+        texts.clear()
+        after_blank = False
 
     for idx, line in enumerate(lines):
-        if _list_item(lines, idx) is not None:
+        item = _list_item(lines, idx)
+        if item is not None:
             if run and indent(line) > run_indent:
-                # A NESTED item is detail under its parent, not one of the
-                # values (or verdicts) the outer list enumerates: masked on its
-                # own, so "- No findings.\n    - the three streams look
-                # right\n- Ready to merge." keeps its top-level verdicts (it
-                # used to hide as indented code by accident).
-                out[idx] = _MASK
+                out[idx] = _MASK  # nested item
+                after_blank = False
                 continue
             if not run:
                 run_indent = indent(line)
             run.append(idx)
+            members.append(idx)
+            texts.append(item["text"])
+            after_blank = False
         elif run and not line.strip():
-            continue  # a blank line inside a loose list does not end it
+            after_blank = True  # a blank inside a loose list does not end it
+        elif (
+            run
+            and not _starts_a_block(lines, idx)
+            and (not after_blank or indent(line) > run_indent)
+        ):
+            # Continuation of the last item: lazy (no blank line) or indented
+            # after one.
+            members.append(idx)
+            texts[-1] = f"{texts[-1]} {line.strip()}"
+            after_blank = False
         else:
             flush()
     flush()
