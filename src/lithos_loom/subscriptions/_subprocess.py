@@ -21,11 +21,12 @@ from lithos_loom.plugins.story_develop.publish_text import (
     CONTROL_CHARS_RE,
     MAX_EXCERPT_CHARS,
     flatten_line,
+    log_text,
     publish_line,
 )
 from lithos_loom.runner.signals import bound_child_env
 
-__all__ = ["NO_MESSAGE", "message_tail", "spawn_command"]
+__all__ = ["log_text", "NO_MESSAGE", "message_tail", "spawn_command"]
 
 
 async def _end_process(proc: asyncio.subprocess.Process) -> None:
@@ -111,6 +112,14 @@ def _is_frame_line(line: str) -> bool:
     return clean.strip().startswith(_FRAME_MARKERS)
 
 
+# The message block is walked from the last line outwards and only ever
+# publishes `MAX_EXCERPT_CHARS`, so nothing past a few hundred lines can change
+# the answer — and the walk must not be the child's to lengthen (remediation
+# review of PR #430, security: quadratic accumulation over an uncapped run of
+# non-blank, non-frame lines blocked the watcher's event loop).
+_MAX_MESSAGE_LINES = 256
+
+
 def message_tail(output: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
     """The crashed child's last logical MESSAGE, fit to publish in a finding.
 
@@ -125,7 +134,7 @@ def message_tail(output: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
     when the output holds no message line at all — a box frame is never the
     answer.
     """
-    block: list[str] = []
+    block: list[str] = []  # last line first
     for line in reversed(output.splitlines()):
         if not line.strip():
             if block:
@@ -133,11 +142,13 @@ def message_tail(output: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
             continue
         if _is_frame_line(line):
             break  # a frame is a wall: never reach past it for a "message"
-        block.insert(0, line.strip())
+        block.append(line.strip())
+        if len(block) >= _MAX_MESSAGE_LINES:
+            break  # bounded: nothing further back can reach the excerpt
     if not block:
         return NO_MESSAGE
-    kept = flatten_line(block[-1])
-    for line in reversed(block[:-1]):
+    kept = flatten_line(block[0])
+    for line in block[1:]:
         wider = flatten_line(f"{line} {kept}")
         if len(wider) > limit:
             break  # earlier lines are a bonus; the message line is not

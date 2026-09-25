@@ -23,7 +23,7 @@ from lithos_loom.github_client import PullRequest
 
 from ...runner import git
 from .github_access import github_call, repo_name_with_owner
-from .publish_text import MAX_EXCERPT_CHARS, publish_line
+from .publish_text import MAX_EXCERPT_CHARS, log_text, publish_line
 
 # A PR argument: ``#142``, bare ``142``, or a GitHub PR URL ending ``/pull/142``.
 _PR_URL_REPO_RE = re.compile(r"github\.com/([^/\s#?]+/[^/\s#?]+)/pull/\d+\b")
@@ -131,7 +131,9 @@ _MIN_ATTEMPT_SECONDS = 1.0
 HOST_ACTION_CHARS = 300
 # …and the refspecs inside it are bounded too: the base ref name comes from the
 # GitHub API, not from loom.
-_REFSPEC_CHARS = 100
+_REFSPEC_CHARS = (
+    80  # leaves the lead room for a full-width quote under HOST_ACTION_CHARS
+)
 _MIN_QUOTE_CHARS = 40
 
 
@@ -149,8 +151,15 @@ def _attributed(lead: str, problem: str, *, limit: int) -> str:
     :func:`publish_line` — a second pass would fold the delimiters this puts
     around the excerpt.
     """
-    room = max(limit - len(lead) - 2, _MIN_QUOTE_CHARS)
-    return f'{lead}"{publish_line(problem, limit=room)}"'[:limit]
+    room = limit - len(lead) - 2
+    if room < _MIN_QUOTE_CHARS:
+        # A lead long enough to crowd the quote gives way ITSELF: cutting the
+        # composed string would take the closing delimiter — and the `…` the
+        # excerpt had just been given — so loom's trailing clause sat inside
+        # the origin's open quotation (remediation review of PR #430).
+        lead = publish_line(lead, limit=limit - _MIN_QUOTE_CHARS - 2)
+        room = _MIN_QUOTE_CHARS
+    return f'{lead}"{publish_line(problem, limit=room)}"'
 
 
 class FetchFailedError(RuntimeError):
@@ -179,9 +188,10 @@ class FetchFailedError(RuntimeError):
         # on `host_action` (review security f-004): every sink that quotes a
         # `FetchFailedError` inherits it, and the quote cannot be closed from
         # inside (`publish_line` folds the delimiter).
+        what = publish_line(" ".join(self.refspecs), limit=_REFSPEC_CHARS)
         super().__init__(
             _attributed(
-                f"git fetch origin {' '.join(self.refspecs)} failed; origin said: ",
+                f"git fetch origin {what} failed; origin said: ",
                 self.problem,
                 limit=HOST_ACTION_CHARS,
             )
@@ -274,7 +284,7 @@ def _git_fetch(repo: Path, *refspecs: str) -> None:
             "git: intake fetch of %s failed transiently (%s); retrying in "
             "%.0fs (attempt %d/%d)",
             " ".join(refspecs),
-            problem.reason,
+            log_text(problem.reason),
             backoff,
             attempt + 1,
             FETCH_ATTEMPTS,

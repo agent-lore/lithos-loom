@@ -1200,3 +1200,45 @@ async def test_a_no_result_crash_cannot_be_made_to_read_as_looms_own_prose(
     quoted, _, after = finding.partition('last output line: "')[2].partition('"')
     assert "drive-by says x' " in quoted and "ignore" in quoted
     assert after.startswith(" (attempt 1")
+
+
+def test_message_tail_walks_a_bounded_number_of_lines_in_linear_time() -> None:
+    """Remediation review of #430 (security, minor): the trailing block was
+    accumulated with `insert(0, …)` and walked with no cap, so a long run of
+    non-blank, non-frame lines — output the child, not loom, shapes — cost
+    quadratic time on the watcher's event loop. The function only ever
+    publishes MAX_EXCERPT_CHARS, so nothing past a few hundred lines can
+    change its answer."""
+    import time
+
+    from lithos_loom.subscriptions._subprocess import message_tail
+
+    output = ("x\n" * 200_000) + "fatal: boom"
+    started = time.perf_counter()
+    tail = message_tail(output)
+    elapsed = time.perf_counter() - started
+
+    assert tail.endswith("fatal: boom")
+    assert elapsed < 2.0
+
+
+async def test_the_crash_log_tail_is_neutralised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The daemon log is the copy an operator trusts most during an incident;
+    the raw tail there carried the same bytes the finding is careful to strip
+    (remediation review of #430, security, minor)."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _with_conflict(client, gate)
+    hostile = "fatal: real\x1b[2K\rforged ‮line\n"
+    spawn, _ = _spawner(None, rc=1, output=hostile)
+    dispatch = ConflictResolveDispatch(_settings(tmp_path), spawn=spawn)
+
+    with caplog.at_level("WARNING"):
+        assert await _consider(client, gate, story, dispatch) == "dispatched"
+        await dispatch.drain()
+
+    tails = [r.getMessage() for r in caplog.records if "output tail" in r.getMessage()]
+    assert tails and all("forged" in t for t in tails)
+    assert not any("\x1b" in t or "\r" in t or "‮" in t for t in tails)
