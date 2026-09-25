@@ -1939,3 +1939,41 @@ async def test_a_probe_that_settles_after_the_drain_began_starts_no_run(
     await asyncio.wait_for(drained, 2.0)
     assert _runs(calls) == []  # the moved fingerprint started nothing
     assert not dispatch.busy_on(_PR_URL)
+
+
+async def test_an_infra_failed_run_names_the_host_action_and_re_arms(
+    tmp_path: Path,
+) -> None:
+    """#431: the re-gate's intake fetch failed on the host — no verdict on the
+    merge. The record says `infra_failed` (never `crashed`), the `[Friction]`
+    names what to fix, and a restart re-arms the same shas."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    spawn, calls = _spawner(
+        {
+            "status": "infra_failed",
+            "host_action": (
+                "the intake fetch of pull/62/head from origin failed (fatal: "
+                "Could not read from remote repository.) — check the daemon's "
+                "SSH agent"
+            ),
+            "message": "git fetch origin pull/62/head failed",
+        },
+        probe=_probe(_FP),
+    )
+    first_boot = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, first_boot) == "dispatched"
+    await _settle(first_boot)
+    gate = await _refresh(client, gate.id)
+    record = read_record(gate, _PR_URL)
+    assert record is not None and record.status == "infra_failed"
+    (finding,) = [f["summary"] for f in client.findings]
+    assert finding.startswith("[Friction] merge-gate")
+    assert "infrastructure failure" in finding
+    assert "SSH agent" in finding
+
+    second_boot = MergeGateDispatch(_settings(tmp_path), spawn=spawn)
+    assert await _consider(client, gate, story, second_boot) == "dispatched"
+    await _settle(second_boot)
+    assert len(_runs(calls)) == 2

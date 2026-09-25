@@ -475,3 +475,99 @@ def test_fetch_refspecs_reports_the_error_line_not_gits_trailing_boilerplate(
 
     assert problem.startswith("error: cannot lock ref 'refs/remotes/origin/main'")
     assert "remove the file manually" not in problem
+
+
+# ── #431 review: the whole stderr beside the reported line, and no escape ─────
+
+
+def test_fetch_problem_keeps_the_whole_stderr_beside_the_reported_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review f-001: a caller that CLASSIFIES the failure needs everything git
+    said — the collapsed reason keeps only the first `error:`/`fatal:` line,
+    which hides the transport sign on the line below."""
+    from lithos_loom.runner import git
+
+    stderr = (
+        "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly\n"
+        "fatal: early EOF\n"
+    )
+    monkeypatch.setattr(git, "run_group", lambda argv, **kw: (128, stderr))
+
+    problem = git.fetch_problem(tmp_path, ("main",))
+
+    assert problem.reason.startswith("error: RPC failed")
+    assert "early EOF" in problem.detail  # what a classifier reads
+    assert problem.fatal_line == "fatal: early EOF"  # what an operator reads
+    # the thin wrapper still reports exactly what it always did
+    assert git.fetch_refspecs(tmp_path, ("main",)) == problem.reason
+
+
+def test_fetch_problem_reports_a_git_that_cannot_be_spawned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review f-002: `run_group` documents that it never raises, but spawned
+    the child outside any OSError guard — a missing `git` or a deleted `cwd`
+    escaped as a traceback through every caller."""
+    from lithos_loom.runner import git
+
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(git.subprocess, "Popen", no_git)
+
+    problem = git.fetch_problem(tmp_path, ("main",))
+
+    assert problem.reason.startswith("fatal: cannot run git:")
+    assert problem.fatal_line == problem.reason
+    # and the same for every other caller of the shared spawn
+    assert "cannot run git" in git.fetch_branch(tmp_path, "main")
+
+
+def test_fetch_problem_shares_one_timeout_with_its_lock_race_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 review f-005: both internal calls were given the caller's FULL
+    timeout, so a lock-race answer at 299 s followed by a hung retry spent
+    ~600 s of a caller that had budgeted 300."""
+    import time
+
+    from lithos_loom.runner import git
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    timeouts: list[float] = []
+
+    def racing_then_hung(argv, *, timeout, **kw):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            clock["now"] += 299
+            return 1, _lock_race_stderr()
+        clock["now"] += timeout
+        return None, ""
+
+    monkeypatch.setattr(git, "run_group", racing_then_hung)
+
+    problem = git.fetch_problem(tmp_path, ("main",), timeout=300.0)
+
+    assert timeouts == [300.0, 1.0]
+    assert clock["now"] == 300.0  # the whole call, retry included
+    # the kill is FLAGGED, not left to be recognised by the shape of `reason`,
+    # so the caller's retry decision can name it (`_git_fetch` retries it inside
+    # the budget it shares with every other attempt)
+    assert problem.timed_out and "timed out" in problem.reason
+
+
+def test_fetch_problem_marks_only_the_watchdog_kill_as_timed_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import git
+
+    stderr = (
+        "ssh: connect to host github.com port 22: Connection timed out\n"
+        "fatal: Could not read from remote repository.\n"
+    )
+    monkeypatch.setattr(git, "run_group", lambda argv, **kw: (128, stderr))
+    problem = git.fetch_problem(tmp_path, ("main",))
+    # the TRANSPORT said it timed out: git answered, so this is not the watchdog
+    assert not problem.timed_out and "Connection timed out" in problem.detail

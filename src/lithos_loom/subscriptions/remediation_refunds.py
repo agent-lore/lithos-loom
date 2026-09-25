@@ -173,7 +173,9 @@ async def refund_infra_failed(
     The state write is STRICT, as for a repo-mismatch refund: it is what
     keeps the round and the review debt.
     """
-    action = str(data.get("host_action") or "fix the host")
+    # both bounded: a host action quotes git's / the agent CLI's stderr, which
+    # the ORIGIN host wrote (#431 review security f-001)
+    action = str(data.get("host_action") or "fix the host")[:300]
     detail = str(data.get("message") or "infrastructure failure")[:300]
     kept = _kept_work(data)
     # The refund IS this round's outcome (#407 slice 2a review): stamped, so a

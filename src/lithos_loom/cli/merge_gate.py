@@ -48,6 +48,7 @@ from lithos_loom.plugins.story_develop.profiles import (
     resolve_profile,
 )
 from lithos_loom.plugins.story_develop.review_resolve import (
+    FetchFailedError,
     RepoMismatchError,
     resolve_change,
 )
@@ -64,6 +65,9 @@ EXIT_CODES: dict[str, int] = {
     "conflict": 3,
     "fork_unsupported": 2,
     "pr_closed": 2,
+    # the intake fetch failed on the host (#431): no verdict on the merge —
+    # the same `infra_failed` contract every other intake surface reports
+    "infra_failed": 1,
     # the checkout's origin is not the repo the caller pinned (--expect-repo)
     "repo_mismatch": 2,
     # the project's current config could not be resolved — gated with
@@ -331,6 +335,21 @@ def merge_gate_command(
             },
         )
         raise typer.Exit(EXIT_CODES["repo_mismatch"]) from exc
+    except FetchFailedError as exc:
+        # #431: the intake fetch failed on the host — not a verdict on the
+        # merge. `infra_failed` with the host action (the dispatcher retries
+        # the key and re-arms it on the next boot, #377), never a crash.
+        typer.echo(f"merge-gate {change}: infra_failed")
+        typer.echo(f"  {exc.host_action}; nothing was merged or gated")
+        _write_json(
+            json_out,
+            {
+                "status": "infra_failed",
+                "host_action": exc.host_action,
+                "message": str(exc),
+            },
+        )
+        raise typer.Exit(EXIT_CODES["infra_failed"]) from exc
     if not resolved.head_branch:
         raise typer.BadParameter(
             f"merge-gate takes a PR (it trial-merges the PR's base and may push "

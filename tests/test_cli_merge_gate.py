@@ -783,3 +783,30 @@ def test_generated_path_flags_fail_closed_on_garbage(
         )
         assert result.exit_code == 2, argv
         assert "config" not in stubs
+
+
+def test_an_intake_fetch_failure_is_infra_failed_not_a_traceback(
+    stubs: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # #431: the re-gate's own fetch is the same intake fetch. A transport
+    # hiccup is no verdict on the merge — `infra_failed` with the host action,
+    # recorded for the sweep (which reads the record, not the log).
+    from lithos_loom.plugins.story_develop.review_resolve import FetchFailedError
+
+    def hiccup(repo, spec, **kw):
+        raise FetchFailedError(
+            refspecs=("pull/9/head", "+refs/heads/main:refs/remotes/origin/main"),
+            problem="fatal: Could not read from remote repository.",
+        )
+
+    monkeypatch.setattr(cli, "resolve_change", hiccup)
+    out = tmp_path / "r.json"
+    result = runner.invoke(develop_app, ["merge-gate", "#9", "--json", str(out)])
+
+    assert result.exit_code == cli.EXIT_CODES["infra_failed"] == 1, result.output
+    assert "config" not in stubs  # nothing merged, nothing gated
+    assert "Traceback" not in result.output
+    assert not isinstance(result.exception, FetchFailedError)
+    record = json.loads(out.read_text())
+    assert record["status"] == "infra_failed"
+    assert "Could not read from remote repository" in record["host_action"]

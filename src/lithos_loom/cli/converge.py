@@ -27,6 +27,7 @@ from lithos_loom.cli.review import (
     apply_model_policy,
     host_default_models,
     layer_check_tables,
+    report_fetch_failure,
     resolve_acceptance_criteria,
     resolve_check_commands,
     resolve_check_states,
@@ -65,6 +66,7 @@ from lithos_loom.plugins.story_develop.pr_delivery import (
 )
 from lithos_loom.plugins.story_develop.profiles import UnknownProfileError, get_profile
 from lithos_loom.plugins.story_develop.review_resolve import (
+    FetchFailedError,
     RepoMismatchError,
     resolve_change,
 )
@@ -331,6 +333,13 @@ def converge_command(
                 encoding="utf-8",
             )
         raise typer.Exit(2) from exc
+    except FetchFailedError as exc:
+        # #431: the intake fetch failed on the host (a transient SSH / network
+        # failure that outlasted its retries) — #377's contract says that is
+        # never a verdict on the change: `infra_failed` with the host action,
+        # the record written, no traceback. The watcher then refunds the S5b
+        # round / keeps the conflict pair armed off its existing infra path.
+        report_fetch_failure(exc, where="develop converge", json_out=json_out)
     if expect_head is not None and resolved.head_sha != expect_head:
         # PR #366 review F3: the watcher keyed the run on a head that moved
         # meanwhile — spending or pushing on another head would record the

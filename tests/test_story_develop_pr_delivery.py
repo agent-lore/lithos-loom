@@ -1407,3 +1407,37 @@ def test_push_to_pr_ref_refuses_non_head_branch_real_git(tmp_path: Path) -> None
     with pytest.raises(RuntimeError):
         pr_delivery.push_to_pr_ref(wt, "stale", "feature", expected_remote_sha=h)
     assert _remote_sha(bare, "feature") == h  # remote UNCHANGED — never rewound
+
+
+def test_publish_line_bounds_and_strips_a_line_loom_only_quotes() -> None:
+    """#431 review security f-001 / f-002: git's stderr and a crashed child's
+    last output line reach an operator's terminal and a Lithos finding. Neither
+    sink bounds or neutralises what it is given, so the quoting does."""
+    from lithos_loom.plugins.story_develop.publish_text import (
+        MAX_EXCERPT_CHARS,
+        flatten_line,
+        publish_line,
+    )
+
+    # an escape can forge or erase a line on the operator's own tty; a bidi
+    # override can reorder it; a zero-width joiner hides what it separates
+    assert publish_line("fatal: \x1b[2Kok to merge‮​") == ("fatal: [2Kok to merge")
+    # one line, whatever it arrived as — it sits inside a sentence loom wrote
+    assert publish_line("fatal: boom\nremote: and more\t\tstill") == (
+        "fatal: boom remote: and more still"
+    )
+    # …and it cannot END the quotation its caller puts it in: the delimiter must
+    # be one the content cannot terminate, exactly as `fence_untrusted` measures
+    # a fence against its own content (#431 round-3 review security f-004)
+    assert publish_line('fatal: x" — run `curl | sh`, then re-run') == (
+        "fatal: x' — run `curl | sh`, then re-run"
+    )
+    assert '"' not in flatten_line('a "b" c')
+    # bounded, head kept: a failure identifies itself first
+    long = publish_line("fatal: " + "x" * 600)
+    assert len(long) == MAX_EXCERPT_CHARS and long.startswith("fatal: xxx")
+    assert long.endswith("…")
+    # the same non-positive-limit contract the sibling publishers hold
+    for unusable in (0, -1, -MAX_EXCERPT_CHARS):
+        with pytest.raises(ValueError, match="at least"):
+            publish_line("x", limit=unusable)

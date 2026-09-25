@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import typer
 
@@ -47,7 +47,39 @@ from lithos_loom.plugins.story_develop.profiles import (
     get_profile,
 )
 from lithos_loom.plugins.story_develop.review_only import review_change
-from lithos_loom.plugins.story_develop.review_resolve import resolve_change
+from lithos_loom.plugins.story_develop.review_resolve import (
+    FetchFailedError,
+    resolve_change,
+)
+
+
+def report_fetch_failure(
+    exc: FetchFailedError, *, where: str, json_out: Path | None
+) -> NoReturn:
+    """Report an intake fetch failure as the ``infra_failed`` run it is (#431).
+
+    Every intake surface (``review`` / ``converge`` / ``merge-gate``) resolves
+    its change through the same fetch, so they share this ending: one plain
+    line naming what to fix on the host, the structured record every
+    autonomous caller reads (``status`` / ``host_action`` / ``message``), exit
+    1 — and no traceback, since the watcher publishes the child's output tail
+    into a story's ``[Friction]``. Never returns.
+    """
+    typer.secho(f"error: {where}: {exc.host_action}", err=True, fg=typer.colors.RED)
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(
+            json.dumps(
+                {
+                    "status": "infra_failed",
+                    "host_action": exc.host_action,
+                    "message": str(exc),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    raise typer.Exit(1)
 
 
 def review_command(
@@ -162,7 +194,12 @@ def review_command(
     repo = repo or Path.cwd()
     host = load_config(config)
 
-    resolved = resolve_change(repo, change, base_branch="main", base_override=base)
+    try:
+        resolved = resolve_change(repo, change, base_branch="main", base_override=base)
+    except FetchFailedError as exc:
+        # #431: a transient SSH / network failure at intake is the host's
+        # problem, not a review verdict — reported, never a traceback.
+        report_fetch_failure(exc, where="develop review", json_out=json_out)
 
     criteria = resolve_acceptance_criteria(acceptance, acceptance_file, resolved.body)
     if not criteria:

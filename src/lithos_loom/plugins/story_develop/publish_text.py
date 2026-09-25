@@ -22,7 +22,7 @@ document:
   not do (the one-line provenance bullet), and belt-and-braces inside every
   fence, since a rule that never stands alone is a rule nobody maintains.
 
-…and the third is for the one string that is neither:
+…the third is for the one string that is neither:
 
 * :func:`publish_title` — the PR **title**. Not markdown (GitHub renders it as
   plain text, so the body's entity rewrites would show up literally) and not
@@ -30,6 +30,12 @@ document:
   the **commit subject**, and GitHub honours closing keywords and ``@name`` in
   commit messages on the default branch. A commit message is raw text, so no
   fence reaches it.
+
+…and the fourth is for text loom merely QUOTES, in a sentence of its own:
+
+* :func:`publish_line` — one bounded, invisible-free line: git's stderr on the
+  operator's terminal, a crashed child's last output line inside a
+  ``[Friction]`` finding. Same hazard, shortest shape.
 
 So the neutralising lives here rather than beside any one caller: the plugin's
 PR-body builder (:func:`~.pr_delivery.build_pr_body`) and the hand-delivery
@@ -43,11 +49,14 @@ import re
 
 __all__ = [
     "CONTROL_CHARS_RE",
+    "MAX_EXCERPT_CHARS",
     "MAX_SECTION_CHARS",
     "MAX_TITLE_CHARS",
     "MIN_SECTION_CHARS",
     "defang_markup",
     "fence_untrusted",
+    "flatten_line",
+    "publish_line",
     "publish_title",
 ]
 
@@ -320,6 +329,62 @@ def publish_title(text: str, *, limit: int = MAX_TITLE_CHARS) -> str:
     # Cut last: the rewrites only ever grow the line, and dropping a suffix
     # cannot rejoin a keyword with the ref the arrow was put between.
     return defanged[:limit].strip()
+
+
+# A published excerpt of text loom did not author: one line, bounded. 300 is the
+# cap `remediation_refunds.refund_infra_failed` already applies to a child's
+# `message` — the same sink (a Lithos finding) and the same reason.
+MAX_EXCERPT_CHARS = 300
+_ELLIPSIS = "…"
+
+
+def publish_line(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
+    """*text* as ONE bounded line an operator can be shown safely.
+
+    The fourth tool, for the shortest shape of all: a line loom quotes from
+    somewhere else — git's stderr (the origin host's and the local ssh
+    client's text: an ssh banner, a ``remote:`` line), a crashed child's last
+    output line — published into an operator's terminal and into a Lithos
+    finding they read to DECIDE. Neither sink bounds or neutralises what it is
+    given, so this does both: the invisibles come out
+    (:data:`CONTROL_CHARS_RE` — an ANSI escape can forge or erase a line on
+    the operator's own tty, a bidi override can reorder it; CWE-117 /
+    CWE-150), every remaining whitespace run collapses to a single space so
+    the excerpt cannot break out of the sentence it sits in, and the result is
+    capped at *limit* characters (CWE-770).
+
+    The cut keeps the **head**: a quoted failure identifies itself first
+    (``fatal: …``, ``RuntimeError: …``) and an operator who reads only the
+    start still knows what happened.
+
+    A published excerpt is always *delimited* — its caller puts it inside
+    ``"…"`` so it reads as a quotation and not as loom's own prose — and the
+    same doctrine :func:`fence_untrusted` states for a whole document holds for
+    one line: the delimiter must be one **the content cannot terminate**. So
+    the double quote is folded to an apostrophe here, in the one place every
+    excerpt passes through. Without that, a line carrying a ``"`` closed the
+    quote early and everything after it read as loom's own instruction for the
+    host (#431 review security f-004, CWE-117 in its UI form).
+    """
+    if limit < 1:
+        raise ValueError(
+            f"publish_line limit must be at least 1 character, got {limit}"
+        )
+    flat = flatten_line(text)
+    if len(flat) <= limit:
+        return flat
+    return flat[: limit - len(_ELLIPSIS)].rstrip() + _ELLIPSIS
+
+
+def flatten_line(text: str) -> str:
+    """*text* as one line with the invisibles out, and no double quote left to
+    close a quotation with — :func:`publish_line` without the cut.
+
+    For the caller that must MEASURE before it chooses what to keep: the
+    watcher composes a finding's excerpt out of several physical lines and can
+    only decide how many fit once they are flattened (#431 review f-007).
+    """
+    return " ".join(CONTROL_CHARS_RE.sub("", text).replace('"', "'").split())
 
 
 def _squeeze_for_budget(text: str) -> str:

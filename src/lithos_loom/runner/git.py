@@ -22,6 +22,7 @@ import logging
 import os
 import signal
 import subprocess
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,9 @@ logger = logging.getLogger(__name__)
 # A remote that does not answer must not hang a dispatch.
 FETCH_TIMEOUT_SECONDS = 60.0
 _REF_LOCK_RACE = "cannot lock ref"
+# `git` could not be spawned at all (the shell's "command not found" code,
+# so nothing mistakes it for an exit status git itself produced).
+_SPAWN_FAILED_CODE = 127
 
 
 def fetch_branch(
@@ -69,6 +73,45 @@ def fetch_branch(
     )
 
 
+@dataclass(frozen=True)
+class FetchProblem:
+    """Why a fetch failed: the one line worth REPORTING plus the WHOLE stderr.
+
+    A caller that only reports the failure wants :attr:`reason`; one that
+    CLASSIFIES it (retry or give up) must read :attr:`detail` — git splits a
+    transport failure across lines (``error: RPC failed; curl 92 …`` then
+    ``fatal: early EOF``) and the collapsed reason keeps only the first, so
+    classifying on it misses the very signs the retry exists for (#431 review
+    f-001). An empty :attr:`reason` means the fetch succeeded.
+
+    ``timed_out`` is the one failure git did not diagnose: the budget passed
+    with no answer and loom killed the process group. It is flagged rather than
+    left to be recognised by the shape of :attr:`reason`, so a caller that
+    retries transport failures can say so deliberately — :func:`review_resolve
+    ._git_fetch` does retry it, bounded by a budget it shares with every other
+    attempt (#431 review f-005).
+    """
+
+    reason: str
+    stderr: str = ""
+    timed_out: bool = False
+
+    @property
+    def detail(self) -> str:
+        """Everything git said — what a classifier must match against."""
+        return self.stderr or self.reason
+
+    @property
+    def fatal_line(self) -> str:
+        """The first ``fatal:`` line — git's own verdict on the failure, which
+        is what an operator needs (the preceding ``error:`` line is the
+        transport's plumbing detail). Falls back to :attr:`reason`."""
+        for line in self.stderr.splitlines():
+            if line.startswith("fatal:"):
+                return line.strip()
+        return self.reason
+
+
 def fetch_refspecs(
     repo: Path,
     refspecs: Sequence[str],
@@ -79,24 +122,50 @@ def fetch_refspecs(
     """``git fetch origin <refspecs…>`` with the daemon's tolerances; ``""``
     on success, else the reason (for the caller's log or error).
 
-    Never raises, never prompts (``GIT_TERMINAL_PROMPT=0`` — a credential
-    prompt on the daemon's tty would block for the whole timeout), and a
-    hung transport is killed with its process group (the ssh / https helper
-    outlives a bare kill of ``git``). Two fetches of a moved base in one
-    repo race on the tracking ref's compare-and-swap and the loser fails
-    with ``cannot lock ref … is at X but expected Y`` though both write X —
-    that is retried once, not a failure (#390 review; #392: the merge-gate
-    probe / converge fetch beside a story-develop worktree cut).
+    See :func:`fetch_problem`, which this reports the :attr:`~FetchProblem.reason`
+    of; a caller that must classify the failure calls that one instead.
+    """
+    return fetch_problem(repo, refspecs, timeout=timeout, label=label).reason
+
+
+def fetch_problem(
+    repo: Path,
+    refspecs: Sequence[str],
+    *,
+    timeout: float = FETCH_TIMEOUT_SECONDS,
+    label: str = "",
+) -> FetchProblem:
+    """``git fetch origin <refspecs…>`` with the daemon's tolerances, as a
+    :class:`FetchProblem` (empty ``reason`` = success).
+
+    Never raises (a ``git`` that cannot even be spawned is a reported problem
+    like any other, #431 review f-002), never prompts
+    (``GIT_TERMINAL_PROMPT=0`` — a credential prompt on the daemon's tty would
+    block for the whole timeout), and a hung transport is killed with its
+    process group (the ssh / https helper outlives a bare kill of ``git``).
+    Two fetches of a moved base in one repo race on the tracking ref's
+    compare-and-swap and the loser fails with ``cannot lock ref … is at X but
+    expected Y`` though both write X — that is retried once, not a failure
+    (#390 review; #392: the merge-gate probe / converge fetch beside a
+    story-develop worktree cut). *timeout* bounds the whole call, that retry
+    included, so a caller's own budget cannot be spent twice over.
     """
     argv = ["git", "fetch", "-q", "origin", *refspecs]
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     what = label or " ".join(refspecs)
+    # *timeout* is the budget for this CALL, lock-race retry included: two
+    # full-timeout waits under one argument let a race at 299s be followed by
+    # a hung retry for another 300 (#431 review f-005).
+    deadline = time.monotonic() + timeout
     for attempt in (1, 2):
-        returncode, stderr = run_group(argv, cwd=repo, env=env, timeout=timeout)
+        remaining = timeout if attempt == 1 else deadline - time.monotonic()
+        if remaining <= 0:
+            return FetchProblem(f"timed out after {timeout:.0f}s", timed_out=True)
+        returncode, stderr = run_group(argv, cwd=repo, env=env, timeout=remaining)
         if returncode is None:
-            return f"timed out after {timeout:.0f}s"
+            return FetchProblem(f"timed out after {remaining:.0f}s", timed_out=True)
         if returncode == 0:
-            return ""
+            return FetchProblem("")
         stderr = stderr.strip()
         reason = _fetch_reason(stderr) or f"exit {returncode}"
         if _REF_LOCK_RACE in stderr and attempt == 1:
@@ -106,8 +175,8 @@ def fetch_refspecs(
                 reason,
             )
             continue
-        return reason
-    return "unreachable"  # pragma: no cover
+        return FetchProblem(reason, stderr)
+    return FetchProblem("unreachable")  # pragma: no cover
 
 
 def _fetch_reason(stderr: str) -> str:
@@ -127,16 +196,26 @@ def run_group(
 ) -> tuple[int | None, str]:
     """Run *argv* in its own process group; ``(returncode, stderr)``, or
     ``(None, "")`` when it timed out — the whole group is killed then, so a
-    transport helper (ssh, git-remote-https) cannot outlive the fetch."""
-    proc = subprocess.Popen(
-        list(argv),
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
+    transport helper (ssh, git-remote-https) cannot outlive the fetch.
+
+    A **spawn** failure is a reported problem, not an exception: a missing or
+    unexecutable ``git``, a working directory that vanished, an out-of-resource
+    ``fork`` all come back as ``(127, "fatal: cannot run …")`` so callers keep
+    the "never raises" contract they document (#431 review f-002 — an uncaught
+    ``OSError`` here reached the watcher as a `crashed` run with no record).
+    """
+    try:
+        proc = subprocess.Popen(
+            list(argv),
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return _SPAWN_FAILED_CODE, f"fatal: cannot run {argv[0]}: {exc}"
     try:
         _out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
