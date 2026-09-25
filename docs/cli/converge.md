@@ -96,6 +96,42 @@ Precedence: `--ac-file` > `--ac` > the **PR body**. A PR with no body and no `--
 
 > **Intake exceptions propagate.** An *unexpected* error while producing the intake review (e.g. a container crash, a bad config) is raised, not silently mapped to `failed` — a traceback is the honest signal for an internal fault. `failed` is reserved for the *expected* incomplete-review and budget-exhausted cases.
 
+## An exhausted run's rounds — `develop converge-push`
+
+A run that stops unapproved (`not_converged` on `max_rounds` / `disputed` /
+`stalled` / `cost_exceeded`) pushes nothing, by design: an unapproved push
+would put unreviewed rounds on a delivered PR. Its rounds are still
+**committed**, on a local branch in `<work_dir>/converge/<run>/worktree`.
+[`lithos-loom develop converge-push <run>`](converge-push.md) is the operator's
+decision about them: without `--yes` it reports what those rounds produced (the
+gate verdict, the findings left open, the fixer commits) and whether they would
+fast-forward onto the PR's current head, writing nothing; with `--yes` it pushes
+them through this command's own append-only seam, answers the reviewers' threads
+and records `[ConvergePushed]` on the story naming what it was pushed with. The
+watcher reads that push as a **human** one, so the remediation budget re-arms.
+
+To make that possible, converge writes a `converge` block into the run dir's
+`state.json` **at intake, before the first paid turn** — `pr_url`, `pr_number`,
+`pr_head_branch` (the PR's head branch, *not* the run's own local branch),
+`intake_head_sha`, `base_sha`, `repo`, and the `--story` id when given — and
+seeds the run's `handoff/` dir in the same step, since that is what every run
+lookup recognises a run by and the intake review seeds only `<run>-intake`'s.
+A run killed during intake (SIGTERM, exit 143) is therefore still resolvable.
+The loop's own exit merges into the same file rather than overwriting it, and
+converge merges the **whole-command** spend in beside the loop's own
+(`total_cost_usd` = the intake / triage turn + the loop; `develop()` records
+only `cost_usd`) — the pre-loop half first, *before* the loop writes the
+terminal status every reader stops on, so a run killed in between can still be
+summed. A successful push is recorded as well (`converge_push`, `by:
+converge`): approval is not that signal, since `--no-push` and a raced push end
+approved with the rounds still only local. In `--from-github`
+mode the run also records the injected batch (`external.json`: the id→row map,
+triage's verdicts, the surviving ids), which is what the replayed thread replies
+are composed from — and the run's own reply epilogue adds each id whose reply
+the transport **confirmed** to that file's `replied` set, so the salvage
+answers only the threads still owed one rather than inferring that from the
+run's status (which the loop writes before the epilogue runs).
+
 ## v1 limit — dispute-all round 1
 
 If round 1's coder disputes *every* finding and commits nothing, the deterministic gate still runs on the unchanged head. Such a round converges only if the head was already gate-green. This is rare (the coder is told to fix, not dispute-all) and acceptable for v1.

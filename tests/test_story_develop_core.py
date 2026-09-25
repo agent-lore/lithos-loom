@@ -563,6 +563,67 @@ def test_final_round_parity_failure_named_in_result(
     assert "make check" in result.message
 
 
+def test_state_json_records_every_check_that_held_approval(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """The durable record must name every check the FLOOR blocked on, not only
+    the raw-exit ones `DevelopResult.blocking_checks` carries (#273).
+
+    A required `typecheck` (pyright) is neither the legacy `test` gate nor a
+    raw-exit override, so a record built from those two says "test GREEN,
+    nothing blocked" for a run that stopped precisely because typecheck was
+    red — and that record is what `develop converge-push` reports to the
+    operator deciding whether to push an unapproved run's rounds.
+    """
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop.check_set import (
+        Check,
+        CheckResult,
+        CheckSetResult,
+    )
+
+    typecheck = Check("typecheck", "pyright", "required", "fast")
+    test = Check("test", "fake-tests", "required", "fast")
+    monkeypatch.setattr(
+        check_runner_mod, "build_check_set", lambda cfg, wt: (typecheck, test)
+    )
+
+    def fake_run_check_set(cfg, wt, sha, round_no, checks, gate_ledger=None):
+        return CheckSetResult(
+            tuple(
+                CheckResult(
+                    c,
+                    "ran",
+                    GateResult(
+                        command=c.command,
+                        exit_code=1 if c.name == "typecheck" else 0,
+                        passed=c.name != "typecheck",
+                        output_tail="error: x is not str"
+                        if c.name == "typecheck"
+                        else "ok",
+                    ),
+                )
+                for c in checks
+            )
+        )
+
+    monkeypatch.setattr(check_runner_mod, "run_check_set", fake_run_check_set)
+    cfg = replace(config, max_rounds=1)
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}], source_rounds={1})
+
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "max_rounds"  # reviewers passed; the floor did not
+    # the raw-exit view is unchanged: pyright is not a raw-exit check
+    assert result.blocking_checks == ()
+    data = json.loads((cfg.run_dir / "state.json").read_text())
+    assert data["test_gate"] == {"verdict": "GREEN", "command": "fake-tests"}
+    assert [c["name"] for c in data["blocking_checks"]] == ["typecheck"]
+    assert data["blocking_checks"][0]["verdict"] == "RED"
+    assert data["blocking_checks"][0]["command"] == "pyright"
+
+
 def test_state_json_failure_reason_none_for_max_rounds(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

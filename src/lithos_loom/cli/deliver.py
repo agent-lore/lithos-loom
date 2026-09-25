@@ -106,6 +106,7 @@ from lithos_loom.cli._deliver_lithos import (
     DELIVER_CLAIM_TTL_MINUTES,
     DeliverRefused,
     DeliverUncertain,
+    DeliverWrongCommand,
     GateOutcome,
     StoryState,
     dispatch_hold_agent,
@@ -162,7 +163,10 @@ __all__ = [
 # written; 2 the PR is open but the gate half did not complete — a PARTIAL
 # delivery the operator must finish, so it never shares an exit code with a
 # refusal that wrote nothing.
-EXIT_CODES = {"delivered": 0, "refused": 1, "ungated": 2}
+# `wrong_command` shares 2 with `ungated` deliberately: both say "this
+# invocation did not deliver anything and the operator has a next command to
+# run", and they cannot co-occur (the refusal is raised before any write).
+EXIT_CODES = {"delivered": 0, "refused": 1, "ungated": 2, "wrong_command": 2}
 
 
 # ── the command ─────────────────────────────────────────────────────────
@@ -251,6 +255,14 @@ def deliver_command(
             profile=profile,
             config_path=config,
         )
+    except DeliverWrongCommand as exc:
+        # The run belongs to another command (a converge run → `converge-push`).
+        # Nothing was written, but it is a usage error rather than a state the
+        # operator can clear and retry here, so it gets its own exit code.
+        typer.secho(
+            f"error: {sanitize_for_terminal(str(exc))}", err=True, fg=typer.colors.RED
+        )
+        raise typer.Exit(EXIT_CODES["wrong_command"]) from exc
     except LithosLoomError as exc:
         # DeliverRefused (a precondition), or a config that would not load —
         # either way nothing was written. Stripped like every other line this

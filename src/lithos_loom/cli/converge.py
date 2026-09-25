@@ -17,8 +17,10 @@ reused verbatim (no second implementation).
 from __future__ import annotations
 
 import json
+import logging
 import math
-from collections.abc import Callable
+import subprocess
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import typer
@@ -35,7 +37,7 @@ from lithos_loom.cli.review import (
     story_settings_for,
 )
 from lithos_loom.config import GitHubWatcherConfig, load_config
-from lithos_loom.plugins.story_develop import engines
+from lithos_loom.plugins.story_develop import engines, run_outcome
 from lithos_loom.plugins.story_develop.config import (
     DEFAULT_IMAGE,
     DEFAULT_TEST_TIMEOUT,
@@ -46,8 +48,10 @@ from lithos_loom.plugins.story_develop.config import (
     parse_test_command,
 )
 from lithos_loom.plugins.story_develop.converge import ConvergeResult, converge_pr
+from lithos_loom.plugins.story_develop.external_record import record_replied
 from lithos_loom.plugins.story_develop.external_reviews import (
     ExternalFinding,
+    ExternalOutcome,
     GitHubError,
     ReplyMode,
     fetch_external_findings,
@@ -68,8 +72,11 @@ from lithos_loom.plugins.story_develop.profiles import UnknownProfileError, get_
 from lithos_loom.plugins.story_develop.review_resolve import (
     FetchFailedError,
     RepoMismatchError,
+    ResolvedChange,
     resolve_change,
 )
+
+logger = logging.getLogger(__name__)
 
 # status -> process exit code. Review-green (nothing left for the operator to do)
 # is 0; a bad-input refusal (fork) is 2; everything else that needs a human is 1.
@@ -522,6 +529,15 @@ def converge_command(
         include_coder=True,
     )
 
+    _record_pr_facts(
+        develop_config.run_dir,
+        resolved,
+        repo=repo,
+        repo_name=gh_repo,
+        pr_number=pr_number if pr_number is not None else pr_number_from_spec(change),
+        story_id=story or "",
+    )
+
     result = converge_pr(
         develop_config,
         resolved,
@@ -540,7 +556,12 @@ def converge_command(
         # #377: an infra death is retried after the host is fixed; a reply
         # now would be re-posted then (nothing has been decided about the
         # material — the watcher re-parks the trigger).
-        _post_external_replies(result, repo=gh_repo, pr_number=pr_number)
+        _post_external_replies(
+            result,
+            repo=gh_repo,
+            pr_number=pr_number,
+            run_dir=develop_config.run_dir,
+        )
 
     typer.echo(_render(result))
     if json_out is not None:
@@ -551,6 +572,53 @@ def converge_command(
     if code == 0 and result.undecided_external:
         code = 1  # #387: a reverted external fix is a decision, not a success
     raise typer.Exit(code)
+
+
+def _record_pr_facts(
+    run_dir: Path,
+    change: ResolvedChange,
+    *,
+    repo: Path,
+    repo_name: str | None,
+    pr_number: int | None,
+    story_id: str,
+) -> None:
+    """Record the PR this run is converging, before the first paid turn.
+
+    A converge run that stops exhausted leaves its rounds on a local branch
+    and nothing on disk says which PR they belong to — the run's own
+    ``branch`` is its LOCAL branch, not the PR's head. Recovering the work
+    then means reading the PR out of the daemon log or the process argv.
+    ``develop converge-push`` reads it from here instead, and it is written
+    at intake so a run killed at any point after it (SIGTERM, exit 143) is
+    still resolvable.
+
+    Best-effort in both directions: a spec with no PR number records nothing
+    (there is nothing to push onto), and a failure to name the repository or
+    write the file costs the salvage path, never the run.
+    """
+    if pr_number is None:
+        return
+    try:
+        name = repo_name or repo_name_with_owner(repo)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        logger.warning("converge: could not resolve the origin repo name: %s", exc)
+        name = ""
+    try:
+        run_outcome.record_converge_intake(
+            run_dir,
+            pr_url=f"https://github.com/{name}/pull/{pr_number}" if name else "",
+            pr_number=pr_number,
+            pr_head_branch=change.head_branch,
+            intake_head_sha=change.head_sha,
+            base_sha=change.base_sha,
+            repo=name,
+            story_id=story_id,
+        )
+    except OSError as exc:
+        logger.warning(
+            "converge: could not record the PR facts in %s: %s", run_dir, exc
+        )
 
 
 def _render(result: ConvergeResult) -> str:
@@ -625,9 +693,65 @@ def _reply_transport(mode: ReplyMode) -> Transport | None:
 
 
 def _post_external_replies(
-    result: ConvergeResult, *, repo: str, pr_number: int
+    result: ConvergeResult, *, repo: str, pr_number: int, run_dir: Path
 ) -> None:
+    """Answer this run's external findings (see :func:`post_external_replies`)."""
+    post_external_replies(
+        result.external_outcomes,
+        repo=repo,
+        pr_number=pr_number,
+        pushed=result.pushed,
+        pushed_sha=result.pushed_sha,
+        run_dir=run_dir,
+    )
+
+
+def reply_for(outcome: ExternalOutcome, *, pushed: bool, pushed_sha: str) -> str | None:
+    """The reply body owed for one disposition, or ``None`` for none.
+
+    The posting rule itself, pure and single-sourced: only what actually
+    happened is asserted — a *fixed* reply needs the branch to have been
+    pushed (its sha is the proof), while rejections, disputes and
+    no-change-needed stand on their own.
+
+    ``develop converge-push`` reads it a second way: run it with this run's
+    OWN outcome (``pushed=False``) to learn which threads the run already
+    answered when it exited, so the push's replay answers only the ones the
+    push newly makes true instead of duplicating them on a public thread.
+    """
+    if outcome.disposition == "rejected":
+        return reply_body(
+            fixed=False, sha=None, coder_response=f"triage: {outcome.detail}"
+        )
+    if outcome.disposition == "disputed":
+        return reply_body(fixed=False, sha=None, coder_response=outcome.detail)
+    if outcome.disposition == "no_change_needed":
+        # #380: the coder agreed nothing should change — say so, in words
+        why = outcome.detail.strip() or "(no further detail given)"
+        return reply_body(
+            fixed=False, sha=None, coder_response=f"no change needed: {why}"
+        )
+    if outcome.disposition == "reverted":
+        # #387: a fix the loop made and then undid — never "Fixed in"
+        return reply_body(
+            fixed=False, sha=None, coder_response=outcome.detail, reverted=True
+        )
+    if outcome.disposition == "fixed" and pushed:
+        return reply_body(fixed=True, sha=pushed_sha, coder_response=outcome.detail)
+    return None
+
+
+def post_external_replies(
+    outcomes: Sequence[ExternalOutcome],
+    *,
+    repo: str,
+    pr_number: int,
+    pushed: bool,
+    pushed_sha: str,
+    run_dir: Path | None = None,
+) -> int:
     """Answer each external finding where it was raised, by its reply mode.
+    Returns how many replies were posted.
 
     Only what actually happened is asserted: a *fixed* reply is posted only
     when the branch was pushed (its sha is the proof — an unpushed fix must
@@ -635,36 +759,31 @@ def _post_external_replies(
     Findings whose mode is ``NONE`` (a summary review has no thread) are
     left to the rendered summary. Best-effort: a failed reply logs via the
     poster and the rest continue.
+
+    Shared with ``develop converge-push``, which posts the replies an
+    exhausted run never got to post once the operator pushes its rounds —
+    the same rules, from the same dispositions.
+
+    *run_dir*, when given, is where the ids that ACTUALLY posted are recorded
+    (:func:`record_replied`). That record — not the run's status, and not what
+    this function was eligible to post — is what a later ``converge-push``
+    subtracts, so a reply the transport refused, or one this process was
+    killed before making, is still owed.
     """
-    posted = 0
-    for o in result.external_outcomes:
+    posted: list[str] = []
+    for o in outcomes:
         transport = _reply_transport(o.finding.reply_mode)
         if transport is None:
             continue
-        if o.disposition == "rejected":
-            body = reply_body(
-                fixed=False, sha=None, coder_response=f"triage: {o.detail}"
-            )
-        elif o.disposition == "disputed":
-            body = reply_body(fixed=False, sha=None, coder_response=o.detail)
-        elif o.disposition == "no_change_needed":
-            # #380: the coder agreed nothing should change — say so, in words
-            why = o.detail.strip() or "(no further detail given)"
-            body = reply_body(
-                fixed=False, sha=None, coder_response=f"no change needed: {why}"
-            )
-        elif o.disposition == "reverted":
-            # #387: a fix the loop made and then undid — never "Fixed in"
-            body = reply_body(
-                fixed=False, sha=None, coder_response=o.detail, reverted=True
-            )
-        elif o.disposition == "fixed" and result.pushed:
-            body = reply_body(
-                fixed=True, sha=result.pushed_sha, coder_response=o.detail
-            )
-        else:
+        body = reply_for(o, pushed=pushed, pushed_sha=pushed_sha)
+        if body is None:
             continue  # unaddressed, or a fix that never landed — assert nothing
         if transport(repo, pr_number, o.finding, body):
-            posted += 1
+            posted.append(o.finding_id)
     if posted:
-        typer.echo(f"posted {posted} external review repl(ies) on {repo}#{pr_number}")
+        typer.echo(
+            f"posted {len(posted)} external review repl(ies) on {repo}#{pr_number}"
+        )
+    if run_dir is not None:
+        record_replied(run_dir, posted)
+    return len(posted)

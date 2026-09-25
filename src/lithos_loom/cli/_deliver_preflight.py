@@ -23,7 +23,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from lithos_loom.cli._deliver_facts import RunFacts, run_facts
-from lithos_loom.cli._deliver_lithos import DeliverRefused, StoryState
+from lithos_loom.cli._deliver_lithos import (
+    DeliverRefused,
+    DeliverWrongCommand,
+    StoryState,
+)
 from lithos_loom.config import LoomConfig
 from lithos_loom.plugins.story_develop import run_outcome
 from lithos_loom.runner import pidfile
@@ -57,6 +61,18 @@ def resolve_facts(
             f"no run state for {run!r} under {host.orchestrator.work_dir} "
             "(`lithos-loom develop list` shows what is there). If the work dir "
             "is gone, pass --branch and --story"
+        )
+    if run_outcome.is_converge_run_dir(run_dir):
+        # A converge run always HAS a PR — the one it was converging. Its
+        # `state.json` names the run's own LOCAL branch and its parent dir is
+        # `converge`, not a story, so delivering it would push that branch as a
+        # NEW remote branch and open a SECOND PR against the story id
+        # `converge`. The rounds belong on the PR they were written for.
+        raise DeliverWrongCommand(
+            f"{run!r} is a converge run ({run_dir}), not a stopped story run. "
+            "Its commits belong on the PR it was converging, not on a second "
+            f"PR: `lithos-loom develop converge-push {run}` reports what is "
+            "unpushed and pushes it with --yes"
         )
     facts = run_facts(run_dir)
     if branch:

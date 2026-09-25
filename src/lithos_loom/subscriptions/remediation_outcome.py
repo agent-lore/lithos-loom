@@ -112,6 +112,7 @@ async def escalate_or_report(
     last_status: str,
     detail: str,
     cost: float | None = None,
+    run_id: str = "",
 ) -> None:
     """PRD S5b: exhaustion → human gate; a gate that could not be raised is
     said so on the story instead of vanishing."""
@@ -126,6 +127,7 @@ async def escalate_or_report(
         last_status=last_status,
         detail=detail,
         cost=cost,
+        run_id=run_id,
     )
     if problem is not None:
         await post_finding(
@@ -328,6 +330,9 @@ async def record_result(
             story_id=story_id,
             spec=spec,
             budget=budget,
+            # the converge run whose rounds are stranded on a local branch —
+            # `develop converge-push` finds its gate by this id
+            run_id=str(data.get("run_id") or ""),
             budget_limit=budget_limit,
             notifier=notifier,
             last_status=str(status),

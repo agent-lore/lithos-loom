@@ -465,6 +465,15 @@ spends nothing.
   same run, under the story's current criteria) or run yourself afterwards as
   `lithos-loom develop converge <pr> --story <id> --ac-file …`. See
   [`converge.md`](converge.md).
+- **Not for a converge run.** A `develop converge` run already HAS a PR — the
+  one it was converging — and its `state.json` names its own *local* branch,
+  not the PR's head; delivering it would push that branch as a new remote
+  branch and open a **second** PR (against the pseudo-task `converge`, which is
+  not a story). A run dir under `<work_dir>/converge/` is therefore refused
+  with **exit 2**, before any read of the story, naming
+  [`lithos-loom develop converge-push <run>`](converge-push.md) — the command
+  that reports an exhausted converge run's unpushed rounds and pushes them onto
+  the right branch.
 - **Not a rescue for a run with no commits.** A branch with nothing on it
   delivers an empty PR; check `develop dump <run>` first.
 - **Never destructive.** It does not force-push, rewrite a branch, cancel a

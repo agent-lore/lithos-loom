@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 from dataclasses import fields
 from datetime import UTC, datetime, timedelta
@@ -2307,3 +2308,93 @@ def test_prune_treats_a_hand_delivered_run_as_finished(
     assert "delivered as https://github.com/agent-lore/lithos-loom/pull/2" in out
     assert "would remove live" not in out and "would remove partial" not in out
     assert delivered.exists() and inflight.exists() and partial.exists()
+
+
+# ── the converge column (#425) ─────────────────────────────────────────
+
+
+def _converge_run(
+    work_dir: Path, *, run_id: str, pr_number: int, status: str = "max_rounds"
+) -> Path:
+    """A converge run dir with a real worktree ahead of the PR head it started
+    from — the shape `develop converge-push` exists for."""
+    run_dir = work_dir / run_outcome.CONVERGE_DIR / run_id
+    wt = run_dir / "worktree"
+    wt.mkdir(parents=True)
+    (run_dir / "handoff").mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(wt), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(wt)], check=True)
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "T")
+    (wt / "a.py").write_text("x = 1\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "the PR's own work")
+    intake_head = git("rev-parse", "HEAD")
+    (wt / "b.py").write_text("y = 2\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "round 1")
+    run_outcome.write_state(
+        run_dir, {"status": status, "run_id": run_id, "worktree": str(wt)}
+    )
+    run_outcome.record_converge_intake(
+        run_dir,
+        pr_url=f"https://github.com/o/r/pull/{pr_number}",
+        pr_number=pr_number,
+        pr_head_branch="feature",
+        intake_head_sha=intake_head,
+        base_sha="b" * 40,
+        repo="o/r",
+    )
+    return run_dir
+
+
+def test_list_titles_a_converge_run_with_its_pr_and_unpushed_marker(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_dir = _converge_run(patched, run_id="cv1", pr_number=425)
+
+    develop.develop_list(config=None, output_format="json")
+    row = json.loads(capsys.readouterr().out)[0]
+    # a converge run has no Lithos task, so the title column was blank
+    assert row["title"] == "#425 unpushed"
+
+    # once converge-push has pushed them, the marker goes
+    run_outcome.record_converge_push(
+        run_dir, pushed_sha="c" * 40, pr_url="https://github.com/o/r/pull/425"
+    )
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["title"] == "#425"
+
+
+def test_list_does_not_mark_a_converge_run_that_pushed_itself(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # an approved converge run that RECORDED its own push has delivered its
+    # rounds — the record, not the approval, is what says so
+    run_dir = _converge_run(patched, run_id="cv2", pr_number=9, status="approved")
+    run_outcome.record_converge_push(
+        run_dir,
+        pushed_sha="c" * 40,
+        pr_url="https://github.com/o/r/pull/9",
+        by=run_outcome.PUSHED_BY_CONVERGE,
+    )
+
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["title"] == "#9"
+
+
+def test_list_marks_an_approved_run_whose_rounds_never_reached_the_pr(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """correctness/f-009: `converge --no-push`, and an approved run whose push
+    raced or failed, both end `approved` with the rounds still only local —
+    exactly the state the marker exists to surface."""
+    _converge_run(patched, run_id="cv3", pr_number=11, status="approved")
+
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["title"] == "#11 unpushed"

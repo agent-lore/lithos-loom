@@ -9,6 +9,8 @@ decides the approval floor — all lives here, behind a small public surface:
 * :func:`run_check_set` — run an ordered check-set against one round commit;
 * :func:`check_result_blocks` / :func:`gate_floor_blocks` — the required-check
   floor decision (shared verbatim by ``develop`` and review-only, #154);
+* :func:`blocking_check_records` — that same decision as the durable record of
+  WHAT blocked, for the run-state an operator later reads;
 * :func:`merge_check_sets` — the fast + approval-candidate merge (#140);
 * :func:`load_gate_ledger` / :func:`persist_gate_ledger` — the run's
   deterministic-finding ledger (#132), reloaded on resume;
@@ -424,6 +426,76 @@ def check_result_blocks(
         has_open = any(f.check == r.check.name for f in gate_ledger.open_findings())
         return not ran_ok and not has_open
     return r.gate is None or not r.gate.passed
+
+
+# Per blocking check, how many of its deterministic findings the durable record
+# names. The record is an operator-facing report, not the ledger (which is on
+# disk in full) — enough to see WHAT blocked without pasting a whole ruff run.
+_RECORD_FINDINGS_CAP = 10
+
+
+def blocking_check_records(
+    check_set: CheckSetResult | None,
+    gate_ledger: GateLedger | None,
+    threshold: str = DEFAULT_BLOCK_THRESHOLD,
+) -> list[dict[str, object]]:
+    """Every check that HELD approval, as a durable, operator-facing record.
+
+    Built from the floor's own per-check decision
+    (:func:`check_result_blocks`) rather than a proxy for it. That matters
+    because the two proxies a run used to persist — the legacy ``test`` gate
+    and :attr:`~.check_set.CheckSetResult.failing_raw_checks` — between them
+    miss most of a standard profile: an **adapter-backed** required check
+    (``lint``/ruff) blocks on its ledger's mapped severity and leaves no raw
+    verdict, and a plain catalog check (``typecheck``/pyright) is neither the
+    ``test`` check nor a ``raw_exit`` override. A record built from those two
+    alone reads "test GREEN, nothing open" for a run that stopped precisely
+    because required lint or typecheck was red — and that record is what
+    ``develop converge-push`` reports to the operator deciding whether to push
+    an unapproved run's rounds onto a delivered PR.
+
+    Each row carries the check's name, its command, the verdict it stopped on
+    (the raw ``GREEN``/``RED``/``TIMEOUT``, or the execution outcome for a
+    check that produced none — an ``ABSENT`` required check blocks with no
+    verdict at all) and the check's own blocking ledger findings, which for an
+    adapter-backed check ARE its verdict.
+    """
+    if check_set is None:
+        return []
+    blocking = gate_ledger.blocking(threshold) if gate_ledger is not None else []
+    records: list[dict[str, object]] = []
+    for r in check_set.results:
+        if not check_result_blocks(r, gate_ledger, threshold):
+            continue
+        findings = [f for f in blocking if f.check == r.check.name]
+        raw = r.gate.verdict if r.gate is not None else r.execution_outcome.upper()
+        records.append(
+            {
+                "name": r.check.name,
+                "command": r.check.command,
+                # The EFFECTIVE verdict — what held approval. An adapter-backed
+                # check runs `--exit-zero`, so its process verdict is GREEN by
+                # construction while its ledger findings are what blocked; the
+                # headline must say RED for it (PR #431 re-review). The raw
+                # execution result is kept beside it, never in its place.
+                "verdict": "RED" if findings else raw,
+                "execution_verdict": raw,
+                "findings": [
+                    {
+                        "finding_id": f.finding_id,
+                        "severity": f.severity,
+                        "rule": f.rule,
+                        "file": f.file,
+                        "line": f.line,
+                        "message": f.message.strip().splitlines()[0][:200]
+                        if f.message.strip()
+                        else "",
+                    }
+                    for f in findings[:_RECORD_FINDINGS_CAP]
+                ],
+            }
+        )
+    return records
 
 
 def gate_floor_blocks(

@@ -26,8 +26,11 @@ commands:
   could not establish — is kept and named ``unknown``.
 
 The mutating commands registered in this namespace live in their own modules:
-``review`` / ``converge`` / ``merge-gate`` / ``deliver`` (the last turns a
-stopped run's branch into a delivered, gated PR — see :mod:`cli.deliver`).
+``review`` / ``converge`` / ``merge-gate`` / ``deliver`` (which turns a
+stopped run's branch into a delivered, gated PR — see :mod:`cli.deliver`) /
+``converge-push`` (which reports an exhausted **converge** run's unpushed
+rounds and pushes them onto the PR it was converging — see
+:mod:`cli.converge_push`).
 
 **Discovery is zero-state.** It scans the orchestrator ``work_dir`` for
 the ``<work_dir>/<task_id>/<run_id>/`` layout the route-runner + plugin produce,
@@ -70,6 +73,7 @@ from lithos_loom.plugins.story_develop.config import DEFAULT_CODER_TIMEOUT
 from lithos_loom.plugins.story_develop.idempotency import lookup_completed
 from lithos_loom.plugins.story_develop.publish_text import CONTROL_CHARS_RE
 from lithos_loom.plugins.story_develop.run_outcome import is_run_dir, resolve_run_dir
+from lithos_loom.runner import git
 from lithos_loom.runner.orphans import PID_LABEL, identity_alive, pid_alive
 from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_exit
 
@@ -122,6 +126,14 @@ develop_app.command("merge-gate")(merge_gate_command)
 from lithos_loom.cli.deliver import deliver_command  # noqa: E402
 
 develop_app.command("deliver")(deliver_command)
+
+# `develop converge-push`: report an EXHAUSTED converge run's unpushed rounds
+# and, on the operator's `--yes`, push them onto the PR they were converging.
+# `deliver`'s counterpart for a run that already has a PR. Impl in
+# `cli/converge_push.py`.
+from lithos_loom.cli.converge_push import converge_push_command  # noqa: E402
+
+develop_app.command("converge-push")(converge_push_command)
 
 _FORMAT_TEXT = "text"
 _FORMAT_JSON = "json"
@@ -258,6 +270,49 @@ def _task_title(run_dir: Path) -> str:
     return ""
 
 
+def _converge_title(run_dir: Path) -> str:
+    """The ``title`` cell for a ``develop converge`` run — blank until now.
+
+    A converge run has no Lithos task, so it has no task title: the column
+    stood empty beside the one thing that identifies it, the PR. It carries
+    the PR number and, when the run's commits are NOT on that PR yet, the
+    ``unpushed`` marker — the operator's cue that
+    ``lithos-loom develop converge-push <run>`` has something to report.
+
+    Offline and best-effort: the tip read is one ``git rev-parse`` in the
+    run's own worktree, and anything it cannot answer (a removed worktree, a
+    run predating the intake record) simply drops the marker rather than
+    guessing that work is stranded.
+    """
+    intake = run_outcome.converge_intake(run_dir)
+    if intake is None:
+        return ""
+    number = intake.get("pr_number")
+    label = f"#{number}" if isinstance(number, int) else "(pr unknown)"
+    return f"{label} unpushed" if _converge_unpushed(run_dir, intake) else label
+
+
+def _converge_unpushed(run_dir: Path, intake: Mapping[str, Any]) -> bool:
+    """Whether this converge run's worktree tip is ahead of the PR head it
+    started from, with nothing recorded as pushed since."""
+    if run_outcome.converge_pushed_sha(run_dir):
+        return False  # a push is RECORDED — by converge itself or by hand
+    state = run_outcome.read_state(run_dir) or {}
+    if not state.get("status"):
+        return False  # no outcome yet: still running, nothing stranded
+    # Approval is deliberately NOT read as "pushed": `converge --no-push`, and
+    # an approved run whose push raced or failed, both end approved with their
+    # rounds still only local. The push RECORD above is the discriminator.
+    head = str(intake.get("intake_head_sha") or "")
+    worktree = Path(str(state.get("worktree") or (run_dir / "worktree")))
+    if not head or not worktree.is_dir():
+        return False
+    try:
+        return git.commit_sha(worktree) != head
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return False
+
+
 def _round_and_reviewers(handoff_dir: Path) -> tuple[int, tuple[str, ...]]:
     """Highest round with any handoff + the reviewer names seen, from filenames."""
     max_round = 0
@@ -284,7 +339,7 @@ def _run_info(run_dir: Path) -> RunInfo:
     return RunInfo(
         run_id=run_dir.name,
         task_id=run_dir.parent.name,
-        title=_task_title(run_dir),
+        title=_task_title(run_dir) or _converge_title(run_dir),
         round=round_no,
         reviewers=reviewers,
         run_dir=str(run_dir),

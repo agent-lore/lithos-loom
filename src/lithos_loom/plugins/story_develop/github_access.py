@@ -24,7 +24,23 @@ from pathlib import Path
 
 import httpx
 
-from lithos_loom.github_client import GitHubClient
+from lithos_loom.github_client import GitHubClient, GitHubError
+from lithos_loom.github_models import PullRequest
+
+# Re-exported at this seam (as ``external_reviews`` re-exports ``GitHubError``
+# for the same reason): a CLI command that fetches a PR through
+# :func:`github_call` must be able to name what it gets back and what it
+# catches without taking a GitHub-tier import of its own — the layering the
+# import-linter contract and the component-edge budget both describe.
+__all__ = [
+    "GitHubError",
+    "OpenPullRequest",
+    "PullRequest",
+    "default_base_branch",
+    "github_call",
+    "list_open_prs_for_branch",
+    "repo_name_with_owner",
+]
 
 # The single-injected-client timeout, matching GitHubClient.create's own
 # fallback (github_client.py). Each call is short-lived: one client, one
