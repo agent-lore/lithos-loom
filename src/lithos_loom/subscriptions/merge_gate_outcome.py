@@ -40,6 +40,7 @@ __all__ = [
     "post_conflict",
     "post_crashed",
     "post_failed",
+    "post_infra_failed",
     "post_push_failed",
     "post_repo_mismatch",
     "record_green",
@@ -356,6 +357,48 @@ async def post_crashed(
                 "; retried next sweep)"
                 if record.attempts < MAX_ATTEMPTS_PER_KEY
                 else "; waits for a head or base move)"
+            )
+        ),
+        marker={MERGE_GATE_KEY: record.as_marker()},
+        subsystem="merge-gate",
+        retry_hint="will retry next sweep",
+        marker_task_id=gate_id,
+    )
+
+
+async def post_infra_failed(
+    gate_id: str,
+    story_id: str,
+    spec: PrGateSpec,
+    record: MergeGateRecord,
+    action: str,
+    ctx: SubscriptionContext,
+) -> None:
+    """The run stopped on the HOST, not on a verdict (#377, #431: its intake
+    fetch failed through its retries). Keyed like a crash — retried on this
+    pair, re-armed by a daemon restart — but the breadcrumb names what to fix
+    instead of an output tail."""
+    record = replace(record, status="infra_failed")
+    ctx.logger.warning(
+        "merge-gate: run for %s stopped on an infrastructure failure "
+        "(attempt %d/%d): %s",
+        spec.pr_url,
+        record.attempts,
+        MAX_ATTEMPTS_PER_KEY,
+        action,
+    )
+    await post_finding_then_mark(
+        ctx,
+        task_id=story_id,
+        summary=(
+            f"[Friction] merge-gate: develop merge-gate for {spec.pr_url} "
+            f"(story {story_id}) stopped on an infrastructure failure, not a "
+            f"verdict on the merge; {action} (attempt {record.attempts}/"
+            f"{MAX_ATTEMPTS_PER_KEY}"
+            + (
+                "; retried next sweep)"
+                if record.attempts < MAX_ATTEMPTS_PER_KEY
+                else "; re-armed by a daemon restart)"
             )
         ),
         marker={MERGE_GATE_KEY: record.as_marker()},

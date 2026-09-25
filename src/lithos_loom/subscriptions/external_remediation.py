@@ -75,7 +75,7 @@ from lithos_loom.subscriptions._project_settings import (
     read_project_flag,
     resolve_project_repo,
 )
-from lithos_loom.subscriptions._subprocess import spawn_command
+from lithos_loom.subscriptions._subprocess import message_tail, spawn_command
 from lithos_loom.subscriptions.draining import DrainState, wait_idle
 from lithos_loom.subscriptions.external_reviews import (
     IngestResult,
@@ -1043,23 +1043,26 @@ class ExternalRemediation:
                 subsystem="external-remediation",
             )
             return
+        # #431: same as the conflict resolver — the finding carries the one
+        # line that says why, the whole tail goes to the log.
         tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
         budget = await record_unsettled(ctx, gate_id=gate_id, spec=spec, budget=budget)
         ctx.logger.warning(
             "external-remediation: converge for %s finished: failed (exit %d) "
-            "without a result, round %d/%d spent",
+            "without a result, round %d/%d spent; output tail: %s",
             spec.pr_url,
             rc,
             budget.rounds_used,
             self._settings.budget,
+            tail,
         )
         await post_finding(
             ctx,
             story_id,
             f"[Friction] external-remediation: converge --from-github for "
             f"{spec.pr_url} failed (exit {rc}) without a result; the round is "
-            f"spent ({budget.rounds_used}/{self._settings.budget}). Output "
-            f"tail: {tail}",
+            f"spent ({budget.rounds_used}/{self._settings.budget}). Last "
+            f'output line: "{message_tail(output)}"',
         )
         await self._escalate_if_exhausted(
             gate_id,

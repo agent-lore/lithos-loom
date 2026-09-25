@@ -112,6 +112,7 @@ graph TD
   Subscriptions --> GitHub
   Subscriptions --> LithosClient
   Subscriptions --> Notifications
+  Subscriptions --> Plugins
   Subscriptions --> ProjectContext
   Subscriptions --> Render
   Subscriptions --> Runners
@@ -170,12 +171,12 @@ graph TD
   linkStyle 58 stroke:#bbb
   linkStyle 59 stroke:#bbb
   linkStyle 60 stroke:#bbb
-  linkStyle 61 stroke:#bbb
-  linkStyle 63 stroke:#bbb
+  linkStyle 62 stroke:#bbb
   linkStyle 64 stroke:#bbb
   linkStyle 65 stroke:#bbb
   linkStyle 66 stroke:#bbb
   linkStyle 67 stroke:#bbb
   linkStyle 68 stroke:#bbb
   linkStyle 69 stroke:#bbb
+  linkStyle 70 stroke:#bbb
 ```

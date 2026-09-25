@@ -91,6 +91,7 @@ from lithos_loom.subscriptions.merge_gate_outcome import (
     post_conflict,
     post_crashed,
     post_failed,
+    post_infra_failed,
     post_push_failed,
     post_repo_mismatch,
     record_green,
@@ -133,11 +134,14 @@ PROBE_SETTLE_SECONDS = PROBE_TIMEOUT_SECONDS + 30
 
 # Record statuses retried on the SAME key, up to MAX_ATTEMPTS_PER_KEY (see
 # merge_gate_record): the run produced no verdict to stand on.
-_RETRYABLE: frozenset[str] = frozenset({"crashed", "push_failed", "repo_mismatch"})
+_RETRYABLE: frozenset[str] = frozenset(
+    {"crashed", "infra_failed", "push_failed", "repo_mismatch"}
+)
 # ...and of those, the ones a daemon RESTART re-arms with a fresh pair: a
-# crash or a push that keeps failing may be loom's own bug, and the restart
-# is the operator's fix attempt (a repo mismatch settles on the origin read)
-_REBOOT_REARMS: frozenset[str] = frozenset({"crashed", "push_failed"})
+# crash, a push that keeps failing or an infrastructure failure (#431) may be
+# loom's own bug or the host's, and the restart is the operator's fix attempt
+# (a repo mismatch settles on the origin read instead)
+_REBOOT_REARMS: frozenset[str] = frozenset({"crashed", "infra_failed", "push_failed"})
 
 # Refusals about the mapped checkout, settled on (repo_path, origin_seen).
 _CHECKOUT_REFUSALS: frozenset[str] = frozenset({"repo_mismatch", "checkout_unresolved"})
@@ -755,6 +759,21 @@ class MergeGateDispatch:
             await post_conflict(gate_id, story_id, spec, record, data, base_ref, ctx)
         elif status == "config_unresolved":
             await post_config_unresolved(gate_id, story_id, spec, record, tail, ctx)
+        elif status == "infra_failed":
+            # #431: the run's intake fetch failed on the host — no verdict on
+            # the merge, so the breadcrumb names the host action and the pair
+            # stays armed (retried on this key, re-armed by a restart, #377).
+            await post_infra_failed(
+                gate_id,
+                story_id,
+                spec,
+                record,
+                # bounded like `refund_infra_failed` bounds its `message`: a
+                # host action quotes git's stderr, which the ORIGIN host wrote
+                # (review security f-001)
+                value_of(data, "host_action")[:300] or "fix the host",
+                ctx,
+            )
         elif status == "pr_closed":
             # The sweep's merge poll owns closed / merged; the run saying so
             # is a race, not an event. Recording it on these shas would

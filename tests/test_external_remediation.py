@@ -167,7 +167,9 @@ def _github(permission: str = "write") -> AsyncMock:
     return github
 
 
-def _spawner(payload: dict | None, rc: int = 0) -> tuple[Any, list[list[str]]]:
+def _spawner(
+    payload: dict | None, rc: int = 0, output: str = "converge output"
+) -> tuple[Any, list[list[str]]]:
     """A fake spawn: records the argv, optionally writes the --json payload."""
     calls: list[list[str]] = []
 
@@ -177,7 +179,7 @@ def _spawner(payload: dict | None, rc: int = 0) -> tuple[Any, list[list[str]]]:
             path = Path(cmd[cmd.index("--json") + 1])
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload), encoding="utf-8")
-        return rc, "converge output"
+        return rc, output
 
     return spawn, calls
 
@@ -3651,3 +3653,31 @@ async def test_drained_covers_a_dispatch_between_its_check_and_its_spawn(
     assert not drained.done()  # and now its run is in flight
     release.set()
     await asyncio.wait_for(drained, 2.0)
+
+
+async def test_a_no_result_run_reports_the_message_line_not_a_traceback_frame(
+    tmp_path: Path,
+) -> None:
+    # #431: the remediation dispatcher renders the same no-result tail the
+    # conflict resolver does — a rich frame is not a reason an operator can act
+    # on, so the finding carries the child's last message line.
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    traceback = (
+        "╭──────────── Traceback (most recent call last) ────────────╮\n"
+        "│ /workspace/src/lithos_loom/cli/converge.py:308 in x       │\n"
+        "│ ❱ 103 │   raise RuntimeError(...)                         │\n"
+        "╰───────────────────────────────────────────────────────────╯\n"
+        "RuntimeError: git fetch origin pull/62/head failed: fatal: Could not "
+        "read from remote repository.\n"
+    )
+    spawn, _calls = _spawner(None, rc=1, output=traceback)
+    rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, rem) == "dispatched"
+    assert rem._task is not None
+    await rem._task
+
+    friction = next(f for f in _findings(client) if "[Friction]" in f)
+    assert "Could not read from remote repository" in friction
+    assert "│" not in friction and "❱" not in friction

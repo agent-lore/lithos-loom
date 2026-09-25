@@ -51,7 +51,7 @@ from lithos_loom.subscriptions._project_settings import (
     read_project_flag,
     resolve_project_repo,
 )
-from lithos_loom.subscriptions._subprocess import spawn_command
+from lithos_loom.subscriptions._subprocess import message_tail, spawn_command
 from lithos_loom.subscriptions.conflict_resolve_outcome import (
     clear_breadcrumb,
     escalate,
@@ -525,13 +525,25 @@ class ConflictResolveDispatch:
             )
         )
         data = self._load(path)
-        tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
         if data is None:
+            # #431: the child died without a record. The finding carries the
+            # one line that says WHY (rich renders a traceback as a panel, so
+            # the raw tail is usually frame decoration); the whole tail goes
+            # to the log.
+            tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
+            ctx.logger.warning(
+                "conflict-resolve: converge for %s exited %d without a result; "
+                "output tail: %s",
+                spec.pr_url,
+                rc,
+                tail,
+            )
             await post_friction(
                 gate_id,
                 story_id,
                 replace(record, status="crashed", message=f"exit {rc}"),
-                f"failed (exit {rc}) without a result; output tail: {tail}",
+                f"failed (exit {rc}) without a result; last output line: "
+                f'"{message_tail(output)}"',
                 ctx,
             )
             return
@@ -564,7 +576,10 @@ class ConflictResolveDispatch:
             # #377: the host failed under the coder — no verdict, no gate; the
             # pair stays armed for the next boot (the record's status + boot
             # id are the re-arm key), the breadcrumb names the host action.
-            action = str(data.get("host_action") or "fix the host")
+            # bounded like `refund_infra_failed` bounds its `message`: a host
+            # action quotes git's stderr, which the ORIGIN host wrote (review
+            # security f-001)
+            action = str(data.get("host_action") or "fix the host")[:300]
             worktree = str(data.get("worktree") or "")
             kept = (
                 f"; the run's worktree {worktree} holds any resolution the coder "

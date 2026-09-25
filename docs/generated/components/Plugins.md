@@ -54,10 +54,10 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 16 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
-| `lithos_loom.plugins.story_develop.publish_text` | M | 0 | 3 |
+| `lithos_loom.plugins.story_develop.publish_text` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
-| `lithos_loom.plugins.story_develop.review_resolve` | S | 2 | 1 |
+| `lithos_loom.plugins.story_develop.review_resolve` | M | 3 | 1 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
 | `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 30 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
@@ -403,6 +403,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.publish_text`
 - def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
 - def `publish_title` — *text*'s first line as a PR title that reads the same and binds nothing.
+- def `publish_line` — *text* as ONE bounded line an operator can be shown safely.
+- def `flatten_line` — *text* as one line with the invisibles out, and no double quote left to close a quotation with — :func:`publish_line` without the cut.
 - def `fence_untrusted` — *text* as a fenced block it cannot break out of, or ``""`` if empty.
 
 ### `lithos_loom.plugins.story_develop.review_only`
@@ -420,6 +422,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.review_resolve`
 - class `ResolvedChange` — A concrete change to review: the ``base..head`` commit pair + intent.
+- class `FetchFailedError` — The intake fetch failed — an infrastructure failure, not a verdict.
 - class `RepoMismatchError` — The checkout's ``origin`` is not the repository the caller expected.
 - def `resolve_change` — Resolve *spec* into a :class:`ResolvedChange`.
 
@@ -516,7 +519,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ## Dependencies
 
 - Depends on: [Config](Config.md), [Errors](Errors.md), [GitHub](GitHub.md), [LithosClient](LithosClient.md), [Runners](Runners.md)
-- Used by: [Cli](Cli.md), [Evals](Evals.md)
+- Used by: [Cli](Cli.md), [Evals](Evals.md), [Subscriptions](Subscriptions.md)
 
 ## ADRs
 
