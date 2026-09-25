@@ -620,9 +620,9 @@ def final_round_outcomes(
     texts: dict[int, str] = {}
     for round_no in range(1, final_round + 1):
         try:
-            texts[round_no] = (
+            texts[round_no] = handoff.read_handoff(
                 handoff_dir / handoff.coder_handoff_name(round_no)
-            ).read_text(encoding="utf-8")
+            )
         except OSError:
             texts[round_no] = ""  # loop died before that round's handoff
     per_round = {r: parse_coder_acks(t, surviving_ids) for r, t in texts.items()}
@@ -716,9 +716,7 @@ def claims_nothing_to_change(
     if not finding_ids:
         return False
     try:
-        text = (handoff_dir / handoff.coder_handoff_name(round_no)).read_text(
-            encoding="utf-8"
-        )
+        text = handoff.read_handoff(handoff_dir / handoff.coder_handoff_name(round_no))
     except OSError:
         return False
     acks = parse_coder_acks(text, finding_ids)

@@ -540,3 +540,79 @@ def test_control_only_mandatory_fields_are_rejected_not_emptied() -> None:
     )
     with pytest.raises(HandoffError, match="deferral_reason.*WHY"):
         parse_review_handoff(mixed)
+
+
+# ── bounded reads of agent-written handoffs (deferred security/f-005, 7848b74a) ──
+
+
+def test_read_handoff_is_bounded_and_marks_truncation(tmp_path: Path) -> None:
+    """The handoff dir is an RW bind mount the agent writes into, so a slurp of
+    a poisoned multi-GB file would OOM the orchestrator driving the run. The
+    plugin reads at most the cap and says so, like the CLI's readers do."""
+    from lithos_loom.plugins.story_develop.handoff import (
+        MAX_HANDOFF_BYTES,
+        read_handoff,
+    )
+
+    big = tmp_path / "round_01_coder_done.md"
+    big.write_bytes(b"## Summary\n" + b"x" * (MAX_HANDOFF_BYTES + 5))
+
+    text = read_handoff(big)
+
+    assert text.startswith("## Summary")
+    assert text.endswith("…(handoff truncated)")
+    marker = "\n…(handoff truncated)".encode()
+    assert len(text.encode("utf-8")) <= MAX_HANDOFF_BYTES + len(marker)
+
+
+def test_read_handoff_keeps_a_small_file_whole(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop.handoff import read_handoff
+
+    p = tmp_path / "round_01_coder_done.md"
+    p.write_text("## Status: DONE\n\n## Summary\nfine\n", encoding="utf-8")
+
+    assert read_handoff(p) == "## Status: DONE\n\n## Summary\nfine"
+
+
+def test_read_handoff_refuses_a_symlink_as_unreadable(tmp_path: Path) -> None:
+    """A symlink in the mount is the agent choosing which host file this
+    host-privileged process opens (CWE-59): it reads as absent, never followed."""
+    from lithos_loom.plugins.story_develop.handoff import read_handoff
+
+    secret = tmp_path / "secret"
+    secret.write_text("hostfile", encoding="utf-8")
+    link = tmp_path / "round_01_coder_done.md"
+    link.symlink_to(secret)
+
+    with pytest.raises(OSError):
+        read_handoff(link)
+
+
+def test_read_handoff_refuses_a_fifo_without_hanging(tmp_path: Path) -> None:
+    """A FIFO with no writer would block a plain read for ever."""
+    import os
+
+    from lithos_loom.plugins.story_develop.handoff import read_handoff
+
+    fifo = tmp_path / "round_01_coder_done.md"
+    os.mkfifo(fifo)
+
+    with pytest.raises(OSError):
+        read_handoff(fifo)
+
+
+def test_the_conversation_log_reads_handoffs_bounded(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop.handoff import (
+        MAX_HANDOFF_BYTES,
+        coder_handoff_name,
+        conversation_log,
+    )
+
+    handoff_dir = tmp_path / "handoff"
+    handoff_dir.mkdir()
+    (handoff_dir / coder_handoff_name(1)).write_bytes(b"y" * (MAX_HANDOFF_BYTES * 3))
+
+    log = conversation_log(handoff_dir, rounds=1, reviewers=())
+
+    assert "…(handoff truncated)" in log
+    assert len(log.encode("utf-8")) < MAX_HANDOFF_BYTES * 2

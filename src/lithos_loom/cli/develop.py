@@ -173,7 +173,9 @@ _TEARDOWN_GRACE_POLLS = max(1, int(_TEARDOWN_GRACE_SECONDS / _ATTACH_POLL_SECOND
 # multi-GB file can't OOM this observability process, and strip terminal control
 # bytes before echoing so a crafted handoff can't forge/hide output on the
 # operator's terminal. The JSON `--stream` path is escape-safe via json.dumps.
-_MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
+_MAX_HANDOFF_BYTES = (
+    handoff.MAX_HANDOFF_BYTES
+)  # 1 MiB — the ONE cap, see handoff.read_handoff
 # Cap how many *new* handoffs we materialise in a single poll. A genuine round
 # adds a handful (1 coder + a few reviewers); an agent could otherwise drop
 # thousands of matching filenames into the RW mount, and reading them all at
@@ -1882,13 +1884,9 @@ def _read_handoff(path: Path) -> str:
     overflow) and decode leniently — adversarial bytes must not raise either.
     """
     try:
-        with path.open("rb") as fh:
-            raw = fh.read(_MAX_HANDOFF_BYTES + 1)
+        return handoff.read_handoff(path, limit=_MAX_HANDOFF_BYTES)
     except OSError:
         return ""
-    truncated = len(raw) > _MAX_HANDOFF_BYTES
-    text = raw[:_MAX_HANDOFF_BYTES].decode("utf-8", errors="replace").strip()
-    return f"{text}\n…(handoff truncated)" if truncated else text
 
 
 def _iter_new_handoffs(handoff_dir: Path, seen: set[str]) -> list[tuple[str, str]]:
