@@ -376,6 +376,20 @@ def publish_line(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
     return flat[: limit - len(_ELLIPSIS)].rstrip() + _ELLIPSIS
 
 
+def log_text(text: str) -> str:
+    """*text* for the daemon LOG: the invisibles out, the lines kept.
+
+    The fifth tool, for the one sink that wants the whole multi-line tail
+    rather than an excerpt — an operator's ``tail -f`` / ``journalctl`` on
+    the daemon log is the copy they trust most during an incident. The same
+    class :func:`publish_line` strips comes out (an ANSI escape erases or
+    rewrites the visible line, ``\r`` overwrites it, a bidi override reorders
+    it; CWE-117 / CWE-150); TAB and LF stay, so a traceback still reads as
+    one (remediation review of PR #430, security).
+    """
+    return CONTROL_CHARS_RE.sub("", text)
+
+
 def flatten_line(text: str) -> str:
     """*text* as one line with the invisibles out, and no double quote left to
     close a quotation with — :func:`publish_line` without the cut.

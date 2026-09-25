@@ -3681,3 +3681,24 @@ async def test_a_no_result_run_reports_the_message_line_not_a_traceback_frame(
     friction = next(f for f in _findings(client) if "[Friction]" in f)
     assert "Could not read from remote repository" in friction
     assert "│" not in friction and "❱" not in friction
+
+
+async def test_the_no_result_log_tail_is_neutralised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Same sink, same bytes, as the conflict resolver's crash log line
+    (remediation review of #430, security, minor)."""
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+
+    async def dies(cmd: list[str]) -> tuple[int, str]:
+        return 1, "fatal: real\x1b[2K\rforged ‮line\n"
+
+    rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=dies)
+    with caplog.at_level(logging.WARNING):
+        marker = await _dispatched_marker(client, gate, story, rem)
+
+    assert marker["last_status"] == "failed"
+    tails = [r.getMessage() for r in caplog.records if "output tail" in r.getMessage()]
+    assert tails and all("forged" in t for t in tails)
+    assert not any("\x1b" in t or "\r" in t or "‮" in t for t in tails)

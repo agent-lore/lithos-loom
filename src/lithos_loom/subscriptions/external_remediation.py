@@ -75,7 +75,7 @@ from lithos_loom.subscriptions._project_settings import (
     read_project_flag,
     resolve_project_repo,
 )
-from lithos_loom.subscriptions._subprocess import message_tail, spawn_command
+from lithos_loom.subscriptions._subprocess import log_text, message_tail, spawn_command
 from lithos_loom.subscriptions.draining import DrainState, wait_idle
 from lithos_loom.subscriptions.external_reviews import (
     IngestResult,
@@ -1045,7 +1045,7 @@ class ExternalRemediation:
             return
         # #431: same as the conflict resolver — the finding carries the one
         # line that says why, the whole tail goes to the log.
-        tail = output[-_OUTPUT_TAIL_CHARS:] if output else "(no output)"
+        tail = log_text(output[-_OUTPUT_TAIL_CHARS:]) if output else "(no output)"
         budget = await record_unsettled(ctx, gate_id=gate_id, spec=spec, budget=budget)
         ctx.logger.warning(
             "external-remediation: converge for %s finished: failed (exit %d) "

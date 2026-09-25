@@ -832,3 +832,54 @@ def test_the_origin_cannot_end_the_quote_it_is_put_in(
     assert str(exc.value).count('"') == 2
     assert "origin said: \"fatal: transient'" in str(exc.value)
     assert "deploy key" not in str(exc.value).split('origin said: "')[0]
+
+
+def test_the_closing_quote_survives_a_long_base_ref() -> None:
+    """Remediation review of #430 (security, minor): the composer sliced the
+    finished string to its limit LAST, so once loom's own lead crowded the
+    quote the cut took the closing delimiter — loom's trailing clause then sat
+    inside the origin's open quotation. A long base ref is enough."""
+    long_base = "feature/pr-reconciliation-s5"
+    exc = review_resolve.FetchFailedError(
+        refspecs=(
+            "pull/142/head",
+            f"+refs/heads/{long_base}:refs/remotes/origin/{long_base}",
+        ),
+        problem="fatal: Could not read from remote repository. " * 4,
+    )
+
+    for text in (exc.host_action, str(exc)):
+        assert len(text) <= review_resolve.HOST_ACTION_CHARS
+        assert text.count('"') == 2 and text.endswith('"')
+        assert 'origin said: "fatal:' in text
+        # a cut quotation says it was cut, inside its own delimiters
+        assert text.endswith('…"')
+
+
+def test_the_retry_log_line_is_neutralised(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`problem.reason` falls back to the last non-blank stderr line — an ssh
+    banner the origin authors — and was logged raw (remediation review of
+    #430, security, minor)."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    calls: list[list[str]] = []
+
+    def hiccup(argv, **kw):
+        calls.append(list(argv))
+        hostile = _ssh_hiccup().replace("fatal:", "\x1b[2K\rfatal:‮", 1)
+        return (128, hostile) if len(calls) == 1 else (0, "")
+
+    monkeypatch.setattr(git, "run_group", hiccup)
+
+    with caplog.at_level("WARNING"):
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    retries = [
+        r.getMessage() for r in caplog.records if "failed transiently" in r.getMessage()
+    ]
+    assert len(retries) == 1
+    assert "\x1b" not in retries[0] and "\r" not in retries[0] and "‮" not in retries[0]
