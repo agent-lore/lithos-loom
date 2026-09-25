@@ -205,10 +205,13 @@ class RoundContext:
     # running totals and not just this session's.
     carried_rounds: int = 0
     carried_cost_usd: float = 0.0
-    # The last round whose panel actually reviewed — set by `panel_phase`, and
-    # what the checkpoint publishes so a resume's intake round is loom's answer
-    # rather than the agent-writable handoff dir's (security/f-003).
+    # The last round whose panel actually reviewed, and per round the content
+    # fingerprint of each reviewer's handoff — set by `panel_phase`, published
+    # by the checkpoint, so BOTH which round a resume reads and what that round
+    # says are loom's answers rather than the agent-writable handoff dir's
+    # (security/f-003, f-005).
     reviewed_round: int = 0
+    reviewed_digests: dict[int, dict[str, str]] = field(default_factory=dict)
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -585,6 +588,47 @@ def fast_gate_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     return None
 
 
+def vouch_for_review(ctx: RoundContext, round_no: int, panel: PanelRoundResult) -> None:
+    """Record that this round WAS reviewed, and what the panel produced.
+
+    The resume's intake is read from an agent-writable mount, so both halves of
+    "what did the last review say" have to be loom's own answer:
+
+    * **which round** — ``reviewed_round``, set only for a panel that actually
+      produced a review: no infra failure, no invalid handoff, and at least one
+      outcome that is not ``invalid`` whose file can be fingerprinted. A panel
+      that died before writing anything is not a reviewed round, and saying so
+      is what keeps the resume's discovery fallback out of reach for it
+      (security/f-005);
+    * **what it said** — a content fingerprint per reviewer
+      (:func:`handoff.file_fingerprint`, the same bounded, symlink-refusing
+      identity the coder-salvage provenance uses). The handoff dir is one flat
+      RW mount shared by every round's agents, so a later round's coder can
+      overwrite an earlier round's review with ``## Status: LGTM`` and suppress
+      its open findings. A file that does not match what the panel left is
+      distrusted by :mod:`.resume`, which falls to the round below instead.
+
+    Kept per round, not just for the newest: a doctored newest round would
+    otherwise fall back to a round with nothing to check it against.
+    """
+    if panel.infra_failure is not None or panel.invalid_reviewer is not None:
+        return
+    digests: dict[str, str] = {}
+    for outcome in panel.round_reviews:
+        if outcome.status == "invalid":
+            continue
+        fingerprint = handoff.file_fingerprint(
+            ctx.config.handoff_dir
+            / handoff.reviewer_handoff_name(round_no, outcome.reviewer)
+        )
+        if fingerprint:
+            digests[outcome.reviewer] = fingerprint
+    if not digests:
+        return
+    ctx.reviewed_round = round_no
+    ctx.reviewed_digests[round_no] = digests
+
+
 def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Run the reviewer panel — the one shared primitive (#154). Sets
     ``ctx.final_reviews`` / accrues ``ctx.review_cost``.
@@ -609,11 +653,7 @@ def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     )
     ctx.review_cost += panel.cost
     ctx.final_reviews = panel.round_reviews
-    if panel.round_reviews:
-        # The round the resume takes its intake from is loom's own answer, not
-        # the handoff dir's (security/f-003): whatever the panel produced this
-        # round IS the review, and the boundary records the round number.
-        ctx.reviewed_round = round_no
+    vouch_for_review(ctx, round_no, panel)
     if panel.interrupted:
         return CycleExit(
             status="interrupted",
@@ -1017,6 +1057,9 @@ def record_boundary(ctx: RoundContext, round_no: int) -> None:
         branch_rounds=ctx.carried_rounds + round_no,
         branch_cost_usd=ctx.carried_cost_usd + cost,
         reviewed_round=ctx.reviewed_round,
+        reviewed_digests={
+            str(rnd): digests for rnd, digests in ctx.reviewed_digests.items()
+        },
     )
 
 

@@ -34,7 +34,7 @@ import dataclasses
 import logging
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
@@ -252,18 +252,45 @@ def _read_handoffs(
     return outcomes
 
 
+def _vouched_intake(
+    handoff_dir: Path, round_no: int, digests: Mapping[str, str]
+) -> list[ReviewOutcome]:
+    """One round's intake, read ONLY as the panel left it (security/f-005).
+
+    The handoff dir is one flat mount shared RW by every round's agents, so a
+    later round's coder can overwrite an earlier round's review with an "LGTM"
+    and suppress its open findings. The checkpoint records what the panel left —
+    a content fingerprint per reviewer — so a file that no longer matches is not
+    a review: it is skipped, and the caller falls to the round below exactly as
+    it does for an unreadable one. The reviewers read are the recorded ones, so
+    a file planted under any other name is not eligible at all.
+    """
+    entries: list[tuple[str, str]] = []
+    for name in sorted(digests)[:MAX_INTAKE_REVIEWERS]:
+        path = handoff_dir / handoff.reviewer_handoff_name(round_no, name)
+        if handoff.file_fingerprint(path) != digests[name]:
+            logger.warning(
+                "resume: distrusting %s — it does not match what the panel left",
+                path,
+            )
+            continue
+        entries.append((name, path.name))
+    return _read_handoffs(handoff_dir, entries)
+
+
 def _round_intake(
     handoff_dir: Path,
     round_no: int,
     panel: Sequence[str],
     by_round: dict[int, list[tuple[str, str]]] | None = None,
 ) -> tuple[list[ReviewOutcome], int]:
-    """One round's intake: ``(outcomes, reviewer files dropped by the cap)``.
+    """One round's intake WITHOUT recorded digests: the legacy path.
 
-    The CONFIGURED panel's own filenames first — no enumeration at all on the
-    ordinary path, since the loop names them deterministically. Discovery within
-    the round is the fallback for a run whose panel has since been reconfigured
-    (its handoffs carry the old names), and it is capped and sorted.
+    Only for a checkpoint that predates ``reviewed_digests`` — a verified round
+    goes through :func:`_vouched_intake`. The CONFIGURED panel's own filenames
+    first (no enumeration: the loop names them deterministically); discovery
+    within the round is the fallback for a run whose panel has since been
+    reconfigured, and it is capped, sorted and token-validated.
     """
     configured = [
         (name, handoff.reviewer_handoff_name(round_no, name))
@@ -296,15 +323,17 @@ def _intake_reviews(
 ) -> tuple[list[ReviewOutcome], int]:
     """The dead run's last reviewer verdicts, as loop-entry intake.
 
-    **Which round is loom's own answer, not the directory's**
-    (security/f-003): the checkpoint records the last round whose panel actually
-    reviewed, and that is the round read. The handoff dir is an RW bind mount in
-    the agent containers and the panel's names are in the coder's own prompt from
-    round 2 on, so a coder that plants ``round_NN_review_<a real panel name>.md``
-    before it dies could otherwise make the round it died in look reviewed — and
-    the last genuinely reviewed round, with its open findings, would be dropped
-    in favour of a planted "LGTM". A checkpoint that predates the field falls
-    back to discovery: the newest round at or below its own whose handoffs parse.
+    **Which round, AND what it said, are loom's own answers — not the
+    directory's** (security/f-003, f-005). The handoff dir is one flat RW mount
+    shared by every round's agents, so a coder can both plant a review for the
+    round it died in (making an unreviewed round look reviewed) and overwrite an
+    earlier round's real review with an "LGTM" (suppressing its findings). The
+    checkpoint therefore records the last round whose panel actually reviewed
+    AND a content fingerprint per reviewer per round: only recorded rounds at or
+    below the vouched one are read, only recorded reviewers within them, and only
+    files that still match. Anything else falls to the round below. A checkpoint
+    that predates the digests keeps the round but takes the directory's content;
+    one that predates both falls back to bounded discovery.
 
     *panel* is the run's configured reviewer names — the files read within the
     chosen round, with bounded discovery as the fallback (see the module's
@@ -316,11 +345,25 @@ def _intake_reviews(
     exactly as with a converge intake.
     """
     handoff_dir = prior_run_dir / "handoff"
+    if checkpoint.reviewed_digests:
+        # Both halves are loom's: WHICH rounds were reviewed, and WHAT each
+        # reviewer left in them. A round with no recorded digests is not read at
+        # all, a file that no longer matches its digest is not a review, and a
+        # round above the vouched one — where a plant for the round the run died
+        # in would sit — is never considered.
+        for intake_round in range(checkpoint.reviewed_round, 0, -1):
+            digests = checkpoint.reviewed_digests.get(str(intake_round))
+            if not digests:
+                continue
+            outcomes = _vouched_intake(handoff_dir, intake_round, digests)
+            if outcomes:
+                return _bounded(outcomes, 0), intake_round
+        return _no_review(), 0
     if checkpoint.reviewed_round:
-        # Loom's own answer, and never a round ABOVE it: the round a run died in
-        # is exactly where a plant would sit. BELOW it is the real dialogue, so a
-        # recorded round whose handoff is corrupt or gone degrades to the round
-        # before it rather than to no findings at all.
+        # A checkpoint with the round but no digests (written before them):
+        # loom's round, the directory's content. Never a round ABOVE it; BELOW it
+        # is the real dialogue, so a recorded round whose handoff is corrupt or
+        # gone degrades to the round before it rather than to no findings at all.
         for intake_round in range(checkpoint.reviewed_round, 0, -1):
             outcomes, dropped = _round_intake(handoff_dir, intake_round, panel)
             if outcomes:
@@ -382,11 +425,24 @@ def prepare_resume(
             "its branch (it died before its first round finished, or it predates "
             "per-round checkpointing)"
         )
+    # Both commits the entry is built from must be IN the repo, and the run
+    # enters the RESOLVED object (correctness/f-005). `from_state` has already
+    # refused anything but an object name, so this is presence plus
+    # canonicalisation rather than ref resolution — which is the point: a
+    # symbolic value would resolve here and AGAIN at worktree creation, and a
+    # base move in between would resume at code the run never checkpointed.
     try:
-        git.commit_sha(config.repo, checkpoint.head_sha)
+        head_sha = git.commit_sha(config.repo, checkpoint.head_sha)
     except (RuntimeError, OSError) as exc:
         return None, (
             f"{prior_run_dir.name}'s branch head {checkpoint.head_sha[:12]} is no "
+            f"longer in {config.repo} ({exc})"
+        )
+    try:
+        base_sha = git.commit_sha(config.repo, checkpoint.base_sha)
+    except (RuntimeError, OSError) as exc:
+        return None, (
+            f"{prior_run_dir.name}'s fork point {checkpoint.base_sha[:12]} is no "
             f"longer in {config.repo} ({exc})"
         )
     rounds_left = config.max_rounds - checkpoint.branch_rounds
@@ -431,12 +487,12 @@ def prepare_resume(
         # out in its worktree (which the operator may still want to read), and
         # `create_on_branch` is the same committable-entry factory converge uses.
         worktree_factory=lambda cfg: worktree.create_on_branch(
-            cfg.repo, checkpoint.head_sha, cfg.description, parent=cfg.worktree_parent
+            cfg.repo, head_sha, cfg.description, parent=cfg.worktree_parent
         ),
         # The fork point the dead run measured from — never a fallback to its
         # HEAD, which would review an empty range (correctness/f-005); a
         # checkpoint without one is refused by `from_state` before we get here.
-        base_override=git.RangeBase(checkpoint.base_sha, base_ref),
+        base_override=git.RangeBase(base_sha, base_ref),
         intake_reviews=intake_reviews,
         intake_check_set=None,
         coder_init_template=RESUME_CODER_INIT,

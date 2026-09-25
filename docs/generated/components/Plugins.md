@@ -60,7 +60,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | M | 3 | 1 |
-| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 17 |
+| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 18 |
 | `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 30 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
@@ -458,6 +458,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `commit_phase` — Commit the round's work (excluding the handoff dir) and auto-format it in place (#134). Sets ``ctx.new_commit`` / ``ctx.gated_sha``.
 - def `cost_ceiling_phase` — T7 cost ceiling. Called TWICE per round — ``when="pre_review"`` (before spending on reviews) and ``when="post_review"`` (after). The two calls are kept separate on purpose: approval (:func:`approval_phase`) runs between them and deliberately takes precedence when both an approval and the ceiling land in the same round.
 - def `fast_gate_phase` — #140/ADR §4: run the FAST deterministic checks on the round's new commit (candidate-staged checks are deferred to :func:`approval_phase`). Never terminal.
+- def `vouch_for_review` — Record that this round WAS reviewed, and what the panel produced.
 - def `panel_phase` — Run the reviewer panel — the one shared primitive (#154). Sets ``ctx.final_reviews`` / accrues ``ctx.review_cost``.
 - def `approval_phase` — Seal approval when ALL reviewers pass their OWN threshold this round (PRD #7). Runs the expensive candidate-staged checks once per committed tree (#140) and holds approval while a *required* check blocks (floor). Approval takes precedence over the same-round cost ceiling (the spend already happened).
 - def `no_change_verdict_phase` — The admitted no-change round (commit_phase, PR #396 review) is a VALIDATION pass, not an entry to the fix loop: approval sealed it in :func:`approval_phase`; reaching here means the panel rejected the coder's claim, or a required check is red on the unchanged head and the floor held. End the run with that rationale — a trigger that asked for nothing (an approval comment ingested as a finding, #380) must never drive paid rounds, nor push unrelated commits onto a delivered PR (opus round 2); the converge epilogue reports the claim unaddressed.

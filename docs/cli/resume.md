@@ -39,11 +39,12 @@ long, expensive runs.
 - the **fork point it recorded** as the review range, so the panel reviews the
   branch's own work and not the base's landed commits;
 - the **last review round's handoffs** as the cold-start coder's intake — the
-  round is the checkpoint's own `reviewed_round` and the files are the configured
-  panel's (that dir is an agent-writable mount, so loom never lets it choose the
-  round, discovery is only the fallback, reviewer names must be plain tokens, and
-  the listing, the files read and the rendered text are all capped) — rendered
-  from `resume_coder_init.md`: the work is the coder's own earlier work, so the
+  round is the checkpoint's own `reviewed_round` and each file is checked against
+  the fingerprint the panel left (that dir is an agent-writable mount shared by
+  every round, so loom never lets it choose the round and never reads a review
+  that has since been rewritten; discovery is only a legacy fallback, reviewer
+  names must be plain tokens, and the listing, the files read and the rendered
+  text are all capped) — rendered from `resume_coder_init.md`: the work is the coder's own earlier work, so the
   prompt tells it to read the branch and the commit history before changing
   anything and to build on those commits, not restart them. (Cold-start from the
   handoffs rather than the session transcript is deliberate: a revoked token or a
@@ -70,7 +71,8 @@ Each exits 2 with the sentence saying which, having started nothing:
   that is [`develop converge-push`](converge-push.md)'s business;
 - a run with **no checkpointed committed round**: it died before its first round
   finished (so there is nothing to continue) or it predates checkpointing;
-- a head the repo no longer has;
+- a head or fork point the repo no longer has, or a checkpoint whose recorded
+  commits are not object names / whose counters contradict each other;
 - a branch whose rounds or spend already **meet** the ceiling — resuming would
   buy nothing;
 - no repo recorded and no `--repo`.

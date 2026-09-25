@@ -32,8 +32,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -106,6 +107,13 @@ class RoundCheckpoint:
     # `round_NN_review_<panel name>.md` for the round a run died in could
     # otherwise make that round the intake and drop the last real review.
     reviewed_round: int = 0
+    # …and what that round SAID: ``{"<round>": {"<reviewer>": "<size>:<sha256>"}}``,
+    # the content fingerprint of each reviewer's handoff as the panel left it.
+    # One flat handoff dir is mounted RW into every round's agents, so a later
+    # round's coder can overwrite an earlier review with an "LGTM" and suppress
+    # its findings; a file that does not match is distrusted (security/f-005).
+    # Empty for a checkpoint that predates the field — then nothing is verified.
+    reviewed_digests: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     at: str = ""
     status: str = "running"
 
@@ -137,6 +145,7 @@ def record_round_checkpoint(
     branch_rounds: int | None = None,
     branch_cost_usd: float | None = None,
     reviewed_round: int = 0,
+    reviewed_digests: Mapping[str, Mapping[str, str]] | None = None,
 ) -> None:
     """Record the round *round_no* boundary of a live run. Best-effort.
 
@@ -176,6 +185,7 @@ def record_round_checkpoint(
                     ),
                     "next_round": 0,  # see record_round_entered
                     "reviewed_round": reviewed_round,
+                    "reviewed_digests": dict(reviewed_digests or {}),
                     "at": datetime.now(UTC).isoformat(timespec="seconds"),
                     # For the operator reading the file out of context (every
                     # in-process reader already holds the path).
@@ -205,6 +215,98 @@ def record_round_entered(run_dir: Path, round_no: int) -> None:
         return
     with contextlib.suppress(OSError):
         write_state(run_dir, {CHECKPOINT_KEY: {**block, "next_round": round_no}})
+
+
+# A git object name: 40 hex (sha1) or 64 (sha256). The checkpoint records what
+# `rev-parse` resolved, and only that will do (correctness/f-005): a symbolic
+# value like ``main`` resolves at read time AND again at worktree creation, so a
+# base move in between would resume at code the run never checkpointed.
+_OBJECT_NAME_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+
+
+def _object_name(
+    block: Mapping[str, object], key: str, *, optional: bool = False
+) -> str | None:
+    """The commit *key* names, ``""`` for an allowed absence, or ``None`` to reject."""
+    value = block.get(key)
+    if optional and (value is None or value == ""):
+        return ""
+    if isinstance(value, str) and _OBJECT_NAME_RE.match(value):
+        return value
+    logger.warning("checkpoint rejected — %s is not a commit object name", key)
+    return None
+
+
+# An ABSENT number takes its default (an older block, written before the field
+# existed); a PRESENT one must be what the writer can only have written: a
+# finite, non-negative count / spend. No coercion — coercing an impossible value
+# to a default is precisely how a negative or NaN carried total becomes "spent
+# nothing" and hands a resumed run the whole ceiling again (correctness/f-005,
+# security/f-004). The sentinel is ``None``: reject the checkpoint.
+
+
+def _counts(
+    block: Mapping[str, object], defaults: Mapping[str, int]
+) -> dict[str, int] | None:
+    """The requested round counters, or ``None`` to reject the checkpoint."""
+    out: dict[str, int] = {}
+    for key, default in defaults.items():
+        value = block.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            logger.warning("checkpoint rejected — %s is not a count (%r)", key, value)
+            return None
+        out[key] = value
+    return out
+
+
+def _spend(block: Mapping[str, object], key: str, default: float) -> float | None:
+    """The recorded spend at *key*, or ``None`` to reject the checkpoint."""
+    value = block.get(key, default)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        logger.warning("checkpoint rejected — %s is not a spend (%r)", key, value)
+        return None
+    return float(value)
+
+
+def _digests(
+    block: Mapping[str, object], *, reviewed_round: int, round_no: int
+) -> dict[str, dict[str, str]] | None:
+    """The per-round reviewer fingerprints, or ``None`` to reject.
+
+    ``{}`` when absent — a block from before the field, where nothing can be
+    verified. Present means the writer wrote it, so the shape is exact: rounds
+    that happened, mapping reviewer name to fingerprint, and the round the
+    checkpoint vouches for among them (security/f-005).
+    """
+    raw = block.get("reviewed_digests", {})
+    if raw == {} or raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning("checkpoint rejected — reviewed_digests is not a mapping")
+        return None
+    out: dict[str, dict[str, str]] = {}
+    for key, value in raw.items():
+        if not (isinstance(key, str) and key.isdigit() and 1 <= int(key) <= round_no):
+            logger.warning("checkpoint rejected — reviewed_digests round %r", key)
+            return None
+        if not isinstance(value, dict) or not all(
+            isinstance(name, str) and name and isinstance(fp, str) and fp
+            for name, fp in value.items()
+        ):
+            logger.warning("checkpoint rejected — reviewed_digests[%s] shape", key)
+            return None
+        out[key] = dict(value)
+    if str(reviewed_round) not in out:
+        logger.warning(
+            "checkpoint rejected — no digests for the vouched round %d", reviewed_round
+        )
+        return None
+    return out
 
 
 def round_checkpoint(run_dir: Path) -> RoundCheckpoint | None:
@@ -240,51 +342,34 @@ def from_state(state: Mapping[str, object] | None) -> RoundCheckpoint | None:
     if not isinstance(raw_round, int) or isinstance(raw_round, bool) or raw_round < 1:
         return None
     branch = block.get("branch")
-    head_sha = block.get("head_sha")
-    base_sha = block.get("base_sha")
     if not isinstance(branch, str) or not branch:
         return None
-    if not isinstance(head_sha, str) or not head_sha:
-        return None
-    if not isinstance(base_sha, str) or not base_sha:
+    head_sha = _object_name(block, "head_sha")
+    base_sha = _object_name(block, "base_sha")
+    commit = _object_name(block, "commit", optional=True)
+    if head_sha is None or base_sha is None or commit is None:
         return None
 
     def _text(key: str) -> str:
         value = block.get(key)
         return value if isinstance(value, str) else ""
 
-    def _money(key: str, default: float) -> float:
-        """A recorded spend: finite and not negative, or the default.
-
-        The resumed run's ceiling is computed from these (security/f-004), and
-        ``json.loads`` accepts the ``NaN`` / ``Infinity`` literals — a NaN spend
-        would pass every ``<= 0`` budget guard (NaN compares False against
-        everything) and install an effectively unlimited ceiling, while a
-        negative one would GRANT more budget than the project ever allowed. A
-        value loom itself wrote is neither; a corrupt, truncated or planted
-        file is exactly where this is read. Mirrors ``_count``'s ``>= 0``.
-        """
-        value = block.get(key)
-        if (
-            isinstance(value, int | float)
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            and value >= 0
-        ):
-            return float(value)
-        return default
-
-    def _count(key: str, default: int) -> int:
-        value = block.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            return value
-        return default
-
-    cost = _money("cost_usd", 0.0)
-    branch_rounds = _count("branch_rounds", raw_round)
-    branch_cost = _money("branch_cost_usd", cost)
-    next_round = _count("next_round", 0)
-    reviewed_round = _count("reviewed_round", 0)
+    # The numbers a resume computes its BUDGET from, validated RAW (see above).
+    counts = _counts(
+        block, {"branch_rounds": raw_round, "next_round": 0, "reviewed_round": 0}
+    )
+    cost = _spend(block, "cost_usd", 0.0)
+    if counts is None or cost is None:
+        return None
+    branch_cost = _spend(block, "branch_cost_usd", cost)
+    if branch_cost is None:
+        return None
+    branch_rounds = counts["branch_rounds"]
+    next_round = counts["next_round"]
+    reviewed_round = counts["reviewed_round"]
+    digests = _digests(block, reviewed_round=reviewed_round, round_no=raw_round)
+    if digests is None:
+        return None
     # The writer's own invariants, checked rather than assumed: the branch
     # totals include this run's, the entered round is this round's successor (or
     # nothing yet), and a reviewed round is one that happened.
@@ -312,7 +397,7 @@ def from_state(state: Mapping[str, object] | None) -> RoundCheckpoint | None:
         head_sha=head_sha,
         base_sha=base_sha,
         base_ref=_text("base_ref"),
-        commit=_text("commit"),
+        commit=commit,
         repo=_text("repo"),
         worktree=_text("worktree"),
         cost_usd=cost,
@@ -320,6 +405,7 @@ def from_state(state: Mapping[str, object] | None) -> RoundCheckpoint | None:
         branch_cost_usd=branch_cost,
         next_round=next_round,
         reviewed_round=reviewed_round,
+        reviewed_digests=digests,
         at=_text("at"),
         status=_text("status") or "running",
     )

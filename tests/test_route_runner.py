@@ -1085,7 +1085,7 @@ async def test_a_resumable_run_survives_retain_failed_workdirs_false(
             run_dir,
             round_no=4,
             branch="story-dead",
-            head_sha="h" * 40,
+            head_sha="ba" * 20,
             base_sha="b" * 40,
         )
         return {
@@ -1126,7 +1126,7 @@ async def test_a_resumable_run_survives_retain_failed_workdirs_false(
             run_dir,
             round_no=4,
             branch="story-dead2",
-            head_sha="h" * 40,
+            head_sha="ba" * 20,
             base_sha="b" * 40,
         )
         return {
@@ -2065,7 +2065,7 @@ async def test_a_host_death_points_the_next_dispatch_at_the_dead_run(
         dead_run,
         round_no=4,
         branch="story-dead",
-        head_sha="h" * 40,
+        head_sha="ba" * 20,
         base_sha="b" * 40,
     )
 
@@ -2130,7 +2130,7 @@ async def test_a_host_death_points_the_next_dispatch_at_the_dead_run(
         other,
         round_no=7,
         branch="story-other",
-        head_sha="o" * 40,
+        head_sha="cd" * 20,
         base_sha="b" * 40,
     )
     for i, unsafe in enumerate(("../task-9/dead", str(other), "/tmp/evil")):

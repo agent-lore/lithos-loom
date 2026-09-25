@@ -25,7 +25,7 @@ def test_records_the_round_boundary_as_a_nested_block(tmp_path: Path) -> None:
         rd,
         round_no=4,
         branch="add-a-thing-1a2b",
-        head_sha="h" * 40,
+        head_sha="ba" * 20,
         base_sha="b" * 40,
         base_ref="origin/main",
         commit="c" * 40,
@@ -41,7 +41,7 @@ def test_records_the_round_boundary_as_a_nested_block(tmp_path: Path) -> None:
     assert data[checkpoint.CHECKPOINT_KEY]["status"] == "running"
     cp = checkpoint.round_checkpoint(rd)
     assert cp is not None
-    assert (cp.round, cp.branch, cp.head_sha) == (4, "add-a-thing-1a2b", "h" * 40)
+    assert (cp.round, cp.branch, cp.head_sha) == (4, "add-a-thing-1a2b", "ba" * 20)
     assert (cp.base_sha, cp.base_ref, cp.commit) == ("b" * 40, "origin/main", "c" * 40)
     assert (cp.repo, cp.worktree) == ("/repos/foo", "/wt/add-a-thing-1a2b")
     assert cp.cost_usd == 12.3457  # rounded to cents-of-a-cent on the way out
@@ -60,7 +60,7 @@ def test_a_checkpointed_run_is_still_classified_as_running(tmp_path: Path) -> No
     """
     rd = _run_dir(tmp_path)
     checkpoint.record_round_checkpoint(
-        rd, round_no=1, branch="b", head_sha="h" * 40, base_sha="a" * 40
+        rd, round_no=1, branch="b", head_sha="ba" * 20, base_sha="a" * 40
     )
     state = run_outcome.read_state(rd)
     assert (
@@ -72,7 +72,7 @@ def test_a_checkpointed_run_is_still_classified_as_running(tmp_path: Path) -> No
 def test_the_loops_terminal_write_keeps_the_checkpoint(tmp_path: Path) -> None:
     rd = _run_dir(tmp_path)
     checkpoint.record_round_checkpoint(
-        rd, round_no=2, branch="b", head_sha="h" * 40, base_sha="a" * 40
+        rd, round_no=2, branch="b", head_sha="ba" * 20, base_sha="a" * 40
     )
     run_outcome.write_state(rd, {"status": "infra_failed", "rounds": 2})
 
@@ -93,7 +93,7 @@ def test_carried_figures_span_the_whole_branch(tmp_path: Path) -> None:
         rd,
         round_no=2,  # this run's own second round…
         branch="b",
-        head_sha="h" * 40,
+        head_sha="ba" * 20,
         base_sha="a" * 40,
         cost_usd=5.0,
         branch_rounds=6,  # …the branch's sixth
@@ -172,7 +172,7 @@ def test_an_interrupted_write_leaves_the_previous_checkpoint_intact(
     """
     rd = _run_dir(tmp_path)
     checkpoint.record_round_checkpoint(
-        rd, round_no=4, branch="b", head_sha="h" * 40, base_sha="a" * 40, cost_usd=4.64
+        rd, round_no=4, branch="b", head_sha="ba" * 20, base_sha="a" * 40, cost_usd=4.64
     )
     before = (rd / run_outcome.STATE_FILE).read_bytes()
 
@@ -181,7 +181,7 @@ def test_an_interrupted_write_leaves_the_previous_checkpoint_intact(
 
     monkeypatch.setattr(run_outcome.os, "fsync", die)
     checkpoint.record_round_checkpoint(  # best-effort: must not raise
-        rd, round_no=5, branch="b", head_sha="i" * 40, base_sha="a" * 40, cost_usd=9.99
+        rd, round_no=5, branch="b", head_sha="ef" * 20, base_sha="a" * 40, cost_usd=9.99
     )
 
     assert (rd / run_outcome.STATE_FILE).read_bytes() == before
@@ -206,7 +206,7 @@ def test_a_block_whose_fields_contradict_each_other_is_not_a_checkpoint(
     sound = {
         "round": 4,
         "branch": "b",
-        "head_sha": "h" * 40,
+        "head_sha": "ba" * 20,
         "base_sha": "a" * 40,
         "cost_usd": 4.0,
         "branch_rounds": 4,
@@ -241,7 +241,7 @@ def test_the_entered_round_is_recorded_by_the_round_that_entered_it(
     """
     rd = _run_dir(tmp_path)
     checkpoint.record_round_checkpoint(
-        rd, round_no=4, branch="b", head_sha="h" * 40, base_sha="a" * 40
+        rd, round_no=4, branch="b", head_sha="ba" * 20, base_sha="a" * 40
     )
     cp = checkpoint.round_checkpoint(rd)
     assert cp is not None and cp.round == 4 and cp.next_round == 0
@@ -250,7 +250,7 @@ def test_the_entered_round_is_recorded_by_the_round_that_entered_it(
     cp = checkpoint.round_checkpoint(rd)
     assert cp is not None and cp.round == 4 and cp.next_round == 5
     # …and the rest of the boundary is untouched by that amendment
-    assert cp.head_sha == "h" * 40 and cp.base_sha == "a" * 40
+    assert cp.head_sha == "ba" * 20 and cp.base_sha == "a" * 40
 
     # a claim about anything but the boundary's successor is not made at all
     checkpoint.record_round_entered(rd, 9)

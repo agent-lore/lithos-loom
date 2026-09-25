@@ -10,6 +10,7 @@ plugin and the runner cannot drift apart silently.
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2421,12 +2422,23 @@ def test_daemon_mode_resume_pointer_enters_the_loop_on_the_branch(
 
     dead = tmp_path / "work" / "dead"
     (dead / "handoff").mkdir(parents=True)
+    # both commits the entry is built from must be IN the repo (correctness/f-005),
+    # so the fixture gives the branch a real fork point and a real head
+    base = git.commit_sha(tmp_git_repo)
+    (tmp_git_repo / "round.txt").write_text("round 5\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "round 5"],
+        cwd=tmp_git_repo,
+        check=True,
+        capture_output=True,
+    )
     checkpoint.record_round_checkpoint(
         dead,
         round_no=5,
         branch="story-dead",
         head_sha=git.commit_sha(tmp_git_repo),
-        base_sha="b" * 40,
+        base_sha=base,
         repo=str(tmp_git_repo),
         cost_usd=26.0,
     )

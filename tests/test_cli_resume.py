@@ -225,7 +225,7 @@ def test_refuses_without_a_repo_to_work_in(host: Path, tmp_path: Path, capsys) -
         run_dir,
         round_no=1,
         branch="story-dead",
-        head_sha="h" * 40,
+        head_sha="ba" * 20,
         base_sha="b" * 40,  # no repo recorded (an older checkpoint)
     )
 
