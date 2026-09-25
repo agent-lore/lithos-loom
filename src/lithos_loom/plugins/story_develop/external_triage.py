@@ -438,7 +438,7 @@ def triage_external_findings(
 
     verdict_path = config.handoff_dir / TRIAGE_HANDOFF_NAME
     try:
-        text = verdict_path.read_text(encoding="utf-8")
+        text = handoff.read_handoff(verdict_path)
     except OSError:
         note = "triage wrote no verdict file — defaulting to act on every finding"
         logger.warning("triage %s: %s", config.run_id, note)

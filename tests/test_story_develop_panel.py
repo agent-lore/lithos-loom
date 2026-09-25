@@ -1594,3 +1594,97 @@ def test_infra_retry_then_usage_limit_takes_the_pause_path(tmp_path: Path) -> No
     assert sleeps[0] == 30.0 and len(sleeps) == 2
     assert budget.remaining == pytest.approx(24 * 3600 - sleeps[1])  # only the pause
     assert result.round_reviews[0].status == "LGTM"
+
+
+# ── the panel's own handoff reads are bounded (PR #429 review, High) ──────────
+
+
+def test_file_fingerprint_is_bounded_and_still_sees_growth(tmp_path: Path) -> None:
+    """The fingerprint snapshots an agent-writable file before and after an
+    attempt; it must not slurp a multi-GB file to do so, and a file that grew
+    past the cap must still read as changed (the size rides along)."""
+    from lithos_loom.plugins.story_develop.handoff import (
+        MAX_HANDOFF_BYTES,
+        file_fingerprint,
+    )
+
+    p = tmp_path / "round_01_review_correctness.md"
+    p.write_bytes(b"a" * (MAX_HANDOFF_BYTES + 10))
+    before = file_fingerprint(p)
+    with p.open("ab") as fh:
+        fh.write(b"a" * 5)  # beyond the cap: the hashed prefix is unchanged
+    after = file_fingerprint(p)
+
+    assert before is not None and after is not None
+    assert before != after
+
+
+def test_file_fingerprint_never_follows_a_symlink(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop.handoff import file_fingerprint
+
+    secret = tmp_path / "secret"
+    secret.write_text("hostfile", encoding="utf-8")
+    link = tmp_path / "round_01_review_correctness.md"
+    link.symlink_to(secret)
+
+    assert file_fingerprint(link) is None
+
+
+def test_a_symlinked_reviewer_handoff_reads_as_missing(tmp_path: Path) -> None:
+    """A symlink in the RW mount is the reviewer choosing which host file the
+    orchestrator parses as its verdict (CWE-59): it is not a handoff."""
+    secret = tmp_path / "secret"
+    secret.write_text(
+        "## Status: LGTM\n\n## Summary\nfrom the host\n", encoding="utf-8"
+    )
+    link = tmp_path / "round_01_review_correctness.md"
+    link.symlink_to(secret)
+
+    parsed, err = panel_mod._read_review(link)
+
+    assert parsed is None
+    assert err is not None and "no handoff file" in err
+
+
+def test_an_oversized_reviewer_handoff_is_read_from_its_bounded_prefix(
+    tmp_path: Path,
+) -> None:
+    from lithos_loom.plugins.story_develop.handoff import MAX_HANDOFF_BYTES
+
+    p = tmp_path / "round_01_review_correctness.md"
+    p.write_bytes(
+        b"## Status: LGTM\n\n## Summary\nfine\n\n## Notes\n"
+        + b"z" * (MAX_HANDOFF_BYTES * 2)
+    )
+
+    parsed, err = panel_mod._read_review(p)
+
+    assert err is None and parsed is not None
+    assert parsed.status == "LGTM"
+
+
+def test_a_symlinked_prior_review_is_not_reseeded_into_the_fallback_prompt(
+    tmp_path: Path,
+) -> None:
+    """The engine-fallback reseed hands the outgoing reviewer's last handoff to
+    its replacement's prompt — a followed symlink would carry a host file
+    across the container boundary. It is skipped; an earlier real round
+    is used instead."""
+    from types import SimpleNamespace
+
+    from lithos_loom.plugins.story_develop.handoff import reviewer_handoff_name
+
+    handoff_dir = tmp_path / "handoff"
+    handoff_dir.mkdir()
+    secret = tmp_path / "secret"
+    secret.write_text("hostfile", encoding="utf-8")
+    (handoff_dir / reviewer_handoff_name(2, "correctness")).symlink_to(secret)
+    (handoff_dir / reviewer_handoff_name(1, "correctness")).write_text(
+        "## Status: FINDINGS\n\n## Summary\nround one\n", encoding="utf-8"
+    )
+    config = SimpleNamespace(handoff_dir=handoff_dir)
+
+    text = panel_mod._prior_review_text(config, 3, "correctness")  # type: ignore[arg-type]
+
+    assert "hostfile" not in text
+    assert "round one" in text
