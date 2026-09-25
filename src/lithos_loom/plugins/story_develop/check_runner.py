@@ -468,15 +468,18 @@ def blocking_check_records(
         if not check_result_blocks(r, gate_ledger, threshold):
             continue
         findings = [f for f in blocking if f.check == r.check.name]
+        raw = r.gate.verdict if r.gate is not None else r.execution_outcome.upper()
         records.append(
             {
                 "name": r.check.name,
                 "command": r.check.command,
-                "verdict": (
-                    r.gate.verdict
-                    if r.gate is not None
-                    else r.execution_outcome.upper()
-                ),
+                # The EFFECTIVE verdict — what held approval. An adapter-backed
+                # check runs `--exit-zero`, so its process verdict is GREEN by
+                # construction while its ledger findings are what blocked; the
+                # headline must say RED for it (PR #431 re-review). The raw
+                # execution result is kept beside it, never in its place.
+                "verdict": "RED" if findings else raw,
+                "execution_verdict": raw,
                 "findings": [
                     {
                         "finding_id": f.finding_id,

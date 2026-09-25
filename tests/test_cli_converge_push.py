@@ -294,7 +294,8 @@ def test_reports_every_check_that_held_approval_not_just_the_test_gate(
         {
             "name": "lint",
             "command": "ruff check .",
-            "verdict": "GREEN",  # ruff exits zero; its findings are the verdict
+            "verdict": "RED",  # the effective verdict: ruff's findings held approval
+            "execution_verdict": "GREEN",  # ruff itself exits zero
             "findings": [
                 {
                     "finding_id": "gate/lint-001",
@@ -316,7 +317,10 @@ def test_reports_every_check_that_held_approval_not_just_the_test_gate(
     assert result.exit_code == 0, result.output
     gate_line = next(ln for ln in result.output.splitlines() if "gate:" in ln)
     assert "test GREEN" in gate_line
-    assert "lint GREEN" in gate_line and "typecheck RED" in gate_line
+    # ruff ran `--exit-zero`, so its PROCESS verdict is GREEN; the headline must
+    # carry the effective one — lint HELD approval (PR #431 re-review)
+    assert "lint RED" in gate_line and "typecheck RED" in gate_line
+    assert "lint GREEN" not in gate_line
     # and WHY lint blocked — an adapter check has no red verdict of its own
     assert "F821" in result.output and "undefined name `widget`" in result.output
     assert "src/app.py:12" in result.output

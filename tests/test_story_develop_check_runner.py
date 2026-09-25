@@ -113,7 +113,10 @@ def test_blocking_check_records_name_adapter_and_catalog_checks() -> None:
     records = check_runner.blocking_check_records(check_set, ledger)
 
     assert [r["name"] for r in records] == ["lint", "typecheck"]
-    assert records[0]["verdict"] == "GREEN"  # the raw exit never blocked it
+    # the raw exit never blocked it — but the EFFECTIVE verdict is what held
+    # approval, so the headline is RED with the process result kept beside it
+    assert records[0]["verdict"] == "RED"
+    assert records[0]["execution_verdict"] == "GREEN"
     assert records[0]["findings"] == [
         {
             "finding_id": "gate/lint-001",
