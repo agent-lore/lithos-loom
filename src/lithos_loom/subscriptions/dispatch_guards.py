@@ -575,6 +575,7 @@ async def record_failed_attempt(
     run_id: str | None = None,
     stamps: AttemptStampStore | None = None,
     gate_id: str | None = None,
+    reason: str | None = None,
 ) -> bool:
     """Best-effort persist the failed attempt on the task. Returns whether
     the write landed.
@@ -594,6 +595,14 @@ async def record_failed_attempt(
     stamp would only ever speak for a future gate-less failure (any stale
     one is cleared).
 
+    *reason* is the escalation's closed-vocabulary reason (5dbeb0c8 slice C):
+    the marker already names the run, and the reason is what says whether that
+    run's branch may be CONTINUED on re-dispatch — a host verdict (`infra`,
+    `resume_exhausted`) may, a verdict on the work (`max_rounds`, `stalled`,
+    `disputed`, …) may not. Recorded on the marker rather than read back off the
+    gate because the dispatch path already has the marker in the payload it is
+    deciding on, and the gate it names is terminal by then.
+
     On a lithos#415 server the update response returns the write's own
     ``updated_at`` — the stamp of the failure path's LAST bumping mutation
     (``finding_post`` before it and ``task_release`` after it don't bump) —
@@ -609,6 +618,8 @@ async def record_failed_attempt(
         marker["run_id"] = run_id
     if gate_id:
         marker["gate_id"] = gate_id
+    if reason:
+        marker["reason"] = reason
     key = last_attempt_key(route)
     metadata: dict[str, Any] = {key: marker}
     if gate_id:
@@ -650,6 +661,7 @@ async def release_with_failure(
     run_id: Any = None,
     stamps: AttemptStampStore | None = None,
     release: bool = True,
+    reason: str | None = None,
 ) -> None:
     """The whole failure-path release: marker (+stamp), finding, release.
 
@@ -670,6 +682,7 @@ async def release_with_failure(
         payload=payload,
         run_id=run_id if isinstance(run_id, str) else None,
         stamps=stamps,
+        reason=reason,
     )
     try:
         await lithos.finding_post(task_id=task_id, summary=summary, agent=agent)

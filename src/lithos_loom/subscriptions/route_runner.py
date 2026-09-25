@@ -47,11 +47,16 @@ from lithos_loom.bus import Event, EventBus, Subscription
 from lithos_loom.config import RouteConfig
 from lithos_loom.errors import LithosClientError, PluginContractError
 from lithos_loom.plugin_runner import run_plugin
+from lithos_loom.plugins.story_develop.checkpoint import (
+    RESUMABLE_ESCALATION_REASONS,
+    resumable_checkpoint,
+)
 from lithos_loom.subscriptions.delivery_gate import gate_and_release
 from lithos_loom.subscriptions.dispatch_guards import (
     AttemptStampStore,
     clear_superseded_failure,
     declines_bootstrap_replay,
+    failed_attempt_for_route,
     on_ready_frontier,
     project_of,
     release_with_failure,
@@ -419,6 +424,58 @@ class RouteRunner:
         )
         await self._run_claimed_task(task_id, payload)
 
+    def _resume_pointer(
+        self, task_id: str, payload: Mapping[str, Any], work_dir: Path
+    ) -> dict[str, str] | None:
+        """The dead run this dispatch should CONTINUE, for the task envelope.
+
+        5dbeb0c8 slice C. An infra death (a revoked token, a vanished coder
+        container) is a verdict on the host, not on the work: its rounds are
+        committed on a branch in its worktree and its checkpoint says where —
+        so the re-dispatch the operator's gate tick asks for should resume
+        there rather than pay for those rounds twice. The signal is the story's
+        own failed-attempt marker as it stood at dispatch time (this payload;
+        the claim path has since cleared it server-side): the route's last
+        attempt failed for a host reason, and it names the run.
+
+        ``None`` — no marker, a stop that is a verdict on the WORK
+        (``max_rounds`` / ``stalled`` / ``disputed`` / …, which is a separate
+        question and deliberately not this), an unknown run, or a run with no
+        committed round — means an ordinary dispatch, exactly as before. The
+        plugin re-validates and falls back the same way, so a pointer is never
+        load-bearing.
+        """
+        marker = failed_attempt_for_route(
+            payload.get("metadata") or {}, self.route.name
+        )
+        if marker is None:
+            return None
+        reason = marker.get("reason")
+        if not isinstance(reason, str) or reason not in RESUMABLE_ESCALATION_REASONS:
+            return None
+        run_id = marker.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        run_dir = work_dir / run_id
+        if resumable_checkpoint(run_dir) is None:
+            logger.info(
+                "RouteRunner %s: %s's last run %s died (%s) but left no "
+                "resumable checkpoint; developing from scratch",
+                self.route.name,
+                task_id,
+                run_id,
+                reason,
+            )
+            return None
+        logger.info(
+            "RouteRunner %s: resuming %s on run %s's branch (last attempt: %s)",
+            self.route.name,
+            task_id,
+            run_id,
+            reason,
+        )
+        return {"run_dir": str(run_dir), "reason": reason}
+
     async def _is_ready(self, task_id: str, metadata: Mapping[str, Any]) -> bool | None:
         """Membership test on Lithos's ready frontier — see
         ``dispatch_guards.on_ready_frontier`` (US4). ``None`` = undetermined."""
@@ -485,7 +542,11 @@ class RouteRunner:
         work_dir.mkdir(parents=True, exist_ok=True)
         task_json_path = work_dir / "task.json"
         result_file = work_dir / "result.json"
-        task_json_path.write_text(json.dumps({"task": dict(payload)}))
+        envelope: dict[str, Any] = {"task": dict(payload)}
+        resume = self._resume_pointer(task_id, payload, work_dir)
+        if resume is not None:
+            envelope["resume"] = resume
+        task_json_path.write_text(json.dumps(envelope))
 
         renew_task = asyncio.create_task(
             self._renew_loop(task_id), name=f"renew-{task_id}"

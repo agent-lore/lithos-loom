@@ -31,6 +31,15 @@ Marker inventory (who writes / who reads each):
   :func:`record_delivery_deadline` / :func:`record_delivery_failure` /
   :func:`record_manual_delivery`; read by :func:`delivery_deadline` /
   :func:`delivery_failed` / :func:`delivery_timed_out` / :func:`run_pr_url`.
+- ``state.json``'s ``checkpoint`` block (run dir) — the per-round CHECKPOINT of
+  a run that is still going: the round just completed, the branch, the head it
+  reached, the fork point and the spend. Not in this module (it carries the
+  policy of which stops may resume from it, and this one stays a classifier):
+  see :mod:`checkpoint`. It is a NESTED block precisely so :func:`run_phase`
+  keeps reading a top-level ``status`` as the run's terminal verdict.
+- ``state.json``'s ``resumed_from`` block (run dir) — written by the resume path
+  (:mod:`resume`) on the run that CONTINUES another's branch: which run, and
+  what that branch had already spent.
 - ``conversation.md`` (run dir) — the teardown marker (the plugin writes it just
   before ``state.json``); its presence means the run reached teardown. Read by
   :func:`capture_outcome`.
@@ -132,9 +141,12 @@ def resolve_run_dir(work_dir: Path, key: str) -> Path | None:
 
 
 def read_state(run_dir: Path) -> dict | None:
-    """The run's terminal ``state.json`` (status + rounds + branch), or ``None``.
+    """The run's ``state.json`` (status + rounds + branch + blocks), or ``None``.
 
-    Written by the plugin only at run end, alongside ``conversation.md``.
+    The top-level verdict keys are written at run end, alongside
+    ``conversation.md``; the nested blocks land earlier (a converge intake, and
+    every round boundary's :mod:`checkpoint`), so a file that exists does NOT
+    mean the run is over — ``status`` does (:func:`run_phase`).
     """
     try:
         data = json.loads((run_dir / STATE_FILE).read_text(encoding="utf-8"))
@@ -149,13 +161,15 @@ def write_state(run_dir: Path, payload: dict) -> None:
     ``develop()`` writes the dialogue verdict at run end, but it is no longer
     the only writer: ``develop converge`` records the PR it is converging
     **at intake** (:func:`record_converge_intake`), before the first paid
-    turn, so a run killed mid-loop is still resolvable; and
-    ``develop converge-push`` records its push afterwards. A plain overwrite
+    turn, so a run killed mid-loop is still resolvable;
+    ``develop converge-push`` records its push afterwards; and the loop
+    records a :mod:`checkpoint` block at every round boundary. A plain overwrite
     would drop the intake block the moment the loop ended — so the loop's
     keys are laid over the file rather than replacing it.
 
-    Top-level, last-writer-wins per key: the two extra writers own their own
-    nested blocks (:data:`CONVERGE_KEY` / :data:`CONVERGE_PUSH_KEY`) and
+    Top-level, last-writer-wins per key: the extra writers own their own
+    nested blocks (:data:`CONVERGE_KEY` / :data:`CONVERGE_PUSH_KEY`,
+    :data:`checkpoint.CHECKPOINT_KEY` / :data:`resume.RESUMED_FROM_KEY`) and
     never a key ``develop()`` writes.
     """
     data = read_state(run_dir) or {}

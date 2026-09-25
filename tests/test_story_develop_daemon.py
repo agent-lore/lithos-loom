@@ -2398,6 +2398,91 @@ def test_daemon_mode_config_rejection_writes_failed_result(
     validate_result_schema(payload)
 
 
+def test_daemon_mode_resume_pointer_enters_the_loop_on_the_branch(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """5dbeb0c8 slice C: a dispatch the runner marked as a resume continues the
+    dead run's branch — with the REMAINDER of its budget, not a fresh one."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop import checkpoint
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+    from lithos_loom.runner import git
+
+    captured: dict[str, Any] = {}
+    captured["settings"] = ProjectDevelopSettings(max_rounds=8, max_cost_usd=30.0)
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        captured["entry"] = kw.get("entry")
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+
+    dead = tmp_path / "work" / "dead"
+    (dead / "handoff").mkdir(parents=True)
+    checkpoint.record_round_checkpoint(
+        dead,
+        round_no=5,
+        branch="story-dead",
+        head_sha=git.commit_sha(tmp_git_repo),
+        base_sha="b" * 40,
+        repo=str(tmp_git_repo),
+        cost_usd=26.0,
+    )
+    argv, _result_file = _daemon_args(tmp_git_repo, tmp_path)
+    task_json = Path(argv[argv.index("--task-json") + 1])
+    envelope = json.loads(task_json.read_text())
+    envelope["resume"] = {"run_dir": str(dead), "reason": "infra"}
+    task_json.write_text(json.dumps(envelope))
+
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+
+    entry = captured["entry"]
+    assert entry is not None and entry.coder_init_template == "resume_coder_init.md"
+    assert entry.carried_rounds == 5 and entry.carried_cost_usd == 26.0
+    assert captured["config"].max_rounds == 3  # 8 - the 5 already landed
+    assert captured["config"].max_cost_usd == 4.0  # 30 - the 26 already spent
+    assert "resuming run dead at round 5" in capsys.readouterr().out
+    # provenance on the resumed run, before its first round
+    state = json.loads((captured["config"].run_dir / "state.json").read_text())
+    assert state["resumed_from"]["run_id"] == "dead"
+
+
+def test_daemon_mode_unusable_resume_pointer_develops_from_scratch(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A refusal is a breadcrumb, not a failure: the dispatch still runs."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    captured: dict[str, Any] = {}
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    frictions: list[tuple] = []
+    monkeypatch.setattr(
+        main_mod,
+        "post_frictions",
+        lambda url, task_id, f: frictions.append(tuple(f)),
+    )
+
+    def fake_develop(config, **kw):
+        captured["entry"] = kw.get("entry")
+        return _result("approved", tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+
+    argv, _result_file = _daemon_args(tmp_git_repo, tmp_path)
+    task_json = Path(argv[argv.index("--task-json") + 1])
+    envelope = json.loads(task_json.read_text())
+    envelope["resume"] = {"run_dir": str(tmp_path / "work" / "gone"), "reason": "infra"}
+    task_json.write_text(json.dumps(envelope))
+
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+
+    assert captured["entry"] is None  # a fresh run, exactly as before
+    assert "not resuming" in capsys.readouterr().err  # beside every other friction
+    assert any("not resuming gone" in f for batch in frictions for f in batch)
+
+
 def test_daemon_mode_interrupted_run_reports_resume(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

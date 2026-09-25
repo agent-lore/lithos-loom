@@ -40,6 +40,7 @@ from . import (
     autoformat,
     check_artifacts,
     check_runner,
+    checkpoint,
     coder_salvage,
     containers,
     engines,
@@ -199,6 +200,11 @@ class RoundContext:
     # via the ledgers, out of the ledger: converge records such a mark as the
     # ordinary dispute it also is.
     decisions_enabled: bool = True
+    # 5dbeb0c8 slice C: the rounds / spend of a run this one RESUMES (see
+    # LoopEntry.carried_*), so each round's checkpoint records the branch's
+    # running totals and not just this session's.
+    carried_rounds: int = 0
+    carried_cost_usd: float = 0.0
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -953,11 +959,62 @@ def stall_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     return None
 
 
+def record_boundary(ctx: RoundContext, round_no: int) -> None:
+    """Checkpoint what round *round_no* left on the branch (5dbeb0c8 slice C).
+
+    The round boundary is the resumable point: whatever this round committed is
+    on the branch, and the process may not live to write anything else — an
+    expired credential or a vanished container kills it between here and
+    ``develop()``'s epilogue. So it is recorded here, for the TERMINAL round as
+    well: the round that stops the run is also the last one a resume can build
+    on.
+
+    ``carried_*`` is what a run this one resumed had already used, so the
+    recorded BRANCH totals span every session of the work while the run's own
+    numbers stay its own. A round that crashed mid-pipeline is recorded too (see
+    :func:`run_round`): it counts as spent — the conservative direction for the
+    budget — and the resume's intake falls back to the last round that was
+    actually reviewed. Best-effort in both directions: reading HEAD is a git
+    call inside a live loop, so a failure is logged and the round goes on — a
+    missing checkpoint costs a resume, never the rounds already committed.
+    """
+    cost = ctx.coder_cost + ctx.review_cost
+    try:
+        head_sha = git.commit_sha(ctx.wt)
+    except (RuntimeError, OSError):
+        logger.warning(
+            "story-develop %s: could not read HEAD for the round %d checkpoint",
+            ctx.config.run_id,
+            round_no,
+        )
+        return
+    checkpoint.record_round_checkpoint(
+        ctx.config.run_dir,
+        round_no=round_no,
+        branch=ctx.wt.name,
+        head_sha=head_sha,
+        base_sha=ctx.base.start_sha,
+        base_ref=ctx.base.ref,
+        commit=ctx.new_commit or "",
+        repo=str(ctx.config.repo),
+        worktree=str(ctx.wt),
+        cost_usd=cost,
+        branch_rounds=ctx.carried_rounds + round_no,
+        branch_cost_usd=ctx.carried_cost_usd + cost,
+    )
+
+
 def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Sequence one develop round's phases. Returns the first phase's
     :class:`CycleExit` (terminating the loop), or ``None`` to continue to the next
     round. The order — and the TWO ``cost_ceiling_phase`` calls straddling
-    approval — is load-bearing (see :func:`cost_ceiling_phase`)."""
+    approval — is load-bearing (see :func:`cost_ceiling_phase`).
+
+    However the round ends, the boundary it reached is checkpointed
+    (:func:`record_boundary`) before the exit is handed back — in a ``finally``,
+    so a round that CRASHED (exit L: the exception bypasses ``develop()``'s
+    epilogue, which is precisely the run with no other record) still records the
+    head its commit reached rather than leaving that commit for nobody."""
     ctx.rounds_completed = round_no
     phases: tuple[Callable[[RoundContext, int], CycleExit | None], ...] = (
         coder_phase,
@@ -973,8 +1030,12 @@ def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
         stall_phase,
         lambda c, r: cost_ceiling_phase(c, r, when="post_review"),
     )
-    for phase in phases:
-        exit_ = phase(ctx, round_no)
-        if exit_ is not None:
-            return exit_
-    return None
+    exit_: CycleExit | None = None
+    try:
+        for phase in phases:
+            exit_ = phase(ctx, round_no)
+            if exit_ is not None:
+                break
+    finally:
+        record_boundary(ctx, round_no)
+    return exit_

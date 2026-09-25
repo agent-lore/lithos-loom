@@ -91,6 +91,19 @@ class LoopEntry:
     # conflicted paths and both parents, so a reviewer can see a resolution
     # that took the base version — invisible in the fork-point diff.
     review_context: str = ""
+    # 5dbeb0c8 slice C (a RESUME entry): the `needs-decision` escape is a
+    # story-develop run's, and a resumed run IS one continuing — its operator
+    # gate is exactly what the question would go to. Converge keeps the
+    # default: there the mark stays the ordinary dispute it also is
+    # (correctness/f-003), because no gate sits behind a converge run.
+    decisions_enabled: bool = False
+    # ...and what the run this one CONTINUES had already spent, so the
+    # checkpoints it writes record the BRANCH's totals rather than its own
+    # (otherwise a second infra death would resume on a budget that silently
+    # reset). Both 0 on every other entry, where the run and the branch are the
+    # same thing.
+    carried_rounds: int = 0
+    carried_cost_usd: float = 0.0
     # External mode (PR #396 review): ``(round_no) -> bool`` — whether the
     # round's coder handoff claims that EVERY injected finding needs no
     # change. Round 1 must otherwise commit (exit C); a true claim admits the

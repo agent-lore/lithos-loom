@@ -138,6 +138,46 @@ def test_round_zero_when_no_handoffs_yet(tmp_path: Path) -> None:
     assert develop._round_and_reviewers(run_dir / "handoff") == (0, ())
 
 
+def test_live_round_comes_from_the_checkpoint_not_the_handoff_names(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """5dbeb0c8 slice C: the round is READ, not inferred.
+
+    A round's handoffs are written at the END of each agent's turn, so a run
+    deep in round 3's coder turn still had only round 2's files and was reported
+    as "round 2: coder working". The per-round checkpoint records the boundary,
+    so both surfaces show the round the loop is actually in.
+    """
+    from lithos_loom.plugins.story_develop import checkpoint
+
+    run_dir = _make_run(
+        patched, task_id="t-1", run_id="r1", rounds={1: ["cq"], 2: ["cq"]}
+    )
+    checkpoint.record_round_checkpoint(
+        run_dir, round_no=2, branch="b", head_sha="h" * 40, base_sha="a" * 40
+    )
+
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["round"] == 3  # round 3 in flight
+    state = run_outcome.read_state(run_dir)
+    _label, round_no, _agent = develop._follow_state(run_dir, None, state)
+    assert round_no == 3  # …and the attach label agrees
+
+    # a FINISHED run shows the round it completed, not a phantom next one
+    run_outcome.write_state(run_dir, {"status": "max_rounds", "rounds": 2})
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["round"] == 2
+
+
+def test_round_falls_back_to_handoff_names_without_a_checkpoint(
+    patched: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # a run from before checkpointing, or one still inside its first round
+    _make_run(patched, task_id="t-1", run_id="r1", rounds={1: ["cq"]})
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["round"] == 1
+
+
 def test_resolve_by_run_id_task_id_and_miss(tmp_path: Path) -> None:
     _make_run(tmp_path, task_id="t-1", run_id="run-aaa", rounds={1: ["cq"]})
     by_run = develop.resolve_run_dir(tmp_path, "run-aaa")
@@ -1730,7 +1770,10 @@ def test_attach_wait_captures_outcome_before_workdir_is_reaped(
     def reaping_read(rd: Path) -> dict | None:
         calls["n"] += 1
         state = real_read(rd)
-        if calls["n"] == 1 and state and state.get("status"):
+        # Call 1 is the header's (`_run_info` reads the checkpoint for the round
+        # it prints); the reap being simulated is the route-runner's, which lands
+        # while the FOLLOW is between its read and its classification.
+        if calls["n"] == 2 and state and state.get("status"):
             shutil.rmtree(rd, ignore_errors=True)  # the success reap, mid-follow
         return state
 

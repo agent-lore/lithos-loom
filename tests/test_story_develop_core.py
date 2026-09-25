@@ -27,6 +27,7 @@ from lithos_loom.plugins.story_develop import turns as turns_mod
 from lithos_loom.plugins.story_develop.config import DevelopConfig, ReviewerSpec
 from lithos_loom.plugins.story_develop.test_gate import GateResult
 from lithos_loom.plugins.story_develop.turns import TurnResult
+from lithos_loom.runner import git
 
 _LGTM = "## Status: LGTM\n## Summary\nLooks correct and complete.\n"
 # NEW findings carry a BLANK id — the orchestrator's ledger assigns f-001 etc.
@@ -864,6 +865,128 @@ def test_conversation_log_written_per_round(
     # become siblings of the log's "## Round N" structure
     assert "> ## Status:" in log
     assert "\n## Status:" not in log
+
+
+# --- per-round checkpoint + resume (5dbeb0c8 slice C) -----------------------
+
+
+def test_every_round_boundary_is_checkpointed(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """The resumable point is the round boundary, terminal round included.
+
+    Before this, ``state.json`` was written only at run END, so a run the host
+    killed mid-loop said nothing about the rounds already committed on its
+    branch and could only be re-developed from scratch.
+    """
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop import checkpoint as checkpoint_mod
+    from lithos_loom.plugins.story_develop import rounds as rounds_mod
+
+    boundaries: list[int] = []
+    real_record = checkpoint_mod.record_round_checkpoint
+
+    def spy(run_dir, **kwargs):
+        boundaries.append(kwargs["round_no"])
+        real_record(run_dir, **kwargs)
+
+    monkeypatch.setattr(rounds_mod.checkpoint, "record_round_checkpoint", spy)
+    cfg = replace(config, max_rounds=2)
+    _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_KEEP_F001}],
+    )
+
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "max_rounds"  # the terminal round is round 2
+    assert boundaries == [1, 2]  # every boundary, the last one included
+    cp = checkpoint_mod.round_checkpoint(cfg.run_dir)
+    assert cp is not None
+    assert cp.round == 2 and cp.branch == result.branch
+    assert cp.base_sha == result.base_sha
+    assert cp.head_sha == git.commit_sha(result.worktree)
+    assert cp.commit == result.commits[-1]  # round 2's own commit
+    assert cp.repo == str(cfg.repo) and cp.worktree == str(result.worktree)
+    assert cp.cost_usd == pytest.approx(result.total_cost_usd, abs=0.0001)
+    # nothing carried: this run IS the branch so far
+    assert (cp.branch_rounds, cp.branch_cost_usd) == (2, cp.cost_usd)
+
+
+def test_a_resumed_run_continues_the_branch_the_budget_and_the_findings(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """The whole point of slice C: the paid rounds are USED, not re-bought.
+
+    Run 1 lands two rounds and stops; the resume enters on its head, so the new
+    branch carries both commits, the coder is cold-started from the last review
+    round's findings, and the remaining budget is what run 1 left of the
+    branch's ceiling — not a fresh one.
+    """
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop import checkpoint as checkpoint_mod
+    from lithos_loom.plugins.story_develop.resume import prepare_resume
+
+    first = replace(config, max_rounds=2, max_cost_usd=10.0)
+    _install_fakes(
+        monkeypatch,
+        first,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _FINDINGS_KEEP_F001}],
+    )
+    dead = develop_mod.develop(first)
+    assert dead.status == "max_rounds" and len(dead.commits) == 2
+
+    # The re-dispatch: the SAME ceilings (they are the route's / project's), a
+    # fresh run id, and the dead run's dir as the thing to continue.
+    fresh = replace(config, max_rounds=5, max_cost_usd=10.0, run_id="resumed1")
+    resumption, refused = prepare_resume(fresh, first.run_dir)
+    assert refused == "" and resumption is not None
+    # the REMAINDER, not a fresh budget
+    assert resumption.config.max_rounds == 3
+    assert resumption.config.max_cost_usd == pytest.approx(
+        round(10.0 - dead.total_cost_usd, 4)
+    )
+    # a story-develop run continuing: the needs-decision escape stays live
+    assert resumption.entry.decisions_enabled is True
+
+    state = _install_fakes(monkeypatch, resumption.config, reviews=[{"text": _LGTM}])
+    revived = develop_mod.develop(resumption.config, entry=resumption.entry)
+
+    assert revived.status == "approved"
+    # a NEW branch (the dead worktree still has the old one checked out) whose
+    # history contains the dead run's commits
+    assert revived.branch != dead.branch
+    log = subprocess.run(
+        ["git", "log", "--format=%H", "-n", "10"],
+        cwd=revived.worktree,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert dead.commits[-1] in log and dead.commits[0] in log
+    # the coder was cold-started from the resume prompt: the brief names what it
+    # is picking up, and the last review round's finding rides along
+    prompt = " ".join(state["coder_prompts"][0].split())
+    assert "being resumed" in prompt
+    assert "ran 2 round(s)" in prompt and "3 round(s) left" in prompt
+    assert "still needs work" in prompt  # round 2's finding, by its text
+    # …and its own checkpoints record the BRANCH's rounds/spend, not just its own
+    cp = checkpoint_mod.round_checkpoint(resumption.config.run_dir)
+    assert cp is not None
+    assert cp.round == 1 and cp.branch_rounds == 3
+    assert cp.branch_cost_usd == pytest.approx(
+        dead.total_cost_usd + revived.total_cost_usd, abs=0.0001
+    )
+    # provenance for the operator's surfaces
+    from lithos_loom.plugins.story_develop.resume import record_resumed_from
+
+    record_resumed_from(resumption.config.run_dir, resumption.plan)
+    recorded = json.loads((resumption.config.run_dir / "state.json").read_text())
+    assert recorded["resumed_from"]["run_id"] == first.run_id
+    assert recorded["resumed_from"]["rounds"] == 2
+    assert recorded["status"] == "approved"  # the loop's own verdict survives
 
 
 # --- test gate (T4) ---------------------------------------------------------
@@ -2375,8 +2498,16 @@ def test_uncaught_exception_propagates_and_tears_down_containers(
     assert len(stopped) == len(set(stopped))  # each container stopped exactly once
     assert sum(1 for n in stopped if n.endswith("-coder")) == 1  # the coder
     assert any("-review-" in n for n in stopped)  # at least one reviewer
-    # epilogue skipped: no durable run state is written on an uncaught exception.
-    assert not (config.run_dir / "state.json").exists()
+    # The epilogue is skipped: no VERDICT is written on an uncaught exception —
+    # but the round boundary is still checkpointed (5dbeb0c8 slice C: a crashed
+    # run is precisely the one with no other record, and its commits are on the
+    # branch), so state.json exists carrying only that block.
+    from lithos_loom.plugins.story_develop import checkpoint as checkpoint_mod
+
+    written = json.loads((config.run_dir / "state.json").read_text())
+    assert "status" not in written  # no verdict, no rounds, no cost
+    assert set(written) == {checkpoint_mod.CHECKPOINT_KEY}
+    assert checkpoint_mod.round_checkpoint(config.run_dir) is not None
 
 
 def test_candidate_stage_dedups_per_committed_sha(

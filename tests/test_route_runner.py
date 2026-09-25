@@ -1929,6 +1929,115 @@ async def test_failed_run_records_last_attempt_marker(tmp_path: Path) -> None:
     assert marker["ended_at"]  # ISO timestamp, value not pinned
 
 
+async def test_failed_attempt_marker_records_the_escalation_reason(
+    tmp_path: Path,
+) -> None:
+    """5dbeb0c8 slice C: the marker says WHY, so a re-dispatch can tell an
+    infra death (continue the branch) from a verdict on the work (do not)."""
+    bus = EventBus()
+    infra = {
+        **_failed_result(),
+        "error": {"category": "environment", "message": "container vanished"},
+    }
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=AsyncMock(return_value=infra)
+    )
+
+    await bus.publish(_evt(payload=_payload("task-1")))
+    await _run_for(runner)
+
+    marker = lithos.task_update.await_args.kwargs["metadata"][
+        last_attempt_key("story-develop")
+    ]
+    assert marker["reason"] == "infra"
+
+
+async def test_a_host_death_points_the_next_dispatch_at_the_dead_run(
+    tmp_path: Path,
+) -> None:
+    """The dispatch after an infra death carries the dead run dir (slice C).
+
+    The signal is the story's own failed-attempt marker as it stood at dispatch
+    time — the route's last attempt died for a HOST reason and named a run whose
+    checkpoint has a committed round. Nothing else changes: the plugin decides
+    what to do with the pointer, and an ordinary dispatch carries none.
+    """
+    import json as _json
+
+    from lithos_loom.plugins.story_develop import checkpoint
+
+    bus = EventBus()
+    envelopes: list[dict[str, Any]] = []
+
+    async def capturing_plugin(**kwargs: Any) -> dict[str, Any]:
+        envelopes.append(_json.loads(kwargs["task_json_path"].read_text()))
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    dead_run = tmp_path / "task-1" / "dead"
+    (dead_run / "handoff").mkdir(parents=True)
+    checkpoint.record_round_checkpoint(
+        dead_run,
+        round_no=4,
+        branch="story-dead",
+        head_sha="h" * 40,
+        base_sha="b" * 40,
+    )
+
+    def _marker(**extra: Any) -> dict[str, Any]:
+        return {
+            "project": "loom",
+            last_attempt_key("story-develop"): {
+                "status": "failed",
+                "ended_at": "2026-09-13T08:00:00+00:00",
+                "gate_id": "gate-1",  # the gate the operator has just ticked
+                **extra,
+            },
+        }
+
+    runner, _ = _make_runner(bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin)
+    await bus.publish(
+        _evt(
+            payload=_payload("task-1", metadata=_marker(reason="infra", run_id="dead"))
+        )
+    )
+    await _run_for(runner)
+    assert envelopes[-1]["resume"] == {
+        "run_dir": str(dead_run),
+        "reason": "infra",
+    }
+
+    # a verdict on the WORK is not resumed — that is a separate question
+    runner2, _ = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin
+    )
+    await bus.publish(
+        _evt(
+            payload=_payload("task-2", metadata=_marker(reason="failed", run_id="dead"))
+        )
+    )
+    await _run_for(runner2)
+    assert "resume" not in envelopes[-1]
+
+    # …and neither is a run with no resumable checkpoint
+    runner3, _ = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin
+    )
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                "task-3", metadata=_marker(reason="infra", run_id="never-existed")
+            )
+        )
+    )
+    await _run_for(runner3)
+    assert "resume" not in envelopes[-1]
+
+
 async def test_marker_write_failure_does_not_mask_release(tmp_path: Path) -> None:
     """The marker write is best-effort: a Lithos hiccup recording it must not
     prevent the [BlockerFailed] finding or the claim release."""

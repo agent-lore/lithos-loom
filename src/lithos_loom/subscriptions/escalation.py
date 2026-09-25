@@ -380,6 +380,7 @@ async def escalate_with_failure(
             run_id=run,
             stamps=stamps,
             gate_id=gate_id,
+            reason=escalation.reason,
         )
 
     gate_id, gate_problem = await raise_needs_human(
@@ -409,6 +410,7 @@ async def escalate_with_failure(
             run_id=run,
             stamps=stamps,
             release=release,
+            reason=escalation.reason,
         )
         return None
     if release:

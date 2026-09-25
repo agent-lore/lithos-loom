@@ -68,7 +68,13 @@ from lithos_loom.config import load_config
 from lithos_loom.errors import LithosClientError, LithosLoomError
 from lithos_loom.gates import GATE_TYPE_PR, STORY_GATE_ID_KEY
 from lithos_loom.lithos_client import LithosClient
-from lithos_loom.plugins.story_develop import engines, handoff, run_outcome, run_owner
+from lithos_loom.plugins.story_develop import (
+    checkpoint,
+    engines,
+    handoff,
+    run_outcome,
+    run_owner,
+)
 from lithos_loom.plugins.story_develop.config import DEFAULT_CODER_TIMEOUT
 from lithos_loom.plugins.story_develop.idempotency import lookup_completed
 from lithos_loom.plugins.story_develop.publish_text import CONTROL_CHARS_RE
@@ -134,6 +140,13 @@ develop_app.command("deliver")(deliver_command)
 from lithos_loom.cli.converge_push import converge_push_command  # noqa: E402
 
 develop_app.command("converge-push")(converge_push_command)
+
+# `develop resume` (5dbeb0c8 slice C): continue a run the HOST killed mid-loop on
+# its own branch — the same entry the daemon takes when it re-dispatches such a
+# run, for a run nobody will re-dispatch. Impl in `cli/resume.py`.
+from lithos_loom.cli.resume import resume_command  # noqa: E402
+
+develop_app.command("resume")(resume_command)
 
 _FORMAT_TEXT = "text"
 _FORMAT_JSON = "json"
@@ -334,8 +347,34 @@ def _round_and_reviewers(handoff_dir: Path) -> tuple[int, tuple[str, ...]]:
     return max_round, tuple(reviewers)
 
 
+def _display_round(state: dict | None, handoff_round: int) -> int:
+    """The round to SHOW for a run, from its checkpoint (5dbeb0c8 slice C).
+
+    ``develop()`` records each round boundary in ``state.json``
+    (:mod:`~lithos_loom.plugins.story_develop.checkpoint`), so the round no
+    longer has to be inferred from which handoff files exist — an inference that
+    LAGS by a whole turn, since a round's handoffs are written at the END of
+    each agent's turn: a run deep in round 5's coder turn still had only round
+    4's files and was reported as "round 4: coder working".
+
+    A live run is therefore shown in the round AFTER the last boundary — the one
+    the loop has entered — and a finished run in the round it completed
+    (``rounds`` from the terminal write, which is what its handoffs and its
+    ``[DevelopResult]`` name). A run with no checkpoint (one that predates this,
+    or one still inside round 1) keeps the filename-derived answer.
+    """
+    cp = checkpoint.from_state(state)
+    if cp is None:
+        return handoff_round
+    if state is not None and state.get("status"):
+        rounds = state.get("rounds")
+        return rounds if isinstance(rounds, int) and rounds > 0 else cp.round
+    return cp.round + 1
+
+
 def _run_info(run_dir: Path) -> RunInfo:
     round_no, reviewers = _round_and_reviewers(run_dir / "handoff")
+    round_no = _display_round(run_outcome.read_state(run_dir), round_no)
     return RunInfo(
         run_id=run_dir.name,
         task_id=run_dir.parent.name,
@@ -1723,10 +1762,18 @@ def _attach_header(info: RunInfo) -> str:
 
 
 def _follow_state(
-    run_dir: Path, containers: list[ContainerStatus] | None
+    run_dir: Path,
+    containers: list[ContainerStatus] | None,
+    state: dict | None = None,
 ) -> tuple[str, int, str | None]:
-    """Human label, round, and active agent for the current poll while running."""
-    round_no = _round_and_reviewers(run_dir / "handoff")[0]
+    """Human label, round, and active agent for the current poll while running.
+
+    *state* is the poll's already-read ``state.json`` — the round comes from the
+    checkpoint in it (:func:`_display_round`), so the label reports the round
+    the loop is actually in rather than the newest round that has written a
+    handoff file.
+    """
+    round_no = _display_round(state, _round_and_reviewers(run_dir / "handoff")[0])
     if containers is None:
         return "── (docker unavailable — following handoffs only)", round_no, None
     active = _active_agent(containers)
@@ -1781,7 +1828,7 @@ def _follow_events(
         if phase != "delivering":
             delivering_polls = 0  # reset the fallback counter unless still delivering
         if phase == "running":
-            label, round_no, agent = _follow_state(run_dir, containers)
+            label, round_no, agent = _follow_state(run_dir, containers, state)
             if label != last_label:  # re-announce only on a state change
                 yield {
                     "event": "state",
@@ -1798,7 +1845,9 @@ def _follow_events(
                 yield {
                     "event": "state",
                     "label": label,
-                    "round": _round_and_reviewers(run_dir / "handoff")[0],
+                    "round": _display_round(
+                        state, _round_and_reviewers(run_dir / "handoff")[0]
+                    ),
                     "agent": None,
                 }
                 last_label = label

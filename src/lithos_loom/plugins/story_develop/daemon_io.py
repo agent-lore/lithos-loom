@@ -106,6 +106,33 @@ def read_task_payload(path: Path) -> TaskContext:
     )
 
 
+def read_resume_run_dir(path: Path) -> Path | None:
+    """The run dir the runner asked this dispatch to RESUME, or ``None``.
+
+    The route-runner's ``task.json`` envelope is ``{"task": …}`` plus, only when
+    the story's failed-attempt marker says the last run died for a HOST reason
+    and left a checkpointed branch, ``{"resume": {"run_dir": …, "reason": …}}``
+    (5dbeb0c8 slice C). The runner decides — the plugin cannot see the marker,
+    and a plugin that resumed whatever it found in the work dir would also
+    continue the branch of a run that stopped `stalled` or `disputed`, which is
+    a verdict on the work and explicitly not this.
+
+    Tolerant by design: a missing, malformed or empty block is ``None`` and the
+    run develops from scratch. The pointer is an optimisation of an otherwise
+    correct dispatch, never a precondition for it, so it must not be able to
+    fail one. (:func:`read_task_payload` is the strict half — no task, no run.)
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    block = data.get("resume") if isinstance(data, dict) else None
+    run_dir = block.get("run_dir") if isinstance(block, dict) else None
+    if not isinstance(run_dir, str) or not run_dir.strip():
+        return None
+    return Path(run_dir).expanduser()
+
+
 # --- project-context config lookup ------------------------------------------
 
 

@@ -22,7 +22,13 @@ from lithos_loom.plugins.story_develop.panel_prompts import (
 
 
 @pytest.mark.parametrize(
-    "name", ["coder_init.md", "coder_fix.md", "converge_coder_init.md"]
+    "name",
+    [
+        "coder_init.md",
+        "coder_fix.md",
+        "converge_coder_init.md",
+        "resume_coder_init.md",
+    ],
 )
 def test_coder_prompt_forbids_background_and_defers_tests(name: str) -> None:
     text = load_prompt(name).lower()
@@ -52,6 +58,30 @@ def test_converge_prompt_carries_intent_transfer_and_slots() -> None:
         "{handoff_file}",
         # external mode's per-id acknowledgement contract (PR #345 re-review
         # 1); rendered empty on the local-panel path
+        "{external_ack}",
+    ):
+        assert slot in raw
+
+
+def test_resume_prompt_continues_the_branch_and_exposes_its_slots() -> None:
+    # 5dbeb0c8 slice C: the resumed coder is picking up its OWN earlier work
+    # (not a stranger's PR, and not a cold start) — so it must read the branch
+    # before changing it, and keep building on those commits.
+    raw = load_prompt("resume_coder_init.md")
+    text = " ".join(raw.lower().split())
+    assert "being resumed" in text
+    assert "commit history" in text
+    assert "do not restart the implementation" in text
+    assert "dispute" in text
+    for slot in (
+        "{resume_brief}",  # what is being picked up: rounds, spend, head
+        "{description}",
+        "{acceptance_criteria}",
+        "{commit_log}",
+        "{findings}",
+        "{gate_summary}",
+        "{handoff_file}",
+        "{sandbox_facts}",
         "{external_ack}",
     ):
         assert slot in raw
