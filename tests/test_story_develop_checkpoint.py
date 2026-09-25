@@ -111,10 +111,16 @@ def test_no_checkpoint_for_an_absent_or_partial_block(tmp_path: Path) -> None:
     run_outcome.write_state(rd, {"status": "approved"})
     assert checkpoint.round_checkpoint(rd) is None  # a run that predates this
     for partial in (
-        {"round": 0, "branch": "b", "head_sha": "h"},  # no round has finished
-        {"round": True, "branch": "b", "head_sha": "h"},  # a bool is not a round
-        {"round": 2, "branch": "", "head_sha": "h"},  # nothing to resume onto
-        {"round": 2, "branch": "b"},  # no head: the resume would have to guess
+        {"round": 0, "branch": "b", "head_sha": "h", "base_sha": "a"},  # none done
+        {"round": True, "branch": "b", "head_sha": "h", "base_sha": "a"},  # not a round
+        {
+            "round": 2,
+            "branch": "",
+            "head_sha": "h",
+            "base_sha": "a",
+        },  # nothing to enter
+        {"round": 2, "branch": "b", "base_sha": "a"},  # no head: it would guess
+        {"round": 2, "branch": "b", "head_sha": "h"},  # no fork point: empty range
         "not a block",
     ):
         run_outcome.write_state(rd, {checkpoint.CHECKPOINT_KEY: partial})
@@ -183,3 +189,77 @@ def test_an_interrupted_write_leaves_the_previous_checkpoint_intact(
     assert cp is not None and cp.round == 4  # round 4 is still resumable
     # and no half-written temp file is left behind for `prune` to puzzle over
     assert [p.name for p in rd.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_a_block_whose_fields_contradict_each_other_is_not_a_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """correctness/f-005: type-valid is not valid.
+
+    These are invariants the WRITER guarantees, and the two that matter are money
+    and the review range: a `branch_rounds` below the round (or a
+    `branch_cost_usd` below the run's own spend) hands a resume budget the branch
+    has already used, which is the whole point of the slice. A record that breaks
+    one is corrupt or not loom's, and falling back to a fresh run is safe.
+    """
+    rd = _run_dir(tmp_path)
+    sound = {
+        "round": 4,
+        "branch": "b",
+        "head_sha": "h" * 40,
+        "base_sha": "a" * 40,
+        "cost_usd": 4.0,
+        "branch_rounds": 4,
+        "branch_cost_usd": 4.0,
+        "next_round": 0,
+        "reviewed_round": 3,
+    }
+    run_outcome.write_state(rd, {checkpoint.CHECKPOINT_KEY: sound})
+    assert checkpoint.round_checkpoint(rd) is not None  # the control
+
+    for broken in (
+        {"branch_rounds": 0},  # …the branch cannot have run fewer rounds
+        {"branch_rounds": 3},
+        {"branch_cost_usd": 0.0},  # …nor spent less than this run did
+        {"next_round": 4},  # the contract is 0 or round + 1
+        {"next_round": 6},
+        {"reviewed_round": 5},  # a round that has not happened
+    ):
+        run_outcome.write_state(rd, {checkpoint.CHECKPOINT_KEY: {**sound, **broken}})
+        assert checkpoint.round_checkpoint(rd) is None, broken
+
+
+def test_the_entered_round_is_recorded_by_the_round_that_entered_it(
+    tmp_path: Path,
+) -> None:
+    """correctness/f-004: a boundary never predicts the round after it.
+
+    ``record_round_checkpoint`` has no ``next_round`` parameter at all — the next
+    round amends the boundary when it starts — so a process killed between the
+    two leaves "round N reached", never a permanent claim about a round that
+    never began.
+    """
+    rd = _run_dir(tmp_path)
+    checkpoint.record_round_checkpoint(
+        rd, round_no=4, branch="b", head_sha="h" * 40, base_sha="a" * 40
+    )
+    cp = checkpoint.round_checkpoint(rd)
+    assert cp is not None and cp.round == 4 and cp.next_round == 0
+
+    checkpoint.record_round_entered(rd, 5)
+    cp = checkpoint.round_checkpoint(rd)
+    assert cp is not None and cp.round == 4 and cp.next_round == 5
+    # …and the rest of the boundary is untouched by that amendment
+    assert cp.head_sha == "h" * 40 and cp.base_sha == "a" * 40
+
+    # a claim about anything but the boundary's successor is not made at all
+    checkpoint.record_round_entered(rd, 9)
+    assert checkpoint.round_checkpoint(rd).next_round == 5  # type: ignore[union-attr]
+
+
+def test_entering_the_first_round_records_nothing(tmp_path: Path) -> None:
+    # Nothing has been completed, so there is no boundary to amend — and the
+    # observers fall back to the handoff names, which is right for round 1.
+    rd = _run_dir(tmp_path)
+    checkpoint.record_round_entered(rd, 1)
+    assert checkpoint.round_checkpoint(rd) is None

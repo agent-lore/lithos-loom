@@ -24,7 +24,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 11 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.checkpoint` | S | 1 | 4 |
+| `lithos_loom.plugins.story_develop.checkpoint` | M | 1 | 5 |
 | `lithos_loom.plugins.story_develop.coder_salvage` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
 | `lithos_loom.plugins.story_develop.conflict_resolve` | M | 3 | 5 |
@@ -132,6 +132,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.checkpoint`
 - class `RoundCheckpoint` — One round boundary of a run that was still going.
 - def `record_round_checkpoint` — Record the round *round_no* boundary of a live run. Best-effort.
+- def `record_round_entered` — Record that the loop has ENTERED round *round_no*. Best-effort.
 - def `round_checkpoint` — The last round boundary *run_dir* recorded, or ``None``.
 - def `from_state` — The checkpoint inside an already-read ``state.json``, or ``None``.
 - def `resumable_checkpoint` — *run_dir*'s checkpoint iff there is a committed round to resume from.

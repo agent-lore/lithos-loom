@@ -1021,6 +1021,59 @@ def test_a_round_that_dies_before_committing_records_no_commit(
     assert cp.next_round == 0  # the run stopped here; no round 3 began
 
 
+def test_the_entered_round_is_published_by_the_round_that_enters_it(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """correctness/f-004 (round 2): the claim belongs to the round making it.
+
+    Publishing ``next_round`` at the round-N boundary meant a SIGKILL in the
+    window between that write and ``run_round(N+1)`` left a permanent "round N+1
+    began" — a number nobody can correct, since the dead run writes nothing else.
+    So round N's boundary lands as N, and round N+1 amends it as its own first
+    act: the coder of round 2 observes the checkpoint already saying so, and the
+    boundary observed before it does not.
+    """
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop import checkpoint as checkpoint_mod
+    from lithos_loom.plugins.story_develop import rounds as rounds_mod
+
+    cfg = replace(config, max_rounds=2)
+    seen: list[tuple[int, int, int]] = []  # (round, next_round, reviewed_round)
+
+    def watch(ctx, round_no):  # the boundary, as the loop leaves round N
+        real(ctx, round_no)
+        cp = checkpoint_mod.round_checkpoint(cfg.run_dir)
+        assert cp is not None
+        seen.append((cp.round, cp.next_round, cp.reviewed_round))
+
+    real = rounds_mod.record_boundary
+    monkeypatch.setattr(rounds_mod, "record_boundary", watch)
+    _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews=[{"text": _FINDINGS_MAJOR}, {"text": _LGTM}],
+    )
+    entered: list[tuple[int, int]] = []
+    real_turn = turns_mod.run_turn  # the fake just installed
+
+    def watching_turn(**kw):
+        if "-coder" in kw["container"]:
+            cp = checkpoint_mod.round_checkpoint(cfg.run_dir)
+            entered.append((cp.round, cp.next_round) if cp else (0, 0))
+        return real_turn(**kw)
+
+    monkeypatch.setattr(turns_mod, "run_turn", watching_turn)
+
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "approved" and result.rounds == 2
+    # at each boundary the loop had entered NO next round yet…
+    assert seen == [(1, 0, 1), (2, 0, 2)]
+    # …and round 2's coder ran with the round-1 boundary amended to name it
+    assert entered == [(0, 0), (1, 2)]
+
+
 def test_a_crashed_round_records_a_boundary_that_entered_no_next_round(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

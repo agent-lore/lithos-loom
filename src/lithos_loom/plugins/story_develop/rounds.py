@@ -205,6 +205,10 @@ class RoundContext:
     # running totals and not just this session's.
     carried_rounds: int = 0
     carried_cost_usd: float = 0.0
+    # The last round whose panel actually reviewed — set by `panel_phase`, and
+    # what the checkpoint publishes so a resume's intake round is loom's answer
+    # rather than the agent-writable handoff dir's (security/f-003).
+    reviewed_round: int = 0
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -605,6 +609,11 @@ def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     )
     ctx.review_cost += panel.cost
     ctx.final_reviews = panel.round_reviews
+    if panel.round_reviews:
+        # The round the resume takes its intake from is loom's own answer, not
+        # the handoff dir's (security/f-003): whatever the panel produced this
+        # round IS the review, and the boundary records the round number.
+        ctx.reviewed_round = round_no
     if panel.interrupted:
         return CycleExit(
             status="interrupted",
@@ -959,9 +968,7 @@ def stall_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     return None
 
 
-def record_boundary(
-    ctx: RoundContext, round_no: int, *, continues: bool = False
-) -> None:
+def record_boundary(ctx: RoundContext, round_no: int) -> None:
     """Checkpoint what round *round_no* left on the branch (5dbeb0c8 slice C).
 
     The round boundary is the resumable point: whatever this round committed is
@@ -980,13 +987,11 @@ def record_boundary(
     call inside a live loop, so a failure is logged and the round goes on — a
     missing checkpoint costs a resume, never the rounds already committed.
 
-    *continues* is whether the loop is about to enter another round. It is
-    recorded (as the round the loop moves INTO) rather than inferred by the
-    readers: a boundary with no terminal verdict beside it is NOT proof that
-    another round began — a crashed round (exit L) and the last round before
-    the epilogue lands both look exactly like a live run between rounds, and
-    "round N+1" for a process that has already exited is a number nobody can
-    correct (correctness/f-004).
+    A boundary never says anything about the round AFTER it: the next round
+    announces itself when it starts (:func:`checkpoint.record_round_entered`),
+    so a process killed between the two leaves "round N reached", which is the
+    truth, rather than a permanent claim about a round that never began — and a
+    crashed run writes nothing else ever (correctness/f-004).
     """
     cost = ctx.coder_cost + ctx.review_cost
     try:
@@ -1011,7 +1016,7 @@ def record_boundary(
         cost_usd=cost,
         branch_rounds=ctx.carried_rounds + round_no,
         branch_cost_usd=ctx.carried_cost_usd + cost,
-        next_round=round_no + 1 if continues else 0,
+        reviewed_round=ctx.reviewed_round,
     )
 
 
@@ -1021,13 +1026,17 @@ def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
     round. The order — and the TWO ``cost_ceiling_phase`` calls straddling
     approval — is load-bearing (see :func:`cost_ceiling_phase`).
 
-    However the round ends, the boundary it reached is checkpointed
-    (:func:`record_boundary`) before the exit is handed back — including when a
-    phase RAISES (exit L: the exception bypasses ``develop()``'s epilogue, which
-    is precisely the run with no other record), so that round's commits are not
-    left for nobody. The checkpoint records whether another round follows, which
-    only this function knows."""
+    It brackets the round in the checkpoint: entering *round_no* amends the
+    previous boundary to name the round now running, and however the round ends
+    — including when a phase RAISES (exit L: the exception bypasses
+    ``develop()``'s epilogue, which is precisely the run with no other record) —
+    the boundary it reached is recorded before the exit is handed back, so that
+    round's commits are not left for nobody."""
     ctx.rounds_completed = round_no
+    # The loop has ENTERED this round — amend the previous boundary to say so,
+    # here and nowhere earlier (correctness/f-004). A no-op for the run's first
+    # round, which has no boundary behind it.
+    checkpoint.record_round_entered(ctx.config.run_dir, round_no)
     # correctness/f-003: `new_commit` is round-scoped, but `commit_phase` is
     # what sets it — a round that exits BEFORE that phase (a coder auth death,
     # the common infra shape) would otherwise leave the PREVIOUS round's sha in
@@ -1057,13 +1066,8 @@ def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
                 break
     except BaseException:
         # A phase raised (exit L): the boundary is still recorded — those
-        # commits are on the branch and this run will write nothing else — but
-        # NO further round begins, so the checkpoint must not claim one.
-        record_boundary(ctx, round_no, continues=False)
+        # commits are on the branch and this run will write nothing else.
+        record_boundary(ctx, round_no)
         raise
-    record_boundary(
-        ctx,
-        round_no,
-        continues=exit_ is None and round_no < ctx.config.max_rounds,
-    )
+    record_boundary(ctx, round_no)
     return exit_

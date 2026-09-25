@@ -36,6 +36,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from itertools import islice
 from pathlib import Path
 
 from ...runner import git, worktree
@@ -78,14 +79,23 @@ _REVIEW_HANDOFF_RE = re.compile(r"^round_(\d+)_review_(.+)\.md$")
 # * the run's CONFIGURED panel is preferred over whatever is on disk, so a
 #   planted file cannot displace the real review (or, by making an unreviewed
 #   round look reviewed, suppress the last real one);
+# * the intake ROUND is loom's own (the checkpoint's ``reviewed_round``), so
+#   the directory never chooses it; discovery only picks files within a round
+#   loom vouched for, and only when the configured names are absent;
 # * at most this many reviewers are read per round, and at most this much
-#   finding text is carried into the prompt — ``read_handoff`` bounds each file
+#   RENDERED text is carried into the prompt — ``read_handoff`` bounds each file
 #   at 1 MiB, which without a COUNT bound is 1 MiB × N for an attacker-chosen N,
-#   the same OOM/billing exposure that per-file cap exists to close. The
-#   remainder is elided in the rendered text, as ``check_artifacts`` does.
+#   the same OOM/billing exposure that per-file cap exists to close. The budget
+#   is measured through ``handoff.render_findings`` itself, so it cannot drift
+#   from what is actually rendered (a finding's ``files`` /
+#   ``deferral_reason`` / ``decision_contest`` are rendered too, security/f-002),
+#   and the remainder is elided in the text, as ``check_artifacts`` does;
+# * the directory listing itself is bounded, so a dir full of planted names
+#   costs a bounded index rather than a few hundred MB of transient strings.
 _REVIEWER_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
 MAX_INTAKE_REVIEWERS = 6  # the largest canonical panel is 5
 MAX_INTAKE_FINDING_CHARS = 20_000
+MAX_INTAKE_SCAN_ENTRIES = 4096  # a real run's dir holds a handful per round
 
 # The prompt the resumed run's round 1 renders instead of ``coder_init.md``:
 # the work is already on the branch and the coder must continue it, which is
@@ -131,10 +141,21 @@ def _elision(count: int, what: str) -> handoff.Finding:
 def _bounded(outcomes: list[ReviewOutcome], dropped_files: int) -> list[ReviewOutcome]:
     """Trim *outcomes* to the intake's text budget, naming what was left out.
 
-    Findings are kept in order until :data:`MAX_INTAKE_FINDING_CHARS` of text
-    has been carried; the rest — and any reviewer file the per-round cap
-    dropped — become one ``(elided)`` finding on the last outcome, so the coder
-    is told the intake is partial instead of silently shown less.
+    Findings are kept in order until :data:`MAX_INTAKE_FINDING_CHARS` of
+    RENDERED text has been carried; the rest — and any reviewer file the
+    per-round cap dropped — become one ``(elided)`` finding on the last outcome,
+    so the coder is told the intake is partial instead of silently shown less.
+
+    Each finding is measured by rendering it through
+    :func:`handoff.render_findings` — the very function the prompt is built
+    with (security/f-002). Counting a hand-picked subset of fields is what the
+    budget did before, and it was wrong in both directions: ``files``,
+    ``deferral_reason`` and ``decision_contest`` are rendered and were
+    uncounted (one planted handoff rendered 800 kB inside a 20 kB "budget"),
+    while ``coder_response`` was counted and is not rendered at all. Measuring
+    per finding rather than per accumulated block keeps this linear in the text
+    — the handoffs are agent-written, so a quadratic re-render would be its own
+    denial of service.
     """
     kept: list[ReviewOutcome] = []
     budget = MAX_INTAKE_FINDING_CHARS
@@ -142,7 +163,7 @@ def _bounded(outcomes: list[ReviewOutcome], dropped_files: int) -> list[ReviewOu
     for outcome in outcomes:
         findings: list[handoff.Finding] = []
         for finding in outcome.findings:
-            size = len(finding.rationale) + len(finding.coder_response)
+            size = len(handoff.render_findings([finding]))
             if budget - size < 0:
                 dropped_findings += 1
                 continue
@@ -156,41 +177,35 @@ def _bounded(outcomes: list[ReviewOutcome], dropped_files: int) -> list[ReviewOu
     return kept
 
 
-def _intake_reviews(
-    prior_run_dir: Path, checkpoint: RoundCheckpoint, panel: Sequence[str]
-) -> tuple[list[ReviewOutcome], int]:
-    """The dead run's last reviewer verdicts, as loop-entry intake.
+def _scan_rounds(
+    handoff_dir: Path, up_to_round: int
+) -> dict[int, list[tuple[str, str]]]:
+    """``{round: [(reviewer, filename), …]}`` for the reviewer handoffs on disk.
 
-    The newest round at or below the checkpoint's whose reviewer handoffs
-    actually PARSE — a run that died in its coder turn has no review for the
-    round it was in, and the round before it is the live state of the dialogue.
-    Each handoff is read through the same bounded, adversarial-input reader
-    every other consumer uses; a round whose handoffs are all unreadable falls
-    back to the round before it rather than failing the resume (the branch is
-    the work; a handoff is a breadcrumb).
-
-    *panel* is the run's configured reviewer names, and they are what is read
-    when the round has them: the files are the dead agents' to name, so
-    discovery is the fallback, not the rule (see the module's bound constants).
-
-    The findings ride along as the round-1 coder prompt's input only. The new
-    panel re-reviews the branch from scratch and mints its OWN finding ids, so
-    these ids are history the coder is shown, not a ledger it is held to —
-    exactly as with a converge intake.
+    The listing is bounded (:data:`MAX_INTAKE_SCAN_ENTRIES`) and every reviewer
+    token is validated: this dir is an RW bind mount in the dead run's agent
+    containers, so both the count and the names are theirs to choose, and an
+    index built one entry per matching file is itself a cost.
     """
-    handoff_dir = prior_run_dir / "handoff"
     try:
-        names = sorted(p.name for p in handoff_dir.iterdir())
+        entries = sorted(
+            islice((p.name for p in handoff_dir.iterdir()), MAX_INTAKE_SCAN_ENTRIES)
+        )
     except OSError:
-        names = []
-    configured = set(panel)
+        return {}
+    if len(entries) == MAX_INTAKE_SCAN_ENTRIES:
+        logger.warning(
+            "resume: %s holds more than %d entries; reading the first page only",
+            handoff_dir,
+            MAX_INTAKE_SCAN_ENTRIES,
+        )
     by_round: dict[int, list[tuple[str, str]]] = {}
-    for name in names:
+    for name in entries:
         match = _REVIEW_HANDOFF_RE.match(name)
         if match is None:
             continue
         round_no = int(match.group(1))
-        if round_no > checkpoint.round:
+        if round_no > up_to_round:
             continue  # a handoff past the last boundary we can vouch for
         reviewer = match.group(2)
         if not _REVIEWER_TOKEN_RE.match(reviewer):
@@ -201,53 +216,71 @@ def _intake_reviews(
             )
             continue
         by_round.setdefault(round_no, []).append((reviewer, name))
-    # The CONFIGURED panel decides which ROUND is the intake as well as which
-    # files are read within it (security/f-003): a coder that plants a clean
-    # review for the round it died in would otherwise make that round the
-    # intake and drop the last genuinely reviewed round — findings and all —
-    # telling the resumed coder there is nothing to fix. Discovery is the
-    # fallback for a run whose panel has since been reconfigured, not the rule.
-    ordered = sorted(by_round, reverse=True)
-    by_panel = [r for r in ordered if any(n in configured for n, _ in by_round[r])]
-    for intake_round, panel_only in [(r, True) for r in by_panel] + [
-        (r, False) for r in ordered
-    ]:
-        entries = sorted(by_round[intake_round])
-        candidates = (
-            [e for e in entries if e[0] in configured] if panel_only else entries
-        )
-        chosen = candidates[:MAX_INTAKE_REVIEWERS]
-        dropped = len(candidates) - len(chosen)
-        outcomes: list[ReviewOutcome] = []
-        for reviewer, name in chosen:
-            try:
-                parsed = handoff.parse_review_handoff(
-                    handoff.read_handoff(handoff_dir / name)
-                )
-            except (HandoffError, OSError) as exc:
-                logger.warning(
-                    "resume: skipping unreadable handoff %s (%s)",
-                    handoff_dir / name,
-                    exc,
-                )
-                continue
-            open_findings = [f for f in parsed.findings if f.is_open]
-            outcomes.append(
-                ReviewOutcome(
-                    reviewer=reviewer,
-                    status=parsed.status,
-                    passed=not open_findings,
-                    max_severity=handoff.max_severity(
-                        [f.severity for f in open_findings]
-                    ),
-                    findings=list(parsed.findings),
-                )
+    return by_round
+
+
+def _read_handoffs(
+    handoff_dir: Path, entries: Sequence[tuple[str, str]]
+) -> list[ReviewOutcome]:
+    """Parse *entries* (``(reviewer, filename)``) into intake outcomes.
+
+    Each file goes through the same bounded, adversarial-input reader every other
+    consumer uses; one that will not parse is skipped rather than failing the
+    resume (the branch is the work; a handoff is a breadcrumb).
+    """
+    outcomes: list[ReviewOutcome] = []
+    for reviewer, name in entries:
+        try:
+            parsed = handoff.parse_review_handoff(
+                handoff.read_handoff(handoff_dir / name)
             )
-        if outcomes:
-            return _bounded(outcomes, dropped), intake_round
-    # Nothing was reviewed (or nothing survived parsing) before the death. ONE
-    # empty outcome, rather than none, so the round-1 prompt's findings slot
-    # renders the "no structured findings" line instead of a blank.
+        except (HandoffError, OSError) as exc:
+            logger.warning(
+                "resume: skipping unreadable handoff %s (%s)", handoff_dir / name, exc
+            )
+            continue
+        open_findings = [f for f in parsed.findings if f.is_open]
+        outcomes.append(
+            ReviewOutcome(
+                reviewer=reviewer,
+                status=parsed.status,
+                passed=not open_findings,
+                max_severity=handoff.max_severity([f.severity for f in open_findings]),
+                findings=list(parsed.findings),
+            )
+        )
+    return outcomes
+
+
+def _round_intake(
+    handoff_dir: Path,
+    round_no: int,
+    panel: Sequence[str],
+    by_round: dict[int, list[tuple[str, str]]] | None = None,
+) -> tuple[list[ReviewOutcome], int]:
+    """One round's intake: ``(outcomes, reviewer files dropped by the cap)``.
+
+    The CONFIGURED panel's own filenames first — no enumeration at all on the
+    ordinary path, since the loop names them deterministically. Discovery within
+    the round is the fallback for a run whose panel has since been reconfigured
+    (its handoffs carry the old names), and it is capped and sorted.
+    """
+    configured = [
+        (name, handoff.reviewer_handoff_name(round_no, name))
+        for name in sorted(set(panel))
+    ][:MAX_INTAKE_REVIEWERS]
+    present = [e for e in configured if (handoff_dir / e[1]).is_file()]
+    if present:
+        return _read_handoffs(handoff_dir, present), 0
+    found = sorted((by_round or _scan_rounds(handoff_dir, round_no)).get(round_no, []))
+    chosen = found[:MAX_INTAKE_REVIEWERS]
+    return _read_handoffs(handoff_dir, chosen), len(found) - len(chosen)
+
+
+def _no_review() -> list[ReviewOutcome]:
+    """The empty intake: ONE outcome, rather than none, so the round-1 prompt's
+    findings slot renders the "no structured findings" line instead of a blank
+    (and ``intake_reviews is not None`` still selects the cold-start entry)."""
     return [
         ReviewOutcome(
             reviewer="(no review recorded)",
@@ -255,7 +288,56 @@ def _intake_reviews(
             passed=True,
             max_severity=None,
         )
-    ], 0
+    ]
+
+
+def _intake_reviews(
+    prior_run_dir: Path, checkpoint: RoundCheckpoint, panel: Sequence[str]
+) -> tuple[list[ReviewOutcome], int]:
+    """The dead run's last reviewer verdicts, as loop-entry intake.
+
+    **Which round is loom's own answer, not the directory's**
+    (security/f-003): the checkpoint records the last round whose panel actually
+    reviewed, and that is the round read. The handoff dir is an RW bind mount in
+    the agent containers and the panel's names are in the coder's own prompt from
+    round 2 on, so a coder that plants ``round_NN_review_<a real panel name>.md``
+    before it dies could otherwise make the round it died in look reviewed — and
+    the last genuinely reviewed round, with its open findings, would be dropped
+    in favour of a planted "LGTM". A checkpoint that predates the field falls
+    back to discovery: the newest round at or below its own whose handoffs parse.
+
+    *panel* is the run's configured reviewer names — the files read within the
+    chosen round, with bounded discovery as the fallback (see the module's
+    bound constants).
+
+    The findings ride along as the round-1 coder prompt's input only. The new
+    panel re-reviews the branch from scratch and mints its OWN finding ids, so
+    these ids are history the coder is shown, not a ledger it is held to —
+    exactly as with a converge intake.
+    """
+    handoff_dir = prior_run_dir / "handoff"
+    if checkpoint.reviewed_round:
+        # Loom's own answer, and never a round ABOVE it: the round a run died in
+        # is exactly where a plant would sit. BELOW it is the real dialogue, so a
+        # recorded round whose handoff is corrupt or gone degrades to the round
+        # before it rather than to no findings at all.
+        for intake_round in range(checkpoint.reviewed_round, 0, -1):
+            outcomes, dropped = _round_intake(handoff_dir, intake_round, panel)
+            if outcomes:
+                return _bounded(outcomes, dropped), intake_round
+        return _no_review(), 0
+    # A checkpoint that predates `reviewed_round`: discovery, newest round
+    # first, preferring one that carries a CONFIGURED reviewer's handoff — the
+    # weaker version of the same rule, which is all this path can do.
+    by_round = _scan_rounds(handoff_dir, checkpoint.round)
+    configured = set(panel)
+    ordered = sorted(by_round, reverse=True)
+    by_panel = [r for r in ordered if any(n in configured for n, _ in by_round[r])]
+    for intake_round in by_panel + [r for r in ordered if r not in by_panel]:
+        outcomes, dropped = _round_intake(handoff_dir, intake_round, panel, by_round)
+        if outcomes:
+            return _bounded(outcomes, dropped), intake_round
+    return _no_review(), 0
 
 
 def _resume_brief(plan: ResumePlan, *, rounds_left: int) -> str:
@@ -351,9 +433,10 @@ def prepare_resume(
         worktree_factory=lambda cfg: worktree.create_on_branch(
             cfg.repo, checkpoint.head_sha, cfg.description, parent=cfg.worktree_parent
         ),
-        base_override=git.RangeBase(
-            checkpoint.base_sha or checkpoint.head_sha, base_ref
-        ),
+        # The fork point the dead run measured from — never a fallback to its
+        # HEAD, which would review an empty range (correctness/f-005); a
+        # checkpoint without one is refused by `from_state` before we get here.
+        base_override=git.RangeBase(checkpoint.base_sha, base_ref),
         intake_reviews=intake_reviews,
         intake_check_set=None,
         coder_init_template=RESUME_CODER_INIT,

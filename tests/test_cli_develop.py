@@ -154,13 +154,11 @@ def test_live_round_comes_from_the_checkpoint_not_the_handoff_names(
         patched, task_id="t-1", run_id="r1", rounds={1: ["cq"], 2: ["cq"]}
     )
     checkpoint.record_round_checkpoint(
-        run_dir,
-        round_no=2,
-        branch="b",
-        head_sha="h" * 40,
-        base_sha="a" * 40,
-        next_round=3,  # the loop entered round 3 — only it knows that
+        run_dir, round_no=2, branch="b", head_sha="h" * 40, base_sha="a" * 40
     )
+    # …and round 3 announcing itself, which is the only thing that says the loop
+    # entered it (correctness/f-004: the round-2 boundary never predicts it).
+    checkpoint.record_round_entered(run_dir, 3)
 
     develop.develop_list(config=None, output_format="json")
     assert json.loads(capsys.readouterr().out)[0]["round"] == 3  # round 3 in flight
@@ -169,9 +167,10 @@ def test_live_round_comes_from_the_checkpoint_not_the_handoff_names(
     assert round_no == 3  # …and the attach label agrees
 
     # correctness/f-004: a boundary that entered NO further round — the round
-    # crashed (exit L, so no terminal verdict is ever written) or it stopped the
-    # run — shows the round it was, not a phantom next one no later poll can
-    # correct.
+    # crashed (exit L, so no terminal verdict is ever written), the round stopped
+    # the run, or the process died between the boundary and the next round's
+    # first act — shows the round it was, not a phantom next one no later poll
+    # can correct.
     checkpoint.record_round_checkpoint(
         run_dir, round_no=2, branch="b", head_sha="h" * 40, base_sha="a" * 40
     )
