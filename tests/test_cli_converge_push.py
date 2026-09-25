@@ -281,6 +281,69 @@ def test_reports_the_plan_and_writes_nothing(
     assert record["pr_number"] == 425 and record["story_id"] == _STORY
 
 
+def test_reports_every_check_that_held_approval_not_just_the_test_gate(
+    host, run_dir: Path, worktree: Path, lithos: FakeLithosClient, tmp_path: Path
+) -> None:
+    """The run stopped with required ruff + pyright red while the test gate was
+    GREEN — the realistic standard-profile stop. A report that showed only the
+    test gate and the reviewer findings would tell the operator the tip is
+    green where the run's own floor says it is red, exactly where they are
+    deciding to push it onto a delivered PR."""
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    state["blocking_checks"] = [
+        {
+            "name": "lint",
+            "command": "ruff check .",
+            "verdict": "GREEN",  # ruff exits zero; its findings are the verdict
+            "findings": [
+                {
+                    "finding_id": "gate/lint-001",
+                    "severity": "major",
+                    "rule": "F821",
+                    "file": "src/app.py",
+                    "line": 12,
+                    "message": "undefined name `widget`",
+                }
+            ],
+        },
+        {"name": "typecheck", "command": "pyright", "verdict": "RED", "findings": []},
+    ]
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    out = tmp_path / "record.json"
+
+    result = _invoke(_RUN, "--json", str(out))
+
+    assert result.exit_code == 0, result.output
+    gate_line = next(ln for ln in result.output.splitlines() if "gate:" in ln)
+    assert "test GREEN" in gate_line
+    assert "lint GREEN" in gate_line and "typecheck RED" in gate_line
+    # and WHY lint blocked — an adapter check has no red verdict of its own
+    assert "F821" in result.output and "undefined name `widget`" in result.output
+    assert "src/app.py:12" in result.output
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert [c["name"] for c in record["gate"]["blocking_checks"]] == [
+        "lint",
+        "typecheck",
+    ]
+
+
+def test_the_pushed_finding_names_the_checks_that_blocked(
+    host, run_dir: Path, worktree: Path, lithos: FakeLithosClient
+) -> None:
+    # `[ConvergePushed]` is the record of an operator override: the checks that
+    # held approval belong in it for the same reason the open findings do.
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    state["blocking_checks"] = [
+        {"name": "typecheck", "command": "pyright", "verdict": "RED", "findings": []}
+    ]
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    assert _invoke(_RUN, "--yes").exit_code == 0
+
+    summary = next(f for f in lithos.findings if f["task_id"] == _STORY)["summary"]
+    assert "typecheck RED" in summary
+
+
 # ── the push ───────────────────────────────────────────────────────────
 
 

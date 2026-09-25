@@ -590,12 +590,45 @@ rounds and the findings the run left open."""
 
 
 def _gate_line(run: ConvergeRun) -> str:
+    """The gate's verdict in one line: the test check, then EVERY check that
+    held approval (``blocking_checks`` is the floor's own decision, so a red
+    required ``lint`` / ``typecheck`` is named here beside a green ``test``)."""
     bits = []
     if run.test_gate:
         bits.append(f"test {run.test_gate.get('verdict', '?')}")
     for check in run.blocking_checks:
-        bits.append(f"{check.get('name', '?')} {check.get('verdict', 'RED')}")
+        name = check.get("name", "?")
+        if name == "test" and run.test_gate:
+            continue  # a blocking `test` check is the bit already appended
+        bits.append(f"{name} {check.get('verdict', 'RED')}")
     return ", ".join(bits) if bits else "no gate verdict recorded"
+
+
+def _gate_finding_lines(run: ConvergeRun, indent: str) -> list[str]:
+    """What each blocking check actually reported.
+
+    An adapter-backed check (ruff) has no raw verdict of its own — its
+    findings ARE the reason it blocked — so a report that named the check but
+    not them would tell the operator a required check is red without saying
+    why, right where they are deciding to push anyway.
+    """
+    lines: list[str] = []
+    for check in run.blocking_checks:
+        findings = check.get("findings") or ()
+        if not isinstance(findings, list | tuple):
+            continue
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            where = f.get("file") or ""
+            if where and f.get("line") is not None:
+                where = f"{where}:{f.get('line')}"
+            lines.append(
+                f"{indent}- [{check.get('name', '?')}/{f.get('rule', '?')}] "
+                f"{f.get('severity', '?')} — {f.get('message', '')}"
+                + (f" ({where})" if where else "")
+            )
+    return lines
 
 
 def report(run: ConvergeRun, plan: PushPlan) -> list[str]:
@@ -613,6 +646,7 @@ def report(run: ConvergeRun, plan: PushPlan) -> list[str]:
         + (f"   cost: ${run.cost_usd:.2f}" if run.cost_usd is not None else ""),
         f"  gate:         {_gate_line(run)}",
     ]
+    lines += _gate_finding_lines(run, "    ")
     if run.open_findings:
         lines.append(f"  open findings ({len(run.open_findings)}):")
         lines += [
@@ -687,6 +721,7 @@ def finding_summary(run: ConvergeRun, *, pushed_sha: str) -> str:
         + (f", cost ${run.cost_usd:.2f}" if run.cost_usd is not None else ""),
         f"- gate at the last round: {_gate_line(run)}",
     ]
+    lines += _gate_finding_lines(run, "  ")
     if run.open_findings:
         lines.append("- pushed WITH these findings still open:")
         lines += [

@@ -716,9 +716,17 @@ def develop(
             "test_gate": (
                 {"verdict": gate.verdict, "command": gate.command} if gate else None
             ),
-            "blocking_checks": [
-                {"name": c.name, "verdict": c.verdict} for c in blocking_checks
-            ],
+            # Every check that held approval, by the floor's own per-check
+            # decision — not just the raw-exit ones named above. An
+            # adapter-backed `lint` (ruff, whose verdict lives in the ledger)
+            # and a plain `typecheck` (pyright) are neither the `test` gate
+            # nor raw-exit overrides, so without this the record says "test
+            # GREEN, nothing open" for a run that stopped with required lint
+            # or typecheck red — and it is this record `converge-push` shows
+            # the operator before they push an unapproved run's rounds.
+            "blocking_checks": check_runner.blocking_check_records(
+                final_check_set, gate_ledger
+            ),
             "open_findings": [
                 {
                     "reviewer": r.reviewer,

@@ -37,9 +37,14 @@ write. It prints, from the run dir and one read-only `ls-remote` / `fetch`:
 - the run's status and stop reason, its rounds and `total_cost_usd` (the whole
   command's: converge's intake / triage turn plus the loop — summed from the
   two halves for a run killed between them);
-- the last round's gate verdict (the test gate, plus any blocking check by
-  name) and the findings the last review round left **open** (severity +
-  title) — read from the run's recorded ledger data, never re-parsed prose;
+- the last round's gate verdict: the test gate, plus **every** check that held
+  approval by the run's own floor decision — named with its verdict, and with
+  the deterministic findings that ARE an adapter-backed check's verdict (a red
+  required `lint` / `typecheck` is neither the legacy `test` gate nor a
+  raw-exit override, so a report built from those two alone would say "test
+  GREEN" for a run the floor stopped) — and the findings the last review round
+  left **open** (severity + title), all read from the run's recorded ledger
+  data, never re-parsed prose;
 - the fixer commits PR head → worktree tip (first-parent, the same set
   `converge --json` reports as `fixer_commits`) with a diffstat;
 - the **push verdict**.

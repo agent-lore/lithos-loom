@@ -22,7 +22,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
-| `lithos_loom.plugins.story_develop.check_runner` | M | 0 | 10 |
+| `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 11 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
 | `lithos_loom.plugins.story_develop.coder_salvage` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
@@ -113,6 +113,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `merge_check_sets` — Append *extra*'s results to *base* (the approval-candidate merge, #140).
 - def `with_result` — *base* with *row* appended, any prior result of the same check name dropped — a verdict produced outside :func:`run_check_set` (the S4 post-commit regenerate pass) joining the round's check-set.
 - def `check_result_blocks` — Whether a single **required** check holds approval (#140, ADR §4/§5).
+- def `blocking_check_records` — Every check that HELD approval, as a durable, operator-facing record.
 - def `gate_floor_blocks` — Whether the deterministic floor blocks approval (#140, ADR §4/§5).
 - def `run_check_set` — Run an ordered check-set against one round commit.
 - def `reconcile_off_check_states` — Retire any persisted findings for checks the operator has turned **off** (#273 slice 2 / #280 review).
