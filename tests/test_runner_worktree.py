@@ -552,8 +552,9 @@ def test_fetch_problem_shares_one_timeout_with_its_lock_race_retry(
 
     assert timeouts == [300.0, 1.0]
     assert clock["now"] == 300.0  # the whole call, retry included
-    # a hung transport is its own class, never a transport MESSAGE a caller
-    # would read as a hiccup worth retrying
+    # the kill is FLAGGED, not left to be recognised by the shape of `reason`,
+    # so the caller's retry decision can name it (`_git_fetch` retries it inside
+    # the budget it shares with every other attempt)
     assert problem.timed_out and "timed out" in problem.reason
 
 

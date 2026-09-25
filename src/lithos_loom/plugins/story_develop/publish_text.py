@@ -356,6 +356,15 @@ def publish_line(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
     The cut keeps the **head**: a quoted failure identifies itself first
     (``fatal: …``, ``RuntimeError: …``) and an operator who reads only the
     start still knows what happened.
+
+    A published excerpt is always *delimited* — its caller puts it inside
+    ``"…"`` so it reads as a quotation and not as loom's own prose — and the
+    same doctrine :func:`fence_untrusted` states for a whole document holds for
+    one line: the delimiter must be one **the content cannot terminate**. So
+    the double quote is folded to an apostrophe here, in the one place every
+    excerpt passes through. Without that, a line carrying a ``"`` closed the
+    quote early and everything after it read as loom's own instruction for the
+    host (#431 review security f-004, CWE-117 in its UI form).
     """
     if limit < 1:
         raise ValueError(
@@ -368,14 +377,14 @@ def publish_line(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
 
 
 def flatten_line(text: str) -> str:
-    """*text* as one line with the invisibles out — :func:`publish_line`
-    without the cut.
+    """*text* as one line with the invisibles out, and no double quote left to
+    close a quotation with — :func:`publish_line` without the cut.
 
     For the caller that must MEASURE before it chooses what to keep: the
     watcher composes a finding's excerpt out of several physical lines and can
     only decide how many fit once they are flattened (#431 review f-007).
     """
-    return " ".join(CONTROL_CHARS_RE.sub("", text).split())
+    return " ".join(CONTROL_CHARS_RE.sub("", text).replace('"', "'").split())
 
 
 def _squeeze_for_budget(text: str) -> str:

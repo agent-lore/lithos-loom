@@ -98,9 +98,11 @@ PR_FETCH_TIMEOUT_SECONDS = 300.0
 # repository.` used to cost a whole conflict-resolve run and leave the PR
 # `behind` until the next daemon boot (#431), so these are retried; anything
 # else (a ref that does not exist, a permission denial) is answered first time.
-# Each sign is a substring of what GIT / SSH printed — `timed out` is the
-# transport's own `Connection timed out`, which comes back in milliseconds, and
-# never loom's watchdog kill (`FetchProblem.timed_out`, review f-005).
+# Each sign is a substring of what GIT / SSH printed (`timed out` catches the
+# transport's own `Connection timed out`); loom's watchdog kill —
+# `FetchProblem.timed_out`, the failure git never got to diagnose — is retried
+# beside them, bounded by the shared budget below rather than excluded (review
+# f-005).
 _TRANSIENT_FETCH_SIGNS = (
     "could not read from remote repository",
     "connection reset",
@@ -111,6 +113,15 @@ _TRANSIENT_FETCH_SIGNS = (
 # Three attempts, ~1 s then ~2 s apart: a hiccup costs seconds, not a restart.
 FETCH_ATTEMPTS = 3
 FETCH_RETRY_BACKOFF_SECONDS = 1.0
+# Held back from each attempt for each attempt after it, so a first try that
+# HANGS for the whole budget cannot leave the retries with nothing to run in
+# (review f-005). A transport sign answers in milliseconds — the reserve only
+# has to be enough for the next try to reach the remote and be refused — so the
+# first attempt still keeps 240s of the 300s for a big PR-head fetch (#392).
+FETCH_RETRY_RESERVE_SECONDS = 30.0
+# Below this there is no attempt worth making: it would only replace what the
+# previous one reported with a 0s timeout of its own.
+_MIN_ATTEMPT_SECONDS = 1.0
 
 # `host_action` is published into a `[Friction]` whose sinks cap what a child
 # supplies at 300 characters, so the WHOLE action is composed to fit inside that
@@ -122,6 +133,24 @@ HOST_ACTION_CHARS = 300
 # GitHub API, not from loom.
 _REFSPEC_CHARS = 100
 _MIN_QUOTE_CHARS = 40
+
+
+def _attributed(lead: str, problem: str, *, limit: int) -> str:
+    """*lead* — loom's own words — followed by *problem* quoted and attributed
+    to the origin, the whole thing inside *limit* characters.
+
+    The one composer for both strings a failed fetch publishes (the run's
+    ``message`` and its ``host_action``): loom's half FIRST, so a cap applied
+    downstream can only shorten the quotation, and the quotation last, so the
+    origin's line can never read as loom's own prose (review security f-004).
+    The excerpt is sized to what is left of the budget, so the sinks' own
+    300-character cut is a no-op; the final slice is a backstop for a *lead*
+    long enough to crowd the quote out, and a plain cut rather than another
+    :func:`publish_line` — a second pass would fold the delimiters this puts
+    around the excerpt.
+    """
+    room = max(limit - len(lead) - 2, _MIN_QUOTE_CHARS)
+    return f'{lead}"{publish_line(problem, limit=room)}"'[:limit]
 
 
 class FetchFailedError(RuntimeError):
@@ -145,8 +174,17 @@ class FetchFailedError(RuntimeError):
     def __init__(self, *, refspecs: Sequence[str], problem: str) -> None:
         self.refspecs = tuple(refspecs)
         self.problem = publish_line(problem, limit=MAX_EXCERPT_CHARS)
+        # The message travels as the run's `message` and both watcher sinks echo
+        # it in their own prose, so the attribution belongs HERE too — not only
+        # on `host_action` (review security f-004): every sink that quotes a
+        # `FetchFailedError` inherits it, and the quote cannot be closed from
+        # inside (`publish_line` folds the delimiter).
         super().__init__(
-            f"git fetch origin {' '.join(self.refspecs)} failed: {self.problem}"
+            _attributed(
+                f"git fetch origin {' '.join(self.refspecs)} failed; origin said: ",
+                self.problem,
+                limit=HOST_ACTION_CHARS,
+            )
         )
 
     @property
@@ -172,9 +210,7 @@ class FetchFailedError(RuntimeError):
         )
         # what is left of the sink's budget after loom's own half, so the whole
         # action fits the cap its sinks apply and nothing has to be cut there
-        room = max(HOST_ACTION_CHARS - len(lead) - 2, _MIN_QUOTE_CHARS)
-        quoted = publish_line(self.problem, limit=room)
-        return publish_line(f'{lead}"{quoted}"', limit=HOST_ACTION_CHARS)
+        return _attributed(lead, self.problem, limit=HOST_ACTION_CHARS)
 
 
 def _transient_fetch_failure(detail: str) -> bool:
@@ -199,35 +235,38 @@ def _git_fetch(repo: Path, *refspecs: str) -> None:
     :data:`FETCH_ATTEMPTS` times with a short backoff (#431) — the signs are
     matched against git's WHOLE stderr, so ``Connection timed out`` /
     ``Connection reset`` / ``early EOF`` under an ``error: RPC failed …`` line
-    are seen. A failure that persists raises :class:`FetchFailedError`, which
-    every intake surface maps to an ``infra_failed`` run, never a crash.
+    are seen, and loom's own watchdog kill (``FetchProblem.timed_out``, which
+    git never got to diagnose) is one of them. A failure that persists raises
+    :class:`FetchFailedError`, which every intake surface maps to an
+    ``infra_failed`` run, never a crash.
 
-    Two bounds keep a broken origin cheap. The attempts share ONE
-    :data:`PR_FETCH_TIMEOUT_SECONDS` budget, so a slow-but-progressing fetch
-    still gets the whole of it on its first try (#392) while three tries can
-    never cost three times it. And loom's own **watchdog** timeout — the
-    budget passing with no answer at all — is not a transport sign and is not
-    retried: an origin that said nothing for the entire budget is the host
-    problem `infra_failed` exists to name, and retrying it would hold a
-    dispatcher's single-flight slot for multiples of the budget (review
-    security f-003 / f-005)."""
+    All of it fits ONE :data:`PR_FETCH_TIMEOUT_SECONDS` budget, so three tries
+    can never cost three times it and a hung origin cannot hold a dispatcher's
+    single-flight slot for multiples of it (review security f-003). Each
+    attempt gets what is left **minus a reserve** that keeps a usable slice for
+    the attempts after it: without that, a first attempt that hangs for the
+    whole budget would leave the retries no time to run in (review f-005).
+    Since a transport sign answers in milliseconds, the reserve is small and
+    the first attempt keeps nearly the whole budget for a legitimately big
+    PR-head fetch (#392)."""
     deadline = time.monotonic() + PR_FETCH_TIMEOUT_SECONDS
     problem = git.FetchProblem(
         f"timed out after {PR_FETCH_TIMEOUT_SECONDS:.0f}s", timed_out=True
     )
     for attempt in range(1, FETCH_ATTEMPTS + 1):
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        problem = git.fetch_problem(repo, refspecs, timeout=remaining)
+        if remaining < _MIN_ATTEMPT_SECONDS:
+            break  # nothing useful left of the one budget; keep what we know
+        reserved = FETCH_RETRY_RESERVE_SECONDS * (FETCH_ATTEMPTS - attempt)
+        allowance = max(remaining - reserved, min(remaining, _MIN_ATTEMPT_SECONDS))
+        problem = git.fetch_problem(repo, refspecs, timeout=allowance)
         if not problem.reason:
             return
         backoff = FETCH_RETRY_BACKOFF_SECONDS * attempt
         retryable = (
             attempt < FETCH_ATTEMPTS
-            and not problem.timed_out
-            and _transient_fetch_failure(problem.detail)
-            and (deadline - time.monotonic()) > backoff
+            and (problem.timed_out or _transient_fetch_failure(problem.detail))
+            and (deadline - time.monotonic()) > backoff + _MIN_ATTEMPT_SECONDS
         )
         if not retryable:
             break

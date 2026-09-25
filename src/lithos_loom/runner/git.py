@@ -84,10 +84,12 @@ class FetchProblem:
     classifying on it misses the very signs the retry exists for (#431 review
     f-001). An empty :attr:`reason` means the fetch succeeded.
 
-    ``timed_out`` is the one failure git did not diagnose: the whole budget
-    passed with no answer and loom killed the process group. It is a class of
-    its own, not a transport message — a caller that retries transport signs
-    must not read "timed out after 300s" as one (#431 review f-005).
+    ``timed_out`` is the one failure git did not diagnose: the budget passed
+    with no answer and loom killed the process group. It is flagged rather than
+    left to be recognised by the shape of :attr:`reason`, so a caller that
+    retries transport failures can say so deliberately — :func:`review_resolve
+    ._git_fetch` does retry it, bounded by a budget it shares with every other
+    attempt (#431 review f-005).
     """
 
     reason: str
