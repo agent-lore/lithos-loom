@@ -22,6 +22,7 @@ import logging
 import os
 import signal
 import subprocess
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,10 +83,16 @@ class FetchProblem:
     ``fatal: early EOF``) and the collapsed reason keeps only the first, so
     classifying on it misses the very signs the retry exists for (#431 review
     f-001). An empty :attr:`reason` means the fetch succeeded.
+
+    ``timed_out`` is the one failure git did not diagnose: the whole budget
+    passed with no answer and loom killed the process group. It is a class of
+    its own, not a transport message — a caller that retries transport signs
+    must not read "timed out after 300s" as one (#431 review f-005).
     """
 
     reason: str
     stderr: str = ""
+    timed_out: bool = False
 
     @property
     def detail(self) -> str:
@@ -138,15 +145,23 @@ def fetch_problem(
     compare-and-swap and the loser fails with ``cannot lock ref … is at X but
     expected Y`` though both write X — that is retried once, not a failure
     (#390 review; #392: the merge-gate probe / converge fetch beside a
-    story-develop worktree cut).
+    story-develop worktree cut). *timeout* bounds the whole call, that retry
+    included, so a caller's own budget cannot be spent twice over.
     """
     argv = ["git", "fetch", "-q", "origin", *refspecs]
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     what = label or " ".join(refspecs)
+    # *timeout* is the budget for this CALL, lock-race retry included: two
+    # full-timeout waits under one argument let a race at 299s be followed by
+    # a hung retry for another 300 (#431 review f-005).
+    deadline = time.monotonic() + timeout
     for attempt in (1, 2):
-        returncode, stderr = run_group(argv, cwd=repo, env=env, timeout=timeout)
+        remaining = timeout if attempt == 1 else deadline - time.monotonic()
+        if remaining <= 0:
+            return FetchProblem(f"timed out after {timeout:.0f}s", timed_out=True)
+        returncode, stderr = run_group(argv, cwd=repo, env=env, timeout=remaining)
         if returncode is None:
-            return FetchProblem(f"timed out after {timeout:.0f}s")
+            return FetchProblem(f"timed out after {remaining:.0f}s", timed_out=True)
         if returncode == 0:
             return FetchProblem("")
         stderr = stderr.strip()

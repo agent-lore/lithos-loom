@@ -20,6 +20,7 @@ import asyncio
 from lithos_loom.plugins.story_develop.publish_text import (
     CONTROL_CHARS_RE,
     MAX_EXCERPT_CHARS,
+    flatten_line,
     publish_line,
 )
 from lithos_loom.runner.signals import bound_child_env
@@ -113,12 +114,16 @@ def _is_frame_line(line: str) -> bool:
 def message_tail(output: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
     """The crashed child's last logical MESSAGE, fit to publish in a finding.
 
-    The trailing run of non-frame, non-blank lines rejoined (a rich-wrapped
-    ``RuntimeError: …`` comes back whole, identity first), bounded and stripped
-    of anything that could render as something other than itself — the child's
-    output carries text loom did not author, and this lands on a screen the
-    operator decides on (:func:`publish_line`). :data:`NO_MESSAGE` when the
-    output holds no message line at all: a box frame is never the answer.
+    The trailing run of non-frame, non-blank lines, rejoined from the **last**
+    line outwards while the result fits *limit*: a rich-wrapped
+    ``RuntimeError: …`` comes back whole, identity first, while the ordinary
+    case — pages of output and then the one line that says why — publishes
+    that line instead of the long line above it (#431 review f-007). Bounded
+    and stripped of anything that could render as something other than itself:
+    the child's output carries text loom did not author and this lands on a
+    screen the operator decides on (:func:`publish_line`). :data:`NO_MESSAGE`
+    when the output holds no message line at all — a box frame is never the
+    answer.
     """
     block: list[str] = []
     for line in reversed(output.splitlines()):
@@ -129,4 +134,12 @@ def message_tail(output: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
         if _is_frame_line(line):
             break  # a frame is a wall: never reach past it for a "message"
         block.insert(0, line.strip())
-    return publish_line(" ".join(block), limit=limit) or NO_MESSAGE
+    if not block:
+        return NO_MESSAGE
+    kept = flatten_line(block[-1])
+    for line in reversed(block[:-1]):
+        wider = flatten_line(f"{line} {kept}")
+        if len(wider) > limit:
+            break  # earlier lines are a bonus; the message line is not
+        kept = wider
+    return publish_line(kept, limit=limit) or NO_MESSAGE

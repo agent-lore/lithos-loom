@@ -69,7 +69,7 @@ The panel needs the change's *intent*. Precedence: `--ac-file` > `--ac` > the **
 
 - **Markdown** to stdout: grouped by reviewer (status + findings with severity / files / rationale), plus a `## Gate` line per deterministic check.
 - **JSON** (`--json`): a stable object — `head_ref`, `base_sha`, `head_sha`, `profile`, `blocking`, `reviewers[]` (each with `findings[]`), `gate[]`.
-- **An intake fetch failure** (#431) is not a review verdict: the PR head / base fetch retries a transport failure (classified on git's whole stderr) 3× with a short backoff under ONE shared fetch timeout, and a failure that persists prints one line naming what to fix on the host, writes `{status: "infra_failed", host_action, message}` with `--json`, and exits **1** — never a traceback.
+- **An intake fetch failure** (#431) is not a review verdict: the PR head / base fetch retries a transport failure (classified on git's whole stderr) 3× with a short backoff under ONE shared fetch timeout (a watchdog kill is not retried), and a failure that persists prints one line naming what to fix on the host, writes `{status: "infra_failed", host_action, message}` with `--json`, and exits **1** — never a traceback.
 - **Exit code** is non-zero when the review is **blocking** (any reviewer finding at/above its threshold, an incomplete panel, or a required gate check blocking — the same floor `develop()` applies).
 
 No GitHub / Lithos side effects in this slice — posting findings to a PR / Lithos task is a deferred follow-up (ADR 0004).

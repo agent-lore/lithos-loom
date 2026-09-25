@@ -522,3 +522,51 @@ def test_fetch_problem_reports_a_git_that_cannot_be_spawned(
     assert problem.fatal_line == problem.reason
     # and the same for every other caller of the shared spawn
     assert "cannot run git" in git.fetch_branch(tmp_path, "main")
+
+
+def test_fetch_problem_shares_one_timeout_with_its_lock_race_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 review f-005: both internal calls were given the caller's FULL
+    timeout, so a lock-race answer at 299 s followed by a hung retry spent
+    ~600 s of a caller that had budgeted 300."""
+    import time
+
+    from lithos_loom.runner import git
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    timeouts: list[float] = []
+
+    def racing_then_hung(argv, *, timeout, **kw):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            clock["now"] += 299
+            return 1, _lock_race_stderr()
+        clock["now"] += timeout
+        return None, ""
+
+    monkeypatch.setattr(git, "run_group", racing_then_hung)
+
+    problem = git.fetch_problem(tmp_path, ("main",), timeout=300.0)
+
+    assert timeouts == [300.0, 1.0]
+    assert clock["now"] == 300.0  # the whole call, retry included
+    # a hung transport is its own class, never a transport MESSAGE a caller
+    # would read as a hiccup worth retrying
+    assert problem.timed_out and "timed out" in problem.reason
+
+
+def test_fetch_problem_marks_only_the_watchdog_kill_as_timed_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lithos_loom.runner import git
+
+    stderr = (
+        "ssh: connect to host github.com port 22: Connection timed out\n"
+        "fatal: Could not read from remote repository.\n"
+    )
+    monkeypatch.setattr(git, "run_group", lambda argv, **kw: (128, stderr))
+    problem = git.fetch_problem(tmp_path, ("main",))
+    # the TRANSPORT said it timed out: git answered, so this is not the watchdog
+    assert not problem.timed_out and "Connection timed out" in problem.detail

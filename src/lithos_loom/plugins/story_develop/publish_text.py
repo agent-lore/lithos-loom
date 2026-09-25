@@ -55,6 +55,7 @@ __all__ = [
     "MIN_SECTION_CHARS",
     "defang_markup",
     "fence_untrusted",
+    "flatten_line",
     "publish_line",
     "publish_title",
 ]
@@ -360,10 +361,21 @@ def publish_line(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
         raise ValueError(
             f"publish_line limit must be at least 1 character, got {limit}"
         )
-    flat = " ".join(CONTROL_CHARS_RE.sub("", text).split())
+    flat = flatten_line(text)
     if len(flat) <= limit:
         return flat
     return flat[: limit - len(_ELLIPSIS)].rstrip() + _ELLIPSIS
+
+
+def flatten_line(text: str) -> str:
+    """*text* as one line with the invisibles out — :func:`publish_line`
+    without the cut.
+
+    For the caller that must MEASURE before it chooses what to keep: the
+    watcher composes a finding's excerpt out of several physical lines and can
+    only decide how many fit once they are flattened (#431 review f-007).
+    """
+    return " ".join(CONTROL_CHARS_RE.sub("", text).split())
 
 
 def _squeeze_for_budget(text: str) -> str:

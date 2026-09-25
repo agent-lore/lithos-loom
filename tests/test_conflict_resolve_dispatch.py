@@ -1113,3 +1113,59 @@ def test_message_tail_selects_the_whole_message_or_says_it_has_none() -> None:
     assert message_tail("real: msg\n\u200b  raise Boom()\n") == NO_MESSAGE
     # what it publishes cannot render as something else (review security f-002)
     assert message_tail("fatal: \x1b[2Kmerged\u202e\n") == "fatal: [2Kmerged"
+    # no frame anywhere, and a long line ABOVE the message: the message is what
+    # a finding needs, so the long line is what gives way (review f-007)
+    assert message_tail(("x" * 400) + "\nfatal: Could not read from remote.") == (
+        "fatal: Could not read from remote."
+    )
+    # …while lines that DO fit are still rejoined, identity first
+    assert message_tail("RuntimeError: git fetch\norigin failed") == (
+        "RuntimeError: git fetch origin failed"
+    )
+
+
+async def test_an_infra_failure_with_a_maximal_host_action_still_says_what_to_fix(
+    tmp_path: Path,
+) -> None:
+    """Review f-006: the dispatcher caps the child's `host_action` at 300 chars
+    from the head. Composed the other way round — the origin's `fatal:` line
+    quoted at the END — that cut can only shorten the quote, never the half
+    that names the host action."""
+    from lithos_loom.plugins.story_develop.review_resolve import (
+        HOST_ACTION_CHARS,
+        FetchFailedError,
+    )
+
+    # the real composer, on the longest line an origin can supply
+    action = FetchFailedError(
+        refspecs=("pull/62/head", "+refs/heads/main:refs/remotes/origin/main"),
+        problem="fatal: " + "x" * 900,
+    ).host_action
+    assert len(action) == HOST_ACTION_CHARS  # the sink's cut is a no-op
+
+    client = FakeLithosClient()
+    story, gate = await _gate_with_story(client)
+    gate = await _with_conflict(client, gate)
+    spawn, _ = _spawner(
+        _result(
+            "infra_failed",
+            succeeded=False,
+            pushed=False,
+            pushed_sha=None,
+            develop_status="infra_failed",
+            message="INFRA FAILURE: the intake fetch failed",
+            host_action=action,
+        ),
+        rc=1,
+    )
+    dispatch = ConflictResolveDispatch(_settings(tmp_path), spawn=spawn)
+
+    assert await _consider(client, gate, story, dispatch) == "dispatched"
+    await dispatch.drain()
+
+    (finding,) = _findings(client)
+    assert finding.startswith("[Friction] conflict-resolve")
+    assert "check the daemon's SSH agent" in finding
+    gate = await _refresh(client, gate.id)
+    record = read_record(gate, _PR_URL)
+    assert record is not None and record.status == "infra_failed"

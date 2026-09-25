@@ -53,7 +53,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.pr_delivery` | L | 3 | 15 |
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
-| `lithos_loom.plugins.story_develop.publish_text` | M | 0 | 4 |
+| `lithos_loom.plugins.story_develop.publish_text` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | M | 3 | 1 |
@@ -393,6 +393,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `defang_markup` — Neutralise the markup GitHub treats as *live* in a PR description.
 - def `publish_title` — *text*'s first line as a PR title that reads the same and binds nothing.
 - def `publish_line` — *text* as ONE bounded line an operator can be shown safely.
+- def `flatten_line` — *text* as one line with the invisibles out — :func:`publish_line` without the cut.
 - def `fence_untrusted` — *text* as a fenced block it cannot break out of, or ``""`` if empty.
 
 ### `lithos_loom.plugins.story_develop.review_only`

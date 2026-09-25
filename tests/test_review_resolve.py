@@ -661,4 +661,132 @@ def test_the_host_action_cannot_carry_what_it_does_not_show(
     problem = exc.value.problem
     assert "\x1b" not in problem and "‮" not in problem
     assert len(problem) <= 300 and problem.endswith("…")
-    assert problem in exc.value.host_action
+    action = exc.value.host_action
+    assert "\x1b" not in action and "‮" not in action
+    # the WHOLE action fits the cap its sinks apply, so nothing is cut there
+    # (review f-006) — and the origin's line is quoted and attributed to it,
+    # never published as loom's own diagnosis (review security f-004)
+    assert len(action) <= review_resolve.HOST_ACTION_CHARS
+    assert action.index("check the daemon's SSH agent") < action.index("origin said:")
+    assert 'origin said: "fatal: ' in action
+
+
+# ── #431 round-2 review: the timeout boundary, and what a cap may cut ─────────
+
+
+def _connection_timed_out() -> str:
+    # the transport's OWN timeout message — milliseconds, not a hung fetch
+    return (
+        "ssh: connect to host github.com port 22: Connection timed out\n"
+        "fatal: Could not read from remote repository.\n"
+    )
+
+
+def test_the_transports_own_connection_timeout_gets_its_three_attempts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review f-005: `timed out` is one of the acceptance's transport signs —
+    git's / ssh's own `Connection timed out`, which answers in milliseconds.
+    It is retried like every other sign, and never confused with loom's
+    watchdog kill."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    calls: list[int] = []
+
+    def refused(argv, **kw):
+        calls.append(1)
+        return 128, _connection_timed_out()
+
+    monkeypatch.setattr(git, "run_group", refused)
+
+    with pytest.raises(review_resolve.FetchFailedError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    assert len(calls) == review_resolve.FETCH_ATTEMPTS == 3
+    assert exc.value.problem == "fatal: Could not read from remote repository."
+
+
+def test_the_watchdog_timeout_is_not_a_hiccup_and_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review f-005 / security f-003: an origin that said NOTHING for the whole
+    budget is the host problem `infra_failed` exists to name, not a hiccup —
+    retrying it would hold the dispatcher's single-flight slot for multiples of
+    the budget. One attempt, one budget, and the `[Friction]` says so."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    clock = {"now": 5000.0}
+    monkeypatch.setattr(review_resolve.time, "monotonic", lambda: clock["now"])
+    timeouts: list[float] = []
+
+    def hung(argv, *, timeout, **kw):
+        timeouts.append(timeout)
+        clock["now"] += timeout
+        return None, ""
+
+    monkeypatch.setattr(git, "run_group", hung)
+
+    with pytest.raises(review_resolve.FetchFailedError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    assert timeouts == [review_resolve.PR_FETCH_TIMEOUT_SECONDS]
+    assert clock["now"] - 5000.0 == review_resolve.PR_FETCH_TIMEOUT_SECONDS
+    assert "timed out after 300s" in exc.value.problem
+
+
+def test_a_lock_race_then_a_hang_still_costs_one_intake_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review f-005: the shared deadline has to reach the fetch's OWN ref-lock
+    retry — two full-timeout waits under one budget spent ~600 s for a race at
+    299 s followed by a hung retry."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(review_resolve, "FETCH_RETRY_BACKOFF_SECONDS", 0.0)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(review_resolve.time, "monotonic", lambda: clock["now"])
+    timeouts: list[float] = []
+
+    def racing_then_hung(argv, *, timeout, **kw):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            clock["now"] += 299  # the lock-race answer, 299s in
+            return 1, _lock_race()
+        clock["now"] += timeout  # the internal retry hangs
+        return None, ""
+
+    monkeypatch.setattr(git, "run_group", racing_then_hung)
+
+    with pytest.raises(review_resolve.FetchFailedError):
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    assert timeouts == [300.0, 1.0]  # the retry got what was LEFT
+    assert clock["now"] <= review_resolve.PR_FETCH_TIMEOUT_SECONDS
+
+
+def test_the_host_action_keeps_the_remediation_a_downstream_cap_would_cut(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review f-006: the watcher sinks cap a child's `host_action` at 300 chars
+    from the head. With a maximal `fatal:` line the guidance used to sit past
+    that cut, so the `[Friction]` quoted the origin and never said what to
+    fix."""
+    from lithos_loom.runner import git
+
+    _stub_pr_metadata(monkeypatch)
+    monkeypatch.setattr(
+        git, "run_group", lambda argv, **kw: (128, "fatal: " + "x" * 900)
+    )
+
+    with pytest.raises(review_resolve.FetchFailedError) as exc:
+        review_resolve.resolve_change(tmp_path, "#142")
+
+    action = exc.value.host_action
+    assert len(action) <= review_resolve.HOST_ACTION_CHARS
+    assert "check the daemon's SSH agent" in action[:300]  # what the sink keeps
+    assert "pull/142/head" in action[:300]

@@ -98,6 +98,9 @@ PR_FETCH_TIMEOUT_SECONDS = 300.0
 # repository.` used to cost a whole conflict-resolve run and leave the PR
 # `behind` until the next daemon boot (#431), so these are retried; anything
 # else (a ref that does not exist, a permission denial) is answered first time.
+# Each sign is a substring of what GIT / SSH printed — `timed out` is the
+# transport's own `Connection timed out`, which comes back in milliseconds, and
+# never loom's watchdog kill (`FetchProblem.timed_out`, review f-005).
 _TRANSIENT_FETCH_SIGNS = (
     "could not read from remote repository",
     "connection reset",
@@ -108,6 +111,17 @@ _TRANSIENT_FETCH_SIGNS = (
 # Three attempts, ~1 s then ~2 s apart: a hiccup costs seconds, not a restart.
 FETCH_ATTEMPTS = 3
 FETCH_RETRY_BACKOFF_SECONDS = 1.0
+
+# `host_action` is published into a `[Friction]` whose sinks cap what a child
+# supplies at 300 characters, so the WHOLE action is composed to fit inside that
+# cap — and loom's own remediation guidance comes FIRST, so a cap applied
+# anywhere downstream can only ever shorten the origin's quote, never the half
+# that says what to fix (review f-006).
+HOST_ACTION_CHARS = 300
+# …and the refspecs inside it are bounded too: the base ref name comes from the
+# GitHub API, not from loom.
+_REFSPEC_CHARS = 100
+_MIN_QUOTE_CHARS = 40
 
 
 class FetchFailedError(RuntimeError):
@@ -137,14 +151,30 @@ class FetchFailedError(RuntimeError):
 
     @property
     def host_action(self) -> str:
-        """What to fix on the host — git's own ``fatal:`` line plus where to
-        look for it (the operator reading the story sees "SSH fetch failed",
-        not a traceback fragment)."""
-        return (
-            f"the intake fetch of {' '.join(self.refspecs)} from origin failed "
-            f"({self.problem}) — check the daemon's SSH agent (SSH_AUTH_SOCK, "
-            "`ssh-add -l`) and its network access to origin, then re-run"
+        """What to fix on the host — where to look, then git's own ``fatal:``
+        line **quoted and attributed** (the operator reading the story sees
+        "SSH fetch failed", not a traceback fragment).
+
+        The order and the quotes are the point. The line is the ORIGIN host's
+        and the local ssh client's text — an ssh pre-auth banner reaches the
+        same stderr unprefixed, so a hostile origin can put its own
+        ``fatal: …`` line where git's verdict would be. Attributed to its
+        author inside ``origin said: "…"`` it can no longer read as loom's own
+        diagnosis of what to do (review security f-004), and with loom's
+        guidance FIRST a downstream cap cannot leave a `[Friction]` that quotes
+        the origin without saying what to fix (review f-006).
+        """
+        what = publish_line(" ".join(self.refspecs), limit=_REFSPEC_CHARS)
+        lead = (
+            f"the intake fetch of {what} from origin failed — check the "
+            "daemon's SSH agent (SSH_AUTH_SOCK, `ssh-add -l`) and its network "
+            "access to origin, then re-run; origin said: "
         )
+        # what is left of the sink's budget after loom's own half, so the whole
+        # action fits the cap its sinks apply and nothing has to be cut there
+        room = max(HOST_ACTION_CHARS - len(lead) - 2, _MIN_QUOTE_CHARS)
+        quoted = publish_line(self.problem, limit=room)
+        return publish_line(f'{lead}"{quoted}"', limit=HOST_ACTION_CHARS)
 
 
 def _transient_fetch_failure(detail: str) -> bool:
@@ -166,25 +196,41 @@ def _git_fetch(repo: Path, *refspecs: str) -> None:
     ssh).
 
     A **transport** failure on top of that is retried up to
-    :data:`FETCH_ATTEMPTS` times with a short backoff (#431), and a failure
-    that persists raises :class:`FetchFailedError` — which every intake
-    surface maps to an ``infra_failed`` run, never a crash. The retries share
-    ONE :data:`PR_FETCH_TIMEOUT_SECONDS` budget: the fast signs the retry
-    exists for come back in milliseconds, while a hung origin would otherwise
-    hold a dispatcher's single-flight slot for attempts × the timeout (review
-    security f-003)."""
+    :data:`FETCH_ATTEMPTS` times with a short backoff (#431) — the signs are
+    matched against git's WHOLE stderr, so ``Connection timed out`` /
+    ``Connection reset`` / ``early EOF`` under an ``error: RPC failed …`` line
+    are seen. A failure that persists raises :class:`FetchFailedError`, which
+    every intake surface maps to an ``infra_failed`` run, never a crash.
+
+    Two bounds keep a broken origin cheap. The attempts share ONE
+    :data:`PR_FETCH_TIMEOUT_SECONDS` budget, so a slow-but-progressing fetch
+    still gets the whole of it on its first try (#392) while three tries can
+    never cost three times it. And loom's own **watchdog** timeout — the
+    budget passing with no answer at all — is not a transport sign and is not
+    retried: an origin that said nothing for the entire budget is the host
+    problem `infra_failed` exists to name, and retrying it would hold a
+    dispatcher's single-flight slot for multiples of the budget (review
+    security f-003 / f-005)."""
     deadline = time.monotonic() + PR_FETCH_TIMEOUT_SECONDS
-    problem = git.FetchProblem(f"timed out after {PR_FETCH_TIMEOUT_SECONDS:.0f}s")
+    problem = git.FetchProblem(
+        f"timed out after {PR_FETCH_TIMEOUT_SECONDS:.0f}s", timed_out=True
+    )
     for attempt in range(1, FETCH_ATTEMPTS + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            break  # the whole intake fetch gets one timeout, retries included
+            break
         problem = git.fetch_problem(repo, refspecs, timeout=remaining)
         if not problem.reason:
             return
-        if attempt == FETCH_ATTEMPTS or not _transient_fetch_failure(problem.detail):
-            break
         backoff = FETCH_RETRY_BACKOFF_SECONDS * attempt
+        retryable = (
+            attempt < FETCH_ATTEMPTS
+            and not problem.timed_out
+            and _transient_fetch_failure(problem.detail)
+            and (deadline - time.monotonic()) > backoff
+        )
+        if not retryable:
+            break
         logger.warning(
             "git: intake fetch of %s failed transiently (%s); retrying in "
             "%.0fs (attempt %d/%d)",
