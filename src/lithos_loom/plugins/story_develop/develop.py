@@ -224,7 +224,7 @@ def _coder_summary(config: DevelopConfig, round_no: int) -> str:
     """
     path = config.handoff_dir / handoff.coder_handoff_name(round_no)
     try:
-        text = path.read_text(encoding="utf-8")
+        text = handoff.read_handoff(path)
     except OSError:
         return "(coder summary unavailable)"
     try:
@@ -283,7 +283,7 @@ def _record_coder_disputes(
     """
     path = config.handoff_dir / handoff.coder_handoff_name(round_no)
     try:
-        parsed = handoff.parse_review_handoff(path.read_text(encoding="utf-8"))
+        parsed = handoff.parse_review_handoff(handoff.read_handoff(path))
     except (HandoffError, OSError):
         return
     if not parsed.findings:

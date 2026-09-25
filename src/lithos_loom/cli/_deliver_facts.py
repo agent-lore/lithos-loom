@@ -26,9 +26,7 @@ command where text loom did not author crosses to a world-readable GitHub PR:
 from __future__ import annotations
 
 import math
-import os
 import re
-import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +34,10 @@ from typing import Any, NamedTuple
 
 from lithos_loom.cli._deliver_lithos import StoryState
 from lithos_loom.plugins.story_develop import run_outcome
+from lithos_loom.plugins.story_develop.handoff import (
+    MAX_HANDOFF_BYTES,
+    read_regular_file,
+)
 from lithos_loom.plugins.story_develop.pr_delivery import build_pr_body, closes_line
 from lithos_loom.plugins.story_develop.publish_text import (
     CONTROL_CHARS_RE,
@@ -147,7 +149,6 @@ def _verbatim(value: Any) -> str:
 # agent-written: bound the read, strip terminal control bytes, and cap what
 # reaches a PR body. (`cli/develop` bounds the same files for the terminal.)
 _CODER_DONE_RE = re.compile(r"^round_(\d+)_coder_done\.md$")
-_MAX_HANDOFF_BYTES = 1 << 20  # 1 MiB — handoffs are short markdown
 _MAX_SUMMARY_CHARS = 600
 _SUMMARY_HEADING_RE = re.compile(r"^\s*#{1,6}\s*summary\s*$", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^\s*#{1,6}\s")
@@ -168,33 +169,6 @@ def sanitize_for_terminal(text: str) -> str:
     screen the operator DECIDES on as on the PR strangers read.
     """
     return CONTROL_CHARS_RE.sub("", text)
-
-
-def _read_regular_file(path: Path, limit: int) -> bytes | None:
-    """Read at most *limit* bytes of *path*, or ``None`` if it is not a plain
-    file.
-
-    ``O_NOFOLLOW`` plus an ``fstat`` regular-file check on the **opened**
-    descriptor, so the type cannot change between the check and the read. That
-    one test rejects symlinks, FIFOs, devices and directories at once — a FIFO
-    planted in the RW handoff mount would otherwise block the whole command
-    (including ``--dry-run``) for ever on a read with no timeout.
-    """
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        # back to blocking for the read itself: O_NONBLOCK was only there so
-        # opening a FIFO with no writer cannot hang before the fstat
-        os.set_blocking(fd, True)
-        return os.read(fd, limit)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
 
 
 def coder_summary(handoff_dir: Path) -> str:
@@ -221,7 +195,7 @@ def coder_summary(handoff_dir: Path) -> str:
         return ""
     if best is None:
         return ""
-    raw = _read_regular_file(best[1], _MAX_HANDOFF_BYTES)
+    raw = read_regular_file(best[1], MAX_HANDOFF_BYTES)
     if raw is None:
         return ""
     text = raw.decode("utf-8", errors="replace")

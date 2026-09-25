@@ -129,24 +129,32 @@ class PanelRoundResult:
 
 
 def _read_review(path: Path) -> tuple[ReviewHandoff | None, str | None]:
-    """Read + parse a reviewer handoff. Returns (handoff, error_message)."""
-    if not path.is_file():
+    """Read + parse a reviewer handoff. Returns (handoff, error_message).
+
+    Read through :func:`handoff.read_handoff` — bounded, and a symlink or
+    FIFO in the RW mount is "no handoff", never followed (PR #429 review).
+    """
+    try:
+        text = handoff.read_handoff(path)
+    except OSError:
         return None, "no handoff file was written at the expected path"
     try:
-        return handoff.parse_review_handoff(path.read_text(encoding="utf-8")), None
+        return handoff.parse_review_handoff(text), None
     except HandoffError as exc:
         return None, str(exc)
 
 
 def _prior_review_text(config: DevelopConfig, round_no: int, reviewer: str) -> str:
     """The outgoing reviewer's most recent handoff text (reseed payload)."""
+    # Bounded, and a symlinked round is skipped rather than followed: this
+    # text lands in the replacement reviewer's PROMPT, so a followed symlink
+    # would carry a host file across the container boundary (PR #429 review).
     for r in range(round_no - 1, 0, -1):
         path = config.handoff_dir / handoff.reviewer_handoff_name(r, reviewer)
-        if path.is_file():
-            try:
-                return path.read_text(encoding="utf-8").strip()
-            except OSError:
-                break
+        try:
+            return handoff.read_handoff(path)
+        except OSError:
+            continue
     return "(no prior review — the limit hit on the first review attempt)"
 
 
