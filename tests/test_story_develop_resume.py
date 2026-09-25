@@ -698,3 +698,69 @@ def test_a_round_with_digests_never_reads_a_planted_name(tmp_path: Path) -> None
         f.rationale for o in resumption.entry.intake_reviews for f in o.findings
     )
     assert "the real finding" in rendered and "planted" not in rendered
+
+
+def test_an_omitted_budget_field_is_not_resumable(tmp_path: Path) -> None:
+    """correctness/f-005: the remainder cannot be reconstructed from an absence.
+
+    The end-to-end half of the checkpoint unit test: a block that has dropped
+    one of the three budget-bearing fields is refused, so the dispatch develops
+    from scratch instead of granting a branch rounds and dollars it has used.
+    """
+    repo, base, head = _repo(tmp_path)
+    run_dir = _dead_run(tmp_path, base=base, head=head, repo=repo, rounds=2, cost=2.0)
+    state_file = run_dir / "state.json"
+    carried = (
+        state_file.read_text()
+        .replace('"branch_rounds": 2', '"branch_rounds": 6')
+        .replace('"branch_cost_usd": 2.0', '"branch_cost_usd": 12.0')
+    )
+    import json as _json
+
+    for key in ("cost_usd", "branch_rounds", "branch_cost_usd"):
+        state = _json.loads(carried)
+        del state["checkpoint"][key]
+        state_file.write_text(_json.dumps(state))
+        resumption, refused = prepare_resume(
+            _config(repo, tmp_path, max_rounds=8, max_cost_usd=20.0), run_dir
+        )
+        assert resumption is None, key
+        assert "no round boundary" in refused
+
+
+def test_a_fork_point_that_is_not_behind_the_head_is_not_resumable(
+    tmp_path: Path,
+) -> None:
+    """correctness/f-005: existing and well-formed is not a fork point.
+
+    A sha from a sibling (or later) commit passes the object-name and presence
+    checks, and `RangeBase.fork_point` can then select it — so the resumed panel
+    would review a range the dead run never recorded: a diff against unrelated
+    code, or nothing at all.
+    """
+    repo, base, head = _repo(tmp_path)
+
+    def git_in_repo(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git_in_repo("checkout", "-q", "-b", "side", base)
+    (repo / "side.txt").write_text("sideways\n")
+    git_in_repo("add", "-A")
+    git_in_repo("commit", "-qm", "a sibling commit")
+    sibling = git_in_repo("rev-parse", "HEAD")
+    git_in_repo("checkout", "-q", "main")
+
+    run_dir = _dead_run(tmp_path, base=base, head=head, repo=repo)
+    state_file = run_dir / "state.json"
+    state_file.write_text(
+        state_file.read_text().replace(
+            f'"base_sha": "{base}"', f'"base_sha": "{sibling}"'
+        )
+    )
+
+    resumption, refused = prepare_resume(_config(repo, tmp_path), run_dir)
+
+    assert resumption is None
+    assert "is not an ancestor of its head" in refused

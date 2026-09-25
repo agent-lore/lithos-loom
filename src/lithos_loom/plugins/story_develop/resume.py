@@ -445,6 +445,24 @@ def prepare_resume(
             f"{prior_run_dir.name}'s fork point {checkpoint.base_sha[:12]} is no "
             f"longer in {config.repo} ({exc})"
         )
+    # …and the fork point must actually be BEHIND the head it was recorded for.
+    # Existing and well-formed is not enough (correctness/f-005): a sha from a
+    # sibling or later commit would be handed to `RangeBase`, whose `fork_point`
+    # can then select it, and the resumed panel would review a range the dead run
+    # never recorded — a diff against unrelated code, or nothing at all.
+    try:
+        descends = git.is_ancestor(config.repo, base_sha, head_sha)
+    except (RuntimeError, OSError) as exc:
+        return None, (
+            f"{prior_run_dir.name}'s fork point {base_sha[:12]} could not be "
+            f"related to its head {head_sha[:12]} in {config.repo} ({exc})"
+        )
+    if not descends:
+        return None, (
+            f"{prior_run_dir.name}'s recorded fork point {base_sha[:12]} is not an "
+            f"ancestor of its head {head_sha[:12]}, so the range it recorded is "
+            "not this branch's"
+        )
     rounds_left = config.max_rounds - checkpoint.branch_rounds
     if rounds_left < 1:
         return None, (

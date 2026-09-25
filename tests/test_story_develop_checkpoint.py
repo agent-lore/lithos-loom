@@ -263,3 +263,45 @@ def test_entering_the_first_round_records_nothing(tmp_path: Path) -> None:
     rd = _run_dir(tmp_path)
     checkpoint.record_round_entered(rd, 1)
     assert checkpoint.round_checkpoint(rd) is None
+
+
+def test_a_block_missing_a_budget_bearing_field_is_not_a_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """correctness/f-005: absence is a partial block, not a compatible zero.
+
+    The remainder a resumed run gets is computed from these three, the writer
+    always emits all three, and no omitted representation can reconstruct what a
+    branch already used — so defaulting them is the same defect as coercing an
+    invalid value: on the second session of a branch that ran six rounds and
+    spent $12, "absent" reads as this round and $0 and hands an 8-round / $20
+    project six more rounds and its whole ceiling.
+    """
+    rd = _run_dir(tmp_path)
+    sound = {
+        "round": 2,
+        "branch": "b",
+        "head_sha": "ba" * 20,
+        "base_sha": "a" * 40,
+        "cost_usd": 2.0,
+        "branch_rounds": 6,
+        "branch_cost_usd": 12.0,
+    }
+    run_outcome.write_state(rd, {checkpoint.CHECKPOINT_KEY: sound})
+    assert checkpoint.round_checkpoint(rd) is not None  # the control
+
+    assert set(checkpoint.REQUIRED_NUMBERS) == {
+        "cost_usd",
+        "branch_rounds",
+        "branch_cost_usd",
+    }
+    for key in checkpoint.REQUIRED_NUMBERS:
+        partial = {k: v for k, v in sound.items() if k != key}
+        run_outcome.write_state(rd, {checkpoint.CHECKPOINT_KEY: partial})
+        assert checkpoint.round_checkpoint(rd) is None, key
+
+    # the non-budget counters still default when absent: their absence costs a
+    # displayed round or a weaker intake selection, never money
+    for key in ("next_round", "reviewed_round"):
+        run_outcome.write_state(rd, {checkpoint.CHECKPOINT_KEY: sound})
+        assert checkpoint.round_checkpoint(rd) is not None, key

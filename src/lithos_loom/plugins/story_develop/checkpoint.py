@@ -237,12 +237,19 @@ def _object_name(
     return None
 
 
-# An ABSENT number takes its default (an older block, written before the field
-# existed); a PRESENT one must be what the writer can only have written: a
-# finite, non-negative count / spend. No coercion — coercing an impossible value
-# to a default is precisely how a negative or NaN carried total becomes "spent
-# nothing" and hands a resumed run the whole ceiling again (correctness/f-005,
-# security/f-004). The sentinel is ``None``: reject the checkpoint.
+# The BUDGET-BEARING fields (:data:`REQUIRED_NUMBERS`) must be PRESENT and valid:
+# a resumed run's remainder is computed from them, no omitted representation can
+# reconstruct what a branch already used, and the writer always emits all three —
+# so absence is a partial or corrupt block, not an older one. Defaulting them is
+# the same defect as coercing an invalid value: on the second session of a branch
+# that has run six rounds and spent $12, "absent" would read as two rounds and
+# $0 and hand an 8-round / $20 project six more rounds and its whole ceiling
+# (correctness/f-005). A PRESENT number must be what the writer can only have
+# written: a finite, non-negative count / spend. The non-budget counters
+# (`next_round` / `reviewed_round`) still default when absent — their absence
+# costs a displayed round or a weaker intake selection, never money. The
+# sentinel is ``None``: reject the checkpoint.
+REQUIRED_NUMBERS = ("cost_usd", "branch_rounds", "branch_cost_usd")
 
 
 def _counts(
@@ -354,7 +361,12 @@ def from_state(state: Mapping[str, object] | None) -> RoundCheckpoint | None:
         value = block.get(key)
         return value if isinstance(value, str) else ""
 
-    # The numbers a resume computes its BUDGET from, validated RAW (see above).
+    # The numbers a resume computes its BUDGET from: present, and validated RAW
+    # (see above).
+    absent = [key for key in REQUIRED_NUMBERS if key not in block]
+    if absent:
+        logger.warning("checkpoint rejected — missing %s", ", ".join(absent))
+        return None
     counts = _counts(
         block, {"branch_rounds": raw_round, "next_round": 0, "reviewed_round": 0}
     )

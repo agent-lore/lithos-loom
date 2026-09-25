@@ -71,8 +71,9 @@ Each exits 2 with the sentence saying which, having started nothing:
   that is [`develop converge-push`](converge-push.md)'s business;
 - a run with **no checkpointed committed round**: it died before its first round
   finished (so there is nothing to continue) or it predates checkpointing;
-- a head or fork point the repo no longer has, or a checkpoint whose recorded
-  commits are not object names / whose counters contradict each other;
+- a head or fork point the repo no longer has, or one that is not behind the
+  head it was recorded for, or a checkpoint whose recorded commits are not
+  object names / whose budget fields are missing or contradict each other;
 - a branch whose rounds or spend already **meet** the ceiling — resuming would
   buy nothing;
 - no repo recorded and no `--repo`.
