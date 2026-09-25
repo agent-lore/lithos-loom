@@ -989,6 +989,68 @@ def test_a_resumed_run_continues_the_branch_the_budget_and_the_findings(
     assert recorded["status"] == "approved"  # the loop's own verdict survives
 
 
+def test_a_round_that_dies_before_committing_records_no_commit(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """correctness/f-003: the boundary's ``commit`` is THIS round's, or nothing.
+
+    The common infra shape — round 1 lands, round 2's coder dies on an expired
+    credential before ``commit_phase`` runs — used to leave round 1's sha in the
+    round-scoped field, so the round-2 checkpoint published it as round 2's own
+    commit.
+    """
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop import checkpoint as checkpoint_mod
+
+    cfg = replace(config, max_rounds=3)
+    _install_fakes(
+        monkeypatch,
+        cfg,
+        reviews=[{"text": _FINDINGS_MAJOR}],
+        coder_results=["ok", "auth"],  # round 2's coder auth-dies, twice
+    )
+
+    result = develop_mod.develop(cfg)
+
+    assert result.status == "infra_failed" and result.rounds == 2
+    cp = checkpoint_mod.round_checkpoint(cfg.run_dir)
+    assert cp is not None and cp.round == 2
+    assert cp.commit == ""  # round 2 committed nothing…
+    assert cp.head_sha == result.commits[-1]  # …and the head is still round 1's
+    assert cp.next_round == 0  # the run stopped here; no round 3 began
+
+
+def test_a_crashed_round_records_a_boundary_that_entered_no_next_round(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """correctness/f-004: exit L records the boundary but never a next round.
+
+    ``develop attach`` / ``develop list`` render the checkpoint's round, and a
+    crashed run writes nothing else ever — so a boundary that claimed "the loop
+    entered round N+1" would pin that phantom round on every later poll.
+    """
+    from dataclasses import replace
+
+    from lithos_loom.plugins.story_develop import checkpoint as checkpoint_mod
+
+    cfg = replace(config, max_rounds=4)
+    _install_fakes(monkeypatch, cfg, reviews=[{"text": _LGTM}])
+    monkeypatch.setattr(
+        develop_mod,
+        "run_panel_round",
+        lambda *a, **k: 1 / 0,  # noqa: ARG005
+    )
+
+    with pytest.raises(ZeroDivisionError):
+        develop_mod.develop(cfg)
+
+    cp = checkpoint_mod.round_checkpoint(cfg.run_dir)
+    assert cp is not None and cp.round == 1
+    assert cp.next_round == 0  # nothing followed — the process is gone
+    assert cp.commit  # …but round 1's commit is on the branch, and named
+
+
 # --- test gate (T4) ---------------------------------------------------------
 
 

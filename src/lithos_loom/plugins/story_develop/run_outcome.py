@@ -62,6 +62,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -171,13 +173,35 @@ def write_state(run_dir: Path, payload: dict) -> None:
     nested blocks (:data:`CONVERGE_KEY` / :data:`CONVERGE_PUSH_KEY`,
     :data:`checkpoint.CHECKPOINT_KEY` / :data:`resume.RESUMED_FROM_KEY`) and
     never a key ``develop()`` writes.
+
+    **Atomic** — temp + fsync + rename in the run dir, the same shape
+    ``plugin_runner.write_result_atomically`` uses (inlined because this module
+    is a stdlib leaf; correctness/f-001). An in-place rewrite is not durable at
+    the one failure boundary this file now has to survive: since the per-round
+    checkpoint lives here (:mod:`checkpoint`), a host death between the
+    truncation and the write would leave an empty or half-written
+    ``state.json`` — no checkpoint at all, the previously valid round's
+    destroyed with it, and the re-dispatch the operator authorised starting
+    from scratch. Either the whole merged state is visible or the previous one
+    still is.
     """
     data = read_state(run_dir) or {}
     data.update(payload)
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / STATE_FILE).write_text(
-        json.dumps(data, indent=2) + "\n", encoding="utf-8"
+    target = run_dir / STATE_FILE
+    fd, temp_name = tempfile.mkstemp(
+        dir=run_dir, prefix=f".{STATE_FILE}.", suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_name, target)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_name)
+        raise
 
 
 def is_converge_run_dir(run_dir: Path) -> bool:

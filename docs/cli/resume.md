@@ -38,7 +38,10 @@ long, expensive runs.
   one checkout per branch;
 - the **fork point it recorded** as the review range, so the panel reviews the
   branch's own work and not the base's landed commits;
-- the **last review round's handoffs** as the cold-start coder's intake, rendered
+- the **last review round's handoffs** as the cold-start coder's intake — read
+  through the run's configured panel (that dir is an agent-writable mount, so
+  discovery is only the fallback, reviewer names must be plain tokens, and both
+  the files read and the text carried are capped) and rendered
   from `resume_coder_init.md`: the work is the coder's own earlier work, so the
   prompt tells it to read the branch and the commit history before changing
   anything and to build on those commits, not restart them. (Cold-start from the

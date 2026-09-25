@@ -599,7 +599,9 @@ def _daemon_main(args: argparse.Namespace) -> int:
     # existed. Resolved after the config (the resumed run develops the task's
     # CURRENT text with its CURRENT settings) and before any spend.
     entry = None
-    resume_dir = read_resume_run_dir(args.task_json.expanduser().resolve())
+    resume_dir = read_resume_run_dir(
+        args.task_json.expanduser().resolve(), config.work_dir
+    )
     if resume_dir is not None:
         resumption, refused = prepare_resume(config, resume_dir)
         if resumption is None:

@@ -357,11 +357,16 @@ def _display_round(state: dict | None, handoff_round: int) -> int:
     each agent's turn: a run deep in round 5's coder turn still had only round
     4's files and was reported as "round 4: coder working".
 
-    A live run is therefore shown in the round AFTER the last boundary — the one
-    the loop has entered — and a finished run in the round it completed
-    (``rounds`` from the terminal write, which is what its handoffs and its
-    ``[DevelopResult]`` name). A run with no checkpoint (one that predates this,
-    or one still inside round 1) keeps the filename-derived answer.
+    A live run is therefore shown in the round the loop actually ENTERED — the
+    boundary records that (``next_round``), it is never inferred from the
+    boundary plus one: a crashed round, a round that stopped the run, and the
+    last round of an exhausted budget all leave a boundary with no terminal
+    verdict beside it, and reporting "round N+1" for a process that has already
+    exited is a number nobody can correct (correctness/f-004). A finished run
+    shows the round it completed (``rounds`` from the terminal write, which is
+    what its handoffs and its ``[DevelopResult]`` name). A run with no
+    checkpoint (one that predates this, or one still inside round 1) keeps the
+    filename-derived answer.
     """
     cp = checkpoint.from_state(state)
     if cp is None:
@@ -369,7 +374,7 @@ def _display_round(state: dict | None, handoff_round: int) -> int:
     if state is not None and state.get("status"):
         rounds = state.get("rounds")
         return rounds if isinstance(rounds, int) and rounds > 0 else cp.round
-    return cp.round + 1
+    return cp.next_round or cp.round
 
 
 def _run_info(run_dir: Path) -> RunInfo:

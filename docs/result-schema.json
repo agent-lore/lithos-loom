@@ -121,7 +121,12 @@
               "format": "date-time",
               "description": "Earliest instant a re-dispatch is expected to succeed (provider reset time, or a fallback delay when unknown)."
             },
-            "run_id": {"type": "string"},
+            "run_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "maxLength": 64,
+              "description": "Optional. The interrupted run whose re-dispatch this describes. Constrained to a plain handle for the same reason as the top-level `run_id`: the runner records it on the story's failed-attempt marker, and the resume path (5dbeb0c8 slice C) JOINS IT ONTO THE WORK DIR to find the run whose branch a re-dispatch continues — `../<other-task>/<run>` would reach another story's run dir, and an absolute value would discard the join (security/f-001)."
+            },
             "coder_session": {"type": "string"},
             "reviewer_sessions": {
               "type": "object",

@@ -154,7 +154,12 @@ def test_live_round_comes_from_the_checkpoint_not_the_handoff_names(
         patched, task_id="t-1", run_id="r1", rounds={1: ["cq"], 2: ["cq"]}
     )
     checkpoint.record_round_checkpoint(
-        run_dir, round_no=2, branch="b", head_sha="h" * 40, base_sha="a" * 40
+        run_dir,
+        round_no=2,
+        branch="b",
+        head_sha="h" * 40,
+        base_sha="a" * 40,
+        next_round=3,  # the loop entered round 3 — only it knows that
     )
 
     develop.develop_list(config=None, output_format="json")
@@ -163,7 +168,17 @@ def test_live_round_comes_from_the_checkpoint_not_the_handoff_names(
     _label, round_no, _agent = develop._follow_state(run_dir, None, state)
     assert round_no == 3  # …and the attach label agrees
 
-    # a FINISHED run shows the round it completed, not a phantom next one
+    # correctness/f-004: a boundary that entered NO further round — the round
+    # crashed (exit L, so no terminal verdict is ever written) or it stopped the
+    # run — shows the round it was, not a phantom next one no later poll can
+    # correct.
+    checkpoint.record_round_checkpoint(
+        run_dir, round_no=2, branch="b", head_sha="h" * 40, base_sha="a" * 40
+    )
+    develop.develop_list(config=None, output_format="json")
+    assert json.loads(capsys.readouterr().out)[0]["round"] == 2  # attach shares it
+
+    # a FINISHED run shows the round it completed
     run_outcome.write_state(run_dir, {"status": "max_rounds", "rounds": 2})
     develop.develop_list(config=None, output_format="json")
     assert json.loads(capsys.readouterr().out)[0]["round"] == 2

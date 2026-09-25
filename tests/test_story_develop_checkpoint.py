@@ -151,3 +151,35 @@ def test_a_write_failure_never_raises_at_the_round_boundary(tmp_path: Path) -> N
         unwritable, round_no=1, branch="b", head_sha="h", base_sha="a"
     )
     assert checkpoint.round_checkpoint(unwritable) is None
+
+
+def test_an_interrupted_write_leaves_the_previous_checkpoint_intact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """correctness/f-001: the checkpoint must survive the boundary it exists for.
+
+    An in-place rewrite truncates first, so a host death between the truncation
+    and the write left an empty ``state.json`` — no resumable checkpoint, the
+    previous round's destroyed too, and the re-dispatch the operator authorised
+    starting from scratch. The write is atomic, so a failure mid-write leaves
+    round 4's checkpoint exactly as it was.
+    """
+    rd = _run_dir(tmp_path)
+    checkpoint.record_round_checkpoint(
+        rd, round_no=4, branch="b", head_sha="h" * 40, base_sha="a" * 40, cost_usd=4.64
+    )
+    before = (rd / run_outcome.STATE_FILE).read_bytes()
+
+    def die(fd: int) -> None:  # the host dies with the new bytes unflushed
+        raise OSError("host died mid-write")
+
+    monkeypatch.setattr(run_outcome.os, "fsync", die)
+    checkpoint.record_round_checkpoint(  # best-effort: must not raise
+        rd, round_no=5, branch="b", head_sha="i" * 40, base_sha="a" * 40, cost_usd=9.99
+    )
+
+    assert (rd / run_outcome.STATE_FILE).read_bytes() == before
+    cp = checkpoint.round_checkpoint(rd)
+    assert cp is not None and cp.round == 4  # round 4 is still resumable
+    # and no half-written temp file is left behind for `prune` to puzzle over
+    assert [p.name for p in rd.iterdir() if p.name.endswith(".tmp")] == []

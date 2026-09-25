@@ -46,6 +46,7 @@ from typing import Any
 from lithos_loom.bus import Event, EventBus, Subscription
 from lithos_loom.config import RouteConfig
 from lithos_loom.errors import LithosClientError, PluginContractError
+from lithos_loom.gates import is_plain_run_id
 from lithos_loom.plugin_runner import run_plugin
 from lithos_loom.plugins.story_develop.checkpoint import (
     RESUMABLE_ESCALATION_REASONS,
@@ -75,6 +76,58 @@ from lithos_loom.subscriptions.ready_recheck import ReadyRechecker
 __all__ = ["PluginRunFn", "RouteRunner"]
 
 logger = logging.getLogger(__name__)
+
+
+def _contained_in(child: Path, parent: Path) -> bool:
+    """Whether *child* resolves to a direct child of *parent* (security/f-001).
+
+    The belt to :func:`~lithos_loom.gates.is_plain_run_id`'s braces: the handle
+    check already excludes a separator, but the join is checked too, so a future
+    caller that loosens one is still stopped by the other. Symlinks resolve, so a
+    run dir pointed outside the work dir does not pass either. An unresolvable
+    path is not contained.
+    """
+    try:
+        return child.resolve().parent == parent.resolve()
+    except OSError:
+        return False
+
+
+def resumable_checkpoint_under(work_dir: Path) -> Path | None:
+    """The first run dir under *work_dir* whose checkpoint has a committed round.
+
+    "Is there anything here a re-dispatch would continue?" — asked of the whole
+    per-task dir rather than of one run id, because the cleanup decision is
+    about the directory (correctness/f-002) and a task may retain several runs.
+    """
+    if not work_dir.is_dir():
+        return None
+    try:
+        children = sorted(work_dir.iterdir())
+    except OSError:
+        return None
+    for run_dir in children:
+        if run_dir.is_dir() and resumable_checkpoint(run_dir) is not None:
+            return run_dir
+    return None
+
+
+def leaves_a_resumable_run(result: Mapping[str, Any]) -> bool:
+    """Whether *result*'s exit is one a later dispatch may CONTINUE on its branch.
+
+    The host verdicts (:data:`RESUMABLE_ESCALATION_REASONS`, read through the
+    same ``escalation_from_result`` the escalation itself uses, so the two can
+    never disagree) plus ``interrupted`` — whose designed recovery IS a
+    re-dispatch (T10) and whose exhaustion escalates as ``resume_exhausted``,
+    by which time the checkpoint must still exist.
+    """
+    status = result.get("status")
+    if status == "interrupted":
+        return True
+    if status != "failed":
+        return False
+    reason = escalation_from_result(result, detail="").reason
+    return reason in RESUMABLE_ESCALATION_REASONS
 
 
 PluginRunFn = Callable[..., Awaitable[Mapping[str, Any]]]
@@ -130,7 +183,10 @@ class RouteRunner:
         than the claim TTL; defaults to 60s, matching the claim default.
     retain_failed_workdirs:
         When ``True`` (default), the work dir is left behind on plugin
-        failure for operator inspection.
+        failure for operator inspection. ``False`` reaps it — except when the
+        run is one a later dispatch may CONTINUE (a host death's checkpointed
+        branch, an interrupted run's sessions): see
+        :meth:`_cleanup_work_dir`.
     plugin_runner:
         Injectable subprocess-runner. Defaults to the real
         :func:`lithos_loom.plugin_runner.run_plugin`. Tests inject an
@@ -442,8 +498,18 @@ class RouteRunner:
         (``max_rounds`` / ``stalled`` / ``disputed`` / …, which is a separate
         question and deliberately not this), an unknown run, or a run with no
         committed round — means an ordinary dispatch, exactly as before. The
-        plugin re-validates and falls back the same way, so a pointer is never
-        load-bearing.
+        plugin re-validates the pointer against its own work dir and falls back
+        the same way, so a pointer is never load-bearing.
+
+        The ``run_id`` in the marker came from a plugin's ``result.json`` — the
+        subprocess contract of an operator-configured route, not in-process
+        state — and this is the one place it is JOINED ONTO A PATH, so it is
+        constrained to a plain handle and the join is checked for containment
+        (security/f-001). Without both, ``../<other-task>/<run>`` reaches another
+        story's run dir under the same work-dir base (story A's dispatch would
+        continue story B's branch and deliver it as A's PR) and an ABSOLUTE
+        ``run_id`` discards the join altogether, letting any local writer supply
+        the branch, the intake handoffs and the budget remainder.
         """
         marker = failed_attempt_for_route(
             payload.get("metadata") or {}, self.route.name
@@ -454,9 +520,26 @@ class RouteRunner:
         if not isinstance(reason, str) or reason not in RESUMABLE_ESCALATION_REASONS:
             return None
         run_id = marker.get("run_id")
-        if not isinstance(run_id, str) or not run_id:
+        if not isinstance(run_id, str) or not is_plain_run_id(run_id):
+            if run_id:
+                logger.warning(
+                    "RouteRunner %s: %s's failed-attempt marker names run_id %r, "
+                    "which is not a plain handle; not resuming",
+                    self.route.name,
+                    task_id,
+                    run_id[:80],
+                )
             return None
         run_dir = work_dir / run_id
+        if not _contained_in(run_dir, work_dir):
+            logger.warning(
+                "RouteRunner %s: %s's named run dir %s is not under %s; not resuming",
+                self.route.name,
+                task_id,
+                run_dir,
+                work_dir,
+            )
+            return None
         if resumable_checkpoint(run_dir) is None:
             logger.info(
                 "RouteRunner %s: %s's last run %s died (%s) but left no "
@@ -552,6 +635,12 @@ class RouteRunner:
             self._renew_loop(task_id), name=f"renew-{task_id}"
         )
         succeeded = False
+        # Whether this exit leaves a run the NEXT dispatch may continue — the
+        # host verdicts, plus `interrupted`, whose own recovery is a re-dispatch
+        # and whose exhaustion escalates as `resume_exhausted`. Read here, where
+        # the exit is known, because `_cleanup_work_dir` may not delete such a
+        # run's checkpoint (correctness/f-002).
+        resumable = False
         try:
             try:
                 result = await self.plugin_runner(
@@ -589,6 +678,7 @@ class RouteRunner:
                 # exit like any other. Letting it escape to the subscriber
                 # loop stranded the story: claimed forever (it is already in
                 # _processed_tasks), no gate, no finding.
+                resumable = True  # `infra`: a host verdict (see above)
                 await self._escalate(
                     task_id,
                     Escalation(
@@ -616,6 +706,7 @@ class RouteRunner:
                     payload=payload,
                 )
             else:
+                resumable = leaves_a_resumable_run(result)
                 succeeded = await self._apply_result(task_id, result, payload)
         finally:
             renew_task.cancel()
@@ -623,8 +714,9 @@ class RouteRunner:
                 await renew_task
             # Cleanup runs on every exit path — success, plugin failure,
             # contract violation, timeout, even cancellation. The flag
-            # decides whether failed dirs are retained for inspection.
-            self._cleanup_work_dir(work_dir, success=succeeded)
+            # decides whether failed dirs are retained for inspection; a
+            # resumable run is kept regardless (correctness/f-002).
+            self._cleanup_work_dir(work_dir, success=succeeded, resumable=resumable)
 
     async def _renew_loop(self, task_id: str) -> None:
         while True:
@@ -921,7 +1013,29 @@ class RouteRunner:
             stamps=self._attempt_stamps,
         )
 
-    def _cleanup_work_dir(self, work_dir: Path, *, success: bool) -> None:
-        if success or not self.retain_failed_workdirs:
+    def _cleanup_work_dir(
+        self, work_dir: Path, *, success: bool, resumable: bool = False
+    ) -> None:
+        if success:
             with contextlib.suppress(OSError):
                 shutil.rmtree(work_dir)
+            return
+        if self.retain_failed_workdirs:
+            return
+        # 5dbeb0c8 slice C / correctness/f-002: `retain_failed_workdirs = false`
+        # is disk hygiene for runs nobody will look at again — but a HOST death
+        # leaves a branch the next dispatch continues, and its checkpoint lives
+        # right here. Reaping it turns the operator's gate tick back into a
+        # from-scratch run and silently loses the rounds the whole slice exists
+        # to keep. So a run that is resumable is kept whatever the flag says,
+        # and named; everything else is reaped exactly as before.
+        if resumable and resumable_checkpoint_under(work_dir) is not None:
+            logger.info(
+                "RouteRunner %s: keeping %s despite retain_failed_workdirs=false "
+                "— it holds a resumable checkpoint the next dispatch continues",
+                self.route.name,
+                work_dir,
+            )
+            return
+        with contextlib.suppress(OSError):
+            shutil.rmtree(work_dir)

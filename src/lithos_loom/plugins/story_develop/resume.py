@@ -30,8 +30,11 @@ before.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -64,6 +67,26 @@ RESUMED_FROM_KEY = "resumed_from"
 # the new coder reconstructs what it did from the branch and the findings.
 _REVIEW_HANDOFF_RE = re.compile(r"^round_(\d+)_review_(.+)\.md$")
 
+# The handoff dir is bind-mounted RW into every agent container, so both the
+# names in it and their contents are the agents' to choose, and the live loop
+# never enumerates it — it builds the filenames it expects from the configured
+# panel. The intake is the one reader that must cope with a dir it did not
+# write, so it bounds what it takes from one (security/f-002, f-003):
+#
+# * a reviewer name must be a plain token — it is rendered to the model AS a
+#   reviewer's identity and as the qualifying prefix on every finding id;
+# * the run's CONFIGURED panel is preferred over whatever is on disk, so a
+#   planted file cannot displace the real review (or, by making an unreviewed
+#   round look reviewed, suppress the last real one);
+# * at most this many reviewers are read per round, and at most this much
+#   finding text is carried into the prompt — ``read_handoff`` bounds each file
+#   at 1 MiB, which without a COUNT bound is 1 MiB × N for an attacker-chosen N,
+#   the same OOM/billing exposure that per-file cap exists to close. The
+#   remainder is elided in the rendered text, as ``check_artifacts`` does.
+_REVIEWER_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
+MAX_INTAKE_REVIEWERS = 6  # the largest canonical panel is 5
+MAX_INTAKE_FINDING_CHARS = 20_000
+
 # The prompt the resumed run's round 1 renders instead of ``coder_init.md``:
 # the work is already on the branch and the coder must continue it, which is
 # neither a cold start (``coder_init.md``) nor picking up a stranger's pull
@@ -91,8 +114,50 @@ class Resumption:
     note: str  # one operator line naming what this run continues
 
 
+def _elision(count: int, what: str) -> handoff.Finding:
+    """One finding standing in for what the intake bound left out."""
+    return handoff.Finding(
+        finding_id="(elided)",
+        severity="minor",
+        status="accepted",
+        rationale=(
+            f"{count} further {what} from this round were left out to bound the "
+            "resumed run's intake; read the branch and the run's handoff dir for "
+            "the full record."
+        ),
+    )
+
+
+def _bounded(outcomes: list[ReviewOutcome], dropped_files: int) -> list[ReviewOutcome]:
+    """Trim *outcomes* to the intake's text budget, naming what was left out.
+
+    Findings are kept in order until :data:`MAX_INTAKE_FINDING_CHARS` of text
+    has been carried; the rest — and any reviewer file the per-round cap
+    dropped — become one ``(elided)`` finding on the last outcome, so the coder
+    is told the intake is partial instead of silently shown less.
+    """
+    kept: list[ReviewOutcome] = []
+    budget = MAX_INTAKE_FINDING_CHARS
+    dropped_findings = 0
+    for outcome in outcomes:
+        findings: list[handoff.Finding] = []
+        for finding in outcome.findings:
+            size = len(finding.rationale) + len(finding.coder_response)
+            if budget - size < 0:
+                dropped_findings += 1
+                continue
+            budget -= size
+            findings.append(finding)
+        kept.append(dataclasses.replace(outcome, findings=findings))
+    if dropped_findings:
+        kept[-1].findings.append(_elision(dropped_findings, "finding(s)"))
+    if dropped_files:
+        kept[-1].findings.append(_elision(dropped_files, "reviewer handoff(s)"))
+    return kept
+
+
 def _intake_reviews(
-    prior_run_dir: Path, checkpoint: RoundCheckpoint
+    prior_run_dir: Path, checkpoint: RoundCheckpoint, panel: Sequence[str]
 ) -> tuple[list[ReviewOutcome], int]:
     """The dead run's last reviewer verdicts, as loop-entry intake.
 
@@ -104,6 +169,10 @@ def _intake_reviews(
     back to the round before it rather than failing the resume (the branch is
     the work; a handoff is a breadcrumb).
 
+    *panel* is the run's configured reviewer names, and they are what is read
+    when the round has them: the files are the dead agents' to name, so
+    discovery is the fallback, not the rule (see the module's bound constants).
+
     The findings ride along as the round-1 coder prompt's input only. The new
     panel re-reviews the branch from scratch and mints its OWN finding ids, so
     these ids are history the coder is shown, not a ledger it is held to —
@@ -114,6 +183,7 @@ def _intake_reviews(
         names = sorted(p.name for p in handoff_dir.iterdir())
     except OSError:
         names = []
+    configured = set(panel)
     by_round: dict[int, list[tuple[str, str]]] = {}
     for name in names:
         match = _REVIEW_HANDOFF_RE.match(name)
@@ -122,10 +192,34 @@ def _intake_reviews(
         round_no = int(match.group(1))
         if round_no > checkpoint.round:
             continue  # a handoff past the last boundary we can vouch for
-        by_round.setdefault(round_no, []).append((match.group(2), name))
-    for intake_round in sorted(by_round, reverse=True):
+        reviewer = match.group(2)
+        if not _REVIEWER_TOKEN_RE.match(reviewer):
+            logger.warning(
+                "resume: ignoring handoff %s — %r is not a reviewer name",
+                handoff_dir / name,
+                reviewer[:80],
+            )
+            continue
+        by_round.setdefault(round_no, []).append((reviewer, name))
+    # The CONFIGURED panel decides which ROUND is the intake as well as which
+    # files are read within it (security/f-003): a coder that plants a clean
+    # review for the round it died in would otherwise make that round the
+    # intake and drop the last genuinely reviewed round — findings and all —
+    # telling the resumed coder there is nothing to fix. Discovery is the
+    # fallback for a run whose panel has since been reconfigured, not the rule.
+    ordered = sorted(by_round, reverse=True)
+    by_panel = [r for r in ordered if any(n in configured for n, _ in by_round[r])]
+    for intake_round, panel_only in [(r, True) for r in by_panel] + [
+        (r, False) for r in ordered
+    ]:
+        entries = sorted(by_round[intake_round])
+        candidates = (
+            [e for e in entries if e[0] in configured] if panel_only else entries
+        )
+        chosen = candidates[:MAX_INTAKE_REVIEWERS]
+        dropped = len(candidates) - len(chosen)
         outcomes: list[ReviewOutcome] = []
-        for reviewer, name in sorted(by_round[intake_round]):
+        for reviewer, name in chosen:
             try:
                 parsed = handoff.parse_review_handoff(
                     handoff.read_handoff(handoff_dir / name)
@@ -146,11 +240,11 @@ def _intake_reviews(
                     max_severity=handoff.max_severity(
                         [f.severity for f in open_findings]
                     ),
-                    findings=parsed.findings,
+                    findings=list(parsed.findings),
                 )
             )
         if outcomes:
-            return outcomes, intake_round
+            return _bounded(outcomes, dropped), intake_round
     # Nothing was reviewed (or nothing survived parsing) before the death. ONE
     # empty outcome, rather than none, so the round-1 prompt's findings slot
     # renders the "no structured findings" line instead of a blank.
@@ -222,14 +316,23 @@ def prepare_resume(
     cost_left: float | None = None
     if config.max_cost_usd is not None:
         cost_left = round(config.max_cost_usd - checkpoint.branch_cost_usd, 4)
-        if cost_left <= 0:
+        # `<= 0` alone is not a budget guard: NaN compares False against
+        # everything, so a non-finite remainder would install a ceiling
+        # `cost_ceiling_phase` can never reach (security/f-004). The recorded
+        # spend is already floored and finite (:func:`checkpoint.from_state`);
+        # this is the second half of the same rule, on the arithmetic.
+        if not math.isfinite(cost_left) or cost_left <= 0:
             return None, (
                 f"{prior_run_dir.name}'s branch already spent "
                 f"${checkpoint.branch_cost_usd:.2f} of the ${config.max_cost_usd:.2f} "
                 "ceiling"
             )
 
-    intake_reviews, intake_round = _intake_reviews(prior_run_dir, checkpoint)
+    intake_reviews, intake_round = _intake_reviews(
+        prior_run_dir,
+        checkpoint,
+        [spec.name for spec in config.effective_reviewers],
+    )
     plan = ResumePlan(
         prior_run_dir=prior_run_dir,
         checkpoint=checkpoint,

@@ -959,7 +959,9 @@ def stall_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     return None
 
 
-def record_boundary(ctx: RoundContext, round_no: int) -> None:
+def record_boundary(
+    ctx: RoundContext, round_no: int, *, continues: bool = False
+) -> None:
     """Checkpoint what round *round_no* left on the branch (5dbeb0c8 slice C).
 
     The round boundary is the resumable point: whatever this round committed is
@@ -977,6 +979,14 @@ def record_boundary(ctx: RoundContext, round_no: int) -> None:
     actually reviewed. Best-effort in both directions: reading HEAD is a git
     call inside a live loop, so a failure is logged and the round goes on — a
     missing checkpoint costs a resume, never the rounds already committed.
+
+    *continues* is whether the loop is about to enter another round. It is
+    recorded (as the round the loop moves INTO) rather than inferred by the
+    readers: a boundary with no terminal verdict beside it is NOT proof that
+    another round began — a crashed round (exit L) and the last round before
+    the epilogue lands both look exactly like a live run between rounds, and
+    "round N+1" for a process that has already exited is a number nobody can
+    correct (correctness/f-004).
     """
     cost = ctx.coder_cost + ctx.review_cost
     try:
@@ -1001,6 +1011,7 @@ def record_boundary(ctx: RoundContext, round_no: int) -> None:
         cost_usd=cost,
         branch_rounds=ctx.carried_rounds + round_no,
         branch_cost_usd=ctx.carried_cost_usd + cost,
+        next_round=round_no + 1 if continues else 0,
     )
 
 
@@ -1011,11 +1022,19 @@ def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
     approval — is load-bearing (see :func:`cost_ceiling_phase`).
 
     However the round ends, the boundary it reached is checkpointed
-    (:func:`record_boundary`) before the exit is handed back — in a ``finally``,
-    so a round that CRASHED (exit L: the exception bypasses ``develop()``'s
-    epilogue, which is precisely the run with no other record) still records the
-    head its commit reached rather than leaving that commit for nobody."""
+    (:func:`record_boundary`) before the exit is handed back — including when a
+    phase RAISES (exit L: the exception bypasses ``develop()``'s epilogue, which
+    is precisely the run with no other record), so that round's commits are not
+    left for nobody. The checkpoint records whether another round follows, which
+    only this function knows."""
     ctx.rounds_completed = round_no
+    # correctness/f-003: `new_commit` is round-scoped, but `commit_phase` is
+    # what sets it — a round that exits BEFORE that phase (a coder auth death,
+    # the common infra shape) would otherwise leave the PREVIOUS round's sha in
+    # place, and the boundary checkpoint would publish it as this round's own
+    # commit. Cleared here, where the round begins; the cross-round tree
+    # pointer is `gated_sha`, which is deliberately left alone.
+    ctx.new_commit = None
     phases: tuple[Callable[[RoundContext, int], CycleExit | None], ...] = (
         coder_phase,
         dispute_phase,
@@ -1036,6 +1055,15 @@ def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
             exit_ = phase(ctx, round_no)
             if exit_ is not None:
                 break
-    finally:
-        record_boundary(ctx, round_no)
+    except BaseException:
+        # A phase raised (exit L): the boundary is still recorded — those
+        # commits are on the branch and this run will write nothing else — but
+        # NO further round begins, so the checkpoint must not claim one.
+        record_boundary(ctx, round_no, continues=False)
+        raise
+    record_boundary(
+        ctx,
+        round_no,
+        continues=exit_ is None and round_no < ctx.config.max_rounds,
+    )
     return exit_

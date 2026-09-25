@@ -106,7 +106,7 @@ def read_task_payload(path: Path) -> TaskContext:
     )
 
 
-def read_resume_run_dir(path: Path) -> Path | None:
+def read_resume_run_dir(path: Path, work_dir: Path) -> Path | None:
     """The run dir the runner asked this dispatch to RESUME, or ``None``.
 
     The route-runner's ``task.json`` envelope is ``{"task": …}`` plus, only when
@@ -117,20 +117,45 @@ def read_resume_run_dir(path: Path) -> Path | None:
     continue the branch of a run that stopped `stalled` or `disputed`, which is
     a verdict on the work and explicitly not this.
 
-    Tolerant by design: a missing, malformed or empty block is ``None`` and the
-    run develops from scratch. The pointer is an optimisation of an otherwise
-    correct dispatch, never a precondition for it, so it must not be able to
-    fail one. (:func:`read_task_payload` is the strict half — no task, no run.)
+    **Re-validated, not merely re-read** (security/f-001). The pointer is built
+    from a ``run_id`` that reaches the runner in a plugin's ``result.json``, so
+    this half of the contract independently requires the named dir to be a
+    **direct child of THIS run's** ``work_dir`` — the per-task dir the runner
+    passed on the command line. Containment is the whole check here: a
+    traversal, an absolute path (``work_dir / "/tmp/evil"`` IS ``/tmp/evil``)
+    and a grandchild all fail it, and the handle rule that keeps the runner's
+    join safe in the first place lives with the join
+    (:func:`~lithos_loom.gates.is_plain_run_id`). Nothing is expanded: a ``~``
+    is a value to refuse, not one to resolve. A resume can then only ever
+    continue a run of the task being dispatched, whatever the marker says.
+
+    Tolerant by design: a missing, malformed, unsafe or empty block is ``None``
+    and the run develops from scratch. The pointer is an optimisation of an
+    otherwise correct dispatch, never a precondition for it, so it must not be
+    able to fail one. (:func:`read_task_payload` is the strict half — no task,
+    no run.)
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     block = data.get("resume") if isinstance(data, dict) else None
-    run_dir = block.get("run_dir") if isinstance(block, dict) else None
-    if not isinstance(run_dir, str) or not run_dir.strip():
+    raw = block.get("run_dir") if isinstance(block, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
         return None
-    return Path(run_dir).expanduser()
+    run_dir = Path(raw)
+    try:
+        contained = run_dir.resolve().parent == work_dir.resolve()
+    except OSError:
+        contained = False
+    if not contained:
+        logger.warning(
+            "story-develop: refusing resume pointer %r — not a run of %s",
+            raw[:120],
+            work_dir,
+        )
+        return None
+    return run_dir
 
 
 # --- project-context config lookup ------------------------------------------

@@ -30,6 +30,7 @@ current round from instead of guessing it from handoff filenames.
 from __future__ import annotations
 
 import contextlib
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -86,6 +87,12 @@ class RoundCheckpoint:
     cost_usd: float = 0.0
     branch_rounds: int = 0
     branch_cost_usd: float = 0.0
+    # The round the loop moved INTO after this boundary, or 0 when none did —
+    # the round that crashed (exit L), the round that stopped the run, and the
+    # last round of an exhausted budget all end a run at a boundary that is
+    # otherwise indistinguishable from a live one between rounds
+    # (correctness/f-004). Only the loop knows; nobody may infer it.
+    next_round: int = 0
     at: str = ""
     status: str = "running"
 
@@ -116,6 +123,7 @@ def record_round_checkpoint(
     cost_usd: float = 0.0,
     branch_rounds: int | None = None,
     branch_cost_usd: float | None = None,
+    next_round: int = 0,
 ) -> None:
     """Record the round *round_no* boundary of a live run. Best-effort.
 
@@ -149,6 +157,7 @@ def record_round_checkpoint(
                     "branch_cost_usd": round(
                         cost_usd if branch_cost_usd is None else branch_cost_usd, 4
                     ),
+                    "next_round": next_round,
                     "at": datetime.now(UTC).isoformat(timespec="seconds"),
                     # For the operator reading the file out of context (every
                     # in-process reader already holds the path).
@@ -195,8 +204,23 @@ def from_state(state: Mapping[str, object] | None) -> RoundCheckpoint | None:
         return value if isinstance(value, str) else ""
 
     def _money(key: str, default: float) -> float:
+        """A recorded spend: finite and not negative, or the default.
+
+        The resumed run's ceiling is computed from these (security/f-004), and
+        ``json.loads`` accepts the ``NaN`` / ``Infinity`` literals — a NaN spend
+        would pass every ``<= 0`` budget guard (NaN compares False against
+        everything) and install an effectively unlimited ceiling, while a
+        negative one would GRANT more budget than the project ever allowed. A
+        value loom itself wrote is neither; a corrupt, truncated or planted
+        file is exactly where this is read. Mirrors ``_count``'s ``>= 0``.
+        """
         value = block.get(key)
-        if isinstance(value, int | float) and not isinstance(value, bool):
+        if (
+            isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ):
             return float(value)
         return default
 
@@ -219,6 +243,7 @@ def from_state(state: Mapping[str, object] | None) -> RoundCheckpoint | None:
         cost_usd=cost,
         branch_rounds=_count("branch_rounds", raw_round),
         branch_cost_usd=_money("branch_cost_usd", cost),
+        next_round=_count("next_round", 0),
         at=_text("at"),
         status=_text("status") or "running",
     )

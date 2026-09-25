@@ -58,7 +58,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 9 |
 | `lithos_loom.subscriptions.remediation_refunds` | M | 0 | 3 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
-| `lithos_loom.subscriptions.route_runner` | L | 1 | 0 |
+| `lithos_loom.subscriptions.route_runner` | L | 1 | 2 |
 
 ## Public API
 
@@ -304,6 +304,8 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.
 
 ### `lithos_loom.subscriptions.route_runner`
+- def `resumable_checkpoint_under` — The first run dir under *work_dir* whose checkpoint has a committed round.
+- def `leaves_a_resumable_run` — Whether *result*'s exit is one a later dispatch may CONTINUE on its branch.
 - class `RouteRunner` — One claim-bound subscriber per route.
 
 ## Dependencies
