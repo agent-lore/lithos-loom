@@ -40,6 +40,7 @@ from . import (
     autoformat,
     check_artifacts,
     check_runner,
+    checkpoint,
     coder_salvage,
     containers,
     engines,
@@ -199,6 +200,18 @@ class RoundContext:
     # via the ledgers, out of the ledger: converge records such a mark as the
     # ordinary dispute it also is.
     decisions_enabled: bool = True
+    # 5dbeb0c8 slice C: the rounds / spend of a run this one RESUMES (see
+    # LoopEntry.carried_*), so each round's checkpoint records the branch's
+    # running totals and not just this session's.
+    carried_rounds: int = 0
+    carried_cost_usd: float = 0.0
+    # The last round whose panel actually reviewed, and per round the content
+    # fingerprint of each reviewer's handoff — set by `panel_phase`, published
+    # by the checkpoint, so BOTH which round a resume reads and what that round
+    # says are loom's answers rather than the agent-writable handoff dir's
+    # (security/f-003, f-005).
+    reviewed_round: int = 0
+    reviewed_digests: dict[int, dict[str, str]] = field(default_factory=dict)
     # --- mutable run state (read by develop()'s epilogue after the loop) ---
     coder_cost: float = 0.0
     review_cost: float = 0.0
@@ -326,7 +339,9 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         ref_names: list[str] = []
         for n in ctx.names:
             ref_names.append(handoff.reviewer_handoff_name(round_no - 1, n))
-            art = handoff.reviewer_handoff_name(round_no - 1, f"{n}_artifacts")
+            art = handoff.reviewer_handoff_name(
+                round_no - 1, handoff.artifact_reviewer_token(n)
+            )
             if (ctx.config.handoff_dir / art).is_file():
                 ref_names.append(art)
         review_files = ", ".join(f"`{n}`" for n in ref_names)
@@ -575,6 +590,66 @@ def fast_gate_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     return None
 
 
+def vouch_for_review(
+    ctx: RoundContext,
+    round_no: int,
+    panel: PanelRoundResult,
+    *,
+    artifact_pass: bool = False,
+) -> None:
+    """Record that this round WAS reviewed, and what the panel produced.
+
+    The resume's intake is read from an agent-writable mount, so both halves of
+    "what did the last review say" have to be loom's own answer:
+
+    * **which round** — ``reviewed_round``, set only for a panel that actually
+      produced a review: no infra failure, no invalid handoff, and at least one
+      outcome that is not ``invalid`` whose file can be fingerprinted. A panel
+      that died before writing anything is not a reviewed round, and saying so
+      is what keeps the resume's discovery fallback out of reach for it
+      (security/f-005);
+    * **what it said** — a content fingerprint per reviewer
+      (:func:`handoff.file_fingerprint`, the same bounded, symlink-refusing
+      identity the coder-salvage provenance uses). The handoff dir is one flat
+      RW mount shared by every round's agents, so a later round's coder can
+      overwrite an earlier round's review with ``## Status: LGTM`` and suppress
+      its open findings. A file that does not match what the panel left is
+      distrusted by :mod:`.resume`, which falls to the round below instead.
+
+    Kept per round, not just for the newest: a doctored newest round would
+    otherwise fall back to a round with nothing to check it against.
+
+    The **artifact pass** (``artifact_pass=True``, #283 / #291) vouches through
+    the same door and ADDS to the round rather than replacing it: it writes its
+    verdicts to their own ``_artifacts`` handoffs
+    (:func:`handoff.artifact_reviewer_token`) and those verdicts control
+    approval, so a visual finding it files is as open as any other. Without this
+    a round that ended in an artifact finding, then died before the next panel,
+    resumed on the regular pass's LGTM alone — silently dropping the one finding
+    that was actually holding the run.
+    """
+    if panel.infra_failure is not None or panel.invalid_reviewer is not None:
+        return
+    digests: dict[str, str] = {}
+    for outcome in panel.round_reviews:
+        if outcome.status == "invalid":
+            continue
+        name = (
+            handoff.artifact_reviewer_token(outcome.reviewer)
+            if artifact_pass
+            else outcome.reviewer
+        )
+        fingerprint = handoff.file_fingerprint(
+            ctx.config.handoff_dir / handoff.reviewer_handoff_name(round_no, name)
+        )
+        if fingerprint:
+            digests[name] = fingerprint
+    if not digests:
+        return
+    ctx.reviewed_round = round_no
+    ctx.reviewed_digests.setdefault(round_no, {}).update(digests)
+
+
 def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Run the reviewer panel — the one shared primitive (#154). Sets
     ``ctx.final_reviews`` / accrues ``ctx.review_cost``.
@@ -599,6 +674,7 @@ def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     )
     ctx.review_cost += panel.cost
     ctx.final_reviews = panel.round_reviews
+    vouch_for_review(ctx, round_no, panel)
     if panel.interrupted:
         return CycleExit(
             status="interrupted",
@@ -752,6 +828,9 @@ def _artifact_review_pass(
     # review's surviving non-blocking findings vanish from DevelopResult /
     # state.json metadata (the ledger kept them; the structured outcome lied).
     ctx.final_reviews = _combine_review_outcomes(ctx.final_reviews, panel.round_reviews)
+    # …and the pass's own handoffs join this round's review provenance, so a
+    # resume after a later death reads the visual findings too.
+    vouch_for_review(ctx, round_no, panel, artifact_pass=True)
     if panel.interrupted:
         return CycleExit(
             status="interrupted",
@@ -953,12 +1032,85 @@ def stall_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     return None
 
 
+def record_boundary(ctx: RoundContext, round_no: int) -> None:
+    """Checkpoint what round *round_no* left on the branch (5dbeb0c8 slice C).
+
+    The round boundary is the resumable point: whatever this round committed is
+    on the branch, and the process may not live to write anything else — an
+    expired credential or a vanished container kills it between here and
+    ``develop()``'s epilogue. So it is recorded here, for the TERMINAL round as
+    well: the round that stops the run is also the last one a resume can build
+    on.
+
+    ``carried_*`` is what a run this one resumed had already used, so the
+    recorded BRANCH totals span every session of the work while the run's own
+    numbers stay its own. A round that crashed mid-pipeline is recorded too (see
+    :func:`run_round`): it counts as spent — the conservative direction for the
+    budget — and the resume's intake falls back to the last round that was
+    actually reviewed. Best-effort in both directions: reading HEAD is a git
+    call inside a live loop, so a failure is logged and the round goes on — a
+    missing checkpoint costs a resume, never the rounds already committed.
+
+    A boundary never says anything about the round AFTER it: the next round
+    announces itself when it starts (:func:`checkpoint.record_round_entered`),
+    so a process killed between the two leaves "round N reached", which is the
+    truth, rather than a permanent claim about a round that never began — and a
+    crashed run writes nothing else ever (correctness/f-004).
+    """
+    cost = ctx.coder_cost + ctx.review_cost
+    try:
+        head_sha = git.commit_sha(ctx.wt)
+    except (RuntimeError, OSError):
+        logger.warning(
+            "story-develop %s: could not read HEAD for the round %d checkpoint",
+            ctx.config.run_id,
+            round_no,
+        )
+        return
+    checkpoint.record_round_checkpoint(
+        ctx.config.run_dir,
+        round_no=round_no,
+        branch=ctx.wt.name,
+        head_sha=head_sha,
+        base_sha=ctx.base.start_sha,
+        base_ref=ctx.base.ref,
+        commit=ctx.new_commit or "",
+        repo=str(ctx.config.repo),
+        worktree=str(ctx.wt),
+        cost_usd=cost,
+        branch_rounds=ctx.carried_rounds + round_no,
+        branch_cost_usd=ctx.carried_cost_usd + cost,
+        reviewed_round=ctx.reviewed_round,
+        reviewed_digests={
+            str(rnd): digests for rnd, digests in ctx.reviewed_digests.items()
+        },
+    )
+
+
 def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
     """Sequence one develop round's phases. Returns the first phase's
     :class:`CycleExit` (terminating the loop), or ``None`` to continue to the next
     round. The order — and the TWO ``cost_ceiling_phase`` calls straddling
-    approval — is load-bearing (see :func:`cost_ceiling_phase`)."""
+    approval — is load-bearing (see :func:`cost_ceiling_phase`).
+
+    It brackets the round in the checkpoint: entering *round_no* amends the
+    previous boundary to name the round now running, and however the round ends
+    — including when a phase RAISES (exit L: the exception bypasses
+    ``develop()``'s epilogue, which is precisely the run with no other record) —
+    the boundary it reached is recorded before the exit is handed back, so that
+    round's commits are not left for nobody."""
     ctx.rounds_completed = round_no
+    # The loop has ENTERED this round — amend the previous boundary to say so,
+    # here and nowhere earlier (correctness/f-004). A no-op for the run's first
+    # round, which has no boundary behind it.
+    checkpoint.record_round_entered(ctx.config.run_dir, round_no)
+    # correctness/f-003: `new_commit` is round-scoped, but `commit_phase` is
+    # what sets it — a round that exits BEFORE that phase (a coder auth death,
+    # the common infra shape) would otherwise leave the PREVIOUS round's sha in
+    # place, and the boundary checkpoint would publish it as this round's own
+    # commit. Cleared here, where the round begins; the cross-round tree
+    # pointer is `gated_sha`, which is deliberately left alone.
+    ctx.new_commit = None
     phases: tuple[Callable[[RoundContext, int], CycleExit | None], ...] = (
         coder_phase,
         dispute_phase,
@@ -973,8 +1125,16 @@ def run_round(ctx: RoundContext, round_no: int) -> CycleExit | None:
         stall_phase,
         lambda c, r: cost_ceiling_phase(c, r, when="post_review"),
     )
-    for phase in phases:
-        exit_ = phase(ctx, round_no)
-        if exit_ is not None:
-            return exit_
-    return None
+    exit_: CycleExit | None = None
+    try:
+        for phase in phases:
+            exit_ = phase(ctx, round_no)
+            if exit_ is not None:
+                break
+    except BaseException:
+        # A phase raised (exit L): the boundary is still recorded — those
+        # commits are on the branch and this run will write nothing else.
+        record_boundary(ctx, round_no)
+        raise
+    record_boundary(ctx, round_no)
+    return exit_

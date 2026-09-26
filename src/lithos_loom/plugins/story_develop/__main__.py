@@ -83,6 +83,7 @@ from .daemon_io import (
     load_tool_default_models,
     post_frictions,
     profile_panel,
+    read_resume_run_dir,
     read_task_payload,
     resolve_project_settings,
     story_config_overrides,
@@ -100,6 +101,7 @@ from .lithos_io import (
 from .model_policy import resolve_config_models
 from .pr_delivery import deliver_guarded
 from .profiles import resolve_profile
+from .resume import prepare_resume, record_resumed_from
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -589,11 +591,40 @@ def _daemon_main(args: argparse.Namespace) -> int:
             args.task_json.expanduser().resolve(), config.run_dir / "task.json"
         )
 
+    # 5dbeb0c8 slice C: when the runner says this dispatch continues a run the
+    # HOST killed mid-loop (an expired credential, a vanished container), enter
+    # the loop on that run's branch with the REMAINDER of its budget instead of
+    # developing the story from scratch. A refusal is a breadcrumb, not a
+    # failure: the run then does exactly what it did before the checkpoint
+    # existed. Resolved after the config (the resumed run develops the task's
+    # CURRENT text with its CURRENT settings) and before any spend.
+    entry = None
+    resume_dir = read_resume_run_dir(
+        args.task_json.expanduser().resolve(), config.work_dir
+    )
+    if resume_dir is not None:
+        resumption, refused = prepare_resume(config, resume_dir)
+        if resumption is None:
+            print(
+                f"[Friction] story-develop: not resuming — {refused}",
+                file=sys.stderr,
+            )
+            post_frictions(
+                args.lithos_url,
+                ctx.task_id,
+                (f"story-develop: not resuming {resume_dir.name} — {refused}",),
+            )
+        else:
+            config, entry = resumption.config, resumption.entry
+            record_resumed_from(config.run_dir, resumption.plan)
+            print(f"story-develop: {resumption.note}")
+
     try:
         result = develop(
             config,
             coder_timeout=args.coder_timeout,
             reviewer_timeout=args.reviewer_timeout,
+            entry=entry,
         )
     except ValueError as exc:
         # The core rejected the resolved config (e.g. project metadata named

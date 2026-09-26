@@ -33,6 +33,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli.merge_gate` | M | 0 | 1 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
 | `lithos_loom.cli.project` | XL | 3 | 10 |
+| `lithos_loom.cli.resume` | S | 0 | 1 |
 | `lithos_loom.cli.review` | M | 1 | 11 |
 | `lithos_loom.cli.task` | M | 1 | 1 |
 
@@ -215,6 +216,9 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `project_enable_github` — Turn on the issue watcher for a project.
 - def `project_disable_github` — Pause the issue watcher for a project without losing the repo mapping.
 - def `project_migrate_github_tags` — One-shot migration of legacy github-watcher *tags* → metadata.
+
+### `lithos_loom.cli.resume`
+- def `resume_command` — Continue a run that died mid-loop, on its own branch.
 
 ### `lithos_loom.cli.review`
 - def `report_fetch_failure` — Report an intake fetch failure as the ``infra_failed`` run it is (#431).

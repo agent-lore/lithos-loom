@@ -29,10 +29,13 @@ finding the reviewer keeps blocking for 2 rounds stops the run with a
 mark of ``needs-decision`` no reviewer contests short-circuits even that
 (9d5ebca6): the run stops ``needs_decision`` at the end of that same review
 round, carrying the question to the operator instead of paying two more rounds
-to reach the same place — on the STORY-DEVELOP path only (``entry is None``):
-converge has no gate behind the question, so there the mark stays the ordinary
-dispute it also is (correctness/f-003). Finding identity itself is
-plugin-enforced via each reviewer's :class:`~.findings.FindingLedger`.
+to reach the same place — on the STORY-DEVELOP path only (no entry, or a RESUME
+one, which is one continuing): converge has no gate behind the question, so
+there the mark stays the ordinary dispute it also is (correctness/f-003).
+Finding identity itself is plugin-enforced via each reviewer's
+:class:`~.findings.FindingLedger`. Every round boundary is CHECKPOINTED
+(:mod:`.checkpoint`, written by :func:`.rounds.run_round`) so a run the host
+kills mid-loop resumes on its own branch (:mod:`.resume`), not from scratch.
 """
 
 from __future__ import annotations
@@ -479,12 +482,14 @@ def develop(
         read_only=False,
     )
     # correctness/f-003: the cheap `needs-decision` escalation is the
-    # story-develop path's (``entry is None``). A converge run shares this loop
-    # but has no needs-decision surface behind it — `converge_pr` flattens every
+    # story-develop path's. A converge run shares this loop but has no
+    # needs-decision surface behind it — `converge_pr` flattens every
     # unapproved run to `not_converged`, and both watcher consumers branch on
     # that — so there the mark stays the ordinary dispute it also is, the coder
-    # is never told otherwise, and the two-round guard bounds it as before.
-    decisions_enabled = entry is None
+    # is never told otherwise, and the two-round guard bounds it as before. An
+    # entry says for itself (5dbeb0c8 slice C): a RESUME entry is a
+    # story-develop run continuing, gate and all.
+    decisions_enabled = entry.decisions_enabled if entry is not None else True
     reviewers: list[panel.ReviewerState] = []
     for spec in specs:
         rname, rcmd = agent_session.build_run_cmd(
@@ -565,6 +570,10 @@ def develop(
         review_context=entry.review_context if entry is not None else "",
         no_change_claim=entry.no_change_claim if entry is not None else None,
         decisions_enabled=decisions_enabled,
+        # what a run this one RESUMES had already spent, so each round's
+        # checkpoint records the BRANCH's totals beside this run's own
+        carried_rounds=entry.carried_rounds if entry is not None else 0,
+        carried_cost_usd=entry.carried_cost_usd if entry is not None else 0.0,
     )
 
     # The default outcome is "max_rounds" — the exit the loop lands on when it

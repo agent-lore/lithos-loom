@@ -240,6 +240,45 @@ def test_artifact_pass_findings_hold_approval_and_continue(tmp_path: Path) -> No
     assert ctx.final_reviews and ctx.final_reviews[0].passed is False
 
 
+def test_the_artifact_pass_joins_the_rounds_review_provenance(
+    tmp_path: Path,
+) -> None:
+    """5dbeb0c8 slice C: a visual finding must survive a later infra death.
+
+    ``panel_phase`` vouches for the regular reviewer handoffs, but the artifact
+    pass writes its approval-controlling verdicts to their own ``_artifacts``
+    files. Left out of ``reviewed_digests``, a round that ended in a held
+    artifact finding and then died resumed on the regular pass's LGTM alone —
+    the one finding actually holding the run silently dropped from the intake.
+    """
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    ctx, _ = _artifact_ctx(tmp_path, collects=True, panel_passes=False)
+    handoff_dir = ctx.config.handoff_dir
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+    regular = handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+    regular.write_text("## Status: LGTM\n## Summary\ncode reads fine\n")
+    artifacts = handoff_dir / handoff_mod.reviewer_handoff_name(
+        1, handoff_mod.artifact_reviewer_token("correctness")
+    )
+    artifacts.write_text("## Status: FINDINGS\n## Summary\nnote-320 overflows\n")
+    # what `panel_phase` already recorded for the regular pass this round
+    ctx.reviewed_round = 1
+    ctx.reviewed_digests[1] = {
+        "correctness": handoff_mod.file_fingerprint(regular) or ""
+    }
+
+    assert rounds_mod.approval_phase(ctx, 1) is None  # the pass filed findings
+
+    # ADDED to the round, never replacing it: both handoffs are what a resume
+    # reads, and each under the token its filename is built from.
+    assert ctx.reviewed_round == 1
+    assert set(ctx.reviewed_digests[1]) == {"correctness", "correctness_artifacts"}
+    assert ctx.reviewed_digests[1]["correctness_artifacts"] == (
+        handoff_mod.file_fingerprint(artifacts)
+    )
+
+
 def test_no_new_artifacts_seals_without_extra_pass(tmp_path: Path) -> None:
     ctx, panel_calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
 
@@ -1309,3 +1348,81 @@ def test_decision_phase_runs_before_the_deadlock_and_stall_guards() -> None:
         < src.index("deadlock_phase")
         < src.index("stall_phase")
     )
+
+
+# --- what the checkpoint vouches for (security/f-003, f-005) -----------------
+
+
+def _vouch_ctx(tmp_path: Path) -> rounds_mod.RoundContext:
+    """A RoundContext aimed at `vouch_for_review`: only its config is read."""
+    ctx, _calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
+    ctx.config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    return ctx
+
+
+def _panel(**overrides: object) -> PanelRoundResult:
+    fields: dict = {
+        "round_reviews": [_passed()],
+        "cost": 0.0,
+        "interrupted": False,
+        "resume_after": None,
+        "invalid_reviewer": None,
+    }
+    fields.update(overrides)
+    return PanelRoundResult(**fields)  # type: ignore[arg-type]
+
+
+def test_a_reviewed_round_is_vouched_for_with_its_content(tmp_path: Path) -> None:
+    """The resume reads both halves from here: the round, and what it said."""
+    ctx = _vouch_ctx(tmp_path)
+    handoff_file = ctx.config.handoff_dir / "round_02_review_correctness.md"
+    handoff_file.write_text("## Status: LGTM\n## Summary\nfine\n")
+
+    rounds_mod.vouch_for_review(ctx, 2, _panel())
+
+    assert ctx.reviewed_round == 2
+    digest = ctx.reviewed_digests[2]["correctness"]
+    assert digest and ":" in digest  # size:sha256, handoff.file_fingerprint
+    # …and it is the CONTENT that is vouched for, not just the name
+    handoff_file.write_text("## Status: LGTM\n## Summary\nrewritten\n")
+    from lithos_loom.plugins.story_develop.handoff import file_fingerprint
+
+    assert file_fingerprint(handoff_file) != digest
+
+
+@pytest.mark.parametrize(
+    "panel_kwargs",
+    [
+        {"infra_failure": "reviewer auth_failed persisted"},  # died before writing
+        {"invalid_reviewer": "correctness"},
+        {"round_reviews": []},  # nothing ran
+        {"round_reviews": [ReviewOutcome("correctness", "invalid", False, None)]},
+    ],
+)
+def test_a_round_nothing_reviewed_is_not_vouched_for(
+    tmp_path: Path, panel_kwargs: dict
+) -> None:
+    """security/f-005: the field must mean what its name says.
+
+    `panel.round_reviews` carries an entry for every reviewer that RAN —
+    including an `invalid` one and one that died of an infra failure — so
+    recording the round on that alone made an unreviewed round "reviewed", and
+    the resume's discovery fallback (where a coder plant is eligible) reachable
+    for it.
+    """
+    ctx = _vouch_ctx(tmp_path)
+    (ctx.config.handoff_dir / "round_02_review_correctness.md").write_text("x")
+
+    rounds_mod.vouch_for_review(ctx, 2, _panel(**panel_kwargs))
+
+    assert ctx.reviewed_round == 0 and ctx.reviewed_digests == {}
+
+
+def test_a_review_with_no_handoff_on_disk_is_not_vouched_for(tmp_path: Path) -> None:
+    # Nothing to fingerprint is nothing to verify later, so the round is not
+    # offered to the resume at all.
+    ctx = _vouch_ctx(tmp_path)
+
+    rounds_mod.vouch_for_review(ctx, 2, _panel())
+
+    assert ctx.reviewed_round == 0 and ctx.reviewed_digests == {}

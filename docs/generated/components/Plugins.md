@@ -24,13 +24,14 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 11 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
+| `lithos_loom.plugins.story_develop.checkpoint` | M | 1 | 6 |
 | `lithos_loom.plugins.story_develop.coder_salvage` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
 | `lithos_loom.plugins.story_develop.conflict_resolve` | M | 3 | 5 |
 | `lithos_loom.plugins.story_develop.containers` | M | 0 | 7 |
 | `lithos_loom.plugins.story_develop.converge` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.converge_result` | S | 2 | 1 |
-| `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 16 |
+| `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 17 |
 | `lithos_loom.plugins.story_develop.develop` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.external_record` | S | 1 | 3 |
@@ -41,7 +42,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
 | `lithos_loom.plugins.story_develop.github_access` | S | 1 | 4 |
-| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 17 |
+| `lithos_loom.plugins.story_develop.handoff` | L | 3 | 18 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
@@ -55,10 +56,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.publish_text` | M | 0 | 6 |
+| `lithos_loom.plugins.story_develop.resume` | M | 2 | 2 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | M | 3 | 1 |
-| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 16 |
+| `lithos_loom.plugins.story_develop.rounds` | L | 3 | 18 |
 | `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 30 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
@@ -127,6 +129,15 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `classify_execution` — Map a raw container outcome onto the ``execution_outcome`` axis.
 - def `render_check_summary` — Render the round's check-set for prompt injection (ADR §6).
 
+### `lithos_loom.plugins.story_develop.checkpoint`
+- class `RoundCheckpoint` — One round boundary of a run that was still going.
+- def `record_round_checkpoint` — Record the round *round_no* boundary of a live run. Best-effort.
+- def `record_round_entered` — Record that the loop has ENTERED round *round_no*. Best-effort.
+- def `round_checkpoint` — The last round boundary *run_dir* recorded, or ``None``.
+- def `from_state` — The checkpoint inside an already-read ``state.json``, or ``None``.
+- def `resumable_checkpoint` — *run_dir*'s checkpoint iff there is a committed round to resume from.
+- def `retained_checkpoint` — *run_dir*'s checkpoint iff deleting the dir would throw away resumable work.
+
 ### `lithos_loom.plugins.story_develop.coder_salvage`
 - def `nudge_for_handoff` — Re-prompt the coder once to write the missing handoff (#114).
 - def `written_by_dying_attempt` — True when a FAILED infra-class turn wrote (or rewrote) the handoff itself.
@@ -180,6 +191,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.daemon_io`
 - def `read_task_payload` — Parse the runner's ``task.json`` into a :class:`TaskContext`.
+- def `read_resume_run_dir` — The run dir the runner asked this dispatch to RESUME, or ``None``.
 - class `ProjectDevelopSettings` — The resolved per-project develop config for one daemon-mode run.
 - def `resolve_project_settings` — Resolve the daemon-mode run's develop config (PRD lookup contract).
 - def `apply_cli_fallbacks` — Layer route-level CLI model/effort flags UNDER the resolved settings.
@@ -299,6 +311,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `quote_agent_block` — *text* as quoted, indented lines under *label* — one prompt line per source line, so multi-line agent text cannot leave the block it was put in.
 - def `coder_handoff_name` — Filename for the coder's handoff in a given round (1-based).
 - def `reviewer_handoff_name` — Filename for a reviewer's handoff in a given round.
+- def `artifact_reviewer_token` — The pseudo-reviewer name an artifact-pass handoff is filed under.
 - def `read_regular_file` — Read at most *limit* bytes of *path*, or ``None`` if it is not a plain file.
 - def `read_handoff` — The text of an agent-written handoff, bounded to *limit* bytes.
 - def `render_log_section` — Render one conversation-log section as a list of lines (the caller joins).
@@ -409,6 +422,12 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `flatten_line` — *text* as one line with the invisibles out, and no double quote left to close a quotation with — :func:`publish_line` without the cut.
 - def `fence_untrusted` — *text* as a fenced block it cannot break out of, or ``""`` if empty.
 
+### `lithos_loom.plugins.story_develop.resume`
+- class `ResumePlan` — What is being continued: the dead run, its checkpoint, its last review.
+- class `Resumption` — A resume ready to run: the remainder-budget config, the loop entry, the plan.
+- def `prepare_resume` — Plan a resume of *prior_run_dir* under *config*, or say why not.
+- def `record_resumed_from` — Record on the RESUMED run whose branch it continues (provenance).
+
 ### `lithos_loom.plugins.story_develop.review_only`
 - def `panel_incomplete` — Whether the panel produced no usable review this pass.
 - def `intake_blocks` — Whether one intake pass blocks approval — the single blocking rule.
@@ -441,18 +460,20 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `commit_phase` — Commit the round's work (excluding the handoff dir) and auto-format it in place (#134). Sets ``ctx.new_commit`` / ``ctx.gated_sha``.
 - def `cost_ceiling_phase` — T7 cost ceiling. Called TWICE per round — ``when="pre_review"`` (before spending on reviews) and ``when="post_review"`` (after). The two calls are kept separate on purpose: approval (:func:`approval_phase`) runs between them and deliberately takes precedence when both an approval and the ceiling land in the same round.
 - def `fast_gate_phase` — #140/ADR §4: run the FAST deterministic checks on the round's new commit (candidate-staged checks are deferred to :func:`approval_phase`). Never terminal.
+- def `vouch_for_review` — Record that this round WAS reviewed, and what the panel produced.
 - def `panel_phase` — Run the reviewer panel — the one shared primitive (#154). Sets ``ctx.final_reviews`` / accrues ``ctx.review_cost``.
 - def `approval_phase` — Seal approval when ALL reviewers pass their OWN threshold this round (PRD #7). Runs the expensive candidate-staged checks once per committed tree (#140) and holds approval while a *required* check blocks (floor). Approval takes precedence over the same-round cost ceiling (the spend already happened).
 - def `no_change_verdict_phase` — The admitted no-change round (commit_phase, PR #396 review) is a VALIDATION pass, not an entry to the fix loop: approval sealed it in :func:`approval_phase`; reaching here means the panel rejected the coder's claim, or a required check is red on the unchanged head and the floor held. End the run with that rationale — a trigger that asked for nothing (an approval comment ingested as a finding, #380) must never drive paid rounds, nor push unrelated commits onto a delivered PR (opus round 2); the converge epilogue reports the claim unaddressed.
 - def `decision_phase` — The cheap escalation (9d5ebca6): a coder ``needs-decision`` the reviewer just declined to contest stops the run NOW — before another coder turn is paid — because the question is a product decision neither agent can settle by re-reading the code.
 - def `deadlock_phase` — T7 dispute escalation: a coder-disputed finding the reviewer kept blocking for 2 consecutive rounds stops the run with a human breadcrumb rather than grinding to max_rounds.
 - def `stall_phase` — T7 stall guard, keyed off finding IDENTITY: an empty round commit or an unchanged blocking set, two rounds running, stops the run.
+- def `record_boundary` — Checkpoint what round *round_no* left on the branch (5dbeb0c8 slice C).
 - def `run_round` — Sequence one develop round's phases. Returns the first phase's :class:`CycleExit` (terminating the loop), or ``None`` to continue to the next round. The order — and the TWO ``cost_ceiling_phase`` calls straddling approval — is load-bearing (see :func:`cost_ceiling_phase`).
 
 ### `lithos_loom.plugins.story_develop.run_outcome`
 - def `is_run_dir` — A run dir is recognised by its seeded ``handoff/`` subdir.
 - def `resolve_run_dir` — Resolve *key* (a run_id or task_id) to a run dir, newest run if a task.
-- def `read_state` — The run's terminal ``state.json`` (status + rounds + branch), or ``None``.
+- def `read_state` — The run's ``state.json`` (status + rounds + branch + blocks), or ``None``.
 - def `write_state` — Write the run's ``state.json``, MERGING over whatever is already there.
 - def `is_converge_run_dir` — Whether *run_dir* is a ``develop converge`` run's (``<work_dir>/converge/<id>``).
 - def `record_converge_intake` — Record the PR a converge run is converging, at INTAKE.

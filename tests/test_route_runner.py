@@ -1065,6 +1065,87 @@ async def test_runner_removes_work_dir_on_failure_when_not_retaining(
     assert not (tmp_path / "task-1").exists()
 
 
+async def test_a_resumable_run_survives_retain_failed_workdirs_false(
+    tmp_path: Path,
+) -> None:
+    """correctness/f-002: the hygiene setting must not eat the resume.
+
+    `retain_failed_workdirs = false` is for runs nobody will look at again — but
+    an infra death leaves a checkpointed branch the NEXT dispatch continues, and
+    that checkpoint lives under the per-task work dir. Reaping it turns the
+    operator's gate tick back into a from-scratch run and loses the paid rounds
+    this whole slice exists to keep.
+    """
+    from lithos_loom.plugins.story_develop import checkpoint
+
+    async def plugin_writing_a_checkpoint(**kwargs: Any) -> dict[str, Any]:
+        run_dir = kwargs["work_dir"] / "dead"
+        (run_dir / "handoff").mkdir(parents=True)
+        checkpoint.record_round_checkpoint(
+            run_dir,
+            round_no=4,
+            branch="story-dead",
+            head_sha="ba" * 20,
+            base_sha="b" * 40,
+        )
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "failed",
+            "exit_code": 1,
+            "run_id": "dead",
+            # the slice-B shape: an auth / container death that persisted
+            "escalation": {"reason": "infra", "summary": "coder auth_failed"},
+        }
+
+    def _runner(bus: EventBus, plugin: Any) -> RouteRunner:
+        return RouteRunner(
+            route=_route(),
+            bus=bus,
+            lithos=_lithos_mock(),
+            agent_id="lithos-orchestrator-test",
+            work_dir_base=tmp_path,
+            renew_interval_seconds=3600,
+            retain_failed_workdirs=False,
+            plugin_runner=plugin,
+        )
+
+    bus = EventBus()
+    runner = _runner(bus, plugin_writing_a_checkpoint)  # subscribes on construction
+    await bus.publish(_evt(payload=_payload("task-1")))
+    await _run_for(runner, seconds=0.2)
+
+    assert checkpoint.resumable_checkpoint(tmp_path / "task-1" / "dead") is not None
+
+    # …while a verdict on the WORK is reaped exactly as before: it will never be
+    # resumed, so keeping it would just defeat the operator's setting.
+    async def stalled_run(**kwargs: Any) -> dict[str, Any]:
+        run_dir = kwargs["work_dir"] / "dead2"
+        (run_dir / "handoff").mkdir(parents=True)
+        checkpoint.record_round_checkpoint(
+            run_dir,
+            round_no=4,
+            branch="story-dead2",
+            head_sha="ba" * 20,
+            base_sha="b" * 40,
+        )
+        return {
+            "schema_version": 1,
+            "task_id": "task-2",
+            "status": "failed",
+            "exit_code": 1,
+            "run_id": "dead2",
+            "escalation": {"reason": "stalled", "summary": "no new commit"},
+        }
+
+    bus2 = EventBus()
+    runner2 = _runner(bus2, stalled_run)
+    await bus2.publish(_evt(payload=_payload("task-2")))
+    await _run_for(runner2, seconds=0.2)
+
+    assert not (tmp_path / "task-2").exists()
+
+
 async def test_runner_keeps_work_dir_on_failure_when_retaining(
     tmp_path: Path,
 ) -> None:
@@ -1927,6 +2008,144 @@ async def test_failed_run_records_last_attempt_marker(tmp_path: Path) -> None:
     assert marker["run_id"] == "run-abc"
     assert marker["task_fingerprint"] == task_fingerprint(payload)
     assert marker["ended_at"]  # ISO timestamp, value not pinned
+
+
+async def test_failed_attempt_marker_records_the_escalation_reason(
+    tmp_path: Path,
+) -> None:
+    """5dbeb0c8 slice C: the marker says WHY, so a re-dispatch can tell an
+    infra death (continue the branch) from a verdict on the work (do not)."""
+    bus = EventBus()
+    infra = {
+        **_failed_result(),
+        "error": {"category": "environment", "message": "container vanished"},
+    }
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=AsyncMock(return_value=infra)
+    )
+
+    await bus.publish(_evt(payload=_payload("task-1")))
+    await _run_for(runner)
+
+    marker = lithos.task_update.await_args.kwargs["metadata"][
+        last_attempt_key("story-develop")
+    ]
+    assert marker["reason"] == "infra"
+
+
+async def test_a_host_death_points_the_next_dispatch_at_the_dead_run(
+    tmp_path: Path,
+) -> None:
+    """The dispatch after an infra death carries the dead run dir (slice C).
+
+    The signal is the story's own failed-attempt marker as it stood at dispatch
+    time — the route's last attempt died for a HOST reason and named a run whose
+    checkpoint has a committed round. Nothing else changes: the plugin decides
+    what to do with the pointer, and an ordinary dispatch carries none.
+    """
+    import json as _json
+
+    from lithos_loom.plugins.story_develop import checkpoint
+
+    bus = EventBus()
+    envelopes: list[dict[str, Any]] = []
+
+    async def capturing_plugin(**kwargs: Any) -> dict[str, Any]:
+        envelopes.append(_json.loads(kwargs["task_json_path"].read_text()))
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    dead_run = tmp_path / "task-1" / "dead"
+    (dead_run / "handoff").mkdir(parents=True)
+    checkpoint.record_round_checkpoint(
+        dead_run,
+        round_no=4,
+        branch="story-dead",
+        head_sha="ba" * 20,
+        base_sha="b" * 40,
+    )
+
+    def _marker(**extra: Any) -> dict[str, Any]:
+        return {
+            "project": "loom",
+            last_attempt_key("story-develop"): {
+                "status": "failed",
+                "ended_at": "2026-09-13T08:00:00+00:00",
+                "gate_id": "gate-1",  # the gate the operator has just ticked
+                **extra,
+            },
+        }
+
+    runner, _ = _make_runner(bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin)
+    await bus.publish(
+        _evt(
+            payload=_payload("task-1", metadata=_marker(reason="infra", run_id="dead"))
+        )
+    )
+    await _run_for(runner)
+    assert envelopes[-1]["resume"] == {
+        "run_dir": str(dead_run),
+        "reason": "infra",
+    }
+
+    # a verdict on the WORK is not resumed — that is a separate question
+    runner2, _ = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin
+    )
+    await bus.publish(
+        _evt(
+            payload=_payload("task-2", metadata=_marker(reason="failed", run_id="dead"))
+        )
+    )
+    await _run_for(runner2)
+    assert "resume" not in envelopes[-1]
+
+    # …and neither is a run with no resumable checkpoint
+    runner3, _ = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin
+    )
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                "task-3", metadata=_marker(reason="infra", run_id="never-existed")
+            )
+        )
+    )
+    await _run_for(runner3)
+    assert "resume" not in envelopes[-1]
+
+    # security/f-001: the run_id comes from a plugin's result.json, and this is
+    # the one place it is joined onto a path. A traversal reaches another story's
+    # run dir under the same work-dir base (story A's dispatch would continue
+    # story B's branch and deliver it as A's PR); an ABSOLUTE run_id discards the
+    # join entirely (`Path("/work/t") / "/tmp/evil"` IS `/tmp/evil`). Neither is
+    # a plain handle, and neither lands under this task's work dir.
+    other = tmp_path / "task-9" / "dead"
+    (other / "handoff").mkdir(parents=True)
+    checkpoint.record_round_checkpoint(
+        other,
+        round_no=7,
+        branch="story-other",
+        head_sha="cd" * 20,
+        base_sha="b" * 40,
+    )
+    for i, unsafe in enumerate(("../task-9/dead", str(other), "/tmp/evil")):
+        unsafe_runner, _ = _make_runner(
+            bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin
+        )
+        await bus.publish(
+            _evt(
+                payload=_payload(
+                    f"task-1{i}", metadata=_marker(reason="infra", run_id=unsafe)
+                )
+            )
+        )
+        await _run_for(unsafe_runner)
+        assert "resume" not in envelopes[-1], unsafe
 
 
 async def test_marker_write_failure_does_not_mask_release(tmp_path: Path) -> None:

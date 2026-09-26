@@ -67,6 +67,7 @@ __all__ = [
     "deliver_command_line",
     "human_gate_brief",
     "is_human_gate",
+    "is_plain_run_id",
     "is_loom_human_gate",
     "is_pr_gate",
     "parse_human_gate",
@@ -140,17 +141,32 @@ completing it (re-develop from scratch) and cancelling the story (abandon)."""
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
 
 
+def is_plain_run_id(run_id: str | None) -> bool:
+    """Whether *run_id* is a plain handle — safe to publish AND to join on a path.
+
+    The one predicate for both hazards this value carries, so a new consumer
+    cannot pick up only half of it: the command surfaces below render nothing
+    for anything else, and the route-runner's resume path (5dbeb0c8 slice C)
+    refuses to join anything else onto its work dir — a `run_id` arriving from a
+    plugin's ``result.json`` can otherwise be ``../<other-task>/<run>`` or an
+    absolute path, and ``Path.__truediv__`` discards the left side of the latter
+    entirely (security/f-001). ``docs/result-schema.json`` carries the matching
+    ``pattern`` + ``maxLength`` on every field that reaches either sink.
+    """
+    return bool(run_id) and _RUN_ID_RE.match(run_id or "") is not None
+
+
 def deliver_command_line(run_id: str) -> str | None:
     """The copy-pasteable ``develop deliver`` invocation for *run_id*.
 
     One source for every surface that offers the third choice — the gate
     brief here, the ``[NeedsHuman]`` finding, and the push sinks — so the
     command an operator copies out of a toast is the one the gate names.
-    ``None`` when *run_id* is not a plain handle (see :data:`_RUN_ID_RE`):
+    ``None`` when *run_id* is not a plain handle (:func:`is_plain_run_id`):
     there is then no safe command to offer, and no action is better than one
     that pastes an attacker's shell line.
     """
-    return f"{DELIVER_COMMAND} {run_id}" if _RUN_ID_RE.match(run_id or "") else None
+    return f"{DELIVER_COMMAND} {run_id}" if is_plain_run_id(run_id) else None
 
 
 def deliver_action(run_id: str) -> str | None:

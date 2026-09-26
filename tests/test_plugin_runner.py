@@ -104,6 +104,40 @@ def test_result_schema_rejects_a_run_id_that_is_not_a_plain_handle() -> None:
             )
 
 
+def test_result_schema_rejects_a_resume_run_id_that_is_not_a_plain_handle() -> None:
+    # security/f-001: the `resume` block's run_id is the one the runner records
+    # on the story's failed-attempt marker, and the slice-C resume path JOINS IT
+    # ONTO THE WORK DIR to find the run whose branch a re-dispatch continues —
+    # so it carries the same plain-handle rule as the top-level field. A
+    # schema-conformant result must not be able to say `../<other-task>/<run>`.
+    for bad in ("../task-9/dead", "/tmp/evil", "a/b", "x" * 65, ""):
+        with pytest.raises(PluginContractError):
+            validate_result_schema(
+                {
+                    "schema_version": 1,
+                    "task_id": "t1",
+                    "status": "interrupted",
+                    "exit_code": 30,
+                    "resume": {
+                        "resume_after": "2026-09-25T10:00:00+00:00",
+                        "run_id": bad,
+                    },
+                }
+            )
+    validate_result_schema(  # …and a plain handle still passes
+        {
+            "schema_version": 1,
+            "task_id": "t1",
+            "status": "interrupted",
+            "exit_code": 30,
+            "resume": {
+                "resume_after": "2026-09-25T10:00:00+00:00",
+                "run_id": "1a2b3c4d",
+            },
+        }
+    )
+
+
 def test_result_schema_accepts_escalation_block() -> None:
     # b91177d2: a failed run may describe why it stopped in the shape the
     # runner's needs-human gate is built from.

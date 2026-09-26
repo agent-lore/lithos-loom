@@ -173,7 +173,9 @@ def round_prompt(
         # #283 (PR #291 review): a panel-only pass shown the artifacts the
         # candidate checks collected AFTER this round's regular review —
         # its own handoff file, so the round's review is never clobbered.
-        review_file = handoff.reviewer_handoff_name(round_no, f"{name}_artifacts")
+        review_file = handoff.reviewer_handoff_name(
+            round_no, handoff.artifact_reviewer_token(name)
+        )
         prompt = render_prompt(
             handoff.load_prompt("reviewer_artifacts.md"),
             reviewer=name,

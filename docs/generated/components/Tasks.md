@@ -11,7 +11,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
-| `lithos_loom.gates` | L | 3 | 13 |
+| `lithos_loom.gates` | L | 3 | 14 |
 | `lithos_loom.task_graph` | S | 1 | 1 |
 | `lithos_loom.task_line` | S | 0 | 4 |
 | `lithos_loom.task_line_parser` | S | 2 | 1 |
@@ -19,6 +19,7 @@ Task-creation planning and parsing of Obsidian-Tasks task lines.
 ## Public API
 
 ### `lithos_loom.gates`
+- def `is_plain_run_id` — Whether *run_id* is a plain handle — safe to publish AND to join on a path.
 - def `deliver_command_line` — The copy-pasteable ``develop deliver`` invocation for *run_id*.
 - def `deliver_action` — The third action's full wording, or ``None`` (see above).
 - class `GateWriter` — The three Lithos calls gate creation needs (a structural subset of :class:`~lithos_loom.lithos_client.TaskClient`).
