@@ -339,7 +339,9 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         ref_names: list[str] = []
         for n in ctx.names:
             ref_names.append(handoff.reviewer_handoff_name(round_no - 1, n))
-            art = handoff.reviewer_handoff_name(round_no - 1, f"{n}_artifacts")
+            art = handoff.reviewer_handoff_name(
+                round_no - 1, handoff.artifact_reviewer_token(n)
+            )
             if (ctx.config.handoff_dir / art).is_file():
                 ref_names.append(art)
         review_files = ", ".join(f"`{n}`" for n in ref_names)
@@ -588,7 +590,13 @@ def fast_gate_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
     return None
 
 
-def vouch_for_review(ctx: RoundContext, round_no: int, panel: PanelRoundResult) -> None:
+def vouch_for_review(
+    ctx: RoundContext,
+    round_no: int,
+    panel: PanelRoundResult,
+    *,
+    artifact_pass: bool = False,
+) -> None:
     """Record that this round WAS reviewed, and what the panel produced.
 
     The resume's intake is read from an agent-writable mount, so both halves of
@@ -610,6 +618,15 @@ def vouch_for_review(ctx: RoundContext, round_no: int, panel: PanelRoundResult) 
 
     Kept per round, not just for the newest: a doctored newest round would
     otherwise fall back to a round with nothing to check it against.
+
+    The **artifact pass** (``artifact_pass=True``, #283 / #291) vouches through
+    the same door and ADDS to the round rather than replacing it: it writes its
+    verdicts to their own ``_artifacts`` handoffs
+    (:func:`handoff.artifact_reviewer_token`) and those verdicts control
+    approval, so a visual finding it files is as open as any other. Without this
+    a round that ended in an artifact finding, then died before the next panel,
+    resumed on the regular pass's LGTM alone — silently dropping the one finding
+    that was actually holding the run.
     """
     if panel.infra_failure is not None or panel.invalid_reviewer is not None:
         return
@@ -617,16 +634,20 @@ def vouch_for_review(ctx: RoundContext, round_no: int, panel: PanelRoundResult) 
     for outcome in panel.round_reviews:
         if outcome.status == "invalid":
             continue
+        name = (
+            handoff.artifact_reviewer_token(outcome.reviewer)
+            if artifact_pass
+            else outcome.reviewer
+        )
         fingerprint = handoff.file_fingerprint(
-            ctx.config.handoff_dir
-            / handoff.reviewer_handoff_name(round_no, outcome.reviewer)
+            ctx.config.handoff_dir / handoff.reviewer_handoff_name(round_no, name)
         )
         if fingerprint:
-            digests[outcome.reviewer] = fingerprint
+            digests[name] = fingerprint
     if not digests:
         return
     ctx.reviewed_round = round_no
-    ctx.reviewed_digests[round_no] = digests
+    ctx.reviewed_digests.setdefault(round_no, {}).update(digests)
 
 
 def panel_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
@@ -807,6 +828,9 @@ def _artifact_review_pass(
     # review's surviving non-blocking findings vanish from DevelopResult /
     # state.json metadata (the ledger kept them; the structured outcome lied).
     ctx.final_reviews = _combine_review_outcomes(ctx.final_reviews, panel.round_reviews)
+    # …and the pass's own handoffs join this round's review provenance, so a
+    # resume after a later death reads the visual findings too.
+    vouch_for_review(ctx, round_no, panel, artifact_pass=True)
     if panel.interrupted:
         return CycleExit(
             status="interrupted",

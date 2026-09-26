@@ -240,6 +240,45 @@ def test_artifact_pass_findings_hold_approval_and_continue(tmp_path: Path) -> No
     assert ctx.final_reviews and ctx.final_reviews[0].passed is False
 
 
+def test_the_artifact_pass_joins_the_rounds_review_provenance(
+    tmp_path: Path,
+) -> None:
+    """5dbeb0c8 slice C: a visual finding must survive a later infra death.
+
+    ``panel_phase`` vouches for the regular reviewer handoffs, but the artifact
+    pass writes its approval-controlling verdicts to their own ``_artifacts``
+    files. Left out of ``reviewed_digests``, a round that ended in a held
+    artifact finding and then died resumed on the regular pass's LGTM alone —
+    the one finding actually holding the run silently dropped from the intake.
+    """
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    ctx, _ = _artifact_ctx(tmp_path, collects=True, panel_passes=False)
+    handoff_dir = ctx.config.handoff_dir
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+    regular = handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+    regular.write_text("## Status: LGTM\n## Summary\ncode reads fine\n")
+    artifacts = handoff_dir / handoff_mod.reviewer_handoff_name(
+        1, handoff_mod.artifact_reviewer_token("correctness")
+    )
+    artifacts.write_text("## Status: FINDINGS\n## Summary\nnote-320 overflows\n")
+    # what `panel_phase` already recorded for the regular pass this round
+    ctx.reviewed_round = 1
+    ctx.reviewed_digests[1] = {
+        "correctness": handoff_mod.file_fingerprint(regular) or ""
+    }
+
+    assert rounds_mod.approval_phase(ctx, 1) is None  # the pass filed findings
+
+    # ADDED to the round, never replacing it: both handoffs are what a resume
+    # reads, and each under the token its filename is built from.
+    assert ctx.reviewed_round == 1
+    assert set(ctx.reviewed_digests[1]) == {"correctness", "correctness_artifacts"}
+    assert ctx.reviewed_digests[1]["correctness_artifacts"] == (
+        handoff_mod.file_fingerprint(artifacts)
+    )
+
+
 def test_no_new_artifacts_seals_without_extra_pass(tmp_path: Path) -> None:
     ctx, panel_calls = _artifact_ctx(tmp_path, collects=False, panel_passes=True)
 

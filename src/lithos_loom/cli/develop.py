@@ -16,12 +16,14 @@ commands:
   far.
 * ``develop prune`` — delete the on-disk run-state dirs of finished runs
   (``--dry-run`` previews, naming the reason + size per candidate). Finished is
-  read from **liveness**, not from one file: the run wrote its terminal
-  ``state.json`` / ``conversation.md``, or **both**: nothing is alive for it —
+  read from **liveness**, not from one file: the run recorded its terminal
+  verdict (``state.json``'s top-level ``status``, or ``conversation.md``), or
+  **both**: nothing is alive for it —
   no running agent container, and the owner process it stamped into its run dir
   (``story_develop.run_owner``) provably gone — *and* nothing anywhere under it
   written for longer than one agent turn, the grace window a just-stopped run
-  gets. An in-flight run is never removed out from under a live daemon, and a
+  gets. An in-flight run is never removed out from under a live daemon, a run
+  whose checkpoint a re-dispatch resumes is kept and named ``resumable``, and a
   dir the rule cannot classify — docker unavailable, or a tree whose age it
   could not establish — is kept and named ``unknown``.
 
@@ -39,9 +41,10 @@ and queries ``docker`` for container/agent liveness — no new index file (issue
 observes **in-flight + failed/interrupted** runs (exactly the watch-a-live-run
 case); a succeeded run's dir is gone.
 
-Mid-run, ``conversation.md`` / ``state.json`` don't exist yet (the plugin writes
-them only at the end), so ``dump`` assembles from the per-round ``handoff/``
-files via :func:`story_develop.handoff.conversation_log`.
+Mid-run there is no ``conversation.md`` and no terminal verdict in
+``state.json`` (the plugin writes those only at the end; the file itself exists
+from the first round boundary's checkpoint), so ``dump`` assembles from the
+per-round ``handoff/`` files via :func:`story_develop.handoff.conversation_log`.
 """
 
 from __future__ import annotations
@@ -749,6 +752,10 @@ def _delivered_pr(
 _FINISHED = "finished"
 _IN_FLIGHT = "in flight"
 _UNCLASSIFIED = "unknown"
+# A run that is over but whose branch the NEXT dispatch continues (5dbeb0c8
+# slice C): its own state, because it is neither of the other two — nothing is
+# alive for it, and it is the one thing prune must not reclaim.
+_RESUMABLE = "resumable"
 # Two more states, internal to the liveness probes (:class:`_Liveness`): a
 # **positively dead** owner is a different answer from **no signal at all**,
 # and the difference decides whether the idle window is consulted.
@@ -803,7 +810,8 @@ class PruneVerdict:
     """Why ``prune`` will — or won't — remove a run dir.
 
     ``state`` is :data:`_FINISHED` (safe to delete), :data:`_IN_FLIGHT` (a live
-    run: never touched) or :data:`_UNCLASSIFIED` (the rule could not tell, so
+    run: never touched), :data:`_RESUMABLE` (over, but holding a checkpoint a
+    re-dispatch continues) or :data:`_UNCLASSIFIED` (the rule could not tell, so
     the dir is kept and named). ``reason`` is the operator-facing "why".
     """
 
@@ -962,22 +970,46 @@ def _looks_like_a_run_dir(path: Path) -> bool:
     return (
         any((path / marker).is_dir() for marker in _RUN_DIR_MARKERS)
         or run_owner.owner_recorded(path)
-        or _has_terminal_log(path)
+        or _has_epilogue_file(path)
     )
 
 
-def _has_terminal_log(run_dir: Path) -> bool:
-    """Whether the run wrote its epilogue.
+def _has_epilogue_file(run_dir: Path) -> bool:
+    """Whether either epilogue file EXISTS — recognition only, never a verdict.
 
-    ``develop()`` writes ``conversation.md`` and then ``state.json`` after the
-    agent containers stop, so either file means the run reached teardown. A run
-    killed before the epilogue (OOM, SIGKILL, a crash) has neither — which is
-    why this is only *one* of prune's finished signals: when it was the only
-    one, a prune left 54 dirs / 8.9 GB behind as "in flight" forever.
+    ``_looks_like_a_run_dir``'s job is "is this loom's dir at all", and for that
+    the bare presence of a marker file is exactly the right (and widest) test.
+    Whether the run is *over* is :func:`_has_terminal_log`'s, and since the
+    per-round checkpoint (5dbeb0c8 slice C) those are no longer the same
+    question: ``state.json`` is created at the first round boundary.
     """
     return (run_dir / run_outcome.CONVERSATION_LOG).is_file() or (
         run_dir / run_outcome.STATE_FILE
     ).is_file()
+
+
+def _has_terminal_log(run_dir: Path) -> bool:
+    """Whether the run reached its epilogue.
+
+    ``develop()`` writes ``conversation.md`` and then ``state.json`` after the
+    agent containers stop, so the log means the run reached teardown. The state
+    file does NOT: the loop now records a
+    :mod:`~lithos_loom.plugins.story_develop.checkpoint` block in it at every
+    round boundary, so a mid-loop run has one from round 1 onward — what marks
+    the run over there is the **top-level verdict** the
+    epilogue writes (the same signal ``run_outcome.run_phase`` reads), not the
+    file. Reading the file as the verdict made every checkpointed run look
+    finished the moment its first round landed, ahead of even the idle/grace
+    window.
+
+    A run killed before the epilogue (OOM, SIGKILL, a crash) has neither — which
+    is why this is only *one* of prune's finished signals: when it was the only
+    one, a prune left 54 dirs / 8.9 GB behind as "in flight" forever.
+    """
+    if (run_dir / run_outcome.CONVERSATION_LOG).is_file():
+        return True
+    state = run_outcome.read_state(run_dir)
+    return state is not None and bool(state.get("status"))
 
 
 @dataclass(frozen=True)
@@ -1102,6 +1134,11 @@ def _prune_verdict(
 ) -> PruneVerdict:
     """Classify *run_dir* for ``prune``: finished, in flight, or unclassifiable.
 
+    A run holding a **resumable checkpoint** — a committed round whose stop is
+    one a re-dispatch continues (:func:`checkpoint.retained_checkpoint`) — is
+    :data:`_RESUMABLE`, outranked only by a live container: it is the one dir
+    whose deletion destroys paid work that is still going to be used.
+
     Finished is the run's epilogue (:func:`_has_terminal_log`), or **both**
     halves of the liveness rule: nothing is alive for it *and* nothing anywhere
     under it has been written for longer than one agent turn — the run's OWN
@@ -1128,6 +1165,21 @@ def _prune_verdict(
     live = _run_liveness(run_dir)
     if live.state == _IN_FLIGHT:
         return PruneVerdict(_IN_FLIGHT, live.reason)
+    if (cp := checkpoint.retained_checkpoint(run_dir)) is not None:
+        # Ahead of every finished signal, including the terminal verdict: an
+        # `infra_failed` run writes an ordinary epilogue and is exactly the run
+        # the operator's gate tick is about to continue on its branch
+        # (5dbeb0c8 slice C). Deleting it here takes the checkpoint, the
+        # worktree and the committed rounds with it, and the re-dispatch
+        # silently develops from scratch — the whole cost this slice exists to
+        # avoid. Held until the task's work dir goes with a success or the
+        # operator removes it by hand; the line below is what tells them.
+        return PruneVerdict(
+            _RESUMABLE,
+            f"round {cp.round} is committed on {cp.branch} @ {cp.head_sha[:12]} "
+            "— a re-dispatch resumes it; delete it by hand once the story is "
+            "settled",
+        )
     if _has_terminal_log(run_dir):
         return PruneVerdict(_FINISHED, "terminal log written")
     if pr := _delivered_pr(run_dir, delivered):
@@ -1474,8 +1526,11 @@ def develop_prune(
 
     Succeeded runs are reaped by the route-runner; this clears the failed /
     interrupted / killed dirs (and the on-demand ``converge`` / ``review``
-    worktrees) that accumulate. A run is *finished* when it wrote its terminal
-    ``state.json`` / ``conversation.md``, **or** when both halves of the
+    worktrees) that accumulate. A run is *finished* when it recorded its
+    terminal verdict (a top-level ``status`` in ``state.json``, or
+    ``conversation.md``; the file alone is not the signal — the per-round
+    checkpoint writes ``state.json`` from round 1 onward), **or** when both
+    halves of the
     liveness rule hold: nothing is alive for it — no running agent container,
     and the process it stamped into its run dir at start provably gone — *and*
     nothing anywhere under it written for longer than one agent turn (the grace
@@ -1486,7 +1541,12 @@ def develop_prune(
     parent run; a ``merge-gate``
     worktree, which has no handoff dir either, is judged by the same rule. Every
     in-flight run — including one still in its startup window — is left
-    untouched, and so is any dir the rule cannot classify (docker unavailable,
+    untouched. So is a run holding a **resumable checkpoint**: a committed round
+    whose stop is one the next dispatch continues on its branch (a host death, a
+    persisted infra failure, a usage-limited pause). That dir is the paid work
+    the operator's gate tick is about to resume, so it is reported
+    ``resumable — kept`` until the story is settled and never deleted on an age
+    window. Kept too is any dir the rule cannot classify (docker unavailable,
     an owner it cannot check, a tree whose age it cannot establish — unreadable,
     future-stamped, or too large to walk): those are ``unknown — kept``.
     ``--dry-run`` previews without deleting, naming why each candidate counts as

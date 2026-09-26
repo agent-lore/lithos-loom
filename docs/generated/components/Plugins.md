@@ -24,7 +24,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 11 |
 | `lithos_loom.plugins.story_develop.check_set` | S | 3 | 2 |
-| `lithos_loom.plugins.story_develop.checkpoint` | M | 1 | 5 |
+| `lithos_loom.plugins.story_develop.checkpoint` | M | 1 | 6 |
 | `lithos_loom.plugins.story_develop.coder_salvage` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.config` | L | 2 | 15 |
 | `lithos_loom.plugins.story_develop.conflict_resolve` | M | 3 | 5 |
@@ -42,7 +42,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
 | `lithos_loom.plugins.story_develop.github_access` | S | 1 | 4 |
-| `lithos_loom.plugins.story_develop.handoff` | M | 3 | 17 |
+| `lithos_loom.plugins.story_develop.handoff` | L | 3 | 18 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
@@ -136,6 +136,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `round_checkpoint` — The last round boundary *run_dir* recorded, or ``None``.
 - def `from_state` — The checkpoint inside an already-read ``state.json``, or ``None``.
 - def `resumable_checkpoint` — *run_dir*'s checkpoint iff there is a committed round to resume from.
+- def `retained_checkpoint` — *run_dir*'s checkpoint iff deleting the dir would throw away resumable work.
 
 ### `lithos_loom.plugins.story_develop.coder_salvage`
 - def `nudge_for_handoff` — Re-prompt the coder once to write the missing handoff (#114).
@@ -310,6 +311,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `quote_agent_block` — *text* as quoted, indented lines under *label* — one prompt line per source line, so multi-line agent text cannot leave the block it was put in.
 - def `coder_handoff_name` — Filename for the coder's handoff in a given round (1-based).
 - def `reviewer_handoff_name` — Filename for a reviewer's handoff in a given round.
+- def `artifact_reviewer_token` — The pseudo-reviewer name an artifact-pass handoff is filed under.
 - def `read_regular_file` — Read at most *limit* bytes of *path*, or ``None`` if it is not a plain file.
 - def `read_handoff` — The text of an agent-written handoff, bounded to *limit* bytes.
 - def `render_log_section` — Render one conversation-log section as a list of lines (the caller joins).

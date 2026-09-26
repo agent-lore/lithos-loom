@@ -712,6 +712,50 @@ def test_prune_removes_killed_run_with_no_live_process_and_old_mtime(
     assert "KiB" in out  # the size of what was reclaimed
 
 
+def test_prune_keeps_a_dead_run_holding_a_resumable_checkpoint(
+    patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """5dbeb0c8 slice C: prune must not delete the rounds a re-dispatch resumes.
+
+    Two ways the same dir was being reclaimed before the operator could tick the
+    gate: the per-round checkpoint CREATES ``state.json`` at the first boundary,
+    so file-presence read as "terminal log written" made every checkpointed run
+    finished ahead of even the idle window; and an ``infra_failed`` run writes a
+    perfectly ordinary epilogue, so the verdict alone would delete precisely the
+    run whose branch the gate tick continues.
+    """
+    from lithos_loom.plugins.story_develop import checkpoint
+
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])  # docker: none
+
+    # (a) host death mid-loop: a checkpoint, no verdict at all, long idle.
+    killed = _make_run(patched, task_id="t-1", run_id="killed", rounds={2: ["cq"]})
+    checkpoint.record_round_checkpoint(
+        killed, round_no=2, branch="feat/x", head_sha="ba" * 20, base_sha="a" * 40
+    )
+    # (b) the graceful shape of the same thing: a terminal `infra_failed`.
+    infra = _make_run(patched, task_id="t-2", run_id="infra", rounds={2: ["cq"]})
+    checkpoint.record_round_checkpoint(
+        infra, round_no=2, branch="feat/y", head_sha="cb" * 20, base_sha="a" * 40
+    )
+    run_outcome.write_state(infra, {"status": "infra_failed", "rounds": 2})
+    # (c) a verdict on the WORK never resumes — its checkpoint holds nothing.
+    stalled = _make_run(patched, task_id="t-3", run_id="stalled", rounds={2: ["cq"]})
+    checkpoint.record_round_checkpoint(
+        stalled, round_no=2, branch="feat/z", head_sha="db" * 20, base_sha="a" * 40
+    )
+    run_outcome.write_state(stalled, {"status": "stalled", "rounds": 2})
+    for run_dir in (killed, infra, stalled):
+        _backdate(run_dir, 7200)
+
+    develop.develop_prune(config=None, dry_run=False, output_format="text")
+    out = capsys.readouterr().out
+    assert killed.exists() and infra.exists()
+    assert "resumable — kept killed" in out and "resumable — kept infra" in out
+    assert "a re-dispatch resumes it" in out
+    assert not stalled.exists() and "removed stalled" in out
+
+
 def test_prune_keeps_recent_run_with_no_terminal_log(
     patched: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

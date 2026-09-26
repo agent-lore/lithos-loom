@@ -44,7 +44,14 @@ long, expensive runs.
   every round, so loom never lets it choose the round and never reads a review
   that has since been rewritten; discovery is only a legacy fallback, reviewer
   names must be plain tokens, and the listing, the files read and the rendered
-  text are all capped) — rendered from `resume_coder_init.md`: the work is the coder's own earlier work, so the
+  text are all capped). An **artifact-review pass**'s handoffs are part of that
+  round's record too, under their own `<reviewer>_artifacts` token, so a visual
+  finding that was holding approval is carried rather than lost behind the code
+  review's LGTM. And when the run being resumed is itself a resume that died
+  before its own panel ever ran, the intake follows its `resumed_from`
+  provenance back to the last session on this branch that *did* review — the
+  brief says so, so the coder reads those findings as still open. Rendered from
+  `resume_coder_init.md`: the work is the coder's own earlier work, so the
   prompt tells it to read the branch and the commit history before changing
   anything and to build on those commits, not restart them. (Cold-start from the
   handoffs rather than the session transcript is deliberate: a revoked token or a

@@ -41,12 +41,12 @@ from pathlib import Path
 
 from ...runner import git, worktree
 from . import handoff
-from .checkpoint import RoundCheckpoint, resumable_checkpoint
+from .checkpoint import RoundCheckpoint, resumable_checkpoint, round_checkpoint
 from .config import DevelopConfig
 from .handoff import HandoffError
 from .loop_entry import LoopEntry
 from .panel import ReviewOutcome
-from .run_outcome import write_state
+from .run_outcome import read_state, write_state
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +93,18 @@ _REVIEW_HANDOFF_RE = re.compile(r"^round_(\d+)_review_(.+)\.md$")
 # * the directory listing itself is bounded, so a dir full of planted names
 #   costs a bounded index rather than a few hundred MB of transient strings.
 _REVIEWER_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
-MAX_INTAKE_REVIEWERS = 6  # the largest canonical panel is 5
+# The largest canonical panel is 5, and a round that ran an artifact pass files
+# a second handoff per reviewer under its own `_artifacts` token (#283 / #291) —
+# both are vouched for, so a fully-reviewed round is up to 2x the panel.
+MAX_INTAKE_REVIEWERS = 12
 MAX_INTAKE_FINDING_CHARS = 20_000
 MAX_INTAKE_SCAN_ENTRIES = 4096  # a real run's dir holds a handful per round
+# How far back the intake follows the ``resumed_from`` chain for a review. Back-
+# to-back infra deaths are exactly this feature's target condition, so the chain
+# is real; it is also loom-written and one link per re-dispatch, so anything
+# beyond a handful means a link points at itself or at a cycle. Bounded rather
+# than trusted, like everything else the intake reads off disk.
+MAX_RESUME_CHAIN = 8
 
 # The prompt the resumed run's round 1 renders instead of ``coder_init.md``:
 # the work is already on the branch and the coder must continue it, which is
@@ -112,6 +121,10 @@ class ResumePlan:
     checkpoint: RoundCheckpoint
     intake_round: int  # the round whose reviewer handoffs seed the new coder
     intake_reviews: list[ReviewOutcome]
+    # WHICH run that round belongs to. Usually ``prior_run_dir``; an earlier
+    # link of the resume chain when this one died before its own panel ran
+    # (:func:`_intake_reviews`), in which case the round number is that run's.
+    intake_run_dir: Path
 
 
 @dataclass(frozen=True)
@@ -318,10 +331,10 @@ def _no_review() -> list[ReviewOutcome]:
     ]
 
 
-def _intake_reviews(
+def _recorded_intake(
     prior_run_dir: Path, checkpoint: RoundCheckpoint, panel: Sequence[str]
 ) -> tuple[list[ReviewOutcome], int]:
-    """The dead run's last reviewer verdicts, as loop-entry intake.
+    """ONE run's last reviewer verdicts, as loop-entry intake.
 
     **Which round, AND what it said, are loom's own answers — not the
     directory's** (security/f-003, f-005). The handoff dir is one flat RW mount
@@ -383,12 +396,108 @@ def _intake_reviews(
     return _no_review(), 0
 
 
+def _prior_link(run_dir: Path) -> Path | None:
+    """The run *run_dir* itself resumed, or ``None``.
+
+    Read from the ``resumed_from`` provenance loom writes on every resumed run
+    (:func:`record_resumed_from`) — never from the handoff dir, which the agents
+    can write. The link is resolved as a SIBLING: ``run_id`` joined onto the same
+    per-task dir, and then re-checked to BE a direct child of it, which is the
+    check ``daemon_io.read_resume_run_dir`` applies to the pointer that got us
+    here. Containment is the whole rule — a traversal, an absolute value (a join
+    discards the left side of one entirely) and a symlink out all fail it — so
+    the walk can only ever reach runs of the task being resumed, whatever the
+    recorded path says. Nothing is expanded: the recorded ``run_dir`` is
+    provenance for the operator, not a path this follows.
+    """
+    state = read_state(run_dir) or {}
+    block = state.get(RESUMED_FROM_KEY)
+    if not isinstance(block, dict):
+        return None
+    run_id = block.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        return None
+    prior = run_dir.parent / run_id
+    try:
+        contained = prior.resolve().parent == run_dir.parent.resolve()
+    except OSError:
+        return None
+    if not contained or not prior.is_dir():
+        logger.warning(
+            "resume: ignoring chain link %r — not a run beside %s",
+            run_id[:80],
+            run_dir.parent,
+        )
+        return None
+    return prior
+
+
+def _intake_reviews(
+    prior_run_dir: Path, checkpoint: RoundCheckpoint, panel: Sequence[str]
+) -> tuple[list[ReviewOutcome], int, Path]:
+    """The last review recorded on this BRANCH, as loop-entry intake.
+
+    Usually *prior_run_dir*'s own (:func:`_recorded_intake`). But a resumed run
+    starts with an empty review record — it vouches for a round only once its
+    own panel has run — so a second infra death before that point would leave a
+    checkpoint with no reviewed round, and the next resume would hand the coder
+    "no review recorded" while the first run's still-open findings sat one link
+    back. Back-to-back infra failures are this feature's own target condition,
+    and a blind coder can spend the remaining paid rounds rediscovering work the
+    branch was already told about — so when a link vouches for nothing, the
+    ``resumed_from`` provenance is followed to the one before it.
+
+    Only loom's own records are walked and only loom's own rounds are read
+    within them (:func:`_recorded_intake`), so the chain inherits the intake's
+    trust rules whole: a link whose checkpoint is missing or corrupt ends the
+    walk exactly as a rejected checkpoint ends a resume. Returns the intake, the
+    round it came from (0 = none anywhere on the chain) and the run dir that
+    round belongs to.
+    """
+    run_dir, cp = prior_run_dir, checkpoint
+    seen = {run_dir}
+    for _ in range(MAX_RESUME_CHAIN):
+        outcomes, intake_round = _recorded_intake(run_dir, cp, panel)
+        if intake_round:
+            return outcomes, intake_round, run_dir
+        prior = _prior_link(run_dir)
+        if prior is None or prior in seen:
+            break
+        prior_cp = round_checkpoint(prior)
+        if prior_cp is None:
+            logger.info(
+                "resume: %s records no usable checkpoint; the chain's intake "
+                "ends at %s",
+                prior,
+                run_dir.name,
+            )
+            break
+        logger.info(
+            "resume: %s vouched for no review; taking the intake from the run "
+            "it continued (%s)",
+            run_dir.name,
+            prior.name,
+        )
+        seen.add(prior)
+        run_dir, cp = prior, prior_cp
+    return _no_review(), 0, prior_run_dir
+
+
 def _resume_brief(plan: ResumePlan, *, rounds_left: int) -> str:
     """The `{resume_brief}` slot: what this run is picking up, for the coder."""
     cp = plan.checkpoint
     spent = f" and spent ${cp.branch_cost_usd:.2f}" if cp.branch_cost_usd else ""
+    carried = plan.intake_run_dir != plan.prior_run_dir
     reviewed = (
-        f"The findings below are round {plan.intake_round}'s review of that work."
+        (
+            f"The findings below are round {plan.intake_round}'s review of this "
+            "branch — the last one recorded before it was interrupted, carried "
+            "forward because the session after it died before its own panel ran, "
+            "so treat them as still open unless the branch already answers them."
+            if carried
+            else f"The findings below are round {plan.intake_round}'s review of "
+            "that work."
+        )
         if plan.intake_round
         else "No review of that work was recorded before the run died."
     )
@@ -484,7 +593,7 @@ def prepare_resume(
                 "ceiling"
             )
 
-    intake_reviews, intake_round = _intake_reviews(
+    intake_reviews, intake_round, intake_run_dir = _intake_reviews(
         prior_run_dir,
         checkpoint,
         [spec.name for spec in config.effective_reviewers],
@@ -494,6 +603,7 @@ def prepare_resume(
         checkpoint=checkpoint,
         intake_round=intake_round,
         intake_reviews=intake_reviews,
+        intake_run_dir=intake_run_dir,
     )
     resumed = replace(config, max_rounds=rounds_left, max_cost_usd=cost_left)
     # The live base ref the range is resolved against each round (S5c). The
@@ -533,6 +643,11 @@ def prepare_resume(
         f"(branch {checkpoint.branch} @ {checkpoint.head_sha[:12]}, "
         f"${checkpoint.branch_cost_usd:.2f} spent): {rounds_left} round(s) left"
         f"{ceiling}; intake is round {intake_round or 'n/a'}'s review"
+        + (
+            f" (carried from run {intake_run_dir.name})"
+            if intake_round and intake_run_dir != prior_run_dir
+            else ""
+        )
     )
     return Resumption(config=resumed, entry=entry, plan=plan, note=note), ""
 
@@ -556,6 +671,9 @@ def record_resumed_from(run_dir: Path, plan: ResumePlan) -> None:
                 "branch": cp.branch,
                 "head_sha": cp.head_sha,
                 "intake_round": plan.intake_round,
+                # Which run that round belongs to — ``run_id`` above unless the
+                # intake was carried from further back down the chain.
+                "intake_run_id": plan.intake_run_dir.name,
             }
         },
     )

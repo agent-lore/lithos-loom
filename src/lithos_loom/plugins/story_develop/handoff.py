@@ -293,6 +293,19 @@ def reviewer_handoff_name(round_no: int, reviewer: str) -> str:
     return f"round_{round_no:02d}_review_{reviewer}.md"
 
 
+# The artifact pass (#283 / #291) files its own handoff per reviewer, under a
+# pseudo-reviewer name so it sits beside the regular review rather than
+# replacing it. Single-sourced because three unrelated readers have to agree on
+# it: the next round's coder prompt, the pass's own prompt, and the resume
+# intake's provenance (which fingerprints the file under exactly this token).
+ARTIFACT_REVIEWER_SUFFIX = "_artifacts"
+
+
+def artifact_reviewer_token(reviewer: str) -> str:
+    """The pseudo-reviewer name an artifact-pass handoff is filed under."""
+    return f"{reviewer}{ARTIFACT_REVIEWER_SUFFIX}"
+
+
 def _read_or_missing(path: Path) -> str:
     """Body of a handoff file, or a placeholder if it was never written."""
     try:
@@ -438,7 +451,7 @@ def conversation_log(handoff_dir: Path, rounds: int, reviewers: Sequence[str]) -
         # per-reviewer file — the review that actually controlled approval
         # belongs in the audit trail. Optional: rendered only when present.
         for reviewer in reviewers:
-            name = reviewer_handoff_name(r, f"{reviewer}_artifacts")
+            name = reviewer_handoff_name(r, artifact_reviewer_token(reviewer))
             if (handoff_dir / name).is_file():
                 entries.append((f"Reviewer [{reviewer}] (artifact pass)", name))
         parts += render_log_section(handoff_dir, f"## Round {r}", entries)

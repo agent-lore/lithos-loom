@@ -46,6 +46,8 @@ __all__ = [
     "CHECKPOINT_KEY",
     "from_state",
     "RESUMABLE_ESCALATION_REASONS",
+    "RESUMABLE_STATUSES",
+    "retained_checkpoint",
     "RoundCheckpoint",
     "record_round_checkpoint",
     "record_round_entered",
@@ -66,6 +68,15 @@ CHECKPOINT_KEY = "checkpoint"
 # complete the gate" should continue the branch rather than start over is a
 # separate, bigger question that this deliberately does not answer.
 RESUMABLE_ESCALATION_REASONS = frozenset({"infra", "resume_exhausted"})
+
+# The same policy read off the RUN rather than off the story: the ``state.json``
+# verdicts whose checkpoint a later dispatch may continue. A host death mid-loop
+# writes no verdict at all (the process is gone before the epilogue), and the two
+# statuses here are the graceful shapes of the same thing — a retry-class failure
+# that persisted (`infra_failed`) and a usage-limited run whose designed recovery
+# IS a re-dispatch (`interrupted`). Every other status is a verdict on the WORK.
+# Kept beside the reasons above so the two halves of one policy cannot drift.
+RESUMABLE_STATUSES = frozenset({"infra_failed", "interrupted"})
 
 
 @dataclass(frozen=True)
@@ -433,6 +444,40 @@ def resumable_checkpoint(run_dir: Path) -> RoundCheckpoint | None:
     :func:`.resume.prepare_resume`'s.
     """
     checkpoint = round_checkpoint(run_dir)
+    if checkpoint is None or not checkpoint.has_committed_round:
+        return None
+    return checkpoint
+
+
+def retained_checkpoint(run_dir: Path) -> RoundCheckpoint | None:
+    """*run_dir*'s checkpoint iff deleting the dir would throw away resumable work.
+
+    The disk-reclaim half of the resume policy, for ``develop prune``. Prune has
+    no Lithos to read the story's failed-attempt marker from, so it asks the run
+    what it asks everything else — its own files: a committed round
+    (:func:`resumable_checkpoint`) whose run recorded **no verdict** (a host
+    death mid-loop: the epilogue never ran) or one of the host verdicts in
+    :data:`RESUMABLE_STATUSES`.
+
+    This is why ``state.json``'s mere EXISTENCE cannot be prune's finished
+    signal any more (the checkpoint now creates that file at the first round
+    boundary), and why the verdict alone is not enough either: an ``infra_failed``
+    run writes a perfectly ordinary terminal ``state.json``, and it is precisely
+    the run whose branch the operator's gate tick is about to continue. A verdict
+    on the WORK — ``approved``, ``max_rounds``, ``stalled``, ``disputed``, a
+    plain ``failed`` — never resumes, so its checkpoint holds nothing prune must
+    keep.
+
+    Held until the dir goes with its task (the route-runner reaps the whole work
+    dir on success) or the operator removes it by hand, never merely for an age
+    window: the retry surface is a human gate in Lithos, and the wait for a human
+    is unbounded by construction.
+    """
+    state = read_state(run_dir)
+    status = (state or {}).get("status")
+    if isinstance(status, str) and status and status not in RESUMABLE_STATUSES:
+        return None
+    checkpoint = from_state(state)
     if checkpoint is None or not checkpoint.has_committed_round:
         return None
     return checkpoint

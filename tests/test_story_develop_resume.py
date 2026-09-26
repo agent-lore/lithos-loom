@@ -25,7 +25,11 @@ from lithos_loom.plugins.story_develop.handoff import (
     render_findings,
     reviewer_handoff_name,
 )
-from lithos_loom.plugins.story_develop.resume import prepare_resume
+from lithos_loom.plugins.story_develop.resume import (
+    prepare_resume,
+    record_resumed_from,
+)
+from lithos_loom.plugins.story_develop.run_outcome import write_state
 
 _FINDINGS = (
     "## Status: FINDINGS\n## Summary\nOne issue.\n## Findings\n"
@@ -206,6 +210,137 @@ def test_intake_is_empty_but_present_when_nothing_was_reviewed(
     # rather than a blank section (and `intake_reviews is not None` still
     # selects the cold-start entry).
     assert len(resumption.entry.intake_reviews) == 1
+    assert resumption.entry.intake_reviews[0].findings == []
+
+
+def test_the_intake_is_carried_through_a_pre_panel_death_in_the_chain(
+    tmp_path: Path,
+) -> None:
+    """resume → the resumed run dies before its own panel → resume again.
+
+    A resumed run vouches for a review only once its OWN panel has run, so a
+    second infra death before that point leaves a checkpoint with no reviewed
+    round — and the next resume used to hand the coder "no review recorded"
+    while the first run's still-open findings sat one link back on the same
+    branch. Back-to-back infra failures are this feature's target condition, and
+    a blind coder spends the remaining paid rounds rediscovering known work.
+    The ``resumed_from`` provenance is followed instead.
+    """
+    repo, base, head = _repo(tmp_path)
+    dead = _dead_run(
+        tmp_path,
+        base=base,
+        head=head,
+        repo=repo,
+        reviews={2: _FINDINGS.format(rationale="the live finding")},
+    )
+    config = _config(repo, tmp_path, max_rounds=8, max_cost_usd=20.0)
+
+    first, _ = prepare_resume(config, dead)
+    assert first is not None and first.plan.intake_round == 2
+
+    # …the run that continued it, killed in its first round's coder turn: a
+    # committed round, and nothing vouched (no panel ever ran).
+    resumed = tmp_path / "work" / "task-1" / "resumed"
+    (resumed / "handoff").mkdir(parents=True)
+    record_resumed_from(resumed, first.plan)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "round 3"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    head_2 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    checkpoint.record_round_checkpoint(
+        resumed,
+        round_no=1,
+        branch="add-a-greeting-resumed",
+        head_sha=head_2,
+        base_sha=base,
+        base_ref="main",
+        repo=str(repo),
+        cost_usd=1.0,
+        branch_rounds=3,
+        branch_cost_usd=5.0,
+    )
+
+    second, refused = prepare_resume(config, resumed)
+
+    assert refused == "" and second is not None
+    # the chain's last real review, and the run it belongs to
+    assert second.plan.intake_round == 2
+    assert second.plan.intake_run_dir == dead
+    assert [f.rationale.strip() for f in second.entry.intake_reviews[0].findings] == [
+        "the live finding"
+    ]
+    # the coder is told the findings came from before the interruption, so it
+    # reads them as still open rather than as this session's own record
+    assert "carried forward" in second.entry.coder_init_extra["resume_brief"]
+    assert f"carried from run {dead.name}" in second.note
+    # …and it is still the BRANCH's remaining budget, not a fresh one
+    assert second.config.max_rounds == 5 and second.config.max_cost_usd == 15.0
+
+
+def test_the_artifact_pass_findings_are_part_of_the_intake(tmp_path: Path) -> None:
+    # The other half of `vouch_for_review(..., artifact_pass=True)`: a round's
+    # artifact handoff is vouched for under its own `_artifacts` token, so the
+    # intake reads it beside the regular review and the visual finding that was
+    # holding approval is carried into the resumed coder's prompt.
+    repo, base, head = _repo(tmp_path)
+    run_dir = _dead_run(
+        tmp_path,
+        base=base,
+        head=head,
+        repo=repo,
+        rounds=1,
+        reviews={1: "## Status: LGTM\n## Summary\ncode reads fine\n"},
+    )
+    artifacts = run_dir / "handoff" / reviewer_handoff_name(1, "code-quality_artifacts")
+    artifacts.write_text(_FINDINGS.format(rationale="note-320 overflows"))
+    fingerprint = file_fingerprint(artifacts)
+    assert fingerprint is not None
+    state = json.loads((run_dir / "state.json").read_text())
+    block = state["checkpoint"]
+    block["reviewed_digests"]["1"]["code-quality_artifacts"] = fingerprint
+    (run_dir / "state.json").write_text(json.dumps(state))
+
+    resumption, _ = prepare_resume(_config(repo, tmp_path), run_dir)
+
+    assert resumption is not None and resumption.plan.intake_round == 1
+    rationales = [
+        f.rationale.strip()
+        for outcome in resumption.entry.intake_reviews
+        for f in outcome.findings
+    ]
+    assert "note-320 overflows" in rationales
+
+
+def test_a_broken_chain_link_degrades_to_no_review(tmp_path: Path) -> None:
+    # The walk only ever follows loom's own records: a link naming a run that is
+    # not a sibling on disk ends it, exactly as a rejected checkpoint would, and
+    # the resume proceeds with an empty (but present) intake.
+    repo, base, head = _repo(tmp_path)
+    resumed = tmp_path / "work" / "task-1" / "resumed"
+    (resumed / "handoff").mkdir(parents=True)
+    write_state(resumed, {"resumed_from": {"run_id": "../elsewhere/dead"}})
+    checkpoint.record_round_checkpoint(
+        resumed,
+        round_no=1,
+        branch="b",
+        head_sha=head,
+        base_sha=base,
+        base_ref="main",
+        repo=str(repo),
+    )
+
+    resumption, refused = prepare_resume(_config(repo, tmp_path), resumed)
+
+    assert refused == "" and resumption is not None
+    assert resumption.plan.intake_round == 0
+    assert resumption.plan.intake_run_dir == resumed
     assert resumption.entry.intake_reviews[0].findings == []
 
 
@@ -417,7 +552,10 @@ def test_the_intake_caps_the_files_it_reads_and_the_text_it_carries(
     assert rendered <= resume_mod.MAX_INTAKE_FINDING_CHARS + 1000  # + the notes
     elided = [f for o in outcomes for f in o.findings if f.finding_id == "(elided)"]
     assert elided, "what was left out must be named, not silently dropped"
-    assert "34 further reviewer handoff(s)" in " ".join(f.rationale for f in elided)
+    left_out = 40 - resume_mod.MAX_INTAKE_REVIEWERS
+    assert f"{left_out} further reviewer handoff(s)" in " ".join(
+        f.rationale for f in elided
+    )
 
 
 def test_the_text_budget_counts_what_the_renderer_actually_emits(
