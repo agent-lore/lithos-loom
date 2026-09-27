@@ -90,9 +90,13 @@ you add an artifact, add it to `conftest._generate_all()` too.
    `conftest._generate_all()` so fresh runs emit it before validation.
 4. `make diagrams` now emits it and CI drift-gates it automatically.
 
-## Budgets are hand-edited ratchets
+## Budgets are explicitly maintained
 
-`[budgets]` are hard counts; `test_metrics_budgets` fails CI on breach. CI must
+When deciding whether to adjust a limit, follow the root
+[AGENTS.md](../../AGENTS.md#architecture-guardrails--generated-docs) rule:
+"Metric limits guide architectural judgment."
+
+`[budgets]` are enforced counts; `test_metrics_budgets` fails CI on breach. CI must
 **never** auto-rewrite them — they are a source-of-truth file, and raising one is
 a deliberate, reviewed line in the PR diff (the message names both remediation
 paths). `test_budget_keys_are_known` catches a typo'd key so a ratchet can't be

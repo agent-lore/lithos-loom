@@ -17,7 +17,6 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
-from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import PrGateSpec
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._findings import post_finding_then_mark, write_marker
@@ -28,10 +27,8 @@ from lithos_loom.subscriptions.merge_gate_record import (
     MergeGateRecord,
 )
 from lithos_loom.subscriptions.pr_landability import PR_CONFLICTED
-from lithos_loom.subscriptions.remediation_budget import (
-    REMEDIATION_KEY,
-    RemediationBudget,
-    read_budget,
+from lithos_loom.subscriptions.remediation_lifecycle import (
+    record_merge_push as record_green,
 )
 
 __all__ = [
@@ -63,46 +60,6 @@ async def write_record(
         marker={MERGE_GATE_KEY: record.as_marker()},
         subsystem="merge-gate",
     )
-
-
-async def record_green(
-    gate_id: str,
-    record: MergeGateRecord,
-    budget: RemediationBudget,
-    ctx: SubscriptionContext,
-) -> None:
-    """Record a green gate; a pushed merge commit is loom's own push on
-    the S5b budget (else observe_head reads it as a human push and
-    resets the remediation counter — the invariant S5b exists for).
-
-    The push has already HAPPENED by now, so this must not fail into a
-    bare crash record. Prefer the gate's current budget (a fresh read);
-    fall back to the dispatch-time snapshot when Lithos will not answer
-    — no other writer moved it meanwhile: remediation is held on this
-    PR and observe_head is inert while the run is in flight. Record and
-    budget land in ONE write. The residual: that one write itself
-    failing (write_marker swallows) loses the sha, and the next sweep
-    resets the budget — rare, and it errs toward more headroom.
-    """
-    marker: dict[str, Any] = {MERGE_GATE_KEY: record.as_marker()}
-    if record.pushed_sha:
-        try:
-            fresh = await ctx.lithos.task_get(task_id=gate_id)
-        except LithosClientError as exc:
-            ctx.logger.warning(
-                "[Friction] merge-gate: re-reading gate %s to record loom's "
-                "push %s failed (%s); recording from the dispatch-time budget",
-                gate_id,
-                record.pushed_sha[:12],
-                exc,
-            )
-            fresh = None
-        if fresh is not None:
-            budget = read_budget(fresh, record.pr_url)
-        marker[REMEDIATION_KEY] = replace(
-            budget, last_loom_pushed_sha=record.pushed_sha
-        ).as_marker()
-    await write_marker(ctx, task_id=gate_id, marker=marker, subsystem="merge-gate")
 
 
 async def post_failed(

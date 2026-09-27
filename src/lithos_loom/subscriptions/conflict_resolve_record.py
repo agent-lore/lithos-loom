@@ -10,7 +10,6 @@ stays under the module budget.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,7 +21,6 @@ __all__ = [
     "PUSHED_BREADCRUMB_KEY",
     "STRICT_WRITE_DELAYS",
     "ConflictResolveRecord",
-    "Debt",
     "read_record",
 ]
 
@@ -120,16 +118,3 @@ def read_record(gate: Any, pr_url: str) -> ConflictResolveRecord | None:
         repo_path=_s("repo_path"),
         origin_seen=_s("origin_seen"),
     )
-
-
-@dataclass(frozen=True)
-class Debt:
-    """A pushed resolution whose record + budget write has not landed yet:
-    the marker to flush and the finding to post once it does. Held in the
-    dispatcher's memory; recoverable from the story breadcrumb after a
-    restart."""
-
-    gate_id: str
-    story_id: str
-    marker: Mapping[str, Any]
-    summary: str

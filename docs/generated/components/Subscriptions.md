@@ -3,7 +3,7 @@
 
 # Subscriptions
 
-Event-subscription handlers and route-runner projection (route runner, awaiting-review, Obsidian projection).
+Event-subscription handlers and route-runner projection; remediation_lifecycle owns PR budget transitions, persistence, escalation, and Loom push attribution.
 
 **Tier:** Core
 
@@ -37,7 +37,7 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.admission_waker` | S | 1 | 0 |
 | `lithos_loom.subscriptions.conflict_resolve_dispatch` | M | 2 | 1 |
 | `lithos_loom.subscriptions.conflict_resolve_outcome` | S | 0 | 9 |
-| `lithos_loom.subscriptions.conflict_resolve_record` | S | 2 | 1 |
+| `lithos_loom.subscriptions.conflict_resolve_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.delivery_gate` | S | 0 | 2 |
 | `lithos_loom.subscriptions.dispatch_guards` | L | 1 | 12 |
 | `lithos_loom.subscriptions.draining` | XS | 1 | 1 |
@@ -47,16 +47,21 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 | `lithos_loom.subscriptions.external_reviews` | M | 1 | 1 |
 | `lithos_loom.subscriptions.merge_gate_command` | S | 1 | 6 |
 | `lithos_loom.subscriptions.merge_gate_dispatch` | L | 1 | 0 |
-| `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 11 |
+| `lithos_loom.subscriptions.merge_gate_outcome` | M | 0 | 10 |
 | `lithos_loom.subscriptions.merge_gate_record` | S | 1 | 1 |
 | `lithos_loom.subscriptions.pr_gate_stranding` | M | 1 | 4 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
 | `lithos_loom.subscriptions.ready_recheck` | S | 1 | 1 |
 | `lithos_loom.subscriptions.reconciliation_state` | M | 3 | 3 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
-| `lithos_loom.subscriptions.remediation_escalation` | S | 0 | 3 |
-| `lithos_loom.subscriptions.remediation_outcome` | M | 0 | 9 |
-| `lithos_loom.subscriptions.remediation_refunds` | M | 0 | 3 |
+| `lithos_loom.subscriptions.remediation_lifecycle` | M | 1 | 0 |
+| `lithos_loom.subscriptions.remediation_lifecycle._escalation` | S | 0 | 3 |
+| `lithos_loom.subscriptions.remediation_lifecycle._outcome` | M | 0 | 5 |
+| `lithos_loom.subscriptions.remediation_lifecycle._push` | S | 1 | 3 |
+| `lithos_loom.subscriptions.remediation_lifecycle._recovery` | S | 1 | 1 |
+| `lithos_loom.subscriptions.remediation_lifecycle._refunds` | M | 0 | 3 |
+| `lithos_loom.subscriptions.remediation_lifecycle._state` | XS | 0 | 6 |
+| `lithos_loom.subscriptions.remediation_refusals` | S | 0 | 4 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 2 |
 
@@ -178,7 +183,6 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.conflict_resolve_record`
 - class `ConflictResolveRecord` — The gate's ``conflict_resolve`` marker: the sha pair + the outcome.
 - def `read_record` — The gate's record; ``None`` for an absent / foreign-url marker.
-- class `Debt` — A pushed resolution whose record + budget write has not landed yet: the marker to flush and the finding to post once it does. Held in the dispatcher's memory; recoverable from the story breadcrumb after a restart.
 
 ### `lithos_loom.subscriptions.delivery_gate`
 - def `gate_and_release` — Gate a delivered task on human merge, then release (``completes_task =false``).
@@ -236,7 +240,6 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 ### `lithos_loom.subscriptions.merge_gate_outcome`
 - def `value_of`
 - def `write_record`
-- def `record_green` — Record a green gate; a pushed merge commit is loom's own push on the S5b budget (else observe_head reads it as a human push and resets the remediation counter — the invariant S5b exists for).
 - def `post_failed`
 - def `post_conflict`
 - def `post_push_failed`
@@ -279,26 +282,49 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 - def `read_budget` — Parse the gate's budget marker; fresh state for a foreign / absent url.
 - class `RemediationSettings` — Host-side knobs the watcher child threads in from its config.
 
-### `lithos_loom.subscriptions.remediation_escalation`
+### `lithos_loom.subscriptions.remediation_lifecycle`
+- class `RemediationLifecycle` — Own one PR budget's transitions and their ordered side effects.
+
+### `lithos_loom.subscriptions.remediation_lifecycle._escalation`
 - def `escalate_if_exhausted` — Raise the needs-human gate when *budget* is spent and the PR is still not converged. Returns ``None`` when nothing was needed or the gate landed, else the problem that stopped the gate (for the caller's ``[Friction]``). Never raises.
 - def `escalate_disputed` — #387: the loop made an external fix and then undid it — the reviewer and the story's acceptance criteria disagree (lens #84: "Fixed in" was posted over a net no-op). A decision, not a re-run: raise the gate NOW, whatever the budget says, once per budget; the marker then holds dispatch until a human push. Same return contract as :func:`escalate_if_exhausted`.
 - def `decision_pending` — A loom remediation gate on this budget — a reverted fix (#387, raised with rounds to spare) or an exhausted budget — holds every dispatch, ``consider`` and a parked trigger alike, while it is OPEN. The gate IS the budget's stop, and the operator's decision need not involve a push ("answer the reviewer, leave the code"), so the gate going terminal is the release AND the operator's consent to continue: the marker on the ``pr`` gate *gate_id* forgets it and the budget re-arms (rounds reset, the once-per-budget reported-not-remediated refund re-granted, loom's push attribution kept — the own-sha skip must still hold), as a human push would (PR #389 review: the motivating run was the last budgeted round). An unreadable gate holds (fail closed); a gate that no longer exists can never be completed, so it releases.
 
-### `lithos_loom.subscriptions.remediation_outcome`
+### `lithos_loom.subscriptions.remediation_lifecycle._outcome`
 - def `post_finding` — Best-effort finding post (the story may have completed mid-run).
 - def `write_marker_strict` — A gate-marker write that keeps a budget round or a parked trigger: retried with backoff, and NEVER raising — a raw transport error propagates past the client's own recovery (``lithos_client._invoke``) and must land here, not in ``ExternalRemediation._run``'s crash handler, which re-reads the ORIGINAL reserved budget and can raise a false ``remediation_exhausted`` gate over a round that was refunded. Returns the last failure, or ``None`` when the write landed.
 - def `escalate_or_report` — PRD S5b: exhaustion → human gate; a gate that could not be raised is said so on the story instead of vanishing.
 - def `record_unsettled` — #408: a run that died without a verdict (a crash, or an exit with no result) left the round spent AND the PR unsettled — say so on the budget so a budget this spends reads as a stop, never as "nothing to do" from the round before. Composed on a RE-READ of the gate (the merge-gate precedent): the crash may have come after :func:`record_result` landed the run's push, and writing the dispatched copy back would revert that attribution — the next sweep would read loom's own push as a human's. Strict and never raising, like every budget write on a failure path; a write that does not land leaves the prior record.
 - def `record_result` — Record a run that produced a JSON result: marker, finding, log, and the exhaustion escalation when the CLI reports it did not succeed.
+
+### `lithos_loom.subscriptions.remediation_lifecycle._push`
+- class `PendingPush` — A pushed resolution held until its combined completion write lands.
+- def `record_merge_push` — Record a green gate; a pushed merge commit is loom's own push on the S5b budget (else observe_head reads it as a human push and resets the remediation counter — the invariant S5b exists for).
+- def `recover_conflict_push` — Re-arm a held debt a previous boot left behind: the story's breadcrumb names a push the gate's budget does not yet know as loom's own. Called by the sweep BEFORE remediation observes the head, so the PR is held from the first sweep after a restart. Never raises.
+- def `record_conflict_push` — Converged + pushed: the merge commit is loom's own push on the S5b budget — record and budget in ONE write, made FIRST and STRICTLY (PR #366 review F1): the push has happened, and once the head moved the trigger is gone, so nothing would re-derive a lost sha. The budget comes from a fresh read of the gate, else the dispatch-time snapshot (no other writer moved it: the PR was held). A write that still does not land becomes a held debt — the PR stays `busy_on` (remediation's head observation inert), the story gets an honest [Friction], and the next sweeps retry the write; the success finding posts only once it landed.
+
+### `lithos_loom.subscriptions.remediation_lifecycle._recovery`
+- class `ReservationRecovery` — Read-only recovery facts; the dispatcher owns holds and wake-ups.
+- def `recover` — A foreign stamp alone proves no death: check the full process identity.
+
+### `lithos_loom.subscriptions.remediation_lifecycle._refunds`
+- def `refund_lost_run` — #407 slice 2a: the daemon is stopping and just killed this PR's run. The daemon knows the moment it strands a round, so the refund belongs here, not in boot-time archaeology: the reservation is given back, the review trigger re-parked (the reservation consumed it), and the story told once — it re-dispatches after the next boot.
+- def `refund_infra_failed` — The run ended ``infra_failed`` (#377): the host, not the change, is broken — refund the reserved round, re-park the review trigger, and say what to fix. No exhaustion escalation (the change was never judged) and no settle key: the dispatcher holds the PR in memory for the rest of this boot, and a daemon restart — the operator's fix attempt — retries once.
+- def `refund_repo_mismatch` — The CLI's authoritative ``--expect-repo`` check refused where the sweep's origin read passed: refund the reserved round, re-park the review trigger (the reservation consumed it), record the settle key so the sweep does not spawn again until the mapping or the remote url moves, and say so.
+
+### `lithos_loom.subscriptions.remediation_lifecycle._state`
+- def `settled`
+- def `refunded`
+- def `reserved`
+- def `decision_raised`
+- def `decision_released`
+- def `pushed`
+
+### `lithos_loom.subscriptions.remediation_refusals`
 - def `refusal_key` — What the sweep observes about the mapped checkout — the settle key a repo-mismatch refusal (the sweep's own, or the CLI's) is de-duped on.
 - def `settled_refusal` — The kind of refusal (``repo_mismatch`` / ``checkout_unresolved``) already recorded for exactly this key — no spawn, no re-post until the mapping or the read moves — or ``None``.
 - def `post_checkout_unresolved_refusal` — The sweep could not resolve the mapped checkout's origin (PR #362 re-review 3 F1): no spawn, no round spent, the parked trigger kept, one ``[Friction]`` naming why; settled on (path, "") until the path changes or the read starts to answer.
 - def `post_repo_mismatch_refusal` — The sweep's own origin read refused the checkout: one ``[Friction]`` on the story per settle key, de-duped by a marker on the gate. Nothing else is written — no round spent, the parked trigger kept.
-
-### `lithos_loom.subscriptions.remediation_refunds`
-- def `refund_lost_run` — #407 slice 2a: the daemon is stopping and just killed this PR's run. The daemon knows the moment it strands a round, so the refund belongs here, not in boot-time archaeology: the reservation is given back, the review trigger re-parked (the reservation consumed it), and the story told once — it re-dispatches after the next boot.
-- def `refund_infra_failed` — The run ended ``infra_failed`` (#377): the host, not the change, is broken — refund the reserved round, re-park the review trigger, and say what to fix. No exhaustion escalation (the change was never judged) and no settle key: the dispatcher holds the PR in memory for the rest of this boot, and a daemon restart — the operator's fix attempt — retries once.
-- def `refund_repo_mismatch` — The CLI's authoritative ``--expect-repo`` check refused where the sweep's origin read passed: refund the reserved round, re-park the review trigger (the reservation consumed it), record the settle key so the sweep does not spawn again until the mapping or the remote url moves, and say so.
 
 ### `lithos_loom.subscriptions.retry`
 - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.
@@ -315,9 +341,13 @@ Event-subscription handlers and route-runner projection (route runner, awaiting-
 
 ## ADRs
 
+- [Feature: Code-quality review strength — Review Profiles + multi-check deterministic gate](../../adr/0003-code-quality-review-strength.context.md)
+- [ADR 0003 — Code quality & review strength: selectable Review Profiles + a multi-check deterministic gate](../../adr/0003-code-quality-review-strength.md)
 - [ADR 0006 — Review-panel variance: measure before reducing](../../adr/0006-review-variance-measure-before-reducing.md)
 - [ADR 0007 — Subscription handlers are hand-wired, not discovered](../../adr/0007-subscription-registration-hand-wired.md)
 - [ADR 0008 — story-develop's PR access runs through the typed GitHubClient, gh CLI kept only for local-checkout conveniences](../../adr/0008-story-develop-pr-access-seam.md)
+- [ADR 0009 — On-demand PR review-convergence loop (`develop converge`)](../../adr/0009-converge-pr-loop.md)
+- [ADR 0010 — Aggregate repo-parity gate check (`make check`)](../../adr/0010-aggregate-repo-parity-check.md)
 - [ADR 0012 — Serial-admission release order: priority, then first-held order; the choice lives in `Admission`](../../adr/0012-admission-release-order.md)
 
 [← all generated docs](../README.md)

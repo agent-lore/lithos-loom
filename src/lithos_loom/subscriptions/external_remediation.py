@@ -41,14 +41,13 @@ live to ingest and gives the round back; a non-zero exit with no JSON posts
 ``[Friction]`` and keeps the round. The pre-run reservation is **strict**
 (PR #346 review F3): a budget write that did not demonstrably land never
 spawns. A decision gate on the budget (#387) holds every dispatch while it
-is open — :func:`~.remediation_escalation.decision_pending`.
+is open — :meth:`RemediationLifecycle.decision_pending`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import logging
 import os
 import sys
@@ -57,8 +56,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from lithos_loom.errors import LithosClientError
-from lithos_loom.gates import PrGateSpec, waiter_of
+from lithos_loom.gates import PrGateSpec
 from lithos_loom.github_client import GitHubClient
 from lithos_loom.github_review_activity import ExternalReviewActivity
 from lithos_loom.github_review_streams import AuthorTrust
@@ -75,7 +73,7 @@ from lithos_loom.subscriptions._project_settings import (
     read_project_flag,
     resolve_project_repo,
 )
-from lithos_loom.subscriptions._subprocess import log_text, message_tail, spawn_command
+from lithos_loom.subscriptions._subprocess import spawn_command
 from lithos_loom.subscriptions.draining import DrainState, wait_idle
 from lithos_loom.subscriptions.external_reviews import (
     IngestResult,
@@ -88,20 +86,11 @@ from lithos_loom.subscriptions.remediation_budget import (
     RemediationSettings,
     read_budget,
 )
-from lithos_loom.subscriptions.remediation_escalation import decision_pending
-from lithos_loom.subscriptions.remediation_outcome import (
-    escalate_or_report,
+from lithos_loom.subscriptions.remediation_lifecycle import RemediationLifecycle
+from lithos_loom.subscriptions.remediation_refusals import (
     post_checkout_unresolved_refusal,
-    post_finding,
     post_repo_mismatch_refusal,
-    record_result,
-    record_unsettled,
     settled_refusal,
-)
-from lithos_loom.subscriptions.remediation_refunds import (
-    refund_infra_failed,
-    refund_lost_run,
-    refund_repo_mismatch,
 )
 
 __all__ = [
@@ -128,9 +117,6 @@ CONVERGE_SETTING = "develop_external_review_converge"
 # the global single-flight slot forever. Generous: a thorough multi-round
 # converge is an hours-scale run.
 RUN_TIMEOUT_SECONDS = 4 * 3600
-
-# The completion/friction findings quote at most this much subprocess output.
-_OUTPUT_TAIL_CHARS = 600
 
 Spawn = Callable[[list[str]], Awaitable[tuple[int, str]]]
 # Whether a merge-gate run is in flight on a PR url (PRD S3): the two
@@ -255,6 +241,23 @@ class ExternalRemediation:
         # PR is still alive (re-review of PR #416)
         return self._in_flight_pr_url == pr_url or pr_url in self._live_foreign_holds()
 
+    def _lifecycle(
+        self,
+        gate_id: str,
+        spec: PrGateSpec,
+        budget: RemediationBudget,
+        ctx: SubscriptionContext,
+        story_id: str | None = None,
+    ) -> RemediationLifecycle:
+        return RemediationLifecycle(
+            ctx,
+            gate_id=gate_id,
+            spec=spec,
+            snapshot=budget,
+            settings=self._settings,
+            story_id=story_id,
+        )
+
     async def observe_head(
         self,
         gate: Any,
@@ -296,141 +299,32 @@ class ExternalRemediation:
             and budget.in_flight_boot_id != self._boot_id
             and self._in_flight_pr_url != spec.pr_url
         ):
-            try:
-                gate, budget = await self._reconcile_lost(
-                    gate, spec, budget, ctx, story_id
-                )
-            except Exception as exc:  # noqa: BLE001 — observe_head never raises
-                ctx.logger.warning(
-                    "[Friction] external-remediation: reconciling the reservation "
-                    "boot %s left on %s failed (%s: %s); the next sweep retries",
-                    budget.in_flight_boot_id,
-                    spec.pr_url,
-                    type(exc).__name__,
-                    exc,
-                )
-                budget = dataclasses.replace(budget, in_flight_boot_id="")
+            recovery = await self._lifecycle(
+                gate.id,
+                spec,
+                budget,
+                ctx,
+                story_id,
+            ).recover_previous_run(
+                gate,
+                boot_id=self._boot_id,
+                probe=identity_alive,
+                report=spec.pr_url not in self._stale_logged,
+            )
+            gate, budget = recovery.gate, recovery.budget
+            if recovery.held_identity is not None:
+                self._foreign_live[spec.pr_url] = recovery.held_identity
+            elif recovery.owner_gone:
+                self._foreign_live.pop(spec.pr_url, None)
+            if recovery.reported:
+                self._stale_logged.add(spec.pr_url)
+            if recovery.reparked:
+                self._reparked[spec.pr_url] = gate.id
         head = getattr(pr, "head_sha", "") or ""
         held = self._hold is not None and self._hold(spec.pr_url)
         if self.busy or held or not head or head == budget.last_seen_head_sha:
             return budget
-        # A moved head is a HUMAN push unless it matches loom's own recorded
-        # push; an empty previous sighting is first-time initialization only
-        # (PR #346 review F2: gating the reset on a non-empty loom sha left a
-        # PR whose spending rounds never pushed permanently exhausted).
-        if budget.last_seen_head_sha and head != budget.last_loom_pushed_sha:
-            ctx.logger.info(
-                "external-remediation: head of %s moved to %s (not loom's %s) — "
-                "human push, resetting budget (was %d round(s) used)",
-                spec.pr_url,
-                head[:12],
-                budget.last_loom_pushed_sha[:12] or "(never pushed)",
-                budget.rounds_used,
-            )
-            budget = RemediationBudget(pr_url=spec.pr_url, last_seen_head_sha=head)
-        else:
-            budget = dataclasses.replace(budget, last_seen_head_sha=head)
-        await write_marker(
-            ctx,
-            task_id=gate.id,
-            marker={REMEDIATION_KEY: budget.as_marker()},
-            subsystem="external-remediation",
-        )
-        return budget
-
-    async def _reconcile_lost(
-        self,
-        gate: Any,
-        spec: PrGateSpec,
-        budget: RemediationBudget,
-        ctx: SubscriptionContext,
-        story_id: str | None,
-    ) -> tuple[Any, RemediationBudget]:
-        """Refund a reservation another boot left in flight (#407 slice 2b);
-        returns the gate + budget to go on with. *story_id* is the sweep's
-        (the waits_on_gate edge, authoritative); the gate's provenance and
-        then the edge are the fallbacks. A stamp whose dispatcher pid is
-        still alive is a run that outlived its daemon (a SIGKILL does not
-        kill the child): left alone — its containers are spared by the boot
-        reaper for the same reason — and reconciled once it ends. When the
-        refund does not apply (a recorded outcome beside the stamp, a
-        malformed record) or does not land, the stamp is dropped in memory
-        so this sweep reads the record on its merits; the record keeps it,
-        the next sweep tries again, and the refusal is logged once per boot.
-        """
-        identity = ProcessIdentity(
-            pid=budget.in_flight_pid,
-            start_ticks=budget.in_flight_pid_start,
-            host_boot=budget.in_flight_host_boot,
-        )
-        alive = identity_alive(identity)
-        if alive is not False:
-            # THAT process is still running, OR the host cannot currently
-            # prove it died. Both fail closed: the lifetime bind only says a
-            # child dies after this dispatcher dies; it is not proof that an
-            # unidentifiable dispatcher has already died.
-            self._foreign_live[spec.pr_url] = identity
-            if spec.pr_url not in self._stale_logged:
-                self._stale_logged.add(spec.pr_url)
-                if alive:
-                    ctx.logger.warning(
-                        "external-remediation: the run boot %s dispatched on %s "
-                        "(pid %d) outlived its daemon and is still running; holding "
-                        "the PR — not refunded or re-dispatched beside it until it "
-                        "ends",
-                        budget.in_flight_boot_id,
-                        spec.pr_url,
-                        budget.in_flight_pid,
-                    )
-                else:
-                    ctx.logger.warning(
-                        "external-remediation: the run boot %s dispatched on %s "
-                        "cannot currently be identified; holding the PR — not "
-                        "refunded or re-dispatched without proof it died",
-                        budget.in_flight_boot_id,
-                        spec.pr_url,
-                    )
-            return gate, dataclasses.replace(budget, in_flight_boot_id="")
-        self._foreign_live.pop(spec.pr_url, None)
-        if story_id is None:
-            meta_story = gate.metadata.get("story_id")
-            if isinstance(meta_story, str) and meta_story:
-                story_id = meta_story
-            else:
-                story_id = await waiter_of(ctx.lithos, gate.id)
-        refund = await refund_lost_run(
-            ctx,
-            gate_id=gate.id,
-            story_id=story_id,
-            spec=spec,
-            budget_limit=self._settings.budget,
-            work_dir=self._settings.work_dir,
-            cause="a daemon restart",
-            next_step="it re-dispatches later in this sweep",
-        )
-        if refund is None:
-            if spec.pr_url not in self._stale_logged:
-                self._stale_logged.add(spec.pr_url)
-                ctx.logger.warning(
-                    "external-remediation: the reservation boot %s left on %s "
-                    "was not refundable (a recorded outcome beside it, a malformed "
-                    "record, or the write did not land); reading the record as it "
-                    "is — the stamp stays for the next sweep",
-                    budget.in_flight_boot_id,
-                    spec.pr_url,
-                )
-            return gate, dataclasses.replace(budget, in_flight_boot_id="")
-        self._reparked[spec.pr_url] = gate.id
-        try:
-            latest = await ctx.lithos.task_get(task_id=gate.id)
-        except Exception:  # noqa: BLE001 — the refund landed; go on from it
-            latest = None
-        if latest is None:
-            return gate, refund  # the copy the write landed, not the stale one
-        budget = read_budget(latest, spec.pr_url)
-        if budget.in_flight_boot_id and budget.in_flight_boot_id != self._boot_id:
-            budget = dataclasses.replace(budget, in_flight_boot_id="")
-        return latest, budget
+        return await self._lifecycle(gate.id, spec, budget, ctx).observe_head(head)
 
     def exhaustion_note(self, budget: RemediationBudget) -> str | None:
         """The S5b exhaustion sentence for the ``[ExternalReview]`` body.
@@ -477,9 +371,9 @@ class ExternalRemediation:
         if self._drain.draining:
             return "draining"  # the trigger stays parked for the next boot
         # the gate before the count (PR #389 review): lifting it re-arms
-        budget, pending = await decision_pending(
-            ctx, gate_id=gate.id, spec=spec, budget=budget
-        )
+        lifecycle = self._lifecycle(gate.id, spec, budget, ctx, story_id)
+        pending = await lifecycle.decision_pending()
+        budget = lifecycle.snapshot
         if pending:
             return "escalated"
         if budget.rounds_used >= settings.budget:
@@ -594,9 +488,9 @@ class ExternalRemediation:
             return "disabled"
         if self.busy:
             return "deferred_busy"  # trigger stays parked
-        budget, pending = await decision_pending(
-            ctx, gate_id=gate.id, spec=spec, budget=budget
-        )
+        lifecycle = self._lifecycle(gate.id, spec, budget, ctx, story_id)
+        pending = await lifecycle.decision_pending()
+        budget = lifecycle.snapshot
         if pending:
             return "escalated"  # trigger stays parked for after the decision
         if budget.rounds_used >= self._settings.budget:
@@ -745,30 +639,11 @@ class ExternalRemediation:
                 spec.pr_url,
             )
             return "identity_unavailable"
-        budget = dataclasses.replace(
-            budget,
-            rounds_used=budget.rounds_used + 1,
-            last_status="",
-            last_settled=False,
-            in_flight_boot_id=self._boot_id,  # #407 slice 2b
-            in_flight_pid=me.pid,
-            in_flight_pid_start=me.start_ticks,
-            in_flight_host_boot=me.host_boot,
-        )
-        try:
-            await ctx.lithos.task_update(
-                task_id=gate.id,
-                metadata={REMEDIATION_KEY: budget.as_marker(), PENDING_KEY: None},
-            )
-        except LithosClientError as exc:
-            self._in_flight_pr_url = ""  # the claim goes with the reservation
-            ctx.logger.warning(
-                "[Friction] external-remediation: budget reservation for gate "
-                "%s failed (%s); not dispatching — will retry next sweep",
-                gate.id,
-                exc,
-            )
+        lifecycle = self._lifecycle(gate.id, spec, budget, ctx, story_id)
+        if not await lifecycle.reserve(boot_id=self._boot_id, identity=me):
+            self._in_flight_pr_url = ""
             return "reservation_failed"
+        budget = lifecycle.snapshot
         self._reparked.pop(spec.pr_url, None)  # the reservation consumed the trigger
         ctx.logger.info(
             "external-remediation: dispatching converge --from-github for %s "
@@ -779,7 +654,7 @@ class ExternalRemediation:
         )
         self._in_flight = (gate.id, story_id, spec, ctx)
         self._task = asyncio.create_task(
-            self._run(gate.id, story_id, spec, repo, budget, ctx),
+            self._run(gate.id, story_id, spec, repo, lifecycle, ctx),
             name=f"external-remediation-{spec.pr_number}",
         )
         return "dispatched"
@@ -806,14 +681,13 @@ class ExternalRemediation:
         # landed after the run recorded.
         if facts is not None and task.cancelled():
             gate_id, story_id, spec, ctx = facts
-            await refund_lost_run(
+            await self._lifecycle(
+                gate_id,
+                spec,
+                RemediationBudget(pr_url=spec.pr_url),
                 ctx,
-                gate_id=gate_id,
-                story_id=story_id,
-                spec=spec,
-                budget_limit=self._settings.budget,
-                work_dir=self._settings.work_dir,
-            )
+                story_id,
+            ).lost_run()
 
     # ── decision helpers ───────────────────────────────────────────────
 
@@ -910,7 +784,7 @@ class ExternalRemediation:
         story_id: str,
         spec: PrGateSpec,
         repo: Path,
-        budget: RemediationBudget,
+        lifecycle: RemediationLifecycle,
         ctx: SubscriptionContext,
     ) -> None:
         """Run one converge subprocess and record its outcome. Never raises.
@@ -922,29 +796,10 @@ class ExternalRemediation:
         this module exists to close, one layer up).
         """
         try:
-            await self._run_inner(gate_id, story_id, spec, repo, budget, ctx)
+            await self._run_inner(gate_id, story_id, spec, repo, lifecycle, ctx)
         except Exception as exc:  # noqa: BLE001 — the slot must always free cleanly
             ctx.logger.exception("external-remediation: run for %s raised", spec.pr_url)
-            detail = f"{type(exc).__name__}: {exc}"
-            budget = await record_unsettled(
-                ctx, gate_id=gate_id, spec=spec, budget=budget
-            )
-            await post_finding(
-                ctx,
-                story_id,
-                f"[Friction] external-remediation: converge --from-github for "
-                f"{spec.pr_url} crashed before recording a result ({detail}); "
-                f"the round is spent ({budget.rounds_used}/{self._settings.budget})",
-            )
-            await self._escalate_if_exhausted(
-                gate_id,
-                story_id,
-                spec,
-                budget,
-                last_status="failed",
-                detail=detail,
-                ctx=ctx,
-            )
+            await lifecycle.crashed(exc)
         finally:
             self._in_flight_pr_url = ""
             self._in_flight = None
@@ -955,7 +810,7 @@ class ExternalRemediation:
         story_id: str,
         spec: PrGateSpec,
         repo: Path,
-        budget: RemediationBudget,
+        lifecycle: RemediationLifecycle,
         ctx: SubscriptionContext,
     ) -> None:
         json_path = (
@@ -974,127 +829,8 @@ class ExternalRemediation:
         except (OSError, ValueError):
             data = None
 
-        if data is not None and data.get("status") == "repo_mismatch":
-            # The CLI's authoritative check refused (gh, redirect-aware —
-            # where the sweep's origin read passed): a configuration
-            # refusal, not a failed run — refunded, re-parked, never an
-            # exhaustion escalation.
-            await refund_repo_mismatch(
-                ctx,
-                gate_id=gate_id,
-                story_id=story_id,
-                spec=spec,
-                repo=repo,
-                origin_seen=((await origin_read(repo)).repo or "").lower(),
-                budget=budget,
-                budget_limit=self._settings.budget,
-                notifier=self._settings.notifier,
-                data=data,
-            )
-            return
+        # Install the scheduling hold before settlement can await a write.
+        # The lifecycle selects the refund and escalation policy.
         if data is not None and data.get("status") == "infra_failed":
-            # #377: the host failed under the run — not a verdict on the
-            # change. Refund, re-park, hold this boot; never exhaustion.
             self._infra_held.add(spec.pr_url)
-            await refund_infra_failed(
-                ctx,
-                gate_id=gate_id,
-                story_id=story_id,
-                spec=spec,
-                budget=budget,
-                budget_limit=self._settings.budget,
-                notifier=self._settings.notifier,
-                data=data,
-            )
-            return
-        if data is not None:
-            await record_result(
-                ctx,
-                gate_id=gate_id,
-                story_id=story_id,
-                spec=spec,
-                budget=budget,
-                budget_limit=self._settings.budget,
-                notifier=self._settings.notifier,
-                data=data,
-            )
-            return
-        if rc == 0:
-            # "nothing to ingest": no agent time spent — give the round back.
-            ctx.logger.info(
-                "external-remediation: converge for %s found nothing live to "
-                "ingest; returning the budget round",
-                spec.pr_url,
-            )
-            refund = dataclasses.replace(
-                budget,
-                rounds_used=max(0, budget.rounds_used - 1),
-                last_status="no_result",  # the round's outcome (#407 review)
-                last_settled=False,
-                in_flight_boot_id="",
-                in_flight_pid=0,
-                in_flight_pid_start=0,
-                in_flight_host_boot="",
-            )
-            await write_marker(
-                ctx,
-                task_id=gate_id,
-                marker={REMEDIATION_KEY: refund.as_marker()},
-                subsystem="external-remediation",
-            )
-            return
-        # #431: same as the conflict resolver — the finding carries the one
-        # line that says why, the whole tail goes to the log.
-        tail = log_text(output[-_OUTPUT_TAIL_CHARS:]) if output else "(no output)"
-        budget = await record_unsettled(ctx, gate_id=gate_id, spec=spec, budget=budget)
-        ctx.logger.warning(
-            "external-remediation: converge for %s finished: failed (exit %d) "
-            "without a result, round %d/%d spent; output tail: %s",
-            spec.pr_url,
-            rc,
-            budget.rounds_used,
-            self._settings.budget,
-            tail,
-        )
-        await post_finding(
-            ctx,
-            story_id,
-            f"[Friction] external-remediation: converge --from-github for "
-            f"{spec.pr_url} failed (exit {rc}) without a result; the round is "
-            f"spent ({budget.rounds_used}/{self._settings.budget}). Last "
-            f'output line: "{message_tail(output)}"',
-        )
-        await self._escalate_if_exhausted(
-            gate_id,
-            story_id,
-            spec,
-            budget,
-            last_status="failed",
-            detail=f"converge exited {rc} without a result",
-            ctx=ctx,
-        )
-
-    async def _escalate_if_exhausted(
-        self,
-        gate_id: str,
-        story_id: str,
-        spec: PrGateSpec,
-        budget: RemediationBudget,
-        *,
-        last_status: str,
-        detail: str,
-        ctx: SubscriptionContext,
-        cost: float | None = None,
-    ) -> None:
-        await escalate_or_report(
-            ctx,
-            gate_id=gate_id,
-            story_id=story_id,
-            spec=spec,
-            budget=budget,
-            budget_limit=self._settings.budget,
-            notifier=self._settings.notifier,
-            last_status=last_status,
-            detail=detail,
-            cost=cost,
-        )
+        await lifecycle.finished(data=data, returncode=rc, output=output, repo=repo)

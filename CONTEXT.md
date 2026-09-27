@@ -77,3 +77,10 @@ dialogue-based** cycle.
   completion store (#196); each marker is bound to *its* run, not a prior one (#198); a failed
   delivery is not a clean success (#194). Owned by the `run_outcome` module — the single home
   for these invariants, read by the CLI and written by the plugin.
+
+## PR maintenance
+
+- **remediation budget** — the allowance for autonomous external-review remediation
+  attempts on a delivered PR, distinct from a develop cycle's round or cost limit.
+  Loom's own pushes retain the allowance already spent; a human push or resolution
+  of the associated decision gate renews it, subject to the existing refund rules.

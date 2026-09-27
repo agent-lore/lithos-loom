@@ -78,9 +78,13 @@ CI:
 - The CI job `diagrams` (Diagram drift) fails when the committed files disagree
   with what the code generates. Fix: `make diagrams`, commit.
 - `docs/architecture.toml` is the source of truth for components, tiers,
-  domain-model scanning, and the hard metric budgets. Adding a new module,
+  domain-model scanning, and metric limits. Adding a new module,
   component, or model? The guardrail orphan/completeness checks fail until you map
   it there.
+- **Metric limits guide architectural judgment.** When meeting a limit would
+  worsen code quality or distort the architecture, keep the better design and
+  update the limit in `docs/architecture.toml`, explaining the tradeoff in the
+  change. CI enforces the configured limits; the limits remain adjustable.
 - Directional import rules (Entrypoints → Core → Foundation) are enforced by
   import-linter (`pyproject.toml [tool.importlinter]`); `test_run_outcome_leaf.py`
   additionally pins `run_outcome` as a leaf on-disk-contract module.

@@ -42,7 +42,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import PrGateSpec
 from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions._project_settings import (
@@ -53,14 +52,10 @@ from lithos_loom.subscriptions._project_settings import (
 )
 from lithos_loom.subscriptions._subprocess import log_text, message_tail, spawn_command
 from lithos_loom.subscriptions.conflict_resolve_outcome import (
-    clear_breadcrumb,
     escalate,
-    paths_of,
-    post_finding,
     post_friction,
     story_escalation,
     strict_write,
-    write_once,
     write_record,
 )
 from lithos_loom.subscriptions.conflict_resolve_record import (
@@ -71,7 +66,6 @@ from lithos_loom.subscriptions.conflict_resolve_record import (
     PUSHED_BREADCRUMB_KEY,
     STRICT_WRITE_DELAYS,
     ConflictResolveRecord,
-    Debt,
     read_record,
 )
 from lithos_loom.subscriptions.draining import DrainState, wait_idle
@@ -79,10 +73,14 @@ from lithos_loom.subscriptions.merge_gate_record import (
     read_record as read_merge_record,
 )
 from lithos_loom.subscriptions.remediation_budget import (
-    REMEDIATION_KEY,
     RemediationBudget,
     RemediationNotifier,
     read_budget,
+)
+from lithos_loom.subscriptions.remediation_lifecycle import (
+    PendingPush,
+    record_conflict_push,
+    recover_conflict_push,
 )
 
 __all__ = [
@@ -164,7 +162,7 @@ class ConflictResolveDispatch:
         self._attempted: set[tuple[str, str, str]] = set()
         # post-push writes that have not landed yet: pr_url → the marker to
         # flush + the finding to post once it does; the PR stays held
-        self._debts: dict[str, Debt] = {}
+        self._debts: dict[str, PendingPush] = {}
 
     # ── in-flight state ────────────────────────────────────────────────
 
@@ -357,11 +355,8 @@ class ConflictResolveDispatch:
 
     async def _settle_debt(self, pr_url: str, ctx: SubscriptionContext) -> str:
         debt = self._debts[pr_url]
-        if not await write_once(debt.gate_id, debt.marker, ctx):
+        if not await debt.retry(ctx, on_recorded=lambda: self._debts.pop(pr_url)):
             return "debt_pending"
-        del self._debts[pr_url]
-        await clear_breadcrumb(debt.story_id, ctx)
-        await post_finding(debt.story_id, debt.summary, ctx)
         return "debt_settled"
 
     async def recover_debt(
@@ -371,55 +366,10 @@ class ConflictResolveDispatch:
         story_id: str | None,
         ctx: SubscriptionContext,
     ) -> None:
-        """Re-arm a held debt a previous boot left behind: the story's
-        breadcrumb names a push the gate's budget does not yet know as
-        loom's own. Called by the sweep BEFORE remediation observes the head,
-        so the PR is held from the first sweep after a restart. Never raises."""
-        if story_id is None or spec.pr_url in self._debts:
-            return
-        try:
-            story = await ctx.lithos.task_get(task_id=story_id)
-        except LithosClientError:
-            return  # retried next sweep; the hold is what matters and it is cheap
-        crumb = None if story is None else story.metadata.get(PUSHED_BREADCRUMB_KEY)
-        if not isinstance(crumb, dict) or crumb.get("pr_url") != spec.pr_url:
-            return
-        pushed = crumb.get("pushed_sha")
-        if not isinstance(pushed, str) or not pushed:
-            return
-        budget = read_budget(gate, spec.pr_url)
-        if budget.last_loom_pushed_sha == pushed:
-            await clear_breadcrumb(story_id, ctx)  # it landed after all
-            return
-        record = read_record(gate, spec.pr_url)
-        if record is None or record.pushed_sha != pushed:
-            record = ConflictResolveRecord(
-                spec.pr_url,
-                head_sha=str(crumb.get("head_sha") or ""),
-                base_sha=str(crumb.get("base_sha") or ""),
-                status="converged",
-                attempts=1,
-                pushed_sha=pushed,
-                message="recovered from the story breadcrumb after a restart",
-            )
-        marker = {
-            CONFLICT_RESOLVE_KEY: record.as_marker(),
-            REMEDIATION_KEY: replace(budget, last_loom_pushed_sha=pushed).as_marker(),
-        }
-        summary = (
-            f"{CONFLICT_RESOLVED} conflict-resolve: loom's push {pushed[:12]} onto "
-            f"{spec.pr_url} (a conflict resolution recorded after a restart) is "
-            f"now on the record; the next sweep re-gates at the new head."
-        )
-        self._debts[spec.pr_url] = Debt(gate.id, story_id, marker, summary)
-        ctx.logger.warning(
-            "conflict-resolve: recovered a held debt for %s from the story "
-            "breadcrumb (push %s not yet on the budget); holding the PR",
-            spec.pr_url,
-            pushed[:12],
-        )
-
-    # ── the run ────────────────────────────────────────────────────────
+        if spec.pr_url not in self._debts:
+            debt = await recover_conflict_push(gate, spec, story_id, ctx)
+            if debt is not None:
+                self._debts[spec.pr_url] = debt
 
     def command(
         self,
@@ -621,72 +571,16 @@ class ConflictResolveDispatch:
         budget: RemediationBudget,
         ctx: SubscriptionContext,
     ) -> None:
-        """Converged + pushed: the merge commit is loom's own push on the S5b
-        budget — record and budget in ONE write, made FIRST and STRICTLY
-        (PR #366 review F1): the push has happened, and once the head moved
-        the trigger is gone, so nothing would re-derive a lost sha. The
-        budget comes from a fresh read of the gate, else the dispatch-time
-        snapshot (no other writer moved it: the PR was held). A write that
-        still does not land becomes a held debt — the PR stays `busy_on`
-        (remediation's head observation inert), the story gets an honest
-        [Friction], and the next sweeps retry the write; the success finding
-        posts only once it landed."""
-        pushed = str(data.get("pushed_sha") or "")
-        record = replace(record, pushed_sha=pushed)
-        # the breadcrumb first, on the STORY: survives a gate write outage and
-        # a restart (recover_debt reads it) — cleared once the record landed
-        await write_once(
+        def hold(debt: PendingPush) -> None:
+            self._debts[spec.pr_url] = debt
+
+        await record_conflict_push(
+            gate_id,
             story_id,
-            {
-                PUSHED_BREADCRUMB_KEY: {
-                    "pr_url": spec.pr_url,
-                    "pushed_sha": pushed,
-                    "head_sha": record.head_sha,
-                    "base_sha": record.base_sha,
-                }
-            },
+            spec,
+            record,
+            data,
+            budget,
             ctx,
-        )
-        try:
-            fresh = await ctx.lithos.task_get(task_id=gate_id)
-        except LithosClientError as exc:
-            ctx.logger.warning(
-                "[Friction] conflict-resolve: re-reading gate %s to record loom's "
-                "push %s failed (%s); recording from the dispatch-time budget",
-                gate_id,
-                pushed[:12],
-                exc,
-            )
-            fresh = None
-        if fresh is not None:
-            budget = read_budget(fresh, spec.pr_url)
-        marker: dict[str, Any] = {
-            CONFLICT_RESOLVE_KEY: record.as_marker(),
-            REMEDIATION_KEY: replace(budget, last_loom_pushed_sha=pushed).as_marker(),
-        }
-        paths = paths_of(data)
-        summary = (
-            f"{CONFLICT_RESOLVED} conflict-resolve: delivered PR {spec.pr_url}'s "
-            f"conflict with its base @ {record.base_sha[:12]} in "
-            f"{len(paths)} path(s) ({', '.join(paths) or 'unnamed'}) was resolved "
-            f"by loom and pushed as {pushed[:12]} onto the PR branch after "
-            f"{data.get('rounds')} round(s) (${data.get('total_cost_usd')}); the "
-            f"composed tree passed the project's check-set and the panel. The "
-            f"next sweep re-gates at the new head."
-        )
-        if await strict_write(gate_id, marker, ctx):
-            await clear_breadcrumb(story_id, ctx)
-            await post_finding(story_id, summary, ctx)
-            return
-        self._debts[spec.pr_url] = Debt(gate_id, story_id, marker, summary)
-        await post_finding(
-            story_id,
-            (
-                f"[Friction] conflict-resolve: loom resolved {spec.pr_url}'s conflict "
-                f"and pushed {pushed[:12]}, but recording that push on gate "
-                f"{gate_id} did not land after {len(STRICT_WRITE_DELAYS) + 1} "
-                f"attempts; the PR stays held and the record is retried every "
-                f"sweep until it lands (nothing else acts on this PR meanwhile)"
-            ),
-            ctx,
+            on_pending=hold,
         )

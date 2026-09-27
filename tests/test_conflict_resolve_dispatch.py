@@ -700,8 +700,11 @@ async def test_a_pushed_resolution_keeps_the_budget_from_the_dispatch_snapshot(
     assert record is not None and record.status == "converged"
 
 
+@pytest.mark.parametrize("report_fails", [False, True])
 async def test_a_pushed_resolution_whose_write_fails_holds_until_it_lands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    report_fails: bool,
 ) -> None:
     """F1b: the combined outcome+budget write is a REQUIRED post-push
     transition. While it has not landed: no success finding, an honest
@@ -723,6 +726,17 @@ async def test_a_pushed_resolution_whose_write_fails_holds_until_it_lands(
             return False
         return await real(ctx, task_id=task_id, marker=marker, subsystem=subsystem)
 
+    real_post = client.finding_post
+
+    async def report(**kwargs):
+        if "did not land after" in kwargs.get("summary", ""):
+            # Even while reporting is suspended, peers must see the hold.
+            assert dispatch.debt_on(_PR_URL)
+            if report_fails:
+                raise RuntimeError("transport failed during friction post")
+        return await real_post(**kwargs)
+
+    monkeypatch.setattr(client, "finding_post", report)
     monkeypatch.setattr(out, "write_marker", flaky)
     monkeypatch.setattr(out, "STRICT_WRITE_DELAYS", ())
     assert await _consider(client, gate, story, dispatch) == "dispatched"

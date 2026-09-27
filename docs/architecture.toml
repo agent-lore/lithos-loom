@@ -31,7 +31,7 @@ Entrypoint     = "Typer CLI app entry and `python -m` bootstrap (`lithos-loom = 
 Children       = "Child-process entrypoints spawned by the supervisor (watcher / sync child mains)."
 Cli            = "Typer command implementations (task, project, develop, review, obsidian-sync, …)."
 Plugins        = "Bundled subprocess plugins; the mature one is story_develop (the implement→review→fix cycle)."
-Subscriptions  = "Event-subscription handlers and route-runner projection (route runner, awaiting-review, Obsidian projection)."
+Subscriptions  = "Event-subscription handlers and route-runner projection; remediation_lifecycle owns PR budget transitions, persistence, escalation, and Loom push attribution."
 Sources        = "Event/issue producers: Lithos SSE event & note streams, GitHub issue watcher, Obsidian watchers."
 Render         = "Rendering of tasks and notes into Obsidian-Tasks-compatible markdown."
 Doctor         = "Environment and configuration diagnostics (`doctor` CLI)."
@@ -75,13 +75,13 @@ Entrypoints = ["Entrypoint", "Children"]
 Core        = ["Cli", "Plugins", "Subscriptions", "Sources", "Render", "Doctor", "Evals"]
 Foundation  = ["Bus", "Config", "Errors", "LithosClient", "GitHub", "Tasks", "Notifications", "State", "Runners", "Supervisor", "ProjectContext"]
 
-# Hard architecture budgets, checked by tests/guardrail/test_metrics_budgets.py
+# Architecture metric limits, checked by tests/guardrail/test_metrics_budgets.py
 # against the metrics snapshot (docs/generated/metrics.md explains each one).
-# CI fails if a measured value exceeds its budget. Raising a budget is allowed
-# but must be an explicit, reviewed edit to this file; lower a budget after
-# improving the code to lock in the gain.
+# CI enforces these values. When deciding whether to adjust a limit, follow
+# AGENTS.md's "Metric limits guide architectural judgment" rule and explain
+# the tradeoff alongside the change.
 #
-# Most budgets below are tight ratchets pinned at today's value (any regression
+# Most budgets below are tight ratchets pinned at today's value (any increase
 # fails CI). max_module_lines is the exception: it is a STOP-LOSS ceiling set a
 # little above today's largest module so a big module can't quietly balloon — it
 # is deliberately NOT pinned to the exact current high-water mark. Ratchet the
@@ -112,7 +112,7 @@ modules_over_800_lines = 12 # 11->12: 5dbeb0c8 slice C — run_outcome.py (819) 
                                # 8->9: external_remediation.py (813, was exactly 800) records the
                                # failed outcome on its two no-verdict paths and clears the previous
                                # round's at the reservation (#408) — a dozen lines in the run's
-                               # dispatch / crash / no-result tail; the writes live in remediation_outcome.py;
+                               # dispatch / crash / no-result tail; the writes live in remediation_lifecycle/_outcome.py;
                                # 9->10: cli/_deliver_lithos.py (809, was 788) — the story read learned
                                # to tell this delivery's own dispatch hold from a foreign run by agent
                                # (converge f6babfd8 correctness/f-001; the rule is a docstring beside

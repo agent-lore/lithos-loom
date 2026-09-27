@@ -8,14 +8,13 @@ reconciled at the next boot, slice 2b). Each returns the reserved round,
 re-parks the review trigger the reservation consumed, stamps the round's
 outcome so no later refund can read it as unrecorded, and tells the story
 where any work the run left behind sits. Split from
-:mod:`.remediation_outcome` (the record-and-escalate half) on the module
-line budget; the two share :func:`.remediation_outcome.write_marker_strict`
-and :data:`.remediation_outcome.REFUND_RETRY_DELAYS`.
+:mod:`._outcome` (the record-and-escalate half) on the module
+line budget; the two share :func:`._outcome.write_marker_strict`
+and :data:`._outcome.REFUND_RETRY_DELAYS`.
 """
 
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -28,14 +27,18 @@ from lithos_loom.subscriptions.remediation_budget import (
     RemediationNotifier,
     read_budget,
 )
-from lithos_loom.subscriptions.remediation_outcome import (
+from lithos_loom.subscriptions.remediation_lifecycle._outcome import (
     REFUND_RETRY_DELAYS,
-    REPO_MISMATCH_KEY,
     escalate_or_report,
     post_finding,
-    refusal_key,
     write_marker_strict,
 )
+from lithos_loom.subscriptions.remediation_refusals import (
+    REPO_MISMATCH_KEY,
+    refusal_key,
+)
+
+from ._state import refunded
 
 __all__ = ["refund_infra_failed", "refund_lost_run", "refund_repo_mismatch"]
 
@@ -97,16 +100,7 @@ async def refund_lost_run(
     budget = read_budget(latest, spec.pr_url)
     if budget.rounds_used <= 0 or budget.last_status:
         return None  # never reserved here, or the run recorded its outcome
-    refund = dataclasses.replace(
-        budget,
-        rounds_used=budget.rounds_used - 1,
-        last_status="",
-        last_settled=False,
-        in_flight_boot_id="",
-        in_flight_pid=0,
-        in_flight_pid_start=0,
-        in_flight_host_boot="",
-    )
+    refund = refunded(budget, "")
     failure = await write_marker_strict(
         ctx,
         gate_id=gate_id,
@@ -181,16 +175,7 @@ async def refund_infra_failed(
     # The refund IS this round's outcome (#407 slice 2a review): stamped, so a
     # shutdown cancel that lands during the friction post below cannot read
     # the refunded round as "never recorded" and refund it again.
-    refund = dataclasses.replace(
-        budget,
-        rounds_used=max(0, budget.rounds_used - 1),
-        last_status="infra_failed",
-        last_settled=False,
-        in_flight_boot_id="",
-        in_flight_pid=0,
-        in_flight_pid_start=0,
-        in_flight_host_boot="",
-    )
+    refund = refunded(budget, "infra_failed")
     marker = {
         REMEDIATION_KEY: refund.as_marker(),
         PENDING_KEY: {"pr_url": spec.pr_url},
@@ -275,16 +260,7 @@ async def refund_repo_mismatch(
     claim over state that did not land.
     """
     actual = data.get("actual_repo") or "(unknown)"
-    refund = dataclasses.replace(
-        budget,
-        rounds_used=max(0, budget.rounds_used - 1),
-        last_status="repo_mismatch",  # the round's outcome (#407 slice 2a review)
-        last_settled=False,
-        in_flight_boot_id="",
-        in_flight_pid=0,
-        in_flight_pid_start=0,
-        in_flight_host_boot="",
-    )
+    refund = refunded(budget, "repo_mismatch")
     marker = {
         REMEDIATION_KEY: refund.as_marker(),
         PENDING_KEY: {"pr_url": spec.pr_url},
