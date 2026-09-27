@@ -118,21 +118,21 @@ async def recover_conflict_push(
     loom's own. Called by the sweep BEFORE remediation observes the head,
     so the PR is held from the first sweep after a restart. Never raises."""
     if story_id is None:
-        return
+        return None
     try:
         story = await ctx.lithos.task_get(task_id=story_id)
     except LithosClientError:
         return  # retried next sweep; the hold is what matters and it is cheap
     crumb = None if story is None else story.metadata.get(PUSHED_BREADCRUMB_KEY)
     if not isinstance(crumb, dict) or crumb.get("pr_url") != spec.pr_url:
-        return
+        return None
     pushed = crumb.get("pushed_sha")
     if not isinstance(pushed, str) or not pushed:
-        return
+        return None
     budget = read_budget(gate, spec.pr_url)
     if budget.last_loom_pushed_sha == pushed:
         await clear_breadcrumb(story_id, ctx)  # it landed after all
-        return
+        return None
     record = read_record(gate, spec.pr_url)
     if record is None or record.pushed_sha != pushed:
         record = ConflictResolveRecord(
@@ -159,8 +159,6 @@ async def recover_conflict_push(
         spec.pr_url,
         pushed[:12],
     )
-
-    # ── the run ────────────────────────────────────────────────────────
 
     return PendingPush(gate.id, story_id, marker, summary)
 
