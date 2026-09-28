@@ -30,4 +30,4 @@ Stories with no ``deps`` are parallel by construction; there is no
 
 (TODO: write the full Pocock-shaped decomposition prompt here, referencing
 the PRD body as `<<PRD_BODY>>` substitution token. See the `prd-decompose`
-story (US-22) in `docs/prd/orchestration.md`.)
+story (US-22) in `docs/prd/archive/orchestration.md` (archived; the carried shape is `docs/prd/accumulator.md` P1–P4).)

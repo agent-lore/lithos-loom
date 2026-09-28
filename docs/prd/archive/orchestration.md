@@ -17,6 +17,12 @@ labels: [needs-triage, lithos-loom, orchestrator, task-graph]
 
 # Lithos Loom — Orchestration Plan (post task-graph extension)
 
+> **Status (2026-09-28).** Processed into [`docs/prd/accumulator.md`](../accumulator.md).
+> G and H shipped; A2's decompose half is carried there as P1–P4, A3's review
+> policy and XC's ops residue are parked as P5–P6, and every other section is
+> recorded there as *not carried* with its reason. Archived 2026-09-28; design
+> record only. Do not add stories here.
+>
 > **Status (2026-06-13).** This plan replaces both `docs/prd/mvp.md` (the
 > proof-of-concept) and `docs/prd/full.md` (the A1–A10 roadmap). It is written
 > against a Lithos server that has the
@@ -54,7 +60,7 @@ plan:
   re-claim) and the `completes_task = false` / `metadata.loom_delivered`
   PR-merge-wait path. Shipped.
 - **GitHub issue watcher** — bidirectional issue ↔ task mirror with drift sync,
-  per-project config in project-context metadata ([ADR 0001](../adr/0001-github-watch-config-storage.md)),
+  per-project config in project-context metadata ([ADR 0001](../../adr/0001-github-watch-config-storage.md)),
   reconciliation sweep. Shipped, and **already polls GitHub** — which makes it
   the natural home for the PR-gate resolver below.
 - **`story-develop`** — the conversational implement → review → fix → approve
@@ -62,7 +68,7 @@ plan:
   per-round commits, objective test gate in a throwaway container, usage-limit
   role-aware degradation, optional PR delivery with an autonomous Copilot review
   round, and full daemon-mode integration. Shipped (T1–T10), specced in
-  [docs/prd/archive/story-develop.md](archive/story-develop.md).
+  [docs/prd/archive/story-develop.md](story-develop.md).
 - **Stubs:** `prd-decompose` (the surviving front-end — to be built here),
   `story-implement` + `story-review-human` (**to be retired** — `story-develop`
   supersedes them; see US-2 — this resolves the "supersede vs coexist" open

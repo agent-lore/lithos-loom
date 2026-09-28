@@ -6,5 +6,6 @@ contract::
     python -m lithos_loom.plugins.<name> \\
         --task-json <path> --work-dir <path> --result-file <path>
 
-See ``docs/prd/orchestration.md`` for plugin-specific behaviour.
+See ``docs/prd/archive/orchestration.md`` (archived design record) for the
+original plugin plan and ``docs/prd/accumulator.md`` for what is carried forward.
 """

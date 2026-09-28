@@ -5,7 +5,7 @@ status: draft
 target_version: 0.9.0
 references:
   - docs/SPECIFICATION.md (implemented surface — pr gates, github-watcher, story-develop delivery)
-  - docs/prd/orchestration.md (epic H — the `pr` gate this PRD extends)
+  - docs/prd/archive/orchestration.md (epic H — the `pr` gate this PRD extends; archived 2026-09-28, see docs/prd/accumulator.md)
   - docs/prd/archive/story-develop.md (T9 — the inline Copilot round this PRD retires)
   - docs/adr/0009-converge-pr-loop.md (`develop converge` — the paid loop this PRD feeds)
   - docs/adr/0011-pr-maintenance-invariants.md (the four cross-cutting decisions, extracted)
@@ -718,7 +718,7 @@ tests today precisely because no fixture has a merge commit in it.
 
 S4's `blocks` edges are the precise mechanism but they rely on a planner adding
 them. Imported tasks, separate epics and imperfect decompositions all still
-produce concurrent PRs, and `max_concurrent_tasks` (`orchestration.md:541`)
+produce concurrent PRs, and `max_concurrent_tasks` (`archive/orchestration.md:547`)
 bounds **running tasks, not delivered-but-unmerged PRs** — once delivery
 releases its claim, the next story starts while the first `pr` gate is still
 open. That is precisely how this batch happened.
@@ -1011,25 +1011,25 @@ K≈20–30 per arm.
 This PRD now owns a chunk of behaviour the orchestration plan also describes.
 Reconciling explicitly, so the two do not drift:
 
-- **`story-fix` (`orchestration.md:355`) overlaps with external-review
+- **`story-fix` (`archive/orchestration.md:361`) overlaps with external-review
   convergence.** Resolution: **converge is the single pre-merge remediation
   engine** — external findings, conflict resolution and re-gating all run
   through it (operator decision, 2026-08-24). `story-fix` is either scoped to
   *post-merge* failures, or reimplemented as a caller of the same loop. Two fix
   loops is precisely what ADR 0004 §1 single-sources against.
-- **Webhooks (`orchestration.md:441`) currently cover only `pr`-gate merge
+- **Webhooks (`archive/orchestration.md:447`) currently cover only `pr`-gate merge
   resolution.** They should wake **this same state machine** on `review`,
   `review_comment`, `synchronize` and base-update events. Polling stays as the
   recovery path — a missed webhook must degrade to "slower", never to "never".
-- **`merge-stories` (`orchestration.md:420`) introduces integration branches.**
+- **`merge-stories` (`archive/orchestration.md:426`) introduces integration branches.**
   Everything here must therefore say **"the PR's current base branch"**, never
   "main". Any remaining "main" in this document is a bug; S3's re-gate, S6's
   admission count and S1's behind-detection are all per-base-branch.
-- **The console is Lens, not loom.** `orchestration.md:469` proposes a loom CLI
+- **The console is Lens, not loom.** `archive/orchestration.md:475` proposes a loom CLI
   dashboard and excludes a web UI. Keep the CLI as an operational/debug surface;
   Lens is the authoritative console, which is exactly why S7's state is
   persisted in Lithos rather than in loom.
-- **A9 (`orchestration.md:374`) is the right knowledge-feedback foundation** for
+- **A9 (`archive/orchestration.md:380`) is the right knowledge-feedback foundation** for
   recording why a resolution was chosen; S5's decision briefs are a natural
   producer of that.
 - **The capture-macro PRD is independent** — no material conflict. It is an
