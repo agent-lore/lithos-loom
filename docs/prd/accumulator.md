@@ -6,7 +6,7 @@ target_version: tbd
 references:
   - docs/SPECIFICATION.md (implemented surface — the contract this document must not contradict)
   - docs/prd/archive/orchestration.md (processed 2026-09-28 and archived — disposition below)
-  - docs/prd/pr-reconciliation.md (not yet processed)
+  - docs/prd/archive/pr-reconciliation.md (processed 2026-09-28 and archived — disposition below)
   - docs/prd/capture-macro-tag-parsing.md (not yet processed)
   - docs/adr/0011-pr-maintenance-invariants.md (per-story PRs to main — the model that retired the integration branch)
   - docs/adr/0012-admission-release-order.md (serial admission — what an ordering edge still has to add)
@@ -41,7 +41,7 @@ document is the check.
 | Legacy PRD | Processed | Result |
 |---|---|---|
 | `orchestration.md` → `archive/` | 2026-09-28 | G + H shipped; A2's decompose half carried as P1–P4; A3's review policy and XC's ops residue parked as P5–P6; A1, A4, A5, A6, A7, A8, A9 and the rest of A2/XC not carried (see disposition) |
-| `pr-reconciliation.md` | — | pending. 10 of 11 slices are on main; expected outcome is a closing status line plus the four follow-ons already tracked as tasks |
+| `pr-reconciliation.md` → `archive/` | 2026-09-28 | all eleven slices shipped (the table had marked six); follow-ons d48caecd (#374) and 7bd2696b (#391) carried as R3/R4, 2bf0bb2b as P6's acceptance test; nothing else carried |
 | `capture-macro-tag-parsing.md` | — | pending. Shipped Obsidian slice; expected outcome is a move to `archive/` |
 | `archive/*` | n/a | already archived |
 
@@ -70,6 +70,17 @@ document is the check.
    ([ADR 0011](../adr/0011-pr-maintenance-invariants.md)). Anything in a legacy
    PRD that assumes `loom/<prd-slug>` or a terminal merge-stories step is
    disposed on that basis.
+4. **pr-reconciliation.md is complete, and the review pipeline's next problem
+   is convergence, not catch rate.** Every slice of the PR-maintenance series
+   is on main, including S8's three instruments. The week of 2026-09-21 then
+   produced five story-develop / converge runs that did not converge, at a
+   cost of $495, with codex as the correctness reviewer in all five and the
+   coder never once taking the `needs-decision` exit. August's
+   review-hardening epic (61a2bd00) was about what the panel *misses*; the
+   escape corpus (#401, #402, #409) now measures that. The new evidence is
+   about the loop failing to *stop* and reviewers judging against an unstated
+   operational model. That is the second section of this document, and the
+   review-hardening epic is re-cut against it there.
 
 ## Disposition of `orchestration.md`
 
@@ -95,6 +106,20 @@ document is the check.
 | XC — `[Plan]` / `[Drift]` findings (US38) | not carried | the scope-dispute escalation (#424) covers the under-delivery half that hurt; over-delivery has not cost an intervention. Candidate if the escape corpus shows otherwise |
 | XC — cost / dashboard / replay / OTel / systemd (US39) | residue parked as **P6** | lens is the dashboard; `develop list` / `develop attach` are the replay; OTel has no consumer. Still owed: the systemd unit and a usage-share reserve |
 | Implementation decisions — config additions (`mode = webhook`, `next_route`, `decide_via_brain`, `[loom_improve]`, `claude_config`, `host_affinity`) | not carried | each falls with its feature above; `review_policy` returns with P5 |
+
+## Disposition of `pr-reconciliation.md`
+
+| Section | Fate | Evidence |
+|---|---|---|
+| S0 real brief, S1 landability, S3 merge-gate, S5/S5a/S5b/S5c convergence, S6 serial admission, S7 reconciliation state | shipped | its own slices table and AGENTS.md; epic 000a4f9f completed 2026-09-26 |
+| S2 external-review ingestion + inline round retired | shipped | slices A–D; the row was never marked, the sections were |
+| S4 prevention | shipped (loom half) / practice (edge half) | generated-paths policy in merge-gate + resolver intake; the `blocks`-edge rule is carried as P3 |
+| S8 measurement | shipped | `eval resolve`, `eval triage`, `lens43-composed-projects`, each with a first reading; the "A/B precondition" is process, not a deliverable |
+| follow-on d48caecd (#374) | carried as **R3** | the panel blocks correct conflict resolutions on pre-existing story code |
+| follow-on 7bd2696b (#391) | carried as **R4** | merge-gate red has no autonomous fix path |
+| open question 4 / task 2bf0bb2b | carried into **P6** | "usage limits, not cost, are the constraint": the sweep must defer on a subscription limit |
+| open question 1 (repo-level Copilot review on lens) | moot | S2 retired the inline round; nothing depends on the answer |
+| open question 5 (webhook enqueue) | not carried | polling is v1; the A7 webhook was cancelled with the orchestration PRD |
 
 ## Carried stories
 
@@ -147,9 +172,85 @@ with the evidence that makes it worth doing.
    that there is no dead scaffolding pointing at a superseded PRD — the same
    subtraction US2 did for `story-implement` and `story-review-human`.
 
+### Review convergence (from the week of 2026-09-21, and the review-hardening epic)
+
+The evidence, from the two stories Dave filed on 2026-09-25 (34bb82c4,
+a3f17c21) and their 2026-09-26 addenda:
+
+| Run | Story | Correctness tool | Outcome | Cost |
+|---|---|---|---|---|
+| d9287814 | f78e6223 `develop deliver` | codex | disputed, 4 rounds | $89 |
+| c2e44d61 | #427 remediation | codex | disputed, 4 rounds | $67 |
+| 86613f8e | fd71001f `converge-push` | codex | max_rounds, 5 | $112 |
+| 8e9ac9c8 | #431 remediation | codex | max_rounds, 5 | $125 |
+| a1817376 | 307ac035 resume, #433 remediation | codex | max_rounds, 5 | $102 |
+
+Two shapes recur. The reviewer treats any constructible interleaving as a
+defect because nothing states the operational model (single operator,
+hand-run commands, Lithos reachable within a claim TTL), and the coder fixes
+rather than asking, so each fix grows protocol and the next round's blocking
+ids are new. And the loop has no notion of "not converging": it runs to
+`max_rounds` and hands the operator a verdict instead of the question. The
+a1817376 run adds the twist that even *in-model* lifecycle findings did not
+converge, so the fix is not "lifecycle findings are minor" but a model precise
+enough to tell in-model from out-of-model, with `needs-decision` as the exit for
+either when the criteria do not settle it.
+
+5. **R1 — Reviewers judge against a stated operational model.** As the
+   operator, I want a project-level `develop_review_scope` block (Markdown, in
+   the project-context doc, host default optional) rendered under the
+   acceptance criteria in every reviewer prompt and the triage prompt, and the
+   coder prompts to route a finding that needs an actor or condition neither
+   the criteria nor the block names to `needs-decision` ("is <actor> in scope
+   for this command?") rather than a fix or a bare dispute, with a reviewer
+   `contest` conceding unless it cites the line that names that actor, so
+   that a product question costs one round and one sentence from me instead of
+   $100 of protocol. Acceptance and fixtures as filed on task 34bb82c4,
+   including the in-model triple-failure case from a1817376.
+6. **R2 — A churning review stops with the question.** As the operator, I want
+   the shared round loop (story-develop, `converge`, `--from-github`,
+   `--resolve-conflicts`) to compare each round's blocking finding ids with
+   the previous round's from round 3 on, treat a round that opened at least
+   one blocking id and carried none over as churned, and end the run after two
+   consecutive churned rounds (`develop_review_churn_rounds`, default 2, 0 =
+   off) with `escalation.reason = review_not_converging` and a brief listing
+   per round which ids opened and closed, so that the disagreement reaches me
+   while it is still legible and a round or two of spend is saved per stalled
+   run. Sequences and acceptance as filed on task a3f17c21.
+7. **R3 — Composed-tree review blocks only on the conflicted hunks.** As the
+   operator, I want the panel in `--resolve-conflicts` mode to block on
+   defects inside the merge's conflicted hunks and report anything in
+   pre-existing story code as non-blocking, so that a correct resolution is not
+   held for a defect the story already shipped and the operator already
+   accepted (task d48caecd, #374). The same disease as R1 in resolve mode: the
+   scope of judgement is unstated, so the reviewer takes the widest one.
+8. **R4 — Merge-gate red has a fix path and keeps its reason.** As the
+   operator, I want a `[MergeGateFailed]` to carry the failing check's reason
+   (not only its output tail) and to feed the same remediation loop an
+   external review does, bounded by the same budget, so that a base move that
+   breaks a delivered PR is fixed by loom when it can be and escalated with a
+   legible cause when it cannot (task 7bd2696b, #391, from lens #85).
+
+**Re-cut of the review-hardening epic (61a2bd00) and the other open review
+items** — 27 of the 64 open loom tasks on 2026-09-28 touch review. Their fate
+under this section:
+
+| Cluster | Tasks | Fate |
+|---|---|---|
+| Termination and scope | 34bb82c4, a3f17c21, d48caecd, 7bd2696b | **R1–R4**, the first slices |
+| Reviewer trust in claims | c7b1adee, 4db7f60b, 32347e77 + 4b6a1565 (sandbox disclosure) | candidate, second slice: a reviewer that accepts an unverified environment claim is the mirror of one that blocks on an unstated actor; both are scope statements the panel lacks |
+| Panel coverage gaps | f78669ae spec-conformance persona, 77064874 AC-completeness, 8c1f33e0 visual UI evaluation, b15f937c cross-file context (#92) | candidate, ordered by what the escape corpus shows the panel actually misses; none is dispatched on a hunch |
+| Measurement | 23db4be6 RH-4, cb29b6af RH-9, e46200f9, 4777ca14, 189657db, a666a81d, d9e67eeb, 88afc13b | the escape corpus is the instrument now (RH-9's question is partly answered: engine-confounded, no arm dominates); the rest are harness hygiene, kept as issues, not roadmap |
+| Engine robustness | 5061554c (#411), fe400fb5 (#420), 942ca9bb (#155) | reliability, not review quality; kept as issues |
+| Elsewhere | f8b5ff7c shared reviewer package (cardinal), 21d4a59e page capture, 54fa7c3e provenance labels | candidate, unchanged |
+
+The epic 61a2bd00 itself is retained as the container for its children and
+tagged `prd:accumulator`; its charter ("close the 2026-08 baseline blind
+spots") is superseded by this section and the escape-review process.
+
 ### Parked from other sections (not for the first slice of this PRD)
 
-5. **P5 — The merge-policy dial (from A3).** As the operator, I want each
+9. **P5 — The merge-policy dial (from A3).** As the operator, I want each
    project to declare how a delivered PR is merged — `human` (today's `pr`
    gate), `shadow` (loom records what it *would* have merged and why, the gate
    stays human), `canary` (loom merges in a named project when the merge-gate
@@ -158,7 +259,7 @@ with the evidence that makes it worth doing.
    project on evidence rather than switched on globally. Held here; designed
    and sliced in the perpetual-daemon PRD, where the confidence measurement
    (shadow recording against the eleven labelled PRs) is the first slice.
-6. **P6 — Ops residue (from XC).** As the operator, I want a `systemd --user`
+10. **P6 — Ops residue (from XC).** As the operator, I want a `systemd --user`
    unit that runs the daemon through `lithos-loom drain` on stop, and a
    usage-share reserve so autonomous work cannot consume the subscription
    allowance I am using interactively (the task-level `develop_max_rounds` /
@@ -166,6 +267,9 @@ with the evidence that makes it worth doing.
    that restarts stop being an intervention class (four of the six T2-era
    hands were host restarts under a run) and the resource that actually binds
    is enforced rather than watched. Held here pending the perpetual-daemon PRD.
+   Acceptance carried from pr-reconciliation open question 4 (task 2bf0bb2b):
+   the reconcile sweep defers cleanly on a subscription usage limit instead of
+   retrying into the wall.
 
 ## Open questions
 
@@ -185,7 +289,4 @@ with the evidence that makes it worth doing.
 
 ## Not yet processed
 
-- `pr-reconciliation.md` — expected: closing status (10 of 11 slices on
-  main), carry nothing new; the follow-ons are tasks 2bf0bb2b, d48caecd
-  (#374), 7bd2696b (#391), 307ac035 (#395).
 - `capture-macro-tag-parsing.md` — expected: archive.

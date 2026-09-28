@@ -4,7 +4,7 @@
 - **Date:** 2026-08-24
 - **Deciders:** Dave Snowdon
 
-> Extracted from [`docs/prd/pr-reconciliation.md`](../prd/pr-reconciliation.md),
+> Extracted from [`docs/prd/archive/pr-reconciliation.md`](../prd/archive/pr-reconciliation.md),
 > which plans the PR-maintenance state machine. Four of that plan's decisions are
 > architectural rather than plan-scoped: they constrain code that will outlive the
 > plan, and a PRD gets archived once delivered. Clarifies the push language in

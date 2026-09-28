@@ -7,7 +7,7 @@
 
 ## Context
 
-Serial admission (PRD [pr-reconciliation](../prd/pr-reconciliation.md) S6,
+Serial admission (PRD [pr-reconciliation](../prd/archive/pr-reconciliation.md) S6,
 `subscriptions/admission.py`) bounds a project's delivered-but-unmerged PRs.
 It did not decide **which** held story takes the slot when one frees. Two
 mechanisms settled it, neither a decision anyone made:

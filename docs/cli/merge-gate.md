@@ -2,7 +2,7 @@
 
 Trial-merge a delivered PR into its base's **current** tip and gate the result
 with the project's **current** check-set (PRD
-[`pr-reconciliation.md`](../prd/pr-reconciliation.md) S3). Zero agent tokens:
+[`pr-reconciliation.md`](../prd/archive/pr-reconciliation.md) S3). Zero agent tokens:
 no coder, no panel — a deterministic check-set on a different tree. This is
 the command the github-watcher sweep drives as a subprocess on every base
 move (the watcher half of S3); on its own it answers the operator's question

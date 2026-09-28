@@ -1,11 +1,11 @@
 ---
 title: Lithos Loom — PR maintenance (post-delivery reconciliation)
 milestone: M-PR
-status: draft
+status: shipped (archived 2026-09-28)
 target_version: 0.9.0
 references:
   - docs/SPECIFICATION.md (implemented surface — pr gates, github-watcher, story-develop delivery)
-  - docs/prd/archive/orchestration.md (epic H — the `pr` gate this PRD extends; archived 2026-09-28, see docs/prd/accumulator.md)
+  - docs/prd/archive/orchestration.md (epic H — the `pr` gate this PRD extends; archived 2026-09-28)
   - docs/prd/archive/story-develop.md (T9 — the inline Copilot round this PRD retires)
   - docs/adr/0009-converge-pr-loop.md (`develop converge` — the paid loop this PRD feeds)
   - docs/adr/0011-pr-maintenance-invariants.md (the four cross-cutting decisions, extracted)
@@ -14,6 +14,18 @@ labels: [needs-triage, lithos-loom, orchestrator, github]
 
 # PR maintenance — post-delivery reconciliation
 
+> **Status (2026-09-28).** Archived: every slice shipped between 2026-08-24 and
+> 2026-09-14 (the table below marked six; S0, S2, S4, S5a, S5b and S8 are now
+> marked too). S8 delivered its three instruments — `eval resolve`,
+> `eval triage`, the `lens43-composed-projects` case — each with a first
+> reading; nothing further was owed. Processed into
+> [`docs/prd/accumulator.md`](../accumulator.md): follow-ons d48caecd (#374)
+> and 7bd2696b (#391) carried as review-convergence stories R3/R4, 2bf0bb2b
+> (open question 4) as the acceptance test of P6. Open question 1 became moot
+> when S2 retired the inline Copilot round; 5 (webhook enqueue) is not carried —
+> polling stays v1 and the A7 webhook was cancelled with the orchestration PRD.
+> Design record only; do not add slices here.
+>
 > **Status (2026-08-23).** Written from a live failure: the lithos-lens T1
 > rollout delivered four PRs in one day, and **every one of them needed manual
 > intervention to land**. Four distinct mechanisms were involved, none of them
@@ -832,7 +844,7 @@ edges would have prevented all of them.
 
 This PRD proposes the largest autonomous mechanism loom has, and none of it is
 currently measurable. The review-correctness harness
-([ADR 0005](../adr/0005-review-correctness-eval-harness.md)) scores panel
+([ADR 0005](../../adr/0005-review-correctness-eval-harness.md)) scores panel
 catch-rate on **seeded defects in a diff**; it has no notion of a composed tree,
 an injected external finding, or a merge resolution.
 
@@ -1078,7 +1090,7 @@ Reconciling explicitly, so the two do not drift:
 - Review-state policy is table-driven: `APPROVED` / `DISMISSED` post nothing,
   `CHANGES_REQUESTED` always posts, `COMMENTED` posts only with content.
 - S3 runs a real check-set against a real merge result in a temp repo — per the
-  [ADR 0005](../adr/0005-review-correctness-eval-harness.md) posture, hermetic
+  [ADR 0005](../../adr/0005-review-correctness-eval-harness.md) posture, hermetic
   and no live Lithos. Also assert the **skip** paths are loud, not silent: a
   gate with no `project`, a project since removed, and a fork PR each record a
   reason.
@@ -1121,18 +1133,18 @@ Reconciling explicitly, so the two do not drift:
 
 | # | slice | ships | cost |
 |---|---|---|---|
-| 0 | **S0 real task brief + PR body** — implemented, PR #333 **open** | the coder, the panel AC and the PR body all get the description | none |
+| 0 | **S0 real task brief + PR body** — **shipped** (#333) | the coder, the panel AC and the PR body all get the description | none |
 | 1 | S1 landability + `[PRConflicted]` — **shipped** (detection; the `behind` auto-update rides with S3) | two fields, one branch, one marker | none |
-| 2 | S2 ingestion + retire the inline round | delivery gets faster and simpler | none |
+| 2 | S2 ingestion + retire the inline round — **shipped** (slices A–D: `[ExternalReview]` detection, trusted-batch dispatch of `converge --from-github`, the inline Copilot round retired) | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move — **shipped** (`develop merge-gate`: trial merge, conflicting paths, current check-set, green-and-behind push; the watcher half fires on `(head_sha, base_sha, settings fingerprint)` change, one in-flight run per project, `metadata.merge_gate` on the gate, `[MergeGateFailed]`, paths into `[PRConflicted]`, mutual per-PR hold with remediation) | the merge-blindness fix | none |
-| 4 | S4 prevention | graph edges + generated-file policy | none |
+| 4 | S4 prevention — **shipped** (generated-paths policy in the merge-gate and the resolver intake; the `blocks`-edge half is planning practice, carried to accumulator P3) | graph edges + generated-file policy | none |
 | 5 | **S5c merge-aware ranges** — **shipped** (`RangeBase` + `fork_point`, three-dot diffs, first-parent enumeration; the pair test is `tests/test_runner_git.py`) | prerequisite: reviewers stop seeing other people's work | none |
-| 6 | **S5a external-claim triage** | a wrong bot comment does not become a wrong commit | one cheap call per finding |
-| 7 | **S5b remediation budget** | the two-bot loop terminates | none |
+| 6 | **S5a external-claim triage** — **shipped** | a wrong bot comment does not become a wrong commit | one cheap call per finding |
+| 7 | **S5b remediation budget** — **shipped** | the two-bot loop terminates | none |
 | 8 | **S5 conflict convergence** — **shipped**, both halves (CLI: `converge --resolve-conflicts`, the merge is the intake, text conflicts only, markers + intended-base guard, merge commit as the round commit, composed-tree review via the S5c fork point, shell-safe reviewer context; watcher: dispatch on the re-gate's `conflict` record once per `(head_sha, base_sha)`, one in flight, mutual hold with the other two dispatchers, `[ConflictResolved]` on a pushed merge commit, a loom `human` gate `conflict_unresolved` otherwise) | routine conflicts resolved without the operator | 1 attempt per sha pair |
-| 9 | **S6 serial admission** — **shipped** (the route-runner admits a ready story into a PR-producing route only while the project's open `pr` gates are under `[orchestrator] max_open_delivered_prs`, default 1, escalated gates excluded; the backstop `max_open_delivered_prs_total`, default 3, counts them all and posts `[AdmissionHeld]`; both per-project overridable in the context doc; a held story is nudged by the admission waker on gate close / escalation and by the readiness re-check otherwise; a freed slot is released by `metadata.priority` then first-asked order, the choice made inside `Admission` so the sleeper cannot pre-empt the waker — [ADR 0012](../adr/0012-admission-release-order.md); per project, not per base branch — a `pr` gate records no base) | concurrent delivered PRs bounded by config, not by hope | none |
+| 9 | **S6 serial admission** — **shipped** (the route-runner admits a ready story into a PR-producing route only while the project's open `pr` gates are under `[orchestrator] max_open_delivered_prs`, default 1, escalated gates excluded; the backstop `max_open_delivered_prs_total`, default 3, counts them all and posts `[AdmissionHeld]`; both per-project overridable in the context doc; a held story is nudged by the admission waker on gate close / escalation and by the readiness re-check otherwise; a freed slot is released by `metadata.priority` then first-asked order, the choice made inside `Admission` so the sleeper cannot pre-empt the waker — [ADR 0012](../../adr/0012-admission-release-order.md); per project, not per base branch — a `pr` gate records no base) | concurrent delivered PRs bounded by config, not by hope | none |
 | 10 | **S7 escalation state** — **shipped**, the Lithos half (`metadata.reconciliation_state` + `_detail` / `_since` / `_pr_url` on the `pr` gate, derived every sweep from the dispatchers' records + the fetched PR + what is in flight, seven-state vocabulary as designed, sweep = the one writer, `gates` CLI `STATE` column; the decision briefs already ride on the loom `human` gates b91177d2 raises; the Lens console is lens-side work) | a decision brief in Lithos, renderable by Lens | none |
-| 11 | **S8 measurement** | the autonomous paths get an instrument before they get trusted | eval runs |
+| 11 | **S8 measurement** — **shipped** (`eval resolve`, `eval triage`, `lens43-composed-projects`; first readings in §S8) | the autonomous paths get an instrument before they get trusted | eval runs |
 
 *(Slice numbers are delivery order; `S<n>` labels name the design sections and
 are deliberately not renumbered, so review comments referring to "S5" keep
@@ -1172,7 +1184,7 @@ automatic-review setting); nothing else waits on it.
    stuck ones accumulating. Written into S6.
 3. ~~Should the cross-cutting decisions become an ADR?~~ **Decided
    2026-08-24: yes, one ADR covering all four** —
-   [ADR 0011](../adr/0011-pr-maintenance-invariants.md): converge as the single
+   [ADR 0011](../../adr/0011-pr-maintenance-invariants.md): converge as the single
    pre-merge remediation engine, reconciliation state in Lithos, single-writer
    concurrency, and the additive-only push invariant. Decisions 1, 2, 7, 9 and
    11 below are its PRD-side restatements; the ADR is authoritative.
