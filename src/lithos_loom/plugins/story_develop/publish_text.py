@@ -332,7 +332,7 @@ def publish_title(text: str, *, limit: int = MAX_TITLE_CHARS) -> str:
 
 
 # A published excerpt of text loom did not author: one line, bounded. 300 is the
-# cap `remediation_refunds.refund_infra_failed` already applies to a child's
+# cap `remediation_lifecycle._refunds.refund_infra_failed` already applies to a child's
 # `message` — the same sink (a Lithos finding) and the same reason.
 MAX_EXCERPT_CHARS = 300
 _ELLIPSIS = "…"

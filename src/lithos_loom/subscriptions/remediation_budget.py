@@ -1,15 +1,10 @@
-"""The S5b external-remediation budget marker on a ``pr`` gate.
+"""Immutable read model and settings for a PR's remediation budget.
 
-``metadata.external_remediation`` — ``{pr_url, rounds_used,
-last_loom_pushed_sha, last_seen_head_sha, needs_human_gate_id,
-needs_human_reason, no_change_refunded, last_status, last_settled,
-in_flight_boot_id, in_flight_pid, in_flight_pid_start, in_flight_host_boot}``,
-url-scoped
-— is the on-disk contract :mod:`.external_remediation` reads and writes and
-:mod:`.remediation_escalation` records its gate in. A separate key from
-``external_review_seen`` and the merge marker — no marker may trip another's
-skip logic. Kept apart from the dispatcher so both halves stay under the
-module budget and the marker's shape has one home.
+The url-scoped ``metadata.external_remediation`` record is decoded here for
+watcher queries and reconciliation-state derivation. Mutations and their ordered
+side effects belong to ``remediation_lifecycle``; callers report lifecycle events
+instead of reconstructing markers. The pending-trigger key remains separate
+from external-review high-water marks and from the PR merge marker.
 """
 
 from __future__ import annotations

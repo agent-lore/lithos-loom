@@ -16,7 +16,6 @@ operator completing the gate (:func:`decision_pending`, PR #389 review).
 
 from __future__ import annotations
 
-import dataclasses
 from typing import Any
 
 from lithos_loom.errors import LithosClientError
@@ -34,6 +33,8 @@ from lithos_loom.subscriptions.remediation_budget import (
     RemediationBudget,
     RemediationNotifier,
 )
+
+from ._state import decision_raised, decision_released
 
 __all__ = [
     "DISPUTE_ACTIONS",
@@ -184,18 +185,7 @@ async def _escalate(
     run_id: str = "",
 ) -> str | None:
     async def _record(human_gate_id: str) -> bool:
-        updated = dataclasses.replace(
-            budget,
-            needs_human_gate_id=human_gate_id,
-            needs_human_reason=escalation.reason,
-            # the round is decided by the time a gate is raised on it; a
-            # dispatch-time snapshot must not resurrect the in-flight stamp
-            # (#407 slice 2b review)
-            in_flight_boot_id="",
-            in_flight_pid=0,
-            in_flight_pid_start=0,
-            in_flight_host_boot="",
-        )
+        updated = decision_raised(budget, human_gate_id, escalation.reason)
         ok = await write_marker(
             ctx,
             task_id=gate_id,
@@ -272,15 +262,7 @@ async def decision_pending(
         return budget, True
     if decision is not None and getattr(decision, "status", "open") == "open":
         return budget, True
-    released = dataclasses.replace(
-        budget,
-        rounds_used=0,
-        needs_human_gate_id="",
-        needs_human_reason="",
-        # a FRESH budget (PR #396 review): the reported-not-remediated refund
-        # is re-granted with the rounds, as a human push's new budget grants it
-        no_change_refunded=False,
-    )
+    released = decision_released(budget)
     ok = await write_marker(
         ctx,
         task_id=gate_id,

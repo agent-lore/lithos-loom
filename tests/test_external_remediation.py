@@ -55,12 +55,23 @@ from lithos_loom.subscriptions.external_remediation import (
     read_budget,
 )
 from lithos_loom.subscriptions.external_reviews import IngestResult
+from lithos_loom.subscriptions.remediation_lifecycle import RemediationLifecycle
 from tests.support import FakeLithosClient
 
 _PR_URL = "https://github.com/agent-lore/lithos-lens/pull/62"
 _HEAD = "h" * 40
 _LOOM_SHA = "a1" * 20
 _BOT = "copilot-pull-request-reviewer[bot]"
+
+
+def _skip_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use a yielding clock stand-in; exercise the actual retry allowance."""
+    sleep = asyncio.sleep
+
+    async def immediately(delay: float) -> None:
+        await sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", immediately)
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +84,9 @@ def _resolvable_origin(monkeypatch: pytest.MonkeyPatch) -> None:
         return OriginRead("agent-lore/lithos-lens", "ok")
 
     monkeypatch.setattr(mod, "origin_read", resolvable)
+    monkeypatch.setattr(
+        "lithos_loom.subscriptions.remediation_lifecycle.origin_read", resolvable
+    )
 
 
 def _ctx(lithos: Any) -> SubscriptionContext:
@@ -1456,23 +1470,20 @@ async def test_the_no_change_refund_is_granted_once_per_budget(tmp_path: Path) -
     five "thanks" comments would be five paid runs at 0/2. One refund per
     budget: the common case (one approval comment) stays free, the second
     keeps its round, and a human push (a fresh budget) re-grants it."""
-    from lithos_loom.subscriptions.remediation_outcome import record_result
 
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     spec = parse_pr_gate(gate)
     assert spec is not None
     first = RemediationBudget(pr_url=_PR_URL, rounds_used=1)
-    await record_result(
+    await RemediationLifecycle(
         _ctx(client),
         gate_id=gate.id,
         story_id=story,
         spec=spec,
-        budget=first,
-        budget_limit=2,
-        notifier=None,
-        data=_already_clean_payload(),
-    )
+        snapshot=first,
+        settings=RemediationSettings(trusted_bots=(), budget=2, notifier=None),
+    ).finished(data=_already_clean_payload(), returncode=0, output="", repo=tmp_path)
     marker = await _marker(client, gate.id)
     assert marker["rounds_used"] == 0 and marker["no_change_refunded"] is True
 
@@ -1483,16 +1494,14 @@ async def test_the_no_change_refund_is_granted_once_per_budget(tmp_path: Path) -
     await client.task_update(
         task_id=gate.id, agent="a", metadata={REMEDIATION_KEY: second.as_marker()}
     )
-    await record_result(
+    await RemediationLifecycle(
         _ctx(client),
         gate_id=gate.id,
         story_id=story,
         spec=spec,
-        budget=second,
-        budget_limit=2,
-        notifier=None,
-        data=_already_clean_payload(),
-    )
+        snapshot=second,
+        settings=RemediationSettings(trusted_bots=(), budget=2, notifier=None),
+    ).finished(data=_already_clean_payload(), returncode=0, output="", repo=tmp_path)
     marker = await _marker(client, gate.id)
     assert marker["rounds_used"] == 1  # kept
     outcomes = [f for f in _findings(client) if "remediation outcome" in f]
@@ -1509,7 +1518,6 @@ async def test_a_no_change_refund_that_cannot_land_never_raises_a_false_gate(
     (not a LithosClientError) during the refund: the write is retried like
     the other refunds, the outcome finding is still posted, the round is
     reported as kept, no gate."""
-    from lithos_loom.subscriptions import remediation_outcome as ro
 
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
@@ -1526,17 +1534,15 @@ async def test_a_no_change_refund_that_cannot_land_never_raises_a_false_gate(
         return await real_update(**kw)
 
     monkeypatch.setattr(client, "task_update", failing_update)
-    monkeypatch.setattr(ro, "REFUND_RETRY_DELAYS", ())  # no sleeping in the test
-    await ro.record_result(
+    _skip_retry_waits(monkeypatch)
+    await RemediationLifecycle(
         _ctx(client),
         gate_id=gate.id,
         story_id=story,
         spec=spec,
-        budget=RemediationBudget(pr_url=_PR_URL, rounds_used=2),
-        budget_limit=2,
-        notifier=None,
-        data=_already_clean_payload(),
-    )
+        snapshot=RemediationBudget(pr_url=_PR_URL, rounds_used=2),
+        settings=RemediationSettings(trusted_bots=(), budget=2, notifier=None),
+    ).finished(data=_already_clean_payload(), returncode=0, output="", repo=tmp_path)
     assert attempts  # it tried
     outcome = next(f for f in _findings(client) if "remediation outcome" in f)
     assert "did not land" in outcome and "stays spent" in outcome
@@ -1619,7 +1625,6 @@ async def test_a_raised_decision_gate_holds_dispatch_until_a_human_push(
 async def test_exhaustion_escalates_once_per_budget(tmp_path: Path) -> None:
     # The recorder's own guard: a result landing at exhaustion while the
     # marker already names a gate raises no second one.
-    from lithos_loom.subscriptions.remediation_outcome import record_result
 
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
@@ -1628,16 +1633,14 @@ async def test_exhaustion_escalates_once_per_budget(tmp_path: Path) -> None:
     budget = RemediationBudget(
         pr_url=_PR_URL, rounds_used=2, needs_human_gate_id="gate-already-raised"
     )
-    await record_result(
+    await RemediationLifecycle(
         _ctx(client),
         gate_id=gate.id,
         story_id=story,
         spec=spec,
-        budget=budget,
-        budget_limit=2,
-        notifier=None,
-        data=_not_converged_payload(),
-    )
+        snapshot=budget,
+        settings=RemediationSettings(trusted_bots=(), budget=2, notifier=None),
+    ).finished(data=_not_converged_payload(), returncode=0, output="", repo=tmp_path)
     assert await _human_gates(client) == []
 
 
@@ -1748,7 +1751,6 @@ async def test_a_reverted_external_fix_raises_a_disputed_gate_with_rounds_to_spa
 
 
 async def test_a_disputed_gate_is_raised_once_per_budget(tmp_path: Path) -> None:
-    from lithos_loom.subscriptions.remediation_outcome import record_result
 
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
@@ -1760,16 +1762,14 @@ async def test_a_disputed_gate_is_raised_once_per_budget(tmp_path: Path) -> None
         needs_human_gate_id="gate-already-raised",
         needs_human_reason="disputed",
     )
-    await record_result(
+    await RemediationLifecycle(
         _ctx(client),
         gate_id=gate.id,
         story_id=story,
         spec=spec,
-        budget=budget,
-        budget_limit=2,
-        notifier=None,
-        data=_reverted_payload(),
-    )
+        snapshot=budget,
+        settings=RemediationSettings(trusted_bots=(), budget=2, notifier=None),
+    ).finished(data=_reverted_payload(), returncode=0, output="", repo=tmp_path)
     assert await _human_gates(client) == []
 
 
@@ -1875,7 +1875,6 @@ async def test_a_triage_rejected_run_refunds_the_round_once_per_budget(
     not remediated, exactly like `already_clean`: the reserved round comes
     back, bounded by the same once-per-budget allowance (a second reported
     run keeps its round), and the last budgeted round raises no gate."""
-    from lithos_loom.subscriptions.remediation_outcome import record_result
 
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
@@ -1897,16 +1896,14 @@ async def test_a_triage_rejected_run_refunds_the_round_once_per_budget(
             }
         ],
     }
-    await record_result(
+    await RemediationLifecycle(
         _ctx(client),
         gate_id=gate.id,
         story_id=story,
         spec=spec,
-        budget=RemediationBudget(pr_url=_PR_URL, rounds_used=1),
-        budget_limit=1,
-        notifier=None,
-        data=payload,
-    )
+        snapshot=RemediationBudget(pr_url=_PR_URL, rounds_used=1),
+        settings=RemediationSettings(trusted_bots=(), budget=1, notifier=None),
+    ).finished(data=payload, returncode=0, output="", repo=tmp_path)
     marker = await _marker(client, gate.id)
     assert marker["rounds_used"] == 0 and marker["no_change_refunded"] is True
     assert await _human_gates(client) == []  # the last round, refunded: no gate
@@ -1924,18 +1921,16 @@ async def test_a_triage_rejected_run_refunds_the_round_once_per_budget(
             ).as_marker()
         },
     )
-    await record_result(
+    await RemediationLifecycle(
         _ctx(client),
         gate_id=gate.id,
         story_id=story,
         spec=spec,
-        budget=RemediationBudget(
+        snapshot=RemediationBudget(
             pr_url=_PR_URL, rounds_used=1, no_change_refunded=True
         ),
-        budget_limit=1,
-        notifier=None,
-        data=_already_clean_payload(),
-    )
+        settings=RemediationSettings(trusted_bots=(), budget=1, notifier=None),
+    ).finished(data=_already_clean_payload(), returncode=0, output="", repo=tmp_path)
     marker = await _marker(client, gate.id)
     assert marker["rounds_used"] == 1  # kept
     outcomes = [f for f in _findings(client) if "remediation outcome" in f]
@@ -2146,6 +2141,9 @@ async def test_a_mismatched_checkout_is_refused_before_any_spend(
         return OriginRead(origin["repo"], "ok")
 
     monkeypatch.setattr(mod, "origin_read", fake_origin)
+    monkeypatch.setattr(
+        "lithos_loom.subscriptions.remediation_lifecycle.origin_read", fake_origin
+    )
     spawn, calls = _spawner(None)
     rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
 
@@ -2233,6 +2231,9 @@ async def test_a_cli_refusal_settles_until_the_mapping_or_origin_changes(
         return OriginRead(origin["repo"], "ok")
 
     monkeypatch.setattr(mod, "origin_read", fake_origin)
+    monkeypatch.setattr(
+        "lithos_loom.subscriptions.remediation_lifecycle.origin_read", fake_origin
+    )
     spawn, calls = _spawner(
         {
             "status": "repo_mismatch",
@@ -2295,6 +2296,9 @@ async def test_an_unresolvable_checkout_is_refused_before_any_spend(
         return read["value"]
 
     monkeypatch.setattr(mod, "origin_read", fake_read)
+    monkeypatch.setattr(
+        "lithos_loom.subscriptions.remediation_lifecycle.origin_read", fake_read
+    )
     spawn, calls = _spawner(None)
     rem = ExternalRemediation(_settings(tmp_path), spawn=spawn)
 
@@ -2337,10 +2341,9 @@ async def test_a_refund_that_fails_transiently_still_lands(
     # round and the review debt; a transient Lithos failure must be retried,
     # not swallowed behind a success breadcrumb.
     from lithos_loom.errors import LithosClientError
-    from lithos_loom.subscriptions import remediation_outcome
     from lithos_loom.subscriptions.external_remediation import PENDING_KEY
 
-    monkeypatch.setattr(remediation_outcome, "REFUND_RETRY_DELAYS", (0, 0, 0))
+    _skip_retry_waits(monkeypatch)
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     original = client.task_update
@@ -2373,10 +2376,9 @@ async def test_a_refund_that_never_lands_is_reported_honestly_and_escalates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from lithos_loom.errors import LithosClientError
-    from lithos_loom.subscriptions import remediation_outcome
     from lithos_loom.subscriptions.external_remediation import PENDING_KEY
 
-    monkeypatch.setattr(remediation_outcome, "REFUND_RETRY_DELAYS", (0, 0, 0))
+    _skip_retry_waits(monkeypatch)
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     original = client.task_update
@@ -2496,10 +2498,9 @@ async def test_an_infra_refund_that_never_lands_still_decides_the_last_round(
     # Mirror of the repo-mismatch case: on this path the round IS spent, so a
     # last round escalates like any other — and a raw transport error (not a
     # LithosClientError) must land in the retry loop, never the crash handler.
-    from lithos_loom.subscriptions import remediation_outcome
     from lithos_loom.subscriptions.external_remediation import PENDING_KEY
 
-    monkeypatch.setattr(remediation_outcome, "REFUND_RETRY_DELAYS", (0, 0, 0))
+    _skip_retry_waits(monkeypatch)
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     original = client.task_update
@@ -2722,20 +2723,19 @@ async def test_a_crash_after_the_result_landed_keeps_the_push_attribution(
     # or a crash after `record_result` landed loom's push would revert the
     # attribution and the next sweep would read that push as a human's
     # (the budget reset the S5b bound exists to prevent).
-    from lithos_loom.subscriptions import external_remediation as er
 
     client = FakeLithosClient()
     story, gate = await _gate_with_story(client)
     spawn, _calls = _spawner(
         {"status": "converged", "pushed": True, "pushed_sha": "ab" * 20, "rounds": 1}
     )
-    real = er.record_result
+    real = RemediationLifecycle.finished
 
     async def record_then_raise(*args: Any, **kwargs: Any) -> None:
         await real(*args, **kwargs)
         raise RuntimeError("logging blew up after the record landed")
 
-    monkeypatch.setattr(er, "record_result", record_then_raise)
+    monkeypatch.setattr(RemediationLifecycle, "finished", record_then_raise)
     rem = ExternalRemediation(_settings(tmp_path, budget=2), spawn=spawn)
     marker = await _dispatched_marker(client, gate, story, rem)
     assert marker["last_loom_pushed_sha"] == "ab" * 20
