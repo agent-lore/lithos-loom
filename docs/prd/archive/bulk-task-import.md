@@ -6,7 +6,7 @@ target_version: 0.3.0
 references:
   - src/lithos_loom/cli/project.py (existing project import / create)
   - docs/prd/task-archive.md (Slice 6 — companion feature for completed tasks)
-  - docs/prd/capture-macro-tag-parsing.md (Slice 3.1 — shares the tag-regex contract)
+  - docs/prd/archive/capture-macro-tag-parsing.md (Slice 3.1 — shares the tag-regex contract; archived unbuilt 2026-09-28)
   - docs/PLAN.md (Slice 5 build order)
 labels: [needs-triage, lithos-loom, obsidian, project-import, tasks]
 ---

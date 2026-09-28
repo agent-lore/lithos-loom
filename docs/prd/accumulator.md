@@ -7,7 +7,7 @@ references:
   - docs/SPECIFICATION.md (implemented surface — the contract this document must not contradict)
   - docs/prd/archive/orchestration.md (processed 2026-09-28 and archived — disposition below)
   - docs/prd/archive/pr-reconciliation.md (processed 2026-09-28 and archived — disposition below)
-  - docs/prd/capture-macro-tag-parsing.md (not yet processed)
+  - docs/prd/archive/capture-macro-tag-parsing.md (processed 2026-09-28 — archived unbuilt)
   - docs/adr/0011-pr-maintenance-invariants.md (per-story PRs to main — the model that retired the integration branch)
   - docs/adr/0012-admission-release-order.md (serial admission — what an ordering edge still has to add)
 labels: [needs-triage, lithos-loom, orchestrator, planning]
@@ -22,7 +22,8 @@ labels: [needs-triage, lithos-loom, orchestrator, planning]
 > the decision can be vetoed rather than rediscovered). When the ledger below
 > shows every legacy PRD processed, this file is renamed, its stories are
 > sliced, and the processed PRDs move to `docs/prd/archive/` with a pointer.
-> Until then it accumulates; it does not yet claim a milestone.
+> Until then it accumulates; it does not yet claim a milestone. *(The ledger
+> closed on 2026-09-28; the tidy-up is the next step.)*
 
 ## Why this exists
 
@@ -42,7 +43,7 @@ document is the check.
 |---|---|---|
 | `orchestration.md` → `archive/` | 2026-09-28 | G + H shipped; A2's decompose half carried as P1–P4; A3's review policy and XC's ops residue parked as P5–P6; A1, A4, A5, A6, A7, A8, A9 and the rest of A2/XC not carried (see disposition) |
 | `pr-reconciliation.md` → `archive/` | 2026-09-28 | all eleven slices shipped (the table had marked six); follow-ons d48caecd (#374) and 7bd2696b (#391) carried as R3/R4, 2bf0bb2b as P6's acceptance test; nothing else carried |
-| `capture-macro-tag-parsing.md` | — | pending. Shipped Obsidian slice; expected outcome is a move to `archive/` |
+| `capture-macro-tag-parsing.md` → `archive/` | 2026-09-28 | archived **unbuilt**: US47–US54 never reached the macro; only D40's tag regex shipped, as `TAG_REGEX` in the bulk-import line parser. Dropped because the operator no longer captures through the Obsidian macro; nothing carried |
 | `archive/*` | n/a | already archived |
 
 ## Decisions taken while processing (2026-09-28, with Dave)
@@ -287,6 +288,9 @@ spots") is superseded by this section and the escape-review process.
    harness only. Proposal: the contract and brief in the loom repo (so a
    consuming project can find them), the skill invocation in the harness.
 
-## Not yet processed
+## Ledger complete
 
-- `capture-macro-tag-parsing.md` — expected: archive.
+Every legacy PRD under `docs/prd/` has been processed as of 2026-09-28. What
+remains for this document is its own tidy-up: a real name and milestone, the
+stories sliced in delivery order, and the status header rewritten from
+"accumulator" to a plan.

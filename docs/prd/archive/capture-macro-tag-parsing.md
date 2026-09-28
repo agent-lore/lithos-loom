@@ -1,7 +1,7 @@
 ---
 title: Lithos Loom — Capture Macro Selection-Tag Parsing
 milestone: Track 1 (Slice 3 enhancement)
-status: draft
+status: archived unbuilt (2026-09-28)
 target_version: 0.2.0
 references:
   - docs/macros/capture-task.md (existing macro source)
@@ -12,6 +12,18 @@ labels: [needs-triage, lithos-loom, obsidian, capture-macro]
 
 # Lithos Loom — Capture Macro Selection-Tag Parsing
 
+> **Status (2026-09-28).** Archived **unbuilt**. The macro still takes the
+> selection verbatim as the Title and opens the Tags field empty; none of
+> US47–US54 was implemented, and the macro's last functional change (#35, the
+> date picker) predates this document. The one piece of its design that reached
+> code is the tag contract: D40's regex (Obsidian-compatible, all-digit tokens
+> excluded) is `TAG_REGEX` in `src/lithos_loom/task_line_parser.py`, where the
+> bulk `project import` path uses it. Dropped rather than carried because the
+> operator no longer captures tasks through the Obsidian macro often enough for
+> the typing to matter; tasks are filed through Claude Code and the Lithos MCP.
+> Recorded in [`docs/prd/accumulator.md`](../accumulator.md). Reopen only if the
+> macro becomes a daily path again.
+>
 ## Problem Statement
 
 Slice 3's capture-task macro (`docs/macros/capture-task.md`) defaults the modal's Title field to the operator's current Obsidian selection. Tags are a separate free-text input the operator types after the modal opens. In practice, when the operator selects a phrase that already contains hashtags — e.g. `"Review staging deploy #urgent #project/lithos-loom"` — the workflow today is:
