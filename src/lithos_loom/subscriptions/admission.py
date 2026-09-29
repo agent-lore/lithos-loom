@@ -1,7 +1,7 @@
 """Serial admission — bound a project's delivered-but-unmerged PRs (PRD S6).
 
 ``blocks`` edges serialise stories the planner knew would collide; nothing
-serialised the rest, and ``max_concurrency`` never bounded *delivered* PRs
+serialised the rest, and no dial bounded *delivered* PRs
 — once delivery released its claim the next story started while the first
 ``pr`` gate was still open. That is how the 2026-08-22 batch of conflicting
 lens PRs happened.

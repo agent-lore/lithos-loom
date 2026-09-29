@@ -241,7 +241,7 @@ partial first pass finishes the job and changes nothing else.
    the record that survives.
 
 From there the PR is a first-class PR-maintenance object (PRD
-[`pr-reconciliation.md`](../prd/pr-reconciliation.md)): landability
+[`pr-reconciliation.md`](../prd/archive/pr-reconciliation.md)): landability
 (`[PRConflicted]`), external-review ingestion and `converge --from-github`
 remediation, the base-move re-gate, the conflict resolver, merge → story
 completed + dependents nudged, and it counts against the project's S6

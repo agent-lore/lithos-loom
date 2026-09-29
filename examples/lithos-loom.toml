@@ -14,7 +14,6 @@ agent_id = "lithos-orchestrator-samsara"
 lithos_url = "http://localhost:8765"
 # task events are pushed from <lithos_url>/events; no polling cadence.
 work_dir = "/tmp/lithos-loom"
-max_concurrency = 4
 log_level = "info"
 retain_failed_workdirs = true
 # Serial admission (PRD pr-reconciliation S6): a PR-producing route claims a

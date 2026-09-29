@@ -10,7 +10,6 @@ import pytest
 from lithos_loom.config import (
     DEFAULT_GITHUB_WATCHER_COORD_DOC,
     DEFAULT_GITHUB_WATCHER_POLL_INTERVAL,
-    DEFAULT_MAX_CONCURRENCY,
     DEFAULT_OBSIDIAN_AWAITING_REVIEW_FILE,
     DEFAULT_OBSIDIAN_PROJECTS_DIR,
     DEFAULT_OBSIDIAN_RESOLVED_TTL_DAYS,
@@ -27,7 +26,6 @@ def test_load_config_parses_orchestrator_projects_routes(loom_config_env: Path) 
     assert isinstance(cfg, LoomConfig)
     assert cfg.orchestrator.agent_id == "lithos-orchestrator-test"
     assert cfg.orchestrator.lithos_url == "http://localhost:8765"
-    assert cfg.orchestrator.max_concurrency == 2
     assert "lithos-lens" in cfg.projects
     assert len(cfg.routes) == 1
     assert cfg.routes[0].name == "prd-decompose"
@@ -105,7 +103,33 @@ def test_environment_picks_per_env_config(
     cfg = load_config()
     assert cfg.orchestrator.agent_id == "lithos-orchestrator-prod"
     assert cfg.environment == "prod"
-    assert cfg.orchestrator.max_concurrency == DEFAULT_MAX_CONCURRENCY
+
+
+def test_removed_max_concurrency_key_is_ignored_with_a_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#85: the knob was parsed for four months and never enforced; an old
+    config that still sets it must keep loading, with a one-line warning."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        dedent(
+            f"""
+            [orchestrator]
+            agent_id = "stale-key"
+            lithos_url = "http://localhost:8765"
+            work_dir = "{tmp_path / "work"}"
+            max_concurrency = 4
+            """
+        )
+    )
+    monkeypatch.setenv("LITHOS_LOOM_CONFIG", str(cfg_path))
+    with caplog.at_level("WARNING", logger="lithos_loom.config"):
+        cfg = load_config()
+    assert cfg.orchestrator.agent_id == "stale-key"
+    assert not hasattr(cfg.orchestrator, "max_concurrency")
+    assert "max_concurrency is no longer read" in caplog.text
 
 
 def test_invalid_toml_surfaces_clear_error(

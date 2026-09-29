@@ -165,7 +165,6 @@ def test_dry_run_rejects_unknown_subscription_action(
             agent_id = "typo-test"
             lithos_url = "http://localhost:8765"
             work_dir = "{tmp_path / "work"}"
-            max_concurrency = 2
             log_level = "info"
 
             [[subscriptions]]
@@ -462,7 +461,6 @@ def _write_doctor_config(
         'agent_id = "lithos-orchestrator-test"',
         'lithos_url = "http://localhost:8765"',
         f'work_dir = "{tmp_path / "work"}"',
-        "max_concurrency = 2",
         "",
     ]
     if vault_path is not None:

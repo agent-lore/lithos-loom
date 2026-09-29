@@ -15,7 +15,7 @@
 > [#88](https://github.com/agent-lore/lithos-loom/issues/88) an operator
 > observe/attach CLI (the "attach escape hatch" is a printed hint today, not a real
 > affordance). The post-extension reframing of the surrounding pipeline lives in
-> [docs/prd/orchestration.md](../orchestration.md).
+> [docs/prd/archive/orchestration.md](orchestration.md).
 > **Date:** 2026-06-11
 > **Deciders:** Dave Snowdon
 >

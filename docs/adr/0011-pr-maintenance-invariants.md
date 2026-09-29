@@ -4,12 +4,12 @@
 - **Date:** 2026-08-24
 - **Deciders:** Dave Snowdon
 
-> Extracted from [`docs/prd/pr-reconciliation.md`](../prd/pr-reconciliation.md),
+> Extracted from [`docs/prd/archive/pr-reconciliation.md`](../prd/archive/pr-reconciliation.md),
 > which plans the PR-maintenance state machine. Four of that plan's decisions are
 > architectural rather than plan-scoped: they constrain code that will outlive the
 > plan, and a PRD gets archived once delivered. Clarifies the push language in
 > [ADR 0009](0009-converge-pr-loop.md) §2 and extends the `pr` gate from
-> [epic H](../prd/orchestration.md).
+> [epic H](../prd/archive/orchestration.md).
 
 ## Context
 
@@ -25,7 +25,7 @@ resolution, and escalates the residue. Four questions arise that are not really
 about *this* plan, and answering them inconsistently later would be expensive:
 
 1. **How many fix loops does loom have?** `story-develop` has one, `converge`
-   has one, `story-fix` is planned ([orchestration.md](../prd/orchestration.md)
+   has one, `story-fix` is planned ([orchestration.md](../prd/archive/orchestration.md)
    §A3), and PR maintenance wants one. [ADR 0004](0004-review-only-mode.md) §1
    already single-sources the fix loop; a fourth would quietly undo that.
 2. **Where does "what is the state of this PR right now?" live?** Findings are
@@ -139,7 +139,7 @@ the name of safety**. Enforce the ancestry proof, never the flag spelling.
 - A Lens slice is needed to render the states. Until it exists the states are
   still queryable, so the work is useful before the console lands.
 - Single-writer discipline constrains the planned webhook path
-  ([orchestration.md](../prd/orchestration.md) §A7): webhooks wake the reconciler,
+  ([orchestration.md](../prd/archive/orchestration.md) §A7): webhooks wake the reconciler,
   they do not update gates directly. Polling stays the recovery path so a missed
   webhook degrades to "slower", never to "never".
 - Rebase is not available as a landing strategy for automation. A merge achieves

@@ -17,6 +17,45 @@ labels: [needs-triage, lithos-loom, orchestrator, task-graph]
 
 # Lithos Loom — Orchestration Plan (post task-graph extension)
 
+> **Status (2026-09-28, dispositions final 2026-09-29).** Processed section by
+> section: G and H shipped; A2's decompose half is carried as P1–P4 in
+> [`docs/prd/prd-to-graph.md`](../prd-to-graph.md); A3's review policy is
+> recorded as the merge-policy dial in
+> [`docs/prd/review-convergence.md`](../review-convergence.md) (delivery blocked by the M1 reading checkpoint 3398a388, design free);
+> XC's ops residue is carried as U7/U8 in
+> [`docs/prd/unattended-duration.md`](../unattended-duration.md); every other
+> section is *not carried*, with the reason below. Its 33 open tasks were
+> closed or cancelled with outcomes on 2026-09-26/28 (twenty-two cancellations
+> point back here). Two premises had become false: the `loom/<prd-slug>`
+> integration branch (per-story PRs to `main` since August, ADR 0011) and
+> consumers that never arrived (Agent Zero, a second host). Archived
+> 2026-09-28; design record only. Do not add stories here.
+>
+> **Disposition by section**
+>
+> | Section | Fate | Evidence |
+> |---|---|---|
+> | G — graph adoption (US1–US9) | shipped | header of the PRD itself; `lithos_task_ready` gates dispatch; `project import` writes epics + `blocks` edges (US9, #260) |
+> | H — human-merge gate (US10–US13) | shipped | PRs #261–#263; the `pr` gate is the sole awaiting-merge state |
+> | A1 — plugin SDK, bash-runner, events.jsonl, idempotency (US14–US18) | not carried | only two plugins exist (story-develop, echo) and decision 1 removes the two that would have been next; US18 shipped inside story-develop only (task b25d9e33 closed with that outcome) |
+> | A2 — prd-generate (US19) | not carried | PRDs are hand-written with the Pocock skills (the MVP PRD says so; T2 was) |
+> | A2 — prd-review-agent (US20) | carried as **P1** (`prd-to-graph.md`) | as a skill, per decision 1 |
+> | A2 — prd-review-human gate (US21), auto-retag on approval (US23) | not carried | under decision 1, approval *is* running the decompose step; no gate or retag is needed between them. Generic `human` gates exist anyway (b91177d2) |
+> | A2 — prd-decompose (US22) | carried as **P2, P3, P4** (`prd-to-graph.md`) | minus the integration branch (decision 3); the stub package retires with P4 |
+> | A3 — review policy (US24, US25) | parked as the merge-policy dial (`review-convergence.md`, *Beyond this PRD*) | it is the merge-policy dial (human-per-story → shadow → canary) that gates the perpetual-daemon goal; designed in that PRD, held here so it is not lost |
+> | A3 — story-fix (US26) | not carried | superseded by `develop converge` + S2/S5a/S5b + escalation (task 9edce802 cancelled 2026-09-26) |
+> | A9 — lithos-coding-mcp (US27, US28) | not carried | decision 2 |
+> | A4 — decide-next brain (US29, US30) | not carried | the failure classifier and reaction table (5dbeb0c8 slice B, #378) decide deterministically; Dave's rule is "escalate if stuck, never silently continue", which is the opposite of a model choosing `cancel_remaining` |
+> | A5 — crash recovery (US31) | not carried | restart family on main (orphan reaping, `drain`, `develop deliver`); the per-round checkpoint is task 307ac035 (#395) |
+> | A5 — loom-improve (US32) | not carried | the escape-review process (#347) is the human version and is producing eval cases; automate only when its shape is stable |
+> | A8 — merge-stories (US33) | not carried | decision 3 (epic 7148f23e cancelled 2026-09-26) |
+> | A6 — A2A endpoint (US34) | not carried | no consumer; Agent Zero / Hanuman are not dispatching to loom and "what is ready" is answered by the Lithos MCP and lens |
+> | A7 — multi-host (US35), webhook (US36) | not carried | one host; webhook enqueue is the PR-reconciliation PRD's open question 5 and polling remains v1. Re-file if a second host or a latency complaint appears |
+> | A7 — SSE readiness re-evaluation (US37) | shipped | the route-runner's readiness re-check plus #352 (task 8c8eba46 closed with that outcome) |
+> | XC — `[Plan]` / `[Drift]` findings (US38) | not carried as findings; the drift half carried as **R5** (`review-convergence.md`) | the scope-dispute escalation (#424) stops a run when the coder declares a finding out of reach, but nothing checks the inverse at approval time — that is 77064874 (#175), promoted 2026-09-29. `[Plan]` is redundant with the run checkpoint (branch, base, head) and the S0 PR body; over-delivery has cost no intervention |
+> | XC — cost / dashboard / replay / OTel / systemd (US39) | residue carried as U7/U8 (`unattended-duration.md`) | lens is the dashboard; `develop list` / `develop attach` are the replay; OTel has no consumer. Still owed: the systemd unit and a usage-share reserve |
+> | Implementation decisions — config additions (`mode = webhook`, `next_route`, `decide_via_brain`, `[loom_improve]`, `claude_config`, `host_affinity`) | not carried | each falls with its feature above; `review_policy` returns with the merge-policy dial |
+>
 > **Status (2026-06-13).** This plan replaces both `docs/prd/mvp.md` (the
 > proof-of-concept) and `docs/prd/full.md` (the A1–A10 roadmap). It is written
 > against a Lithos server that has the
@@ -54,7 +93,7 @@ plan:
   re-claim) and the `completes_task = false` / `metadata.loom_delivered`
   PR-merge-wait path. Shipped.
 - **GitHub issue watcher** — bidirectional issue ↔ task mirror with drift sync,
-  per-project config in project-context metadata ([ADR 0001](../adr/0001-github-watch-config-storage.md)),
+  per-project config in project-context metadata ([ADR 0001](../../adr/0001-github-watch-config-storage.md)),
   reconciliation sweep. Shipped, and **already polls GitHub** — which makes it
   the natural home for the PR-gate resolver below.
 - **`story-develop`** — the conversational implement → review → fix → approve
@@ -62,7 +101,7 @@ plan:
   per-round commits, objective test gate in a throwaway container, usage-limit
   role-aware degradation, optional PR delivery with an autonomous Copilot review
   round, and full daemon-mode integration. Shipped (T1–T10), specced in
-  [docs/prd/archive/story-develop.md](archive/story-develop.md).
+  [docs/prd/archive/story-develop.md](story-develop.md).
 - **Stubs:** `prd-decompose` (the surviving front-end — to be built here),
   `story-implement` + `story-review-human` (**to be retired** — `story-develop`
   supersedes them; see US-2 — this resolves the "supersede vs coexist" open

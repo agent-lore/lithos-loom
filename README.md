@@ -178,7 +178,7 @@ code.
 
 | Layer | What it sets | When you change it |
 |-------|--------------|--------------------|
-| Defaults baked in | `max_concurrency`, `log_level`, `resolved_ttl_days`, etc | Almost never. |
+| Defaults baked in | `log_level`, `resolved_ttl_days`, etc | Almost never. |
 | TOML config | `orchestrator.*`, project registry, route table, subscriptions, `obsidian_sync` | Per-machine, per-environment. Hot-reload is not implemented; restart the daemon. |
 | `.env` (CWD) or shell rc | `LITHOS_URL`, `LITHOS_LOOM_CONFIG`, `LITHOS_LOOM_ENVIRONMENT` | Per-shell session. |
 | CLI flags (`--config`, `--dry-run`, …) | One-off overrides | Per invocation. |

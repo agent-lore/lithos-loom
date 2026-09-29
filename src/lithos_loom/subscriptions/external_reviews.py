@@ -3,7 +3,7 @@
 A delivered PR sits behind a ``pr`` gate awaiting a human merge. Reviews left
 on it in the meantime — Copilot, other bots, humans — were invisible to loom:
 the reconcile sweep polled only merge state. This module is the detection half
-of PRD S2 (``docs/prd/pr-reconciliation.md``): each sweep of a still-open
+of PRD S2 (``docs/prd/archive/pr-reconciliation.md``): each sweep of a still-open
 gate, read the PR's reviews, inline review comments and Conversation-tab
 comments and surface anything new as a one-shot ``[ExternalReview]`` finding
 on the blocked *story* (the task an operator watches), with a de-dup marker
