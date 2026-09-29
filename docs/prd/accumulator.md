@@ -105,6 +105,10 @@ document is the check.
    cancel). Of `[Plan]`/`[Drift]`, the plan half is redundant with the run
    checkpoint and the S0 PR body; the drift half is task 77064874 (#175), the
    panel's missing AC-completeness check, promoted to **R5**.
+9. **There is no separate perpetual-daemon PRD; P5 and P6 live here**
+   (2026-09-29). They are sequenced after M1 has a number, as the last section
+   of this document, so the dial and the operations it needs are not parked
+   against a document nobody has scheduled.
 
 ## Disposition of `orchestration.md`
 
@@ -299,7 +303,10 @@ The epic 61a2bd00 itself is retained as the container for its children and
 tagged `prd:accumulator`; its charter ("close the 2026-08 baseline blind
 spots") is superseded by this section and the escape-review process.
 
-### Parked from other sections (not for the first slice of this PRD)
+### Later: the autonomy dial and the operations it needs
+
+Folded in on 2026-09-29 (decision 9). Both stories are sequenced after M1 has
+produced an agreement rate; until then they are design, not delivery.
 
 11. **P5 — The merge-policy dial (from A3).** As the operator, I want each
    project to declare how a delivered PR is merged — `human` (today's `pr`
@@ -307,8 +314,8 @@ spots") is superseded by this section and the escape-review process.
    stays human), `canary` (loom merges in a named project when the merge-gate
    is green and the panel and external review agree), with an `every-n` human
    checkpoint available under the last two — so that autonomy is turned up per
-   project on evidence rather than switched on globally. Held here for the dial itself;
-   its confidence measurement is **M1** above, pulled forward on 2026-09-29.
+   project on evidence rather than switched on globally. Its confidence measurement is **M1** above; the dial is designed once M1 has
+   a number.
 12. **P6 — Ops residue (from XC).** As the operator, I want a `systemd --user`
    unit that runs the daemon through `lithos-loom drain` on stop, and a
    usage-share reserve so autonomous work cannot consume the subscription
@@ -316,7 +323,8 @@ spots") is superseded by this section and the escape-review process.
    `develop_max_cost_usd` knobs of #350 are the per-story half of that), so
    that restarts stop being an intervention class (four of the six T2-era
    hands were host restarts under a run) and the resource that actually binds
-   is enforced rather than watched. Held here pending the perpetual-daemon PRD.
+   is enforced rather than watched. Sequenced with P5; the systemd unit could
+   go earlier if restarts return as an intervention class.
    Acceptance carried from pr-reconciliation open question 4 (task 2bf0bb2b):
    the reconcile sweep defers cleanly on a subscription usage limit instead of
    retrying into the wall.
