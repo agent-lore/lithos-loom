@@ -21,7 +21,7 @@ labels: [needs-triage, lithos-loom, orchestrator, task-graph]
 > section: G and H shipped; A2's decompose half is carried as P1–P4 in
 > [`docs/prd/prd-to-graph.md`](../prd-to-graph.md); A3's review policy is
 > recorded as the merge-policy dial in
-> [`docs/prd/review-convergence.md`](../review-convergence.md) (gated on M1);
+> [`docs/prd/review-convergence.md`](../review-convergence.md) (delivery blocked by the M1 reading checkpoint 3398a388, design free);
 > XC's ops residue is carried as U7/U8 in
 > [`docs/prd/unattended-duration.md`](../unattended-duration.md); every other
 > section is *not carried*, with the reason below. Its 33 open tasks were

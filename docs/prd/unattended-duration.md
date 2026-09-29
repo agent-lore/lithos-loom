@@ -156,7 +156,9 @@ sibling PRD is safe to leave running above `human`.
    issue; serial admission is the cap that binds.
 3. **No separate perpetual-daemon PRD** (2026-09-29). This PRD and the
    merge-policy dial recorded in the sibling are its two halves; the dial is
-   designed once M1 has a number, and this PRD is sequenced ahead of it
+   delivered only after the checkpoint that reads M1 over ≥7 closed T3
+   gates (3398a388; its design may start earlier), and this PRD is sequenced
+   ahead of it
    because a daemon that forgets its schedule on restart is not one to leave
    merging.
 4. **Durable records, no new service** (2026-09-29, from the LRA

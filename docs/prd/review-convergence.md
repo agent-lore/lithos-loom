@@ -199,8 +199,15 @@ per-reviewer model explicitly (3b38e86b).
    cancel).
 3. **M1 comes early** (2026-09-29), with R5 as its precondition; it was
    parked under the merge-policy dial and pulled forward.
-4. **The merge-policy dial is designed after M1 has a number.** It is not a
-   story here; see *Beyond this PRD*.
+4. **The merge-policy dial's delivery waits for a reading of M1, as
+   structure** (2026-09-29). M1 blocks a checkpoint task (3398a388) that
+   reads the agreement rate over at least **seven** closed T3 `pr` gates
+   (T2 produced seven PRs; a rate off fewer means nothing) and decides the
+   dial; the checkpoint blocks the dial's delivery tasks (US24, US25) and
+   **not** its design task (e6bdd3e1), which may start before the reading.
+   The edges are permanent, so the checkpoint is completed with its outcome
+   even when the outcome is "no dial". It is not a story here; see *Beyond
+   this PRD*.
 5. **Mutation testing is not carried** (2026-09-29, from the LRA
    comparison). It earns a place only if the escape corpus shows an escape a
    test existed for and missed; that check has not been made.
@@ -247,8 +254,11 @@ question; M1 has an agreement rate over T3's PRs.
 ## Beyond this PRD — the merge-policy dial
 
 Carried from the orchestration PRD's A3 (tasks e87010bf US24, f05e76ac
-US25), gated on M1, designed once M1 has a number; recorded here so it is
-not lost and not scheduled:
+US25, delivery; e6bdd3e1, design), recorded here so it is not lost and not
+scheduled. The gating is structural (decision 4): M1 → checkpoint 3398a388
+(read the rate over ≥7 closed T3 gates) → US24 and US25. The design task is
+unblocked and may draft the config shape and canary predicate before the
+reading:
 
 As the operator, I want each project to declare how a delivered PR is
 merged — `human` (today's `pr` gate), `shadow` (loom records what it *would*
@@ -257,7 +267,8 @@ project when the merge-gate is green, the PR's CI check-runs are green
 (#141, task 0e544b14 — today loom reads no CI result at all), and the panel
 and external review agree), with an `every-n` human checkpoint available
 under the last two — so that autonomy is turned up per project on evidence
-rather than switched on globally. Its confidence measurement is M1.
+rather than switched on globally. Its confidence measurement is M1, read
+at the checkpoint above.
 [`unattended-duration.md`](unattended-duration.md) is what the daemon needs
 before any setting above `human` is safe to leave running.
 
