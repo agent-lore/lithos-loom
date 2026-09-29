@@ -102,16 +102,31 @@ pointed at the old plan (P4).
    rendering the tree and each task's readiness before anything is written,
    so that a decomposed PRD is a runnable pipeline in one step instead of hand
    entry followed by a separate tagging pass. Reuses `project import`'s bulk
-   path (`task_graph.build_plan` + `_project_import_bulk.create_tasks`),
-   which already writes exactly this shape from an indented list; Lithos
-   refuses a cycle at edge time, so the dry run is the validation step.
+   writer (`_project_import_bulk.create_tasks`), which already writes this
+   shape from an indented list — but with a **graph preflight in front of
+   it**, because the existing path is only safe for the shape it was built
+   for: `task_graph.build_plan` derives dependencies solely from the
+   `[sequential]` sibling chain, and `create_tasks` creates in document
+   order and resolves each `depends_on` from tasks already created, which is
+   correct only because that chain makes document order topological. A
+   declared dependency on a later slice has no path through it, and a cycle
+   caught at edge-write time leaves a half-written graph. So P2 (a) merges
+   the declared dependencies with P3's inferred surface edges into one edge
+   set, (b) rejects dangling references and cycles **before any write**, (c)
+   sorts the slices topologically and creates them in that order with every
+   blocker present in the creation call's `depends_on`, so no task is ever
+   ready without its blockers, and (d) writes the trigger tag last, after
+   every edge exists, as a second guard. `--dry-run` renders the result of
+   (a)–(c). (PR #436 review, 2026-09-29.)
 3. **P3 — Slices declare the surfaces they touch; overlap is serialised.**
    As the operator, I want each slice to name the surfaces (paths, modules,
    screens) it will change, and the writer to add a `blocks` edge, in PRD
    order, between any two slices whose surfaces overlap unless they already
    have one, refusing to write an edge-less overlapping pair without an
    explicit `--allow-parallel-surface`, so that the failure that produced the
-   PR-maintenance series cannot be re-planned.
+   PR-maintenance series cannot be re-planned. The inferred edges are an
+   **input to P2's preflight**, not a pass after creation: added afterwards
+   they would leave trigger-tagged tasks ready before their blockers exist.
 4. **P4 — Retire the `prd-decompose` stub.** As a maintainer, I want the
    `plugins/prd_decompose` package, its `prompt.md` and the reference in
    `plugins/__init__.py` removed in the same change that lands P2, so that
@@ -155,9 +170,10 @@ pointed at the old plan (P4).
 
 ## Sequencing
 
-P1 first, because T3's PRD is written through it; P2 with P4 in one change;
-P3 with P2 or immediately after, before T3's slices are written. The whole
-milestone precedes T3's first dispatch. Success: T3's graph is produced by
+P1 first, because T3's PRD is written through it; P2, P3 and P4 in one
+change — P3's edges feed P2's preflight, so they cannot land separately
+without reintroducing the ready-before-blocked window. The whole milestone
+precedes T3's first dispatch. Success: T3's graph is produced by
 P2 from P1's slice list, with P3's edges, and no tagging pass follows.
 
 ## Non-goals

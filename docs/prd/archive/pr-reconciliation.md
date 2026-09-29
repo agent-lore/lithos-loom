@@ -39,7 +39,7 @@ labels: [needs-triage, lithos-loom, orchestrator, github]
 > | S8 measurement | shipped | `eval resolve`, `eval triage`, `lens43-composed-projects`, each with a first reading; the "A/B precondition" is process, not a deliverable |
 > | follow-on d48caecd (#374) | carried as **R3** | the panel blocks correct conflict resolutions on pre-existing story code |
 > | follow-on 7bd2696b (#391) | carried as **R4** | merge-gate red has no autonomous fix path |
-> | open question 4 / task 2bf0bb2b | carried into **P6** | "usage limits, not cost, are the constraint": the sweep must defer on a subscription limit |
+> | open question 4 / task 2bf0bb2b | carried into **U8** (`unattended-duration.md`) | "usage limits, not cost, are the constraint": the sweep must defer on a subscription limit |
 > | open question 1 (repo-level Copilot review on lens) | moot | S2 retired the inline round; nothing depends on the answer |
 > | open question 5 (webhook enqueue) | not carried | polling is v1; the A7 webhook was cancelled with the orchestration PRD |
 >
