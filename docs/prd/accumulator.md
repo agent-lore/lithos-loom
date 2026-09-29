@@ -259,7 +259,7 @@ spots") is superseded by this section and the escape-review process.
    checkpoint available under the last two — so that autonomy is turned up per
    project on evidence rather than switched on globally. Held here; designed
    and sliced in the perpetual-daemon PRD, where the confidence measurement
-   (shadow recording against the eleven labelled PRs) is the first slice.
+   (shadow recording: for every delivered PR, record whether loom *would* have merged on `ready_to_merge` + panel approval + a clean external review, and compare with what the operator did; the escape corpus already holds recorded verdicts for 21 lens PRs) is the first slice.
 10. **P6 — Ops residue (from XC).** As the operator, I want a `systemd --user`
    unit that runs the daemon through `lithos-loom drain` on stop, and a
    usage-share reserve so autonomous work cannot consume the subscription
