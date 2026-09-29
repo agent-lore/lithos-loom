@@ -7,7 +7,7 @@ Invoked by the daemon as::
 
 Stub — see the `prd-decompose` story (US-22) in
 docs/prd/archive/orchestration.md (archived; the carried shape is
-docs/prd/accumulator.md P2–P4).
+docs/prd/prd-to-graph.md P2–P4).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Stub — see docs/prd/accumulator.md P2–P4 (orchestration.md is archived)."""
+    """Stub — see docs/prd/prd-to-graph.md P2–P4 (orchestration.md is archived)."""
     raise NotImplementedError("prd-decompose plugin — not yet implemented")
 
 

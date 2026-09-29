@@ -74,7 +74,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `main`
 
 ### `lithos_loom.plugins.prd_decompose.__main__`
-- def `main` — Stub — see docs/prd/accumulator.md P2–P4 (orchestration.md is archived).
+- def `main` — Stub — see docs/prd/prd-to-graph.md P2–P4 (orchestration.md is archived).
 
 ### `lithos_loom.plugins.story_develop.__main__`
 - def `main`

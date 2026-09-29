@@ -21,7 +21,7 @@ labels: [needs-triage, lithos-loom, obsidian, capture-macro]
 > bulk `project import` path uses it. Dropped rather than carried because the
 > operator no longer captures tasks through the Obsidian macro often enough for
 > the typing to matter; tasks are filed through Claude Code and the Lithos MCP.
-> Recorded in [`docs/prd/accumulator.md`](../accumulator.md). Reopen only if the
+> Nothing carried to the active PRDs. Reopen only if the
 > macro becomes a daily path again.
 >
 ## Problem Statement

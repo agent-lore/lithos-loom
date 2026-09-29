@@ -18,13 +18,30 @@ labels: [needs-triage, lithos-loom, orchestrator, github]
 > 2026-09-14 (the table below marked six; S0, S2, S4, S5a, S5b and S8 are now
 > marked too). S8 delivered its three instruments — `eval resolve`,
 > `eval triage`, the `lens43-composed-projects` case — each with a first
-> reading; nothing further was owed. Processed into
-> [`docs/prd/accumulator.md`](../accumulator.md): follow-ons d48caecd (#374)
-> and 7bd2696b (#391) carried as review-convergence stories R3/R4, 2bf0bb2b
-> (open question 4) as the acceptance test of P6. Open question 1 became moot
+> reading; nothing further was owed. Follow-ons d48caecd (#374) and 7bd2696b
+> (#391) are carried as R3/R4 in
+> [`docs/prd/review-convergence.md`](../review-convergence.md); 2bf0bb2b (open
+> question 4) is the acceptance of U8 in
+> [`docs/prd/unattended-duration.md`](../unattended-duration.md); S4's
+> `blocks`-edge rule is P3 in [`docs/prd/prd-to-graph.md`](../prd-to-graph.md).
+> Open question 1 became moot
 > when S2 retired the inline Copilot round; 5 (webhook enqueue) is not carried —
 > polling stays v1 and the A7 webhook was cancelled with the orchestration PRD.
 > Design record only; do not add slices here.
+>
+> **Disposition by section (2026-09-28)**
+>
+> | Section | Fate | Evidence |
+> |---|---|---|
+> | S0 real brief, S1 landability, S3 merge-gate, S5/S5a/S5b/S5c convergence, S6 serial admission, S7 reconciliation state | shipped | its own slices table and AGENTS.md; epic 000a4f9f completed 2026-09-26 |
+> | S2 external-review ingestion + inline round retired | shipped | slices A–D; the row was never marked, the sections were |
+> | S4 prevention | shipped (loom half) / practice (edge half) | generated-paths policy in merge-gate + resolver intake; the `blocks`-edge rule is carried as P3 (`prd-to-graph.md`) |
+> | S8 measurement | shipped | `eval resolve`, `eval triage`, `lens43-composed-projects`, each with a first reading; the "A/B precondition" is process, not a deliverable |
+> | follow-on d48caecd (#374) | carried as **R3** | the panel blocks correct conflict resolutions on pre-existing story code |
+> | follow-on 7bd2696b (#391) | carried as **R4** | merge-gate red has no autonomous fix path |
+> | open question 4 / task 2bf0bb2b | carried into **P6** | "usage limits, not cost, are the constraint": the sweep must defer on a subscription limit |
+> | open question 1 (repo-level Copilot review on lens) | moot | S2 retired the inline round; nothing depends on the answer |
+> | open question 5 (webhook enqueue) | not carried | polling is v1; the A7 webhook was cancelled with the orchestration PRD |
 >
 > **Status (2026-08-23).** Written from a live failure: the lithos-lens T1
 > rollout delivered four PRs in one day, and **every one of them needed manual
@@ -1137,7 +1154,7 @@ Reconciling explicitly, so the two do not drift:
 | 1 | S1 landability + `[PRConflicted]` — **shipped** (detection; the `behind` auto-update rides with S3) | two fields, one branch, one marker | none |
 | 2 | S2 ingestion + retire the inline round — **shipped** (slices A–D: `[ExternalReview]` detection, trusted-batch dispatch of `converge --from-github`, the inline Copilot round retired) | delivery gets faster and simpler | none |
 | 3 | S3 re-gate on base move — **shipped** (`develop merge-gate`: trial merge, conflicting paths, current check-set, green-and-behind push; the watcher half fires on `(head_sha, base_sha, settings fingerprint)` change, one in-flight run per project, `metadata.merge_gate` on the gate, `[MergeGateFailed]`, paths into `[PRConflicted]`, mutual per-PR hold with remediation) | the merge-blindness fix | none |
-| 4 | S4 prevention — **shipped** (generated-paths policy in the merge-gate and the resolver intake; the `blocks`-edge half is planning practice, carried to accumulator P3) | graph edges + generated-file policy | none |
+| 4 | S4 prevention — **shipped** (generated-paths policy in the merge-gate and the resolver intake; the `blocks`-edge half is planning practice, carried to `prd-to-graph.md` P3) | graph edges + generated-file policy | none |
 | 5 | **S5c merge-aware ranges** — **shipped** (`RangeBase` + `fork_point`, three-dot diffs, first-parent enumeration; the pair test is `tests/test_runner_git.py`) | prerequisite: reviewers stop seeing other people's work | none |
 | 6 | **S5a external-claim triage** — **shipped** | a wrong bot comment does not become a wrong commit | one cheap call per finding |
 | 7 | **S5b remediation budget** — **shipped** | the two-bot loop terminates | none |

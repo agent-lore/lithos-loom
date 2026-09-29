@@ -7,5 +7,5 @@ contract::
         --task-json <path> --work-dir <path> --result-file <path>
 
 See ``docs/prd/archive/orchestration.md`` (archived design record) for the
-original plugin plan and ``docs/prd/accumulator.md`` for what is carried forward.
+original plugin plan and ``docs/prd/prd-to-graph.md`` for what is carried forward.
 """
