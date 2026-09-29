@@ -14,6 +14,6 @@ When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the 
 
 Edit the right-hand column to match whatever vocabulary you actually use.
 
-## First-run label creation
+## Label creation
 
-`wontfix` already exists on `agent-lore/lithos-loom` (it's a GitHub default). The other four labels do not exist yet — the first triage operation should create them via `gh label create` before applying them, so subsequent runs don't trip on missing labels.
+All five labels exist on `agent-lore/lithos-loom` (`wontfix` is a GitHub default; the other four were created on first triage). On a fork or a fresh repo, create any that are missing with `gh label create` before applying them.
