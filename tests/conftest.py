@@ -86,7 +86,6 @@ def loom_config_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             agent_id = "lithos-orchestrator-test"
             lithos_url = "http://localhost:8765"
             work_dir = "{tmp_path / "work"}"
-            max_concurrency = 2
             log_level = "info"
 
             [projects.lithos-lens]

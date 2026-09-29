@@ -16,7 +16,6 @@ The TOML schema is documented in ``docs/SPECIFICATION.md`` §3.1; the shape is:
     agent_id = "lithos-orchestrator-<host>"
     lithos_url = "http://localhost:8765"
     work_dir = "/tmp/lithos-loom"
-    max_concurrency = 4
 
     [projects.<name>]
     repo = "/path/to/local/repo"
@@ -32,6 +31,7 @@ The TOML schema is documented in ``docs/SPECIFICATION.md`` §3.1; the shape is:
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import tomllib
@@ -44,6 +44,8 @@ from dotenv import load_dotenv
 
 from lithos_loom.errors import ConfigError
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "DEFAULT_CONFIG_FILENAME",
     "DEFAULT_GITHUB_WATCHER_COORD_DOC",
@@ -51,7 +53,6 @@ __all__ = [
     "DEFAULT_GITHUB_WATCHER_RECONCILE_INTERVAL_MINUTES",
     "DEFAULT_GITHUB_WATCHER_RESOLVED_REPLAY_DAYS",
     "DEFAULT_LOG_LEVEL",
-    "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_OBSIDIAN_AWAITING_REVIEW_FILE",
     "DEFAULT_OBSIDIAN_PROJECTS_DIR",
     "DEFAULT_OBSIDIAN_RESOLVED_TTL_DAYS",
@@ -90,7 +91,6 @@ _VALID_ON_PERSISTENT_FAILURE: set[str] = {"friction", "ignore"}
 
 DEFAULT_CONFIG_FILENAME = "config.toml"
 DEFAULT_WORK_DIR = Path("/tmp/lithos-loom")  # noqa: S108 — operator-overridable default work dir on a single-operator host, not a secret-bearing temp file  # nosec B108
-DEFAULT_MAX_CONCURRENCY = 4
 DEFAULT_LOG_LEVEL: LogLevel = "info"
 DEFAULT_OBSIDIAN_TASKS_FILE = Path("_lithos/tasks.md")
 DEFAULT_OBSIDIAN_RESOLVED_TTL_DAYS = 7
@@ -121,7 +121,6 @@ class OrchestratorConfig:
     agent_id: str
     lithos_url: str
     work_dir: Path = DEFAULT_WORK_DIR
-    max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     log_level: LogLevel = DEFAULT_LOG_LEVEL
     retain_failed_workdirs: bool = True
     max_open_delivered_prs: int = 1
@@ -557,9 +556,15 @@ def _parse_orchestrator(data: Any, config_path: Path) -> OrchestratorConfig:
     work_dir = _optional_path(
         data, "work_dir", DEFAULT_WORK_DIR, config_path, "orchestrator"
     )
-    max_concurrency = _optional_int(
-        data, "max_concurrency", DEFAULT_MAX_CONCURRENCY, config_path, "orchestrator"
-    )
+    if "max_concurrency" in data:
+        # Removed 2026-09-29 (#85): parsed since May and never enforced —
+        # concurrency is the number of loom workers, and serial admission
+        # (max_open_delivered_prs) is the cap that binds. Ignored, not an
+        # error, so an existing config keeps loading.
+        logger.warning(
+            "%s: orchestrator.max_concurrency is no longer read; remove it",
+            config_path,
+        )
     log_level_raw = data.get("log_level", DEFAULT_LOG_LEVEL)
     if not isinstance(log_level_raw, str):
         raise ConfigError(f"{config_path}: orchestrator.log_level must be a string")
@@ -596,7 +601,6 @@ def _parse_orchestrator(data: Any, config_path: Path) -> OrchestratorConfig:
         agent_id=agent_id,
         lithos_url=lithos_url,
         work_dir=work_dir,
-        max_concurrency=max_concurrency,
         log_level=log_level,
         retain_failed_workdirs=retain_failed,
         max_open_delivered_prs=max_open,
