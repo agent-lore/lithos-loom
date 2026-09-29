@@ -10,6 +10,7 @@ references:
   - docs/prd/archive/capture-macro-tag-parsing.md (processed 2026-09-28 — archived unbuilt)
   - docs/adr/0011-pr-maintenance-invariants.md (per-story PRs to main — the model that retired the integration branch)
   - docs/adr/0012-admission-release-order.md (serial admission — what an ordering edge still has to add)
+  - operator note `20260926-lra-vs-loom.md` (Obsidian, not in this repo — the LRA comparison processed on 2026-09-29, decision 10)
 labels: [needs-triage, lithos-loom, orchestrator, planning]
 ---
 
@@ -109,6 +110,32 @@ document is the check.
    (2026-09-29). They are sequenced after M1 has a number, as the last section
    of this document, so the dial and the operations it needs are not parked
    against a document nobody has scheduled.
+10. **The LRA comparison adds two stories and three amendments; the rest is
+   rejected for lack of evidence** (2026-09-29). The operator's comparison of
+   loom with the long-running-agent article and checkout (note
+   `20260926-lra-vs-loom.md`) proposed seven additions. Adopted, because the
+   code confirms the gap: **K1** (loom writes no completion record — the route
+   runner completes a task with no outcome, and the eleven null outcomes
+   backfilled on 2026-09-28 were loom's own closures), **P6a** (the usage-limit
+   resume schedule is in-memory — `route_runner.py`'s own docstring: "the
+   schedule is in-memory only (a daemon restart re-bootstraps open tasks
+   anyway)" — so a restart during a wait re-dispatches into the wall), P1's
+   schema gaining a verification approach and PRD provenance per slice, CI
+   check-runs (#141) as a third input to P5's canary mode, and network egress
+   policy on the November sandbox checkpoint (594c6bfd: nothing in the
+   container launch sets a network policy, while external review comments
+   already reach the coder's prompt). Rejected until there is evidence:
+   evidence-driven **replanning** (T2's seven-slice graph never needed
+   revising; replanning happens over longer horizons and stays interactive,
+   exactly as this document is being produced), lesson and procedure tiers
+   beyond K1, mutation testing (only if the escape corpus shows an escape a
+   test existed for and missed), automated `loom-improve` candidate generation
+   (the month-end review and the escape-corpus process are the manual version
+   until M1 has data), a pre-implementation research phase (no failure has yet
+   been traced to missing knowledge), and a Temporal migration. P6 moves ahead
+   of P5 in delivery order because P6a and the two restart-shaped issues
+   (#420 boot-holds a PR on a self-clearing refusal, #406's auth mount cannot
+   refresh in a long run) are what unattended duration actually needs.
 
 ## Disposition of `orchestration.md`
 
@@ -168,7 +195,14 @@ with the evidence that makes it worth doing.
    review brief the pass runs with. The output schema in
    `plugins/prd_decompose/prompt.md` (title, ≥80-word brief, acceptance
    criteria, deps, files hint) is the starting point and moves into that
-   document.
+   document, extended with two fields per slice (decision 10): a
+   **verification approach** (which check, test, or probe proves each
+   criterion — the input R5's AC-to-evidence checklist reads) and
+   **provenance** (the PRD file and section the slice came from, written to the
+   task as `metadata.prd` / `metadata.prd_section`, the same pattern as the
+   `carried_to` / `carried_as` metadata this document uses), so that a story
+   can be traced back to its requirement and forward to its proof without
+   reading the run.
 2. **P2 — Decompose writes the dispatchable graph.** As the operator, I want a
    loom command that takes a reviewed slice list and writes, for one project,
    an `epic` plus one `task` per slice with `parent_task_id`, `blocks` edges
@@ -303,31 +337,62 @@ The epic 61a2bd00 itself is retained as the container for its children and
 tagged `prd:accumulator`; its charter ("close the 2026-08 baseline blind
 spots") is superseded by this section and the escape-review process.
 
+### Knowledge carried between stories (from the LRA comparison, decision 10)
+
+11. **K1 — A completed story leaves a record the next one can read.** As the
+   operator, I want story completion to write an outcome on the Lithos task
+   built from the final handoff — the decision taken, the approaches rejected
+   and why, the PR, and the commits or tests that are its evidence — and the
+   project-context doc (which the daemon already reads for settings) to be
+   where a later story's prompt picks up the records that name the same
+   surfaces, so that a story does not re-investigate what the previous one
+   settled and the month-end review is built from what loom wrote rather than
+   from what I backfilled. Evidence: the route runner completes a task with no
+   outcome text; handoffs live only in run directories; the eleven September
+   closures with null outcomes were loom's own. Acceptance includes the
+   measurement the LRA note asks for: after two T3 slices, whether the second
+   cited the first's record. Lessons and reusable procedures as separate
+   tiers are **not** carried (decision 10) — this is events with provenance,
+   nothing distilled.
+
 ### Later: the autonomy dial and the operations it needs
 
-Folded in on 2026-09-29 (decision 9). Both stories are sequenced after M1 has
-produced an agreement rate; until then they are design, not delivery.
+Folded in on 2026-09-29 (decision 9); reordered on the same day (decision
+10). P6 is delivery, not design: its parts are what unattended duration needs
+before the dial means anything. P5 stays design until M1 has produced an
+agreement rate.
 
-11. **P5 — The merge-policy dial (from A3).** As the operator, I want each
-   project to declare how a delivered PR is merged — `human` (today's `pr`
-   gate), `shadow` (loom records what it *would* have merged and why, the gate
-   stays human), `canary` (loom merges in a named project when the merge-gate
-   is green and the panel and external review agree), with an `every-n` human
-   checkpoint available under the last two — so that autonomy is turned up per
-   project on evidence rather than switched on globally. Its confidence measurement is **M1** above; the dial is designed once M1 has
-   a number.
-12. **P6 — Ops residue (from XC).** As the operator, I want a `systemd --user`
-   unit that runs the daemon through `lithos-loom drain` on stop, and a
-   usage-share reserve so autonomous work cannot consume the subscription
-   allowance I am using interactively (the task-level `develop_max_rounds` /
-   `develop_max_cost_usd` knobs of #350 are the per-story half of that), so
-   that restarts stop being an intervention class (four of the six T2-era
+12. **P6 — Ops residue and unattended duration (from XC, and decision 10).**
+   As the operator, I want a `systemd --user` unit that runs the daemon
+   through `lithos-loom drain` on stop, and a usage-share reserve so
+   autonomous work cannot consume the subscription allowance I am using
+   interactively (the task-level `develop_max_rounds` / `develop_max_cost_usd`
+   knobs of #350 are the per-story half of that; the cost-measure design of
+   #102 is its design half — the binding resource is subscription share, not
+   dollars, and codex is subscription too, so dollar metering is not pursued),
+   so that restarts stop being an intervention class (four of the six T2-era
    hands were host restarts under a run) and the resource that actually binds
-   is enforced rather than watched. Sequenced with P5; the systemd unit could
-   go earlier if restarts return as an intervention class.
+   is enforced rather than watched.
+   - **P6a — a scheduled resume survives a restart.** The usage-limit resume
+     (`resume_after`, attempts used) is persisted on the task, and boot honours
+     it instead of re-dispatching into the wall; the same record covers a
+     provider capacity refusal, which today retries the same model and
+     boot-holds the PR (#420), and the auth mount that cannot refresh inside a
+     long run (#406). Business state stays in Lithos; the execution record is
+     the task's metadata, not a second journal.
    Acceptance carried from pr-reconciliation open question 4 (task 2bf0bb2b):
    the reconcile sweep defers cleanly on a subscription usage limit instead of
    retrying into the wall.
+13. **P5 — The merge-policy dial (from A3).** As the operator, I want each
+   project to declare how a delivered PR is merged — `human` (today's `pr`
+   gate), `shadow` (loom records what it *would* have merged and why, the gate
+   stays human), `canary` (loom merges in a named project when the merge-gate
+   is green, the PR's CI check-runs are green (#141 — today loom reads no CI
+   result at all), and the panel and external review agree), with an
+   `every-n` human checkpoint available under the last two — so that autonomy
+   is turned up per project on evidence rather than switched on globally. Its
+   confidence measurement is **M1** above; the dial is designed once M1 has a
+   number.
 
 ## Open questions
 
@@ -352,3 +417,5 @@ remains for this document is its own tidy-up: a real name and milestone, the
 stories sliced in delivery order, and the status header rewritten from
 "accumulator" to a plan. Decisions 5–8 (2026-09-29) fix the customer and the
 early order: R1 and `bd66d57c` before T3's first slice; R5, then M1, early.
+Decision 10 (2026-09-29) adds K1 and P6a from the LRA comparison and moves P6
+ahead of P5; nothing else from that comparison is carried without evidence.
