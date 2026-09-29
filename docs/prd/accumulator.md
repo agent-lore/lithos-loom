@@ -82,6 +82,29 @@ document is the check.
    about the loop failing to *stop* and reviewers judging against an unstated
    operational model. That is the second section of this document, and the
    review-hardening epic is re-cut against it there.
+5. **Loom's October customer is lens T3** (decided 2026-09-29). T3 is the
+   better-specified of the two lens candidates (REQUIREMENTS Part B already
+   carries the action, error-mapping and endpoint tables and the security
+   boundary; T2b's PRD is unwritten and its metrics lean on three lithos-core
+   gaps), its value rose in September (every non-delivering run now raises a
+   human gate, and approving gates is the operator's most frequent action),
+   and the checkpoint that held it said "revisits in October". Two things land
+   before its first slice dispatches: lithos-core `bd66d57c` (task-edge delete,
+   because T3 ships an add-edge button) and **R1** (T3 is write paths behind a
+   trusted-network boundary — exactly the shape that churned five reviews).
+6. **Shadow auto-merge recording comes early, not parked** (2026-09-29: "if it is
+   cheap, get it in early"). It is **M1** below, task `664d84c4`; **R5** is its
+   precondition.
+7. **Loom's own project stays at `max_open_delivered_prs = 1`** (2026-09-29).
+   The six-hour hold on 2026-09-25 was caused by #431's review, not by
+   admission; a higher cap would have let a second story open a PR on a base
+   the operator was still fixing by hand.
+8. **A4 stays not carried; US38's live half is R5** (2026-09-29). Every action
+   the decide-next brain would take is either built deterministically
+   (escalate, retry), is `converge` (batch-fix), or is the operator's (merge,
+   cancel). Of `[Plan]`/`[Drift]`, the plan half is redundant with the run
+   checkpoint and the S0 PR body; the drift half is task 77064874 (#175), the
+   panel's missing AC-completeness check, promoted to **R5**.
 
 ## Disposition of `orchestration.md`
 
@@ -104,7 +127,7 @@ document is the check.
 | A6 — A2A endpoint (US34) | not carried | no consumer; Agent Zero / Hanuman are not dispatching to loom and "what is ready" is answered by the Lithos MCP and lens |
 | A7 — multi-host (US35), webhook (US36) | not carried | one host; webhook enqueue is the PR-reconciliation PRD's open question 5 and polling remains v1. Re-file if a second host or a latency complaint appears |
 | A7 — SSE readiness re-evaluation (US37) | shipped | the route-runner's readiness re-check plus #352 (task 8c8eba46 closed with that outcome) |
-| XC — `[Plan]` / `[Drift]` findings (US38) | not carried | the scope-dispute escalation (#424) covers the under-delivery half that hurt; over-delivery has not cost an intervention. Candidate if the escape corpus shows otherwise |
+| XC — `[Plan]` / `[Drift]` findings (US38) | not carried as findings; the drift half carried as **R5** | the scope-dispute escalation (#424) stops a run when the coder declares a finding out of reach, but nothing checks the inverse at approval time — that is 77064874 (#175), promoted 2026-09-29. `[Plan]` is redundant with the run checkpoint (branch, base, head) and the S0 PR body; over-delivery has cost no intervention |
 | XC — cost / dashboard / replay / OTel / systemd (US39) | residue parked as **P6** | lens is the dashboard; `develop list` / `develop attach` are the replay; OTel has no consumer. Still owed: the systemd unit and a usage-share reserve |
 | Implementation decisions — config additions (`mode = webhook`, `next_route`, `decide_via_brain`, `[loom_improve]`, `claude_config`, `host_affinity`) | not carried | each falls with its feature above; `review_policy` returns with P5 |
 
@@ -232,6 +255,33 @@ either when the criteria do not settle it.
    breaks a delivered PR is fixed by loom when it can be and escalated with a
    legible cause when it cannot (task 7bd2696b, #391, from lens #85).
 
+9. **R5 — Approval means the task is done, not that the diff is sound.** As
+   the operator, I want the panel's approval to require that every acceptance
+   criterion in the story maps to evidence in the diff or its tests — either
+   an AC-checklist pass in the review, or a coder handoff that maps each
+   criterion to the test or change that closes it, which the reviewers verify —
+   with an unmet criterion blocking approval or surfaced as an explicit
+   disposition, so that "approved" can be read by a person or a machine as
+   "delivered". Evidence: the #173 dogfood shipped a gate-command change that
+   did not work, in one round, both reviewers LGTM, with an explicit criterion
+   unmet (task 77064874, #175, filed 2026-06-22, still open). Precondition for
+   M1: a shadow record built on approval that means only "locally sound"
+   measures the wrong thing. The gate-code half of #175 (a change to check
+   definitions must execute the affected checks) rides along.
+10. **M1 — Shadow auto-merge recording** (task `664d84c4`). As the operator, I
+    want the reconcile sweep to record, on each delivered PR's `pr` gate, the
+    first moment loom *would* have merged it — `reconciliation_state =
+    ready_to_merge`, a recorded panel approval on the delivered head, no open
+    external-review finding — and, when the gate closes, what I actually did
+    (merged at that head; merged after further pushes, and whose; closed
+    unmerged; merged although loom never reached would-merge) with the delta,
+    reported by `lithos-loom gates` or an eval summary, so that the merge-policy
+    dial (P5) is turned on a measured agreement rate rather than a feeling.
+    Zero tokens: every input already exists on the gate. The escape corpus
+    already holds recorded external-review verdicts for 21 lens PRs and is the
+    retrospective half of the same measurement. Pulled forward from P5 on
+    2026-09-29.
+
 **Re-cut of the review-hardening epic (61a2bd00) and the other open review
 items** — 27 of the 64 open loom tasks on 2026-09-28 touch review. Their fate
 under this section:
@@ -240,7 +290,7 @@ under this section:
 |---|---|---|
 | Termination and scope | 34bb82c4, a3f17c21, d48caecd, 7bd2696b | **R1–R4**, the first slices |
 | Reviewer trust in claims | c7b1adee, 4db7f60b, 32347e77 + 4b6a1565 (sandbox disclosure) | candidate, second slice: a reviewer that accepts an unverified environment claim is the mirror of one that blocks on an unstated actor; both are scope statements the panel lacks |
-| Panel coverage gaps | f78669ae spec-conformance persona, 77064874 AC-completeness, 8c1f33e0 visual UI evaluation, b15f937c cross-file context (#92) | candidate, ordered by what the escape corpus shows the panel actually misses; none is dispatched on a hunch |
+| Panel coverage gaps | f78669ae spec-conformance persona, 8c1f33e0 visual UI evaluation, b15f937c cross-file context (#92) | candidate, ordered by what the escape corpus shows the panel actually misses; none is dispatched on a hunch. 77064874 AC-completeness was promoted out of this row to **R5** on 2026-09-29 |
 | Measurement | 23db4be6 RH-4, cb29b6af RH-9, e46200f9, 4777ca14, 189657db, a666a81d, d9e67eeb, 88afc13b | the escape corpus is the instrument now (RH-9's question is partly answered: engine-confounded, no arm dominates); the rest are harness hygiene, kept as issues, not roadmap |
 | Engine robustness | 5061554c (#411), fe400fb5 (#420), 942ca9bb (#155) | reliability, not review quality; kept as issues |
 | Elsewhere | f8b5ff7c shared reviewer package (cardinal), 21d4a59e page capture, 54fa7c3e provenance labels | candidate, unchanged |
@@ -251,16 +301,15 @@ spots") is superseded by this section and the escape-review process.
 
 ### Parked from other sections (not for the first slice of this PRD)
 
-9. **P5 — The merge-policy dial (from A3).** As the operator, I want each
+11. **P5 — The merge-policy dial (from A3).** As the operator, I want each
    project to declare how a delivered PR is merged — `human` (today's `pr`
    gate), `shadow` (loom records what it *would* have merged and why, the gate
    stays human), `canary` (loom merges in a named project when the merge-gate
    is green and the panel and external review agree), with an `every-n` human
    checkpoint available under the last two — so that autonomy is turned up per
-   project on evidence rather than switched on globally. Held here; designed
-   and sliced in the perpetual-daemon PRD, where the confidence measurement
-   (shadow recording: for every delivered PR, record whether loom *would* have merged on `ready_to_merge` + panel approval + a clean external review, and compare with what the operator did; the escape corpus already holds recorded verdicts for 21 lens PRs) is the first slice.
-10. **P6 — Ops residue (from XC).** As the operator, I want a `systemd --user`
+   project on evidence rather than switched on globally. Held here for the dial itself;
+   its confidence measurement is **M1** above, pulled forward on 2026-09-29.
+12. **P6 — Ops residue (from XC).** As the operator, I want a `systemd --user`
    unit that runs the daemon through `lithos-loom drain` on stop, and a
    usage-share reserve so autonomous work cannot consume the subscription
    allowance I am using interactively (the task-level `develop_max_rounds` /
@@ -293,4 +342,5 @@ spots") is superseded by this section and the escape-review process.
 Every legacy PRD under `docs/prd/` has been processed as of 2026-09-28. What
 remains for this document is its own tidy-up: a real name and milestone, the
 stories sliced in delivery order, and the status header rewritten from
-"accumulator" to a plan.
+"accumulator" to a plan. Decisions 5–8 (2026-09-29) fix the customer and the
+early order: R1 and `bd66d57c` before T3's first slice; R5, then M1, early.
