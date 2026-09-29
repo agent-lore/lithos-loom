@@ -93,7 +93,7 @@ you add an artifact, add it to `conftest._generate_all()` too.
 ## Budgets are explicitly maintained
 
 When deciding whether to adjust a limit, follow the root
-[AGENTS.md](../../AGENTS.md#architecture-guardrails--generated-docs) rule:
+[AGENTS.md](../../AGENTS.md#rules) "Architecture guardrails" rule:
 "Metric limits guide architectural judgment."
 
 `[budgets]` are enforced counts; `test_metrics_budgets` fails CI on breach. CI must
@@ -124,5 +124,4 @@ Always regenerate and commit after touching the kit.
 | `test_*.py` | one driver per artifact, plus manifest + budget guards |
 
 For the project-level view of this system (the CI gate, when to edit the toml),
-see the "Architecture guardrails & generated docs" section of the repo-root
-`AGENTS.md`.
+see the "Architecture guardrails" rule in the repo-root `AGENTS.md`.
