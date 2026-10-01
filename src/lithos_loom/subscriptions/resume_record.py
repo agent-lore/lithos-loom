@@ -33,12 +33,14 @@ Lifecycle, so that every exit is accounted for:
 3. **Exhaustion** is unchanged: attempts at ``MAX_RESUMES_PER_TASK`` raise the
    ``resume_exhausted`` gate and write no record, so ticking the gate is a
    fresh budget with no special case.
-4. **Honoured on every origin** but the sleeper's own re-dispatch and the
-   operator's gate tick: a record whose ``resume_after`` is still ahead re-arms
-   the timer with the remaining delay (never counting an attempt) and defers;
-   one whose time has passed falls through to an ordinary dispatch, carrying
-   its attempts into step 1. This covers the restart bootstrap and a live
-   edit during the wait after one.
+4. **Honoured on every origin** but the operator's gate tick, and before the
+   in-process dedup — the record is the authority and the armed timer follows
+   it: a timer armed for the recorded time is left alone, one armed for
+   another time is re-armed (at once when the new time has passed), no timer
+   and a time ahead arms one, no timer and a time passed falls through to an
+   ordinary dispatch carrying its attempts into step 1. The sleeper disarms
+   itself before its re-read. Never counts an attempt. This covers the
+   restart bootstrap and a hand-edited time, before or after a restart.
 
 The record also names the interrupted run, so the dispatch can hand the plugin
 a resume pointer (5dbeb0c8 slice C) and continue the branch the wait was for —
@@ -48,7 +50,8 @@ Reserved namespace: ``loom_resume:*`` is runner-owned, like
 ``loom_last_attempt:*`` — plugins see it in their ``task.json`` metadata and
 must not repurpose it (SPECIFICATION §2.2). Operator gestures: cancel the
 story, or pull the route's trigger tag (both checked when the timer fires);
-editing ``resume_after`` by hand is honoured at the next boot or task event.
+editing ``resume_after`` by hand moves the armed timer as soon as the edit's
+``task.updated`` arrives.
 
 Tolerant by design: a malformed record degrades to the pre-U1 behaviour
 (dispatch now, count from zero), never to a stuck task.

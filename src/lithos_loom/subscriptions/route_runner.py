@@ -84,13 +84,19 @@ from lithos_loom.subscriptions.resume_record import (
     write_resume_record,
 )
 
-__all__ = ["RESUME_ORIGIN", "PluginRunFn", "RouteRunner"]
+__all__ = ["RESUME_DUE_SLACK_SECONDS", "RESUME_ORIGIN", "PluginRunFn", "RouteRunner"]
 
-# The origin of the sleeper's own re-dispatch event. It bypasses the
-# pending-resume check in `_handle`: at fire time the fresh task snapshot
-# still carries the record it is honouring (the claim consumes it, after the
-# payload is read), and a re-dispatch deferred by its own record would never run.
+# The origin of the sleeper's own re-dispatch event (a synthetic
+# `loom.route.resume`, never a bootstrap replay). It is NOT exempt from the
+# pending-resume check: the sleeper disarms itself before the fresh re-read, so
+# a record whose time still stands is due and dispatches, and one the operator
+# moved later arms a fresh timer instead (PR #439 review).
 RESUME_ORIGIN = "resume"
+
+# A recorded resume time this close is "now": the sleeper's wake and the record
+# are measured on two clocks (the loop's monotonic one, the wall clock), and a
+# fire a few milliseconds ahead must not re-arm for the remainder.
+RESUME_DUE_SLACK_SECONDS = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +291,9 @@ class RouteRunner:
         # timer from the record when the bootstrap replays the open task,
         # and the count is read from the dispatch payload, never kept here.
         self._resume_tasks: dict[str, asyncio.Task[None]] = {}
+        # …and the instant each armed sleeper is for, so an event carrying the
+        # same record is a no-op and one carrying an edited time re-arms.
+        self._resume_due: dict[str, datetime] = {}
         # #407 slice 3 (`lithos-loom drain`): once draining, no new claim —
         # `_handle` refuses before any Lithos read and again right before
         # the claim (readiness + admission are awaits a drain can begin
@@ -368,6 +377,20 @@ class RouteRunner:
             # window) — exhaustion writes no resume record, so there is no
             # count left on the task to reset.
             self._processed_tasks.discard(task_id)
+        metadata = payload.get("metadata") or {}
+        # U1: a re-dispatch this route already scheduled — recorded on the task,
+        # so it is still here after a restart — is honoured on every origin but
+        # the operator's gate tick, and BEFORE the in-process dedup: the record
+        # is the authority over the armed timer, so a hand-edited time on an
+        # already-processed task moves the timer rather than being swallowed
+        # (PR #439 review), and the sleeper's own fire re-reads it. Payload-only,
+        # so before the readiness round trip; before the bootstrap decline too,
+        # though the two cannot coexist (the interrupted write clears the
+        # marker, and a failure only ever follows a consumed record).
+        if event.origin != GATE_RESOLVED_ORIGIN:
+            pending = resume_record_for_route(metadata, self.route.name)
+            if pending is not None and self._honour_pending_resume(task_id, pending):
+                return
         if task_id in self._processed_tasks:
             logger.debug(
                 "RouteRunner %s: skipping stale event for already-processed %s",
@@ -376,17 +399,6 @@ class RouteRunner:
             )
             return
 
-        metadata = payload.get("metadata") or {}
-        # U1: a re-dispatch this route already scheduled — recorded on the task,
-        # so it is still here after a restart — is honoured on every origin but
-        # the sleeper's own fire and the operator's gate tick. Payload-only, so
-        # before the readiness round trip; before the bootstrap decline too,
-        # though the two cannot coexist (the interrupted write clears the
-        # marker, and a failure only ever follows a consumed record).
-        if event.origin not in (RESUME_ORIGIN, GATE_RESOLVED_ORIGIN):
-            pending = resume_record_for_route(metadata, self.route.name)
-            if pending is not None and self._honour_pending_resume(task_id, pending):
-                return
         # A bootstrap replay must not re-develop a story whose last attempt
         # FAILED and that nobody edited since — deliberate retry paths arrive
         # live or change the fingerprint (rationale + residual crash-window
@@ -969,16 +981,49 @@ class RouteRunner:
         )
 
     def _honour_pending_resume(self, task_id: str, record: ResumeRecord) -> bool:
-        """Defer a dispatch the task's resume record says is not yet due.
+        """Make the armed timer agree with the task's resume record.
 
-        True — the timer is (re-)armed for the remaining delay, nothing
-        written, no attempt counted — when ``resume_after`` is still ahead;
-        False when it has passed, and the caller dispatches now (the claim
-        consumes the record; its attempts ride the payload). Re-arming is
-        idempotent: a second event during the same wait replaces the sleeper.
+        The record is the authority; the sleeper follows it. Four cases:
+
+        * a sleeper is armed for this exact time → nothing to do (the record's
+          own write, or a replayed event), handled;
+        * a sleeper is armed for another time → the operator edited
+          ``resume_after`` (PR #439 review): re-arm for the new remaining
+          delay — zero when the new time has passed, so the re-dispatch runs
+          at once through the sleeper path, which drops the dedup entry —
+          handled;
+        * no sleeper and the time is still ahead → arm one (a restart, or the
+          first event after one), handled;
+        * no sleeper and the time has passed → not handled: the caller
+          dispatches now (the claim consumes the record; its attempts ride the
+          payload). This is also how the sleeper's own fire proceeds — it
+          disarms itself before re-reading the task.
+
+        Nothing is written and no attempt counted on any branch. "Passed" has
+        a second's slack, so a fire a few milliseconds ahead of the wall-clock
+        instant (two clocks are compared) is not re-armed for the remainder.
         """
         delay = record.remaining_seconds()
-        if delay <= 0:
+        due = delay <= RESUME_DUE_SLACK_SECONDS
+        armed = self._resume_tasks.get(task_id)
+        armed_for = self._resume_due.get(task_id)
+        if armed is not None and not armed.done():
+            if armed_for == record.resume_after:
+                return True
+            logger.info(
+                "RouteRunner %s: %s's recorded resume time moved %s -> %s; "
+                "re-arming (re-dispatch in %.0fs, attempt %d/%d used)",
+                self.route.name,
+                task_id,
+                armed_for.isoformat(timespec="seconds") if armed_for else "?",
+                record.resume_after.isoformat(timespec="seconds"),
+                0.0 if due else delay,
+                record.attempts,
+                MAX_RESUMES_PER_TASK,
+            )
+            self._arm_sleeper(task_id, 0.0 if due else delay, record.resume_after)
+            return True
+        if due:
             logger.info(
                 "RouteRunner %s: %s's recorded resume time %s has passed "
                 "(attempt %d/%d used); dispatching now",
@@ -999,7 +1044,7 @@ class RouteRunner:
             record.attempts,
             MAX_RESUMES_PER_TASK,
         )
-        self._arm_sleeper(task_id, delay)
+        self._arm_sleeper(task_id, delay, record.resume_after)
         return True
 
     def _arm_resume(self, task_id: str, record: ResumeRecord) -> None:
@@ -1014,9 +1059,9 @@ class RouteRunner:
             MAX_RESUMES_PER_TASK,
             record.resume_after.isoformat(timespec="seconds"),
         )
-        self._arm_sleeper(task_id, delay)
+        self._arm_sleeper(task_id, delay, record.resume_after)
 
-    def _arm_sleeper(self, task_id: str, delay: float) -> None:
+    def _arm_sleeper(self, task_id: str, delay: float, due: datetime) -> None:
         existing = self._resume_tasks.get(task_id)
         if existing is not None and not existing.done():
             existing.cancel()
@@ -1025,6 +1070,7 @@ class RouteRunner:
             name=f"resume-{task_id}",
         )
         self._resume_tasks[task_id] = sleeper
+        self._resume_due[task_id] = due
 
         def _cleanup(done: asyncio.Task[None]) -> None:
             # Only remove the entry this task still owns: a cancelled old
@@ -1032,8 +1078,17 @@ class RouteRunner:
             # and must not evict the replacement.
             if self._resume_tasks.get(task_id) is done:
                 del self._resume_tasks[task_id]
+                self._resume_due.pop(task_id, None)
 
         sleeper.add_done_callback(_cleanup)
+
+    def _disarm_current_sleeper(self, task_id: str) -> None:
+        """The sleeper that is firing is no longer *armed*: forget it before the
+        re-read, so the record check sees "no timer" and lets a due record
+        dispatch (and a moved-later one arm a fresh timer)."""
+        if self._resume_tasks.get(task_id) is asyncio.current_task():
+            del self._resume_tasks[task_id]
+            self._resume_due.pop(task_id, None)
 
     async def _resume_dispatch(self, task_id: str, delay: float) -> None:
         """Sleep until ``resume_after``, then re-claim + re-run the task.
@@ -1068,7 +1123,10 @@ class RouteRunner:
                     task_id,
                 )
                 return
-            # Drop the dedup entry so _handle's claim path re-runs.
+            # Drop the dedup entry so _handle's claim path re-runs, and the
+            # armed-timer entry so the record check re-reads the FRESH time
+            # (an operator may have moved it; PR #439 review).
+            self._disarm_current_sleeper(task_id)
             self._processed_tasks.discard(task_id)
             await self._handle(
                 Event(

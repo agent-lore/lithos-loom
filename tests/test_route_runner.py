@@ -3885,7 +3885,9 @@ async def test_scheduled_resume_survives_a_restart(tmp_path: Path) -> None:
 async def test_pending_resume_defers_a_live_update_too(tmp_path: Path) -> None:
     """After a restart the task is not in the in-process dedup set, so an
     operator edit during the wait arrives as a live `updated` — it must not
-    dispatch into the wall either. Re-arming is idempotent and counts nothing."""
+    dispatch into the wall either. The same record again is a no-op (the timer
+    is kept); an edited, later time replaces the timer. Nothing is written and
+    nothing counted on either."""
     bus = EventBus()
     plugin = AsyncMock()
     runner, lithos = _make_runner(bus=bus, work_dir=tmp_path, plugin_runner=plugin)
@@ -3896,13 +3898,78 @@ async def test_pending_resume_defers_a_live_update_too(tmp_path: Path) -> None:
     first = runner._resume_tasks["task-1"]
     await bus.publish(_evt(type_="lithos.task.updated", payload=payload))
     await _run_for(runner)
+    assert runner._resume_tasks["task-1"] is first and not first.done()
+
+    later = _payload(
+        metadata=_resume_metadata(resume_after="2099-06-01T00:00:00+00:00", attempts=2)
+    )
+    await bus.publish(_evt(type_="lithos.task.updated", payload=later))
+    await _run_for(runner)
     second = runner._resume_tasks["task-1"]
 
     lithos.task_claim.assert_not_called()
     plugin.assert_not_called()
     lithos.task_update.assert_not_called()
-    assert first.cancelled() and not second.done()
+    assert first.cancelled() and second is not first and not second.done()
     second.cancel()
+
+
+async def test_editing_the_pending_time_in_process_moves_the_armed_timer(
+    tmp_path: Path,
+) -> None:
+    """PR #439 review: after an interrupted run the task sits in the in-process
+    dedup set, and a hand-edited `resume_after` used to be swallowed there. The
+    record is the authority over the timer: moved later → the timer waits for
+    the new time; moved earlier (here: into the past) → the re-dispatch runs
+    now, through the sleeper path."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        side_effect=[
+            _interrupted_with_resume(resume_after=_FAR_FUTURE),
+            {
+                "schema_version": 1,
+                "task_id": "task-1",
+                "status": "succeeded",
+                "exit_code": 0,
+            },
+        ]
+    )
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    await bus.publish(_evt())
+    await _run_for(runner)
+    first = runner._resume_tasks["task-1"]
+    assert "task-1" in runner._processed_tasks
+
+    # moved later: a fresh timer, no dispatch
+    later = _resume_metadata(resume_after="2099-06-01T00:00:00+00:00", attempts=1)
+    await bus.publish(
+        _evt(type_="lithos.task.updated", payload=_payload(metadata=later))
+    )
+    await _run_for(runner)
+    second = runner._resume_tasks["task-1"]
+    assert first.cancelled() and second is not first and not second.done()
+    assert plugin_runner.await_count == 1
+
+    # moved earlier (past): the sleeper fires at once and re-dispatches
+    earlier = _resume_metadata(resume_after=_PAST, attempts=1)
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t",
+        status="open",
+        tags=("trigger:story-develop",),
+        metadata=earlier,
+        claims=(),
+    )
+    await bus.publish(
+        _evt(type_="lithos.task.updated", payload=_payload(metadata=earlier))
+    )
+    await _run_for(runner, seconds=0.3)
+
+    assert second.cancelled()
+    assert plugin_runner.await_count == 2
+    lithos.task_complete.assert_awaited_once()
 
 
 async def test_past_resume_dispatches_now_consumes_the_record_and_keeps_the_count(
@@ -3994,12 +4061,13 @@ async def test_gate_resolved_nudge_bypasses_a_pending_resume(tmp_path: Path) -> 
     lithos.task_complete.assert_awaited_once()
 
 
-async def test_sleeper_fire_bypasses_the_record_it_is_honouring(
+async def test_sleeper_fire_re_reads_the_record_and_waits_for_a_moved_time(
     tmp_path: Path,
 ) -> None:
-    """At fire time the fresh task snapshot still carries the record (it is
-    consumed at the claim, after the payload is read); the sleeper's own
-    re-dispatch must not be deferred by it, or nothing would ever run."""
+    """At fire time the fresh task snapshot is re-read: a record still saying
+    "now" dispatches (the usual case — the claim then consumes it), while one
+    the operator moved later arms a fresh timer instead of claiming early into
+    the wall (PR #439 review)."""
     bus = EventBus()
     plugin_runner = AsyncMock(
         side_effect=[
@@ -4015,20 +4083,46 @@ async def test_sleeper_fire_bypasses_the_record_it_is_honouring(
     runner, lithos = _make_runner(
         bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
     )
-    lithos.task_get.return_value = Task(
-        id="task-1",
-        title="t",
-        status="open",
-        tags=("trigger:story-develop",),
-        metadata=_resume_metadata(resume_after=_FAR_FUTURE, attempts=1),
-        claims=(),
-    )
 
+    def _snapshot(resume_after: str) -> Task:
+        return Task(
+            id="task-1",
+            title="t",
+            status="open",
+            tags=("trigger:story-develop",),
+            metadata=_resume_metadata(resume_after=resume_after, attempts=1),
+            claims=(),
+        )
+
+    # moved later meanwhile → no claim, a new timer for the new time
+    lithos.task_get.return_value = _snapshot(_FAR_FUTURE)
     await bus.publish(_evt())
     await _run_for(runner, seconds=0.3)
+    assert plugin_runner.await_count == 1
+    lithos.task_claim.assert_awaited_once()  # the first run only
+    sleeper = runner._resume_tasks["task-1"]
+    assert not sleeper.done()
+    sleeper.cancel()
 
-    assert plugin_runner.await_count == 2
-    lithos.task_complete.assert_awaited_once()
+    # the record still says now → dispatch
+    bus2 = EventBus()
+    plugin2 = AsyncMock(
+        side_effect=[
+            _interrupted_with_resume(),
+            {
+                "schema_version": 1,
+                "task_id": "task-1",
+                "status": "succeeded",
+                "exit_code": 0,
+            },
+        ]
+    )
+    runner2, lithos2 = _make_runner(bus=bus2, work_dir=tmp_path, plugin_runner=plugin2)
+    lithos2.task_get.return_value = _snapshot(_PAST)
+    await bus2.publish(_evt())
+    await _run_for(runner2, seconds=0.3)
+    assert plugin2.await_count == 2
+    lithos2.task_complete.assert_awaited_once()
 
 
 async def test_resume_pointer_continues_the_interrupted_run_from_the_record(
