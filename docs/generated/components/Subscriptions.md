@@ -62,6 +62,7 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 | `lithos_loom.subscriptions.remediation_lifecycle._refunds` | M | 0 | 3 |
 | `lithos_loom.subscriptions.remediation_lifecycle._state` | XS | 0 | 6 |
 | `lithos_loom.subscriptions.remediation_refusals` | S | 0 | 4 |
+| `lithos_loom.subscriptions.resume_record` | S | 1 | 5 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 2 |
 
@@ -325,6 +326,14 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 - def `settled_refusal` — The kind of refusal (``repo_mismatch`` / ``checkout_unresolved``) already recorded for exactly this key — no spawn, no re-post until the mapping or the read moves — or ``None``.
 - def `post_checkout_unresolved_refusal` — The sweep could not resolve the mapped checkout's origin (PR #362 re-review 3 F1): no spawn, no round spent, the parked trigger kept, one ``[Friction]`` naming why; settled on (path, "") until the path changes or the read starts to answer.
 - def `post_repo_mismatch_refusal` — The sweep's own origin read refused the checkout: one ``[Friction]`` on the story per settle key, de-duped by a marker on the gate. Nothing else is written — no round spent, the parked trigger kept.
+
+### `lithos_loom.subscriptions.resume_record`
+- def `resume_key` — The task-metadata key holding ``route``'s pending resume.
+- def `parse_resume_after` — *raw* as an aware UTC instant, or ``None`` when it is not a timestamp.
+- class `ResumeRecord` — A pending re-dispatch as recorded on the task.
+- def `resume_record_for_route` — ``route``'s pending resume as recorded on the task, or ``None``.
+- def `write_resume_record` — Persist *record* on the task; returns whether the write landed.
+- def `consume_resume_record` — Best-effort per-key delete of ``route``'s resume record, iff the dispatch-time *payload* carried one (no round trip otherwise).
 
 ### `lithos_loom.subscriptions.retry`
 - def `run_with_retry` — Run ``operation``, retrying up to ``policy.attempts`` times.

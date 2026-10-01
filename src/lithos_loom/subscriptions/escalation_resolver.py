@@ -79,9 +79,10 @@ class EscalationResolver:
         # intent. Without this, a late/replayed completion arriving after the
         # first retry ran (and cleared the story's provenance) would look
         # exactly like the missing-provenance fallback below and nudge again:
-        # un-dedup the runner's fail-once set, reset the resume budget, and
-        # start a duplicate run past a pending resume schedule. In-memory is
-        # the right durability: those three pieces of state are themselves
+        # un-dedup the runner's fail-once set and start a duplicate run past
+        # a pending resume schedule (the resume budget itself lives on the
+        # task since U1 and is not touched by a nudge). In-memory is the
+        # right durability: the dedup set and the armed timer are themselves
         # per-process, and after a restart a replayed nudge degrades to the
         # restart bootstrap's own (correct) semantics. Grows by one small id
         # per resolved loom gate per process lifetime.
