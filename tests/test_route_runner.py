@@ -41,6 +41,7 @@ from lithos_loom.subscriptions.dispatch_guards import (
     task_fingerprint,
     task_payload,
 )
+from lithos_loom.subscriptions.escalation_resolver import GATE_RESOLVED_ORIGIN
 from lithos_loom.subscriptions.route_runner import RouteRunner
 from tests.support import FakeLithosClient, make_task
 
@@ -1286,36 +1287,6 @@ async def test_runner_resume_dropped_when_task_no_longer_open(
     assert lithos.task_claim.await_count == 1
 
 
-async def test_runner_resume_budget_exhausted_escalates(
-    tmp_path: Path,
-) -> None:
-    """Beyond MAX_RESUMES_PER_TASK the task is a human's problem: a needs-human
-    gate (reason resume_exhausted) + [NeedsHuman], no further re-dispatch. The
-    claim was released on the interrupted path already — exactly once."""
-    from lithos_loom.subscriptions.route_runner import MAX_RESUMES_PER_TASK
-
-    bus = EventBus()
-    plugin_runner = AsyncMock(side_effect=[_interrupted_with_resume()])
-    runner, lithos = _make_runner(
-        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
-    )
-    runner._resume_counts["task-1"] = MAX_RESUMES_PER_TASK
-
-    await bus.publish(_evt())
-    await _run_for(runner, seconds=0.3)
-
-    assert plugin_runner.await_count == 1
-    assert not runner._resume_tasks
-    lithos.finding_post.assert_awaited_once()
-    summary = lithos.finding_post.await_args.kwargs["summary"]
-    assert summary.startswith("[NeedsHuman]")
-    assert "resume budget exhausted" in summary
-    assert lithos.task_create.await_args.kwargs["metadata"]["escalation_reason"] == (
-        "resume_exhausted"
-    )
-    lithos.task_release.assert_awaited_once()
-
-
 async def test_runner_unparseable_resume_after_not_scheduled(
     tmp_path: Path,
 ) -> None:
@@ -1347,12 +1318,16 @@ async def test_rescheduled_resume_survives_old_sleepers_cleanup(
     callback runs, _resume_tasks must still hold the SECOND sleeper.
     """
     bus = EventBus()
-    runner, _ = _make_runner(bus=bus, work_dir=tmp_path)
-    resume = {"resume_after": "2099-01-01T00:00:00+00:00"}
+    from lithos_loom.subscriptions.resume_record import ResumeRecord
 
-    await runner._maybe_schedule_resume("task-1", resume, _payload())
+    runner, _ = _make_runner(bus=bus, work_dir=tmp_path)
+    record = ResumeRecord(
+        resume_after=datetime(2099, 1, 1, tzinfo=UTC), attempts=1, run_id=None
+    )
+
+    runner._arm_resume("task-1", record)
     first = runner._resume_tasks["task-1"]
-    await runner._maybe_schedule_resume("task-1", resume, _payload())
+    runner._arm_resume("task-1", record)
     second = runner._resume_tasks["task-1"]
     assert first is not second
 
@@ -3250,16 +3225,38 @@ async def test_gate_resolved_nudge_resets_the_resume_budget(tmp_path: Path) -> N
     """PR #349 review F3: the operator-authorized retry gesture grants a
     fresh bounded resume window — the first usage-limit pause after a
     completed resume_exhausted gate must schedule a resume, not immediately
-    re-escalate."""
+    re-escalate. With the count on the task (U1) this holds by construction:
+    exhaustion writes no record, so the ticked story carries none."""
+    from lithos_loom.subscriptions.resume_record import resume_key
     from lithos_loom.subscriptions.route_runner import MAX_RESUMES_PER_TASK
 
     bus = EventBus()
-    plugin_runner = AsyncMock(return_value=_failed_result())
+    plugin_runner = AsyncMock(
+        side_effect=[
+            _interrupted_with_resume(),  # on the last recorded attempt → exhausted
+            _interrupted_with_resume(resume_after=_FAR_FUTURE),  # after the tick
+        ]
+    )
     runner, lithos = _make_runner(
         bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
     )
-    runner._resume_counts["task-1"] = MAX_RESUMES_PER_TASK
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                metadata=_resume_metadata(
+                    resume_after=_PAST, attempts=MAX_RESUMES_PER_TASK
+                )
+            ),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+    assert lithos.task_create.await_args.kwargs["metadata"]["escalation_reason"] == (
+        "resume_exhausted"
+    )
+    assert not runner._resume_tasks
 
+    # the story as the operator's tick leaves it: gate provenance, no record
     await bus.publish(
         _evt(
             type_="lithos.task.updated",
@@ -3269,8 +3266,10 @@ async def test_gate_resolved_nudge_resets_the_resume_budget(tmp_path: Path) -> N
     )
     await _run_for(runner)
 
-    assert plugin_runner.await_count == 1  # the retry ran
-    assert "task-1" not in runner._resume_counts
+    assert plugin_runner.await_count == 2  # the retry ran
+    written = lithos.task_update.await_args.kwargs["metadata"]
+    assert written[resume_key("story-develop")]["attempts"] == 1
+    runner._resume_tasks["task-1"].cancel()
 
 
 async def test_runner_rechecks_after_a_transient_readiness_error(
@@ -3736,3 +3735,460 @@ async def test_drained_waits_for_every_run_in_flight_not_just_the_first(
         run_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await run_task
+
+
+# ── Durable resume record (U1, task 250d231f) ──────────────────────────
+#
+# The usage-limit re-dispatch used to live in the runner's memory only; a
+# restart during the wait re-bootstrapped the open task straight back into the
+# wall with a fresh attempt count. The record on the task is what survives.
+
+
+def _resume_metadata(
+    *,
+    resume_after: str,
+    attempts: int,
+    run_id: str | None = "r1",
+    route: str = "story-develop",
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    from lithos_loom.subscriptions.resume_record import (
+        RESUME_REASON_USAGE_LIMITED,
+        resume_key,
+    )
+
+    record: dict[str, Any] = {
+        "resume_after": resume_after,
+        "attempts": attempts,
+        "reason": RESUME_REASON_USAGE_LIMITED,
+        "scheduled_at": "2026-10-01T12:00:00+00:00",
+    }
+    if run_id:
+        record["run_id"] = run_id
+    return {resume_key(route): record, **dict(extra or {})}
+
+
+_FAR_FUTURE = "2099-01-01T00:00:00+00:00"
+_PAST = "2026-01-01T00:00:00+00:00"
+
+
+async def test_interrupted_with_resume_writes_the_record_before_the_release(
+    tmp_path: Path,
+) -> None:
+    """The record exists by the time the task is externally visible as
+    unclaimed (the marker's rule), and a first interruption counts one attempt."""
+    from lithos_loom.subscriptions.resume_record import resume_key
+
+    bus = EventBus()
+    order: list[str] = []
+    runner, lithos = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        plugin_runner=AsyncMock(
+            side_effect=[_interrupted_with_resume(resume_after=_FAR_FUTURE)]
+        ),
+    )
+    lithos.task_update.side_effect = lambda **_: order.append("update")
+    lithos.task_release.side_effect = lambda **_: order.append("release")
+
+    await bus.publish(_evt())
+    await _run_for(runner)
+
+    assert order == ["update", "release"]
+    written = lithos.task_update.await_args.kwargs["metadata"]
+    record = written[resume_key("story-develop")]
+    assert record["resume_after"] == _FAR_FUTURE
+    assert record["attempts"] == 1
+    assert record["run_id"] == "r1"
+    assert record["reason"] == "usage_limited"
+    assert last_attempt_key("story-develop") not in written  # no marker to clear
+    assert "task-1" in runner._resume_tasks
+    runner._resume_tasks["task-1"].cancel()
+
+
+async def test_interrupted_with_resume_clears_a_superseded_marker_in_the_same_write(
+    tmp_path: Path,
+) -> None:
+    from lithos_loom.subscriptions.resume_record import resume_key
+
+    bus = EventBus()
+    runner, lithos = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        plugin_runner=AsyncMock(
+            side_effect=[_interrupted_with_resume(resume_after=_FAR_FUTURE)]
+        ),
+    )
+    fp = task_fingerprint(_payload())
+    await bus.publish(
+        _evt(
+            type_="lithos.task.updated",
+            payload=_payload(metadata=_marker_metadata(fingerprint=fp)),
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_update.assert_awaited_once()
+    written = lithos.task_update.await_args.kwargs["metadata"]
+    assert written[last_attempt_key("story-develop")] is None
+    assert written[resume_key("story-develop")]["attempts"] == 1
+    runner._resume_tasks["task-1"].cancel()
+
+
+async def test_scheduled_resume_survives_a_restart(tmp_path: Path) -> None:
+    """Acceptance: restart the daemon during a usage-limit wait → no dispatch
+    before `resume_after`, the sleeper re-armed from the record, and the attempt
+    count carried into the next interruption.
+
+    Runner A interrupts and writes the record; runner B (a new process) sees
+    the task's bootstrap replay carrying it.
+    """
+    from lithos_loom.subscriptions.resume_record import resume_key
+
+    bus_a = EventBus()
+    runner_a, lithos_a = _make_runner(
+        bus=bus_a,
+        work_dir=tmp_path,
+        plugin_runner=AsyncMock(
+            side_effect=[_interrupted_with_resume(resume_after=_FAR_FUTURE)]
+        ),
+    )
+    await bus_a.publish(_evt())
+    await _run_for(runner_a)
+    record = lithos_a.task_update.await_args.kwargs["metadata"][
+        resume_key("story-develop")
+    ]
+    runner_a._resume_tasks["task-1"].cancel()
+
+    # "restart": a fresh runner over a bootstrap replay of the open task
+    bus_b = EventBus()
+    plugin_b = AsyncMock()
+    runner_b, lithos_b = _make_runner(
+        bus=bus_b, work_dir=tmp_path, plugin_runner=plugin_b
+    )
+    await bus_b.publish(
+        _evt(
+            payload=_payload(metadata={resume_key("story-develop"): record}),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner_b)
+
+    lithos_b.task_claim.assert_not_called()
+    plugin_b.assert_not_called()
+    lithos_b.task_update.assert_not_called()  # honouring writes nothing
+    sleeper = runner_b._resume_tasks["task-1"]
+    assert not sleeper.done()
+    sleeper.cancel()
+
+
+async def test_pending_resume_defers_a_live_update_too(tmp_path: Path) -> None:
+    """After a restart the task is not in the in-process dedup set, so an
+    operator edit during the wait arrives as a live `updated` — it must not
+    dispatch into the wall either. The same record again is a no-op (the timer
+    is kept); an edited, later time replaces the timer. Nothing is written and
+    nothing counted on either."""
+    bus = EventBus()
+    plugin = AsyncMock()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path, plugin_runner=plugin)
+    payload = _payload(metadata=_resume_metadata(resume_after=_FAR_FUTURE, attempts=2))
+
+    await bus.publish(_evt(type_="lithos.task.updated", payload=payload))
+    await _run_for(runner)
+    first = runner._resume_tasks["task-1"]
+    await bus.publish(_evt(type_="lithos.task.updated", payload=payload))
+    await _run_for(runner)
+    assert runner._resume_tasks["task-1"] is first and not first.done()
+
+    later = _payload(
+        metadata=_resume_metadata(resume_after="2099-06-01T00:00:00+00:00", attempts=2)
+    )
+    await bus.publish(_evt(type_="lithos.task.updated", payload=later))
+    await _run_for(runner)
+    second = runner._resume_tasks["task-1"]
+
+    lithos.task_claim.assert_not_called()
+    plugin.assert_not_called()
+    lithos.task_update.assert_not_called()
+    assert first.cancelled() and second is not first and not second.done()
+    second.cancel()
+
+
+async def test_editing_the_pending_time_in_process_moves_the_armed_timer(
+    tmp_path: Path,
+) -> None:
+    """PR #439 review: after an interrupted run the task sits in the in-process
+    dedup set, and a hand-edited `resume_after` used to be swallowed there. The
+    record is the authority over the timer: moved later → the timer waits for
+    the new time; moved earlier (here: into the past) → the re-dispatch runs
+    now, through the sleeper path."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        side_effect=[
+            _interrupted_with_resume(resume_after=_FAR_FUTURE),
+            {
+                "schema_version": 1,
+                "task_id": "task-1",
+                "status": "succeeded",
+                "exit_code": 0,
+            },
+        ]
+    )
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    await bus.publish(_evt())
+    await _run_for(runner)
+    first = runner._resume_tasks["task-1"]
+    assert "task-1" in runner._processed_tasks
+
+    # moved later: a fresh timer, no dispatch
+    later = _resume_metadata(resume_after="2099-06-01T00:00:00+00:00", attempts=1)
+    await bus.publish(
+        _evt(type_="lithos.task.updated", payload=_payload(metadata=later))
+    )
+    await _run_for(runner)
+    second = runner._resume_tasks["task-1"]
+    assert first.cancelled() and second is not first and not second.done()
+    assert plugin_runner.await_count == 1
+
+    # moved earlier (past): the sleeper fires at once and re-dispatches
+    earlier = _resume_metadata(resume_after=_PAST, attempts=1)
+    lithos.task_get.return_value = Task(
+        id="task-1",
+        title="t",
+        status="open",
+        tags=("trigger:story-develop",),
+        metadata=earlier,
+        claims=(),
+    )
+    await bus.publish(
+        _evt(type_="lithos.task.updated", payload=_payload(metadata=earlier))
+    )
+    await _run_for(runner, seconds=0.3)
+
+    assert second.cancelled()
+    assert plugin_runner.await_count == 2
+    lithos.task_complete.assert_awaited_once()
+
+
+async def test_past_resume_dispatches_now_consumes_the_record_and_keeps_the_count(
+    tmp_path: Path,
+) -> None:
+    """A record whose time has passed (the daemon was down past `resume_after`)
+    dispatches at once; the claim consumes the record (one per-key delete), and
+    the next interruption counts on from the recorded attempts, not from zero."""
+    from lithos_loom.subscriptions.resume_record import resume_key
+
+    bus = EventBus()
+    runner, lithos = _make_runner(
+        bus=bus,
+        work_dir=tmp_path,
+        plugin_runner=AsyncMock(
+            side_effect=[_interrupted_with_resume(resume_after=_FAR_FUTURE)]
+        ),
+    )
+    await bus.publish(
+        _evt(
+            payload=_payload(metadata=_resume_metadata(resume_after=_PAST, attempts=2)),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+    lithos.task_claim.assert_awaited_once()
+    writes = [c.kwargs["metadata"] for c in lithos.task_update.await_args_list]
+    assert writes[0] == {resume_key("story-develop"): None}  # consumed at claim
+    assert writes[1][resume_key("story-develop")]["attempts"] == 3
+    runner._resume_tasks["task-1"].cancel()
+
+
+async def test_recorded_attempts_at_the_cap_escalate_resume_exhausted(
+    tmp_path: Path,
+) -> None:
+    """The budget is read from the task, so a restart cannot reset it: a story
+    re-dispatched on its last recorded attempt that is interrupted again raises
+    the needs-human gate (reason resume_exhausted), writes no new record, and
+    arms no sleeper. The claim was released on the interrupted path — once."""
+    from lithos_loom.subscriptions.resume_record import resume_key
+    from lithos_loom.subscriptions.route_runner import MAX_RESUMES_PER_TASK
+
+    bus = EventBus()
+    plugin_runner = AsyncMock(side_effect=[_interrupted_with_resume()])
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                metadata=_resume_metadata(
+                    resume_after=_PAST, attempts=MAX_RESUMES_PER_TASK
+                )
+            ),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner, seconds=0.3)
+
+    assert plugin_runner.await_count == 1
+    assert not runner._resume_tasks
+    summary = lithos.finding_post.await_args.kwargs["summary"]
+    assert summary.startswith("[NeedsHuman]") and "resume budget exhausted" in summary
+    assert lithos.task_create.await_args.kwargs["metadata"]["escalation_reason"] == (
+        "resume_exhausted"
+    )
+    lithos.task_release.assert_awaited_once()
+    for call in lithos.task_update.await_args_list:
+        written = call.kwargs["metadata"].get(resume_key("story-develop"), None)
+        assert written is None  # consumed at claim, never re-written
+
+
+async def test_gate_resolved_nudge_bypasses_a_pending_resume(tmp_path: Path) -> None:
+    """The operator's gate tick is THE retry gesture: it dispatches now."""
+    bus = EventBus()
+    runner, lithos = _make_runner(bus=bus, work_dir=tmp_path)
+    await bus.publish(
+        _evt(
+            type_="lithos.task.updated",
+            payload=_payload(
+                metadata=_resume_metadata(resume_after=_FAR_FUTURE, attempts=1)
+            ),
+            origin=GATE_RESOLVED_ORIGIN,
+        )
+    )
+    await _run_for(runner)
+    lithos.task_claim.assert_awaited_once()
+    lithos.task_complete.assert_awaited_once()
+
+
+async def test_sleeper_fire_re_reads_the_record_and_waits_for_a_moved_time(
+    tmp_path: Path,
+) -> None:
+    """At fire time the fresh task snapshot is re-read: a record still saying
+    "now" dispatches (the usual case — the claim then consumes it), while one
+    the operator moved later arms a fresh timer instead of claiming early into
+    the wall (PR #439 review)."""
+    bus = EventBus()
+    plugin_runner = AsyncMock(
+        side_effect=[
+            _interrupted_with_resume(),  # resume_after in the past: fires at once
+            {
+                "schema_version": 1,
+                "task_id": "task-1",
+                "status": "succeeded",
+                "exit_code": 0,
+            },
+        ]
+    )
+    runner, lithos = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=plugin_runner
+    )
+
+    def _snapshot(resume_after: str) -> Task:
+        return Task(
+            id="task-1",
+            title="t",
+            status="open",
+            tags=("trigger:story-develop",),
+            metadata=_resume_metadata(resume_after=resume_after, attempts=1),
+            claims=(),
+        )
+
+    # moved later meanwhile → no claim, a new timer for the new time
+    lithos.task_get.return_value = _snapshot(_FAR_FUTURE)
+    await bus.publish(_evt())
+    await _run_for(runner, seconds=0.3)
+    assert plugin_runner.await_count == 1
+    lithos.task_claim.assert_awaited_once()  # the first run only
+    sleeper = runner._resume_tasks["task-1"]
+    assert not sleeper.done()
+    sleeper.cancel()
+
+    # the record still says now → dispatch
+    bus2 = EventBus()
+    plugin2 = AsyncMock(
+        side_effect=[
+            _interrupted_with_resume(),
+            {
+                "schema_version": 1,
+                "task_id": "task-1",
+                "status": "succeeded",
+                "exit_code": 0,
+            },
+        ]
+    )
+    runner2, lithos2 = _make_runner(bus=bus2, work_dir=tmp_path, plugin_runner=plugin2)
+    lithos2.task_get.return_value = _snapshot(_PAST)
+    await bus2.publish(_evt())
+    await _run_for(runner2, seconds=0.3)
+    assert plugin2.await_count == 2
+    lithos2.task_complete.assert_awaited_once()
+
+
+async def test_resume_pointer_continues_the_interrupted_run_from_the_record(
+    tmp_path: Path,
+) -> None:
+    """A usage-limit re-dispatch continues the interrupted run's branch when its
+    checkpoint has a committed round (the plugin already treats `interrupted` as
+    resumable) — paying the rounds again after waiting them out defeats the wait."""
+    import json as _json
+
+    from lithos_loom.plugins.story_develop import checkpoint
+
+    bus = EventBus()
+    envelopes: list[dict[str, Any]] = []
+
+    async def capturing_plugin(**kwargs: Any) -> dict[str, Any]:
+        envelopes.append(_json.loads(kwargs["task_json_path"].read_text()))
+        return {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    paused_run = tmp_path / "task-1" / "paused"
+    (paused_run / "handoff").mkdir(parents=True)
+    checkpoint.record_round_checkpoint(
+        paused_run,
+        round_no=2,
+        branch="story-paused",
+        head_sha="ab" * 20,
+        base_sha="b" * 40,
+    )
+
+    runner, _ = _make_runner(bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin)
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                metadata=_resume_metadata(
+                    resume_after=_PAST, attempts=1, run_id="paused"
+                )
+            ),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+    assert envelopes[-1]["resume"] == {
+        "run_dir": str(paused_run),
+        "reason": "usage_limited",
+    }
+
+    # no committed round → from scratch, exactly as before (the delivered
+    # dispatch above reaped the task's work dir)
+    (tmp_path / "task-1" / "fresh").mkdir(parents=True)
+    runner2, _ = _make_runner(
+        bus=bus, work_dir=tmp_path, plugin_runner=capturing_plugin
+    )
+    await bus.publish(
+        _evt(
+            payload=_payload(
+                metadata=_resume_metadata(
+                    resume_after=_PAST, attempts=1, run_id="fresh"
+                )
+            ),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner2)
+    assert "resume" not in envelopes[-1]

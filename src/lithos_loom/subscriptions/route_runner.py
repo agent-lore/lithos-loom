@@ -19,8 +19,12 @@ subprocess, and applies the resulting status:
   provider usage limit), the runner schedules an in-process re-dispatch:
   at ``resume_after`` it re-checks the task is still open, drops it from
   the dedup set, and re-claims + re-runs. Bounded by
-  ``MAX_RESUMES_PER_TASK``; the schedule is in-memory only (a daemon
-  restart re-bootstraps open tasks anyway).
+  ``MAX_RESUMES_PER_TASK``. The schedule is **durable** (U1, task
+  250d231f): the time and the attempts used are recorded on the task
+  (:mod:`.resume_record`, ``metadata.loom_resume:<route>``), consumed at
+  the claim, and honoured on every event — so a restart during the wait
+  re-arms the timer from the record instead of re-bootstrapping the open
+  task straight back into the wall, and the attempt count survives.
 
 The runner is instantiated directly by the route-runner child entry
 point (one runner per route) — it does **not** go through the
@@ -72,8 +76,27 @@ from lithos_loom.subscriptions.escalation import (
 )
 from lithos_loom.subscriptions.escalation_resolver import GATE_RESOLVED_ORIGIN
 from lithos_loom.subscriptions.ready_recheck import ReadyRechecker
+from lithos_loom.subscriptions.resume_record import (
+    ResumeRecord,
+    consume_resume_record,
+    parse_resume_after,
+    resume_record_for_route,
+    write_resume_record,
+)
 
-__all__ = ["PluginRunFn", "RouteRunner"]
+__all__ = ["RESUME_DUE_SLACK_SECONDS", "RESUME_ORIGIN", "PluginRunFn", "RouteRunner"]
+
+# The origin of the sleeper's own re-dispatch event (a synthetic
+# `loom.route.resume`, never a bootstrap replay). It is NOT exempt from the
+# pending-resume check: the sleeper disarms itself before the fresh re-read, so
+# a record whose time still stands is due and dispatches, and one the operator
+# moved later arms a fresh timer instead (PR #439 review).
+RESUME_ORIGIN = "resume"
+
+# A recorded resume time this close is "now": the sleeper's wake and the record
+# are measured on two clocks (the loop's monotonic one, the wall clock), and a
+# fire a few milliseconds ahead must not re-arm for the remainder.
+RESUME_DUE_SLACK_SECONDS = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +178,9 @@ _HANDLED_EVENT_TYPES = (
 # resume_exhausted). Distinct from the failure retry budget (issue #11):
 # resume is "try again after the limit lifts", not "retry a failure".
 MAX_RESUMES_PER_TASK = 3
+
+# `_plan_resume`'s "the recorded attempts meet the budget" answer.
+_EXHAUSTED = object()
 
 
 @dataclass
@@ -259,12 +285,15 @@ class RouteRunner:
         # path below (claim_failed) deliberately does NOT add to this set,
         # so a subsequent released event there does re-attempt the claim.
         self._processed_tasks: set[str] = set()
-        # T10: pending usage-limit re-dispatches (task id → sleeper task)
-        # and how many resumes each task has consumed. In-memory only:
-        # a daemon restart loses the schedule, but the event-stream
-        # bootstrap re-surfaces open tasks on startup anyway.
+        # T10: pending usage-limit re-dispatches (task id → sleeper task).
+        # The timer is the in-process half; the time and the attempts used
+        # live on the task (U1, `resume_record`) — a restart re-arms the
+        # timer from the record when the bootstrap replays the open task,
+        # and the count is read from the dispatch payload, never kept here.
         self._resume_tasks: dict[str, asyncio.Task[None]] = {}
-        self._resume_counts: dict[str, int] = {}
+        # …and the instant each armed sleeper is for, so an event carrying the
+        # same record is a no-op and one carrying an edited time re-arms.
+        self._resume_due: dict[str, datetime] = {}
         # #407 slice 3 (`lithos-loom drain`): once draining, no new claim —
         # `_handle` refuses before any Lithos read and again right before
         # the claim (readiness + admission are awaits a drain can begin
@@ -343,12 +372,25 @@ class RouteRunner:
             # b91177d2: the operator completed this story's needs-human gate —
             # THE retry gesture. The in-process "fail once per task" set
             # (below) would otherwise swallow it until a restart, and the T10
-            # resume budget starts fresh (PR #349 review F3: a retry the
-            # operator authorized deserves a full bounded resume window, not
-            # an immediate resume_exhausted re-escalation on the first
-            # usage-limit pause).
+            # resume budget starts fresh by construction (PR #349 review F3:
+            # a retry the operator authorized deserves a full bounded resume
+            # window) — exhaustion writes no resume record, so there is no
+            # count left on the task to reset.
             self._processed_tasks.discard(task_id)
-            self._resume_counts.pop(task_id, None)
+        metadata = payload.get("metadata") or {}
+        # U1: a re-dispatch this route already scheduled — recorded on the task,
+        # so it is still here after a restart — is honoured on every origin but
+        # the operator's gate tick, and BEFORE the in-process dedup: the record
+        # is the authority over the armed timer, so a hand-edited time on an
+        # already-processed task moves the timer rather than being swallowed
+        # (PR #439 review), and the sleeper's own fire re-reads it. Payload-only,
+        # so before the readiness round trip; before the bootstrap decline too,
+        # though the two cannot coexist (the interrupted write clears the
+        # marker, and a failure only ever follows a consumed record).
+        if event.origin != GATE_RESOLVED_ORIGIN:
+            pending = resume_record_for_route(metadata, self.route.name)
+            if pending is not None and self._honour_pending_resume(task_id, pending):
+                return
         if task_id in self._processed_tasks:
             logger.debug(
                 "RouteRunner %s: skipping stale event for already-processed %s",
@@ -357,7 +399,6 @@ class RouteRunner:
             )
             return
 
-        metadata = payload.get("metadata") or {}
         # A bootstrap replay must not re-develop a story whose last attempt
         # FAILED and that nobody edited since — deliberate retry paths arrive
         # live or change the fingerprint (rationale + residual crash-window
@@ -478,6 +519,17 @@ class RouteRunner:
             payload=payload,
             stamps=self._attempt_stamps,
         )
+        # U1: the re-dispatch a resume record scheduled is now under way — the
+        # record is consumed here, on every origin, so "present" keeps meaning
+        # "scheduled and not started". The payload still carries it for the
+        # attempt count the interrupted path reads, and for the resume pointer.
+        await consume_resume_record(
+            self.lithos,
+            task_id=task_id,
+            route=self.route.name,
+            agent=self.agent_id,
+            payload=payload,
+        )
         await self._run_claimed_task(task_id, payload)
 
     def _resume_pointer(
@@ -494,7 +546,13 @@ class RouteRunner:
         the claim path has since cleared it server-side): the route's last
         attempt failed for a host reason, and it names the run.
 
-        ``None`` — no marker, a stop that is a verdict on the WORK
+        The other signal (U1) is the route's resume record: a usage-limited run
+        checkpointed on its branch too, and its designed recovery IS this
+        re-dispatch — paying its rounds again after waiting out the limit would
+        defeat the wait. The record names the run; the reason is
+        ``usage_limited``.
+
+        ``None`` — no marker or record, a stop that is a verdict on the WORK
         (``max_rounds`` / ``stalled`` / ``disputed`` / …, which is a separate
         question and deliberately not this), an unknown run, or a run with no
         committed round — means an ordinary dispatch, exactly as before. The
@@ -511,15 +569,22 @@ class RouteRunner:
         ``run_id`` discards the join altogether, letting any local writer supply
         the branch, the intake handoffs and the budget remainder.
         """
-        marker = failed_attempt_for_route(
-            payload.get("metadata") or {}, self.route.name
-        )
-        if marker is None:
-            return None
-        reason = marker.get("reason")
-        if not isinstance(reason, str) or reason not in RESUMABLE_ESCALATION_REASONS:
-            return None
-        run_id = marker.get("run_id")
+        metadata = payload.get("metadata") or {}
+        run_id: Any
+        marker = failed_attempt_for_route(metadata, self.route.name)
+        if marker is not None:
+            reason = marker.get("reason")
+            if (
+                not isinstance(reason, str)
+                or reason not in RESUMABLE_ESCALATION_REASONS
+            ):
+                return None
+            run_id = marker.get("run_id")
+        else:
+            record = resume_record_for_route(metadata, self.route.name)
+            if record is None or record.run_id is None:
+                return None
+            reason, run_id = record.reason, record.run_id
         if not isinstance(run_id, str) or not is_plain_run_id(run_id):
             if run_id:
                 logger.warning(
@@ -773,17 +838,46 @@ class RouteRunner:
             )
             return False
         if status == "interrupted":
-            # An interrupted attempt supersedes an earlier failure — a stale
-            # failed marker must not veto interrupted's designed recovery,
-            # the restart bootstrap (see clear_superseded_failure).
-            await clear_superseded_failure(
-                self.lithos,
-                task_id=task_id,
-                route=self.route.name,
-                agent=self.agent_id,
-                payload=payload,
-                stamps=self._attempt_stamps,
+            # T10: a `resume` block makes the interruption retryable — the
+            # plugin says WHEN a re-run is expected to succeed. Planned before
+            # the release so the durable record (U1) exists by the time the
+            # task is externally visible as unclaimed — the marker's rule.
+            resume = result.get("resume")
+            record = (
+                self._plan_resume(task_id, resume, payload)
+                if isinstance(resume, Mapping)
+                else None
             )
+            superseded = (
+                failed_attempt_for_route(payload.get("metadata") or {}, self.route.name)
+                is not None
+            )
+            if isinstance(record, ResumeRecord):
+                # One write: the record, and the superseded failed marker gone.
+                if (
+                    await write_resume_record(
+                        self.lithos,
+                        task_id=task_id,
+                        route=self.route.name,
+                        agent=self.agent_id,
+                        record=record,
+                        clear_failed_marker=superseded,
+                    )
+                    and superseded
+                ):
+                    self._attempt_stamps.clear(self.route.name, task_id)
+            else:
+                # An interrupted attempt supersedes an earlier failure — a
+                # stale failed marker must not veto interrupted's designed
+                # recovery, the restart bootstrap (see clear_superseded_failure).
+                await clear_superseded_failure(
+                    self.lithos,
+                    task_id=task_id,
+                    route=self.route.name,
+                    agent=self.agent_id,
+                    payload=payload,
+                    stamps=self._attempt_stamps,
+                )
             # Release the claim either way: a shutdown signal frees the task
             # for a future run; a usage-limit checkpoint must not hold the
             # claim across the (potentially hours-long) wait. No
@@ -799,11 +893,10 @@ class RouteRunner:
                 self.route.name,
                 task_id,
             )
-            # T10: a `resume` block makes the interruption retryable — the
-            # plugin says WHEN a re-run is expected to succeed.
-            resume = result.get("resume")
-            if isinstance(resume, Mapping):
-                await self._maybe_schedule_resume(task_id, resume, payload)
+            if isinstance(record, ResumeRecord):
+                self._arm_resume(task_id, record)
+            elif record is _EXHAUSTED and isinstance(resume, Mapping):
+                await self._escalate_resume_exhausted(task_id, resume, payload)
             return False
         await self._escalate(
             task_id,
@@ -818,72 +911,166 @@ class RouteRunner:
 
     # ── usage-limit re-dispatch (T10) ─────────────────────────────────
 
-    async def _maybe_schedule_resume(
+    def _plan_resume(
         self,
         task_id: str,
         resume: Mapping[str, Any],
         payload: Mapping[str, Any],
-    ) -> None:
-        raw = resume.get("resume_after")
-        try:
-            resume_after = datetime.fromisoformat(str(raw))
-        except ValueError:
+    ) -> ResumeRecord | object | None:
+        """What this interruption's ``resume`` block asks for.
+
+        A :class:`ResumeRecord` to persist and arm; :data:`_EXHAUSTED` when the
+        attempts already recorded on the task meet ``MAX_RESUMES_PER_TASK``;
+        ``None`` when the block is unusable (no re-dispatch, as before). The
+        attempt count is read from the record the dispatch payload carried
+        (U1) — the task is the count, so a restart cannot reset it — and the
+        new record is that plus one.
+        """
+        resume_after = parse_resume_after(resume.get("resume_after"))
+        if resume_after is None:
             logger.warning(
                 "RouteRunner %s: %s has unparseable resume_after %r; not "
                 "re-dispatching",
                 self.route.name,
                 task_id,
-                raw,
+                resume.get("resume_after"),
             )
-            return
-        if resume_after.tzinfo is None:
-            resume_after = resume_after.replace(tzinfo=UTC)
-        used = self._resume_counts.get(task_id, 0)
+            return None
+        prior = resume_record_for_route(payload.get("metadata") or {}, self.route.name)
+        used = prior.attempts if prior is not None else 0
         if used >= MAX_RESUMES_PER_TASK:
-            logger.warning(
-                "RouteRunner %s: %s exhausted its resume budget (%d); escalating",
+            return _EXHAUSTED
+        run_id = resume.get("run_id")
+        return ResumeRecord(
+            resume_after=resume_after,
+            attempts=used + 1,
+            run_id=run_id
+            if isinstance(run_id, str) and is_plain_run_id(run_id)
+            else None,
+        )
+
+    async def _escalate_resume_exhausted(
+        self,
+        task_id: str,
+        resume: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> None:
+        logger.warning(
+            "RouteRunner %s: %s exhausted its resume budget (%d); escalating",
+            self.route.name,
+            task_id,
+            MAX_RESUMES_PER_TASK,
+        )
+        # b91177d2: a run that keeps hitting its provider limit is a human's
+        # problem now, not a retry's. The claim was already released on the
+        # interrupted path, so this raises the gate + the [NeedsHuman] finding
+        # without releasing again. No resume record is written, so the gate
+        # tick starts a fresh budget by construction.
+        await self._escalate(
+            task_id,
+            Escalation(
+                reason="resume_exhausted",
+                summary=(
+                    "usage-limited run resume budget exhausted "
+                    f"({MAX_RESUMES_PER_TASK} re-dispatches)"
+                ),
+            ),
+            payload=payload,
+            run_id=resume.get("run_id"),
+            release=False,
+        )
+
+    def _honour_pending_resume(self, task_id: str, record: ResumeRecord) -> bool:
+        """Make the armed timer agree with the task's resume record.
+
+        The record is the authority; the sleeper follows it. Four cases:
+
+        * a sleeper is armed for this exact time → nothing to do (the record's
+          own write, or a replayed event), handled;
+        * a sleeper is armed for another time → the operator edited
+          ``resume_after`` (PR #439 review): re-arm for the new remaining
+          delay — zero when the new time has passed, so the re-dispatch runs
+          at once through the sleeper path, which drops the dedup entry —
+          handled;
+        * no sleeper and the time is still ahead → arm one (a restart, or the
+          first event after one), handled;
+        * no sleeper and the time has passed → not handled: the caller
+          dispatches now (the claim consumes the record; its attempts ride the
+          payload). This is also how the sleeper's own fire proceeds — it
+          disarms itself before re-reading the task.
+
+        Nothing is written and no attempt counted on any branch. "Passed" has
+        a second's slack, so a fire a few milliseconds ahead of the wall-clock
+        instant (two clocks are compared) is not re-armed for the remainder.
+        """
+        delay = record.remaining_seconds()
+        due = delay <= RESUME_DUE_SLACK_SECONDS
+        armed = self._resume_tasks.get(task_id)
+        armed_for = self._resume_due.get(task_id)
+        if armed is not None and not armed.done():
+            if armed_for == record.resume_after:
+                return True
+            logger.info(
+                "RouteRunner %s: %s's recorded resume time moved %s -> %s; "
+                "re-arming (re-dispatch in %.0fs, attempt %d/%d used)",
                 self.route.name,
                 task_id,
+                armed_for.isoformat(timespec="seconds") if armed_for else "?",
+                record.resume_after.isoformat(timespec="seconds"),
+                0.0 if due else delay,
+                record.attempts,
                 MAX_RESUMES_PER_TASK,
             )
-            # b91177d2: a run that keeps hitting its provider limit is a
-            # human's problem now, not a retry's. The claim was already
-            # released on the interrupted path, so this raises the gate + the
-            # [NeedsHuman] finding without releasing again.
-            await self._escalate(
+            self._arm_sleeper(task_id, 0.0 if due else delay, record.resume_after)
+            return True
+        if due:
+            logger.info(
+                "RouteRunner %s: %s's recorded resume time %s has passed "
+                "(attempt %d/%d used); dispatching now",
+                self.route.name,
                 task_id,
-                Escalation(
-                    reason="resume_exhausted",
-                    summary=(
-                        "usage-limited run resume budget exhausted "
-                        f"({MAX_RESUMES_PER_TASK} re-dispatches)"
-                    ),
-                ),
-                payload=payload,
-                run_id=resume.get("run_id"),
-                release=False,
+                record.resume_after.isoformat(timespec="seconds"),
+                record.attempts,
+                MAX_RESUMES_PER_TASK,
             )
-            return
-        self._resume_counts[task_id] = used + 1
-        existing = self._resume_tasks.get(task_id)
-        if existing is not None and not existing.done():
-            existing.cancel()
-        delay = max(0.0, (resume_after - datetime.now(UTC)).total_seconds())
+            return False
+        logger.info(
+            "RouteRunner %s: honouring %s's recorded resume — re-dispatch in "
+            "%.0fs (at %s, attempt %d/%d used); not dispatching before it",
+            self.route.name,
+            task_id,
+            delay,
+            record.resume_after.isoformat(timespec="seconds"),
+            record.attempts,
+            MAX_RESUMES_PER_TASK,
+        )
+        self._arm_sleeper(task_id, delay, record.resume_after)
+        return True
+
+    def _arm_resume(self, task_id: str, record: ResumeRecord) -> None:
+        delay = record.remaining_seconds()
         logger.info(
             "RouteRunner %s: scheduling re-dispatch of %s in %.0fs "
             "(resume %d/%d, at %s)",
             self.route.name,
             task_id,
             delay,
-            used + 1,
+            record.attempts,
             MAX_RESUMES_PER_TASK,
-            resume_after.isoformat(timespec="seconds"),
+            record.resume_after.isoformat(timespec="seconds"),
         )
+        self._arm_sleeper(task_id, delay, record.resume_after)
+
+    def _arm_sleeper(self, task_id: str, delay: float, due: datetime) -> None:
+        existing = self._resume_tasks.get(task_id)
+        if existing is not None and not existing.done():
+            existing.cancel()
         sleeper = asyncio.create_task(
             self._resume_dispatch(task_id, delay),
             name=f"resume-{task_id}",
         )
         self._resume_tasks[task_id] = sleeper
+        self._resume_due[task_id] = due
 
         def _cleanup(done: asyncio.Task[None]) -> None:
             # Only remove the entry this task still owns: a cancelled old
@@ -891,8 +1078,17 @@ class RouteRunner:
             # and must not evict the replacement.
             if self._resume_tasks.get(task_id) is done:
                 del self._resume_tasks[task_id]
+                self._resume_due.pop(task_id, None)
 
         sleeper.add_done_callback(_cleanup)
+
+    def _disarm_current_sleeper(self, task_id: str) -> None:
+        """The sleeper that is firing is no longer *armed*: forget it before the
+        re-read, so the record check sees "no timer" and lets a due record
+        dispatch (and a moved-later one arm a fresh timer)."""
+        if self._resume_tasks.get(task_id) is asyncio.current_task():
+            del self._resume_tasks[task_id]
+            self._resume_due.pop(task_id, None)
 
     async def _resume_dispatch(self, task_id: str, delay: float) -> None:
         """Sleep until ``resume_after``, then re-claim + re-run the task.
@@ -927,13 +1123,17 @@ class RouteRunner:
                     task_id,
                 )
                 return
-            # Drop the dedup entry so _handle's claim path re-runs.
+            # Drop the dedup entry so _handle's claim path re-runs, and the
+            # armed-timer entry so the record check re-reads the FRESH time
+            # (an operator may have moved it; PR #439 review).
+            self._disarm_current_sleeper(task_id)
             self._processed_tasks.discard(task_id)
             await self._handle(
                 Event(
                     type="loom.route.resume",
                     timestamp=datetime.now(UTC),
                     payload=task_payload(task),
+                    origin=RESUME_ORIGIN,
                 )
             )
         except asyncio.CancelledError:

@@ -22,6 +22,12 @@ labels: [lithos-loom, orchestrator, route-runner, ops, planning]
 > from a cluster of seven open issues plus the ops residue of the
 > orchestration PRD; scheduled by the October plan, not by this document.
 > Every slice has a Lithos task tagged `prd:unattended-duration`.
+>
+> **2026-10-01.** U1 shipped: `subscriptions/resume_record.py` + the
+> route-runner's honour / consume / count-from-the-task paths (spec §2.2
+> `interrupted`); the usage-limit re-dispatch now also continues the
+> interrupted run's branch through the slice-C resume pointer. Open question
+> 2 answered below.
 
 ## Summary
 
@@ -192,7 +198,15 @@ self-clearing condition.
    fires? If not, U8's reserve can only be time- or round-based.
 2. Does U1's `resume` block generalise to the external-remediation boot hold
    (#377's `_infra_held`), or does that stay a per-boot set with U2 carving
-   out the self-clearing conditions?
+   out the self-clearing conditions? **Answered 2026-10-01: generalise, as
+   U2's work.** The record's shape (a time, attempts, a closed-vocabulary
+   reason, the run) is the right one for a provider cool-off on the gate's
+   parked trigger, but the watcher cannot apply it until an `infra_failed`
+   converge result names its failure class — today it carries only the
+   `host_action` prose — and that classification is U2's plugin half (the
+   same split that routes a capacity refusal to the fallback chain). Until
+   then the per-boot hold stays for every `infra_failed`; host-side classes
+   (auth, docker, spawn) keep it afterwards.
 
 ## Provenance
 
