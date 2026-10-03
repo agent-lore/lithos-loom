@@ -115,7 +115,10 @@ are exhaustive and mutually exclusive:
 
 - `decision_verdict: contest` **plus** `decision_contest:` quoting the
   acceptance-criteria line the finding already meets — it becomes an ordinary
-  `disputed`. A contest without the citation is rejected.
+  `disputed`. A contest without the citation is rejected. When the question
+  asks whether an actor or condition is in scope (the prompt's operational
+  model), the quote must be the criterion or operational-model line that names
+  that actor; a line that only touches the topic is not a citation — concede.
 - `decision_verdict: concede` **and no `decision_contest:`** — you cannot show
   it is in scope, so the question goes to the human operator. The two keys
   together contradict each other and are rejected.

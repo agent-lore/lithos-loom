@@ -2662,3 +2662,39 @@ def test_fetch_task_metadata_round_trips_title_and_metadata(monkeypatch: Any) ->
     )
     with pytest.raises(LookupError):
         daemon_io.fetch_task_metadata("http://lithos.test", "missing")
+
+
+def test_daemon_review_scope_metadata_threads_into_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """R1 (34bb82c4): develop_review_scope from project metadata reaches
+    DevelopConfig.review_scope on the daemon path."""
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {
+        "settings": ProjectDevelopSettings(review_scope="Single operator.")
+    }
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    argv, _ = _daemon_args(tmp_git_repo, tmp_path)
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].review_scope == "Single operator."
+
+
+def test_a_task_review_scope_survives_a_degraded_project_read(fake_client) -> None:
+    """R1 review: the operational model set on the TASK must survive the
+    degraded paths (no doc, no slug, failed read) like every task scalar."""
+    scope = {"develop_review_scope": "Single operator."}
+    assert (
+        resolve_project_settings("http://x", {"project": "loom", **scope}).review_scope
+        == "Single operator."
+    )
+    assert (
+        resolve_project_settings("http://x", scope).review_scope == "Single operator."
+    )
+    fake_client.fail_connect = ConnectionError("lithos down")
+    settings = resolve_project_settings("http://x", {"project": "loom", **scope})
+    assert settings.context_read_failed is True
+    assert settings.review_scope == "Single operator."

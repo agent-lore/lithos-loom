@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...runner import git
-from . import handoff
+from . import handoff, review_scope
 from .check_set import CheckSetResult, render_check_summary
 from .config import DevelopConfig
 from .gate_findings import GateLedger
@@ -183,6 +183,7 @@ def round_prompt(
             sandbox_facts=sandbox,
             round_no=str(round_no),
             acceptance_criteria=config.effective_acceptance_criteria,
+            review_scope=review_scope.reviewer_block(config),
             base_sha=fork[:12],
             artifacts_note=artifacts_note,
             gate_summary=gate_summary,
@@ -203,6 +204,7 @@ def round_prompt(
             reviewer_brief=reviewer_brief(spec),
             sandbox_facts=sandbox,
             acceptance_criteria=config.effective_acceptance_criteria,
+            review_scope=review_scope.reviewer_block(config),
             coder_summary=coder_summary,
             base_sha=fork[:12],
             diff_stat=git.diff_stat(wt, fork),
@@ -220,6 +222,7 @@ def round_prompt(
         sandbox_facts=sandbox,
         round_no=str(round_no),
         acceptance_criteria=config.effective_acceptance_criteria,
+        review_scope=review_scope.reviewer_block(config),
         base_sha=fork[:12],
         coder_handoff_file=handoff.coder_handoff_name(round_no),
         open_findings=rstate.ledger.render_open(),

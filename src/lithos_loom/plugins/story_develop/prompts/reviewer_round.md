@@ -6,7 +6,7 @@ acceptance criteria below.
 {sandbox_facts}
 ## Acceptance criteria
 
-{acceptance_criteria}
+{acceptance_criteria}{review_scope}
 
 ## The coder's summary
 

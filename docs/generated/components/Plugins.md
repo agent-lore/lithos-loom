@@ -61,6 +61,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | M | 3 | 1 |
+| `lithos_loom.plugins.story_develop.review_scope` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 18 |
 | `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 30 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
@@ -457,6 +458,12 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `FetchFailedError` — The intake fetch failed — an infrastructure failure, not a verdict.
 - class `RepoMismatchError` — The checkout's ``origin`` is not the repository the caller expected.
 - def `resolve_change` — Resolve *spec* into a :class:`ResolvedChange`.
+
+### `lithos_loom.plugins.story_develop.review_scope`
+- def `parse_review_scope` — Validate a ``develop_review_scope`` text, or ``None`` (layer unset).
+- def `reviewer_block` — The model + how findings are judged in it, for reviewer/triage prompts.
+- def `coder_block` — The model, for the coder: what to build for.
+- def `coder_route` — The coder's exit for a finding outside the model.
 
 ### `lithos_loom.plugins.story_develop.rounds`
 - def `no_resync` — The ``Services.resync_auth`` default: nothing landed (fakes, and any constructor that does not name the seam).

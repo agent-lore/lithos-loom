@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING
 
 from ...github_models import BLOCKING_REVIEW_STATES, carries_approval
 from ...runner import worktree
-from . import containers, engines, handoff, run_owner, turns
+from . import containers, engines, handoff, review_scope, run_owner, turns
 from .agent_session import build_run_cmd
 from .config import HANDOFF_MOUNT_NAME, DevelopConfig
 from .sandbox_facts import for_prompt as _sandbox_section
@@ -398,6 +398,7 @@ def triage_external_findings(
     prompt = handoff.render_prompt(
         handoff.load_prompt("external_triage.md"),
         acceptance_criteria=config.effective_acceptance_criteria,
+        review_scope=review_scope.reviewer_block(config),
         findings=handoff.render_findings(outcome.findings),
         handoff_file=TRIAGE_HANDOFF_NAME,
         sandbox_facts=_sandbox_section(config.image, for_coder=False),

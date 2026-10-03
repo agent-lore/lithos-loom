@@ -521,3 +521,48 @@ def test_a_clean_resolution_rejects_nothing() -> None:
     )
     assert scalars.rejected_keys == ()
     assert frictions == []
+
+
+# --- operational model (review-convergence R1, 34bb82c4) ───────────────────
+
+
+def test_review_scope_project_then_task() -> None:
+    project, _ = _resolve({"develop_review_scope": "  Single operator.  "})
+    assert project.review_scope == "Single operator."
+    both, _ = _resolve(
+        {"develop_review_scope": "Single operator."},
+        {"develop_review_scope": "Single operator; two hosts."},
+    )
+    assert both.review_scope == "Single operator; two hosts."
+
+
+def test_review_scope_default_none_no_friction() -> None:
+    settings, frictions = _resolve()
+    assert settings.review_scope is None
+    assert frictions == ()
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 7, ["a"], "x" * 4001])
+def test_review_scope_bad_value_frictions_and_keeps_none(bad: object) -> None:
+    settings, frictions = _resolve({"develop_review_scope": bad})
+    assert settings.review_scope is None
+    assert len(frictions) == 1 and frictions[0].endswith("; ignoring")
+    assert "develop_review_scope" in settings.rejected_keys
+
+
+def test_a_bad_task_review_scope_keeps_the_project_model() -> None:
+    settings, frictions = _resolve(
+        {"develop_review_scope": "Single operator."}, {"develop_review_scope": ""}
+    )
+    assert settings.review_scope == "Single operator."
+    assert len(frictions) == 1 and frictions[0].endswith("; keeping project default")
+
+
+def test_review_scope_with_slot_like_text_is_rejected() -> None:
+    # R1 review: render_prompt is a sequential str.replace, so a model that
+    # contains `{findings}` would have a later slot spliced into it.
+    settings, frictions = _resolve(
+        {"develop_review_scope": "Findings live in {findings}."}
+    )
+    assert settings.review_scope is None
+    assert len(frictions) == 1 and "{findings}" in frictions[0]

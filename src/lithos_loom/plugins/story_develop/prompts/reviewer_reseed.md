@@ -6,7 +6,7 @@ project is checked out **read-only** at `/workspace`.
 {sandbox_facts}
 ## Acceptance criteria
 
-{acceptance_criteria}
+{acceptance_criteria}{review_scope}
 
 ## State of the change
 

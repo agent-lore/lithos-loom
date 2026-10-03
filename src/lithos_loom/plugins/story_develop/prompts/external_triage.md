@@ -37,7 +37,7 @@ is the reviewer's to resolve, and it PROCEEDs.
 
 ## Acceptance criteria (the change's intent, for context)
 
-{acceptance_criteria}
+{acceptance_criteria}{review_scope}
 
 ## The claims to triage
 

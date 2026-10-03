@@ -222,6 +222,8 @@ class ProjectDevelopSettings:
     # + ``develop_regenerate_command``). Threaded onto ``DevelopConfig``.
     generated_paths: tuple[str, ...] = ()
     regenerate_command: str | None = None
+    # Review-convergence R1: the operational model (``develop_review_scope``).
+    review_scope: str | None = None
     # Review Profile (#139). ``review_profile_project`` is the project-layer name
     # (context-doc ``develop_review_profile``), ``review_profile_task`` the
     # per-task one (task ``develop_review_profile``) — both parsed by the
@@ -365,6 +367,7 @@ def _degraded_settings(
         parity_command=scalars.parity_command,
         generated_paths=scalars.generated_paths,
         regenerate_command=scalars.regenerate_command,
+        review_scope=scalars.review_scope,
         review_profile_project=scalars.review_profile_project,
         review_profile_task=scalars.review_profile_task,
         context_read_failed=context_read_failed,
@@ -447,6 +450,7 @@ def resolve_project_settings(
         parity_command=scalars.parity_command,
         generated_paths=scalars.generated_paths,
         regenerate_command=scalars.regenerate_command,
+        review_scope=scalars.review_scope,
         review_profile_project=scalars.review_profile_project,
         review_profile_task=scalars.review_profile_task,
         frictions=tuple(frictions),
@@ -1053,6 +1057,8 @@ def story_config_overrides(settings: ProjectDevelopSettings) -> dict[str, Any]:
         overrides["generated_paths"] = settings.generated_paths
     if settings.regenerate_command is not None:
         overrides["regenerate_command"] = settings.regenerate_command
+    if settings.review_scope is not None:
+        overrides["review_scope"] = settings.review_scope
     if settings.image:
         overrides["image"] = settings.image
     if settings.fallback_chain:
