@@ -174,6 +174,21 @@ make diagrams   # = pytest tests/guardrail/ -q; commit the result
 `docs/generated/`. CI's `diagrams` job fails if the committed views drift from the
 code.
 
+**Changing the gate definitions?** If you touch the deterministic gate's check
+catalog (`src/lithos_loom/plugins/story_develop/check_catalog.py`, `profiles.py`,
+`gate_adapters.py`, `check_runner.py` and friends — the full list is in
+[`AGENTS.md`](AGENTS.md)), also run
+
+```bash
+make gate-exec   # host only: docker + the ralph-sandbox image + network
+```
+
+It executes every Python catalog command in the sandbox image against a clean
+fixture (each check must pass) and a defective one (each must block). `make check`
+and CI never run it — they only assert the command strings — and a story-develop
+run gates with the daemon's installed catalog rather than the edited one, so a
+broken check command otherwise ships green.
+
 ## Configuration model
 
 | Layer | What it sets | When you change it |

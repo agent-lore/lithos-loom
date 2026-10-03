@@ -17,7 +17,7 @@ lower a budget after improving the code to lock in the gain.
 | `max_module_lines` | 2036 | 2100 | 64 |
 | `module_cycles` | 1 | 1 | 0 |
 | `modules_over_800_lines` | 14 | 14 | 0 |
-| `tests_private_imports` | 99 | 99 | 0 |
+| `tests_private_imports` | 100 | 100 | 0 |
 
 ## Import graph
 
@@ -108,7 +108,7 @@ Private-name reaches across module seams. Both counts can be pinned as
   - `lithos_loom.sources.github_issue_watcher -> lithos_loom.sources.github_watch_state._isoformat`
   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._resolved_at_for`
   - `lithos_loom.subscriptions._task_archive -> lithos_loom.subscriptions._obsidian_projection._task_from_payload`
-- Tests importing src privates: **99**
+- Tests importing src privates: **100**
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._format_mtime (x6)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_event (x4)`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._outcome_line (x4)`
@@ -126,6 +126,7 @@ Private-name reaches across module seams. Both counts can be pinned as
   - `tests/test_story_develop_idempotency.py -> lithos_loom.plugins.story_develop.idempotency._record_path (x2)`
   - `tests/test_story_develop_panel.py -> lithos_loom.plugins.story_develop.panel._read_review (x2)`
   - `tests/test_awaiting_review.py -> lithos_loom.subscriptions._awaiting_review`
+  - `tests/test_check_catalog_exec.py -> lithos_loom.plugins.story_develop.check_catalog._BY_NAME`
   - `tests/test_child_boot.py -> lithos_loom.children._boot`
   - `tests/test_cli_converge.py -> lithos_loom.cli.converge._EXIT_CODES`
   - `tests/test_cli_converge_push.py -> lithos_loom.cli._converge_push_facts`
@@ -138,10 +139,9 @@ Private-name reaches across module seams. Both counts can be pinned as
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._iter_run_dirs`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._latest_mtime`
   - `tests/test_cli_develop.py -> lithos_loom.cli.develop._round_and_reviewers`
-  - `tests/test_cli_develop.py -> lithos_loom.cli.develop._sanitize`
   - … (list capped at 30 pairs)
 
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.52** (121355 test lines / 80043 source lines)
+- Test-to-source line ratio: **1.52** (121805 test lines / 80043 source lines)
