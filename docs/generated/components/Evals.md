@@ -178,7 +178,7 @@ The review-eval harness (case / harness / match / judge / patch / stats and its 
 ## Dependencies
 
 - Depends on: [Plugins](Plugins.md), [Runners](Runners.md)
-- Used by: [Entrypoint](Entrypoint.md)
+- Used by: [Cli](Cli.md), [Entrypoint](Entrypoint.md)
 
 ## ADRs
 

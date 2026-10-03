@@ -30,6 +30,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli.develop` | XL | 4 | 6 |
 | `lithos_loom.cli.drain` | S | 1 | 1 |
 | `lithos_loom.cli.gates` | S | 1 | 3 |
+| `lithos_loom.cli.gates_shadow` | M | 1 | 5 |
 | `lithos_loom.cli.merge_gate` | M | 0 | 1 |
 | `lithos_loom.cli.obsidian_sync` | S | 0 | 1 |
 | `lithos_loom.cli.project` | XL | 3 | 10 |
@@ -197,6 +198,14 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `collect_gate_rows` — Enumerate open gates and classify each (read-only).
 - def `render_report` — Render the gate listing as aligned text lines (pure).
 
+### `lithos_loom.cli.gates_shadow`
+- class `ShadowRow` — One ``pr`` gate's shadow record, as the report reads it.
+- def `shadow_row` — The gate's :class:`ShadowRow`, or ``None`` for anything but a parseable ``pr`` gate (pure).
+- def `shadow_label` — The SHADOW column of the default ``gates`` listing: where an open ``pr`` gate's verdict stands (``would`` / ``not-yet`` / ``invalidated`` / ``unmeasured``), ``—`` for any other gate or a gate not yet swept.
+- def `parse_since` — ``--since``: ``<N>d`` (N×24h before *now*) or ``YYYY-MM-DD`` (UTC midnight). Raises ``ValueError`` naming the flag for anything else.
+- def `collect_shadow_rows` — Every ``pr`` gate delivered at or after *since* (open, and completed — a gate delivered in the window resolved in it too, so the completed listing is narrowed server-side; a completed gate Lithos stamped with no ``resolved_at`` falls outside a window there), in *project* when given. A gate whose delivery time is unknown is outside any window. Read-only; sorted by gate id.
+- def `render_shadow_report` — The per-gate table, then one roll-up line per project and one ``overall:`` line (pure).
+
 ### `lithos_loom.cli.merge_gate`
 - def `merge_gate_command` — Trial-merge a PR into its current base and run the check-set on the result.
 
@@ -241,7 +250,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 
 ## Dependencies
 
-- Depends on: [Config](Config.md), [Errors](Errors.md), [LithosClient](LithosClient.md), [Plugins](Plugins.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [Subscriptions](Subscriptions.md), [Tasks](Tasks.md)
+- Depends on: [Config](Config.md), [Errors](Errors.md), [Evals](Evals.md), [LithosClient](LithosClient.md), [Plugins](Plugins.md), [ProjectContext](ProjectContext.md), [Render](Render.md), [Runners](Runners.md), [Subscriptions](Subscriptions.md), [Tasks](Tasks.md)
 - Used by: [Entrypoint](Entrypoint.md), [Sources](Sources.md)
 
 ## ADRs

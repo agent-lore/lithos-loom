@@ -44,6 +44,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
+from lithos_loom.cli.gates_shadow import shadow_label
 from lithos_loom.gates import (
     GATE_TYPE_HUMAN,
     GATE_TYPE_PR,
@@ -106,6 +107,9 @@ class GateRow:
     escalation_summary: str | None = None
     # PRD S7: a `pr` gate's reconciliation state (`metadata.reconciliation_state`)
     state: str | None = None
+    # M1: where a `pr` gate's shadow auto-merge verdict stands
+    # (:func:`~lithos_loom.cli.gates_shadow.shadow_label`)
+    shadow: str | None = None
 
     @property
     def pr_label(self) -> str:
@@ -162,6 +166,7 @@ def classify_gate(gate: Task, waiter_id: str | None, waiter: Task | None) -> Gat
         escalation_reason=human_spec.reason if human_spec else None,
         escalation_summary=human_spec.summary if human_spec else None,
         state=_state_of(gate) if gate_type == GATE_TYPE_PR else None,
+        shadow=shadow_label(gate) if gate_type == GATE_TYPE_PR else None,
     )
 
 
@@ -204,13 +209,23 @@ def render_report(rows: list[GateRow]) -> list[str]:
     if not rows:
         return ["no open gates"]
 
-    headers = ("GATE", "TYPE", "REF", "STATE", "WAITER", "WAITER STATUS", "HEALTH")
+    headers = (
+        "GATE",
+        "TYPE",
+        "REF",
+        "STATE",
+        "SHADOW",
+        "WAITER",
+        "WAITER STATUS",
+        "HEALTH",
+    )
     cells = [
         (
             row.gate_id,
             row.gate_type,
             row.ref_label,
             row.state or _NO_REF,
+            row.shadow or _NO_REF,
             row.waiter_id or _NO_REF,
             row.waiter_status or _NO_REF,
             row.health,
