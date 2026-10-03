@@ -31,6 +31,11 @@ from lithos_loom.bus import Event, EventBus
 from lithos_loom.cli import develop_app, obsidian_sync_app, project_app, task_app
 from lithos_loom.cli.drain import drain_daemon
 from lithos_loom.cli.gates import collect_gate_rows, render_report
+from lithos_loom.cli.gates_shadow import (
+    collect_shadow_rows,
+    parse_since,
+    render_shadow_report,
+)
 from lithos_loom.config import (
     LoomConfig,
     RouteConfig,
@@ -393,6 +398,22 @@ def gates(
         "-c",
         help="Explicit TOML config path (overrides LITHOS_LOOM_CONFIG).",
     ),
+    shadow: bool = typer.Option(
+        False,
+        "--shadow",
+        help="Report the shadow auto-merge reading instead: per pr gate, when "
+        "loom would have merged and what the operator did, with the agreement "
+        "rate per project and overall (open and resolved gates).",
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="With --shadow: only gates delivered at or after this — <N>d "
+        "(N×24h back) or YYYY-MM-DD (UTC midnight).",
+    ),
+    project: str | None = typer.Option(
+        None, "--project", help="With --shadow: only this project's gates."
+    ),
 ) -> None:
     """List open gates and each gate's waiter health (read-only).
 
@@ -405,13 +426,17 @@ def gates(
     classifying the wiring the resolvers depend on — so a stuck gate is
     diagnosable without touching GitHub or mutating anything.
 
+    ``--shadow`` reports the review-convergence M1 reading instead (see
+    :mod:`lithos_loom.cli.gates_shadow`).
+
     Non-mutating: one open-task sweep plus a per-gate edge/waiter read. Exit
     codes: `0` on a successful listing (regardless of gate health); `1` if the
-    config can't load or Lithos is unreachable.
+    config can't load or Lithos is unreachable; `2` on a bad flag.
     """
+    window = _shadow_window(shadow, since, project)
     cfg = _load_or_exit(config)
     try:
-        rows = asyncio.run(_collect_gates_async(cfg))
+        lines = asyncio.run(_gates_lines_async(cfg, shadow, window, project))
     except (OSError, ExceptionGroup) as exc:
         # LithosClient.__aenter__ surfaces a connect failure as a plain OSError
         # or, when it happens inside a task group, an ExceptionGroup wrapping
@@ -428,12 +453,31 @@ def gates(
     except LithosClientError as exc:
         typer.echo(f"lithos-loom: listing gates failed: {exc}", err=True)
         raise typer.Exit(1) from exc
-    for line in render_report(rows):
+    for line in lines:
         typer.echo(line)
 
 
-async def _collect_gates_async(cfg: LoomConfig) -> list:
-    """One-shot ``LithosClient`` wrapper around :func:`collect_gate_rows`.
+def _shadow_window(
+    shadow: bool, since: str | None, project: str | None
+) -> datetime | None:
+    """Validate the ``--shadow`` flags before any I/O; exit 2 on misuse."""
+    if not shadow and (since is not None or project is not None):
+        typer.echo("lithos-loom: --since / --project need --shadow", err=True)
+        raise typer.Exit(2)
+    if since is None:
+        return None
+    try:
+        return parse_since(since)
+    except ValueError as exc:
+        typer.echo(f"lithos-loom: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
+async def _gates_lines_async(
+    cfg: LoomConfig, shadow: bool, since: datetime | None, project: str | None
+) -> list[str]:
+    """One-shot ``LithosClient`` wrapper around :func:`collect_gate_rows` (or
+    :func:`collect_shadow_rows` for ``--shadow``), rendered.
 
     Mirrors the ``_create_task_async`` / ``_rows_from_lithos`` pattern: the
     client is an async context manager, so the sync Typer command wraps it in
@@ -441,7 +485,10 @@ async def _collect_gates_async(cfg: LoomConfig) -> list:
     async with LithosClient(
         cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
     ) as client:
-        return await collect_gate_rows(client)
+        if shadow:
+            rows = await collect_shadow_rows(client, since=since, project=project)
+            return render_shadow_report(rows)
+        return render_report(await collect_gate_rows(client))
 
 
 def _load_or_exit(config: Path | None) -> LoomConfig:

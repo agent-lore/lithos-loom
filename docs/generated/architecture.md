@@ -61,6 +61,7 @@ graph TD
   Children --> Subscriptions
   Cli --> Config
   Cli --> Errors
+  Cli --> Evals
   Cli --> LithosClient
   Cli --> Plugins
   Cli --> ProjectContext
@@ -130,21 +131,20 @@ graph TD
   linkStyle 6 stroke:#999,stroke-dasharray:4
   linkStyle 8 stroke:#bbb
   linkStyle 9 stroke:#bbb
-  linkStyle 10 stroke:#bbb
-  linkStyle 12 stroke:#bbb
-  linkStyle 14 stroke:#bbb
-  linkStyle 16 stroke:#bbb
+  linkStyle 11 stroke:#bbb
+  linkStyle 13 stroke:#bbb
+  linkStyle 15 stroke:#bbb
   linkStyle 17 stroke:#bbb
   linkStyle 18 stroke:#bbb
   linkStyle 19 stroke:#bbb
   linkStyle 20 stroke:#bbb
-  linkStyle 21 stroke:#999,stroke-dasharray:4
-  linkStyle 23 stroke:#999,stroke-dasharray:4
-  linkStyle 25 stroke:#999,stroke-dasharray:4
-  linkStyle 27 stroke:#999,stroke-dasharray:4
+  linkStyle 21 stroke:#bbb
+  linkStyle 22 stroke:#999,stroke-dasharray:4
+  linkStyle 24 stroke:#999,stroke-dasharray:4
+  linkStyle 26 stroke:#999,stroke-dasharray:4
   linkStyle 28 stroke:#999,stroke-dasharray:4
-  linkStyle 30 stroke:#999,stroke-dasharray:4
-  linkStyle 32 stroke:#bbb
+  linkStyle 29 stroke:#999,stroke-dasharray:4
+  linkStyle 31 stroke:#999,stroke-dasharray:4
   linkStyle 33 stroke:#bbb
   linkStyle 34 stroke:#bbb
   linkStyle 35 stroke:#bbb
@@ -156,10 +156,10 @@ graph TD
   linkStyle 41 stroke:#bbb
   linkStyle 42 stroke:#bbb
   linkStyle 43 stroke:#bbb
-  linkStyle 45 stroke:#bbb
+  linkStyle 44 stroke:#bbb
   linkStyle 46 stroke:#bbb
   linkStyle 47 stroke:#bbb
-  linkStyle 49 stroke:#bbb
+  linkStyle 48 stroke:#bbb
   linkStyle 50 stroke:#bbb
   linkStyle 51 stroke:#bbb
   linkStyle 52 stroke:#bbb
@@ -171,12 +171,13 @@ graph TD
   linkStyle 58 stroke:#bbb
   linkStyle 59 stroke:#bbb
   linkStyle 60 stroke:#bbb
-  linkStyle 62 stroke:#bbb
-  linkStyle 64 stroke:#bbb
+  linkStyle 61 stroke:#bbb
+  linkStyle 63 stroke:#bbb
   linkStyle 65 stroke:#bbb
   linkStyle 66 stroke:#bbb
   linkStyle 67 stroke:#bbb
   linkStyle 68 stroke:#bbb
   linkStyle 69 stroke:#bbb
   linkStyle 70 stroke:#bbb
+  linkStyle 71 stroke:#bbb
 ```

@@ -11,6 +11,8 @@ Two layers, mirroring ``test_cli_project``:
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -394,3 +396,124 @@ def test_render_shows_a_state_column_for_pr_gates() -> None:
     assert "STATE" in lines[0]
     assert "gate_failed" in lines[1]
     assert "—" in lines[2]  # a human gate has no reconciliation state
+
+
+# ── shadow auto-merge (review-convergence M1) ────────────────────────────
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _shadow_meta(**record: object) -> dict:
+    meta = dict(_GATE_META)
+    meta["shadow_merge"] = {"pr_url": _PR_URL, "basis": "approval", **record}
+    return meta
+
+
+def test_render_shows_where_a_pr_gates_shadow_verdict_stands() -> None:
+    rows = [
+        classify_gate(
+            _gate(
+                "gate-1",
+                metadata=_shadow_meta(would_merge_at="2026-10-06T10:00:00+00:00"),
+            ),
+            "story-1",
+            _story("story-1"),
+        ),
+        classify_gate(_human_gate("gate-2"), "story-2", _story("story-2")),
+    ]
+    lines = render_report(rows)
+    assert "SHADOW" in lines[0]
+    assert "would" in lines[1]
+    assert rows[1].shadow is None
+
+
+def test_gates_shadow_reports_the_agreement_reading(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    merged = make_task(
+        "gate-9",
+        status="completed",
+        task_type="gate",
+        metadata=_shadow_meta(
+            would_merge_at="2026-10-06T10:00:00+00:00",
+            would_merge_head="a" * 40,
+            outcome="merged_at_head",
+            elapsed_s=7200,
+        )
+        | {
+            "project": "lithos-loom",
+            "delivered_approval": {
+                "pr_url": _PR_URL,
+                "head_sha": "a" * 40,
+                "source": "run",
+                "delivered_at": "2026-10-05T09:00:00+00:00",
+            },
+        },
+        resolved_at=datetime(2026, 10, 7, tzinfo=UTC),
+    )
+    fake = FakeLithosClient(tasks=[merged])
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(
+        app, ["gates", "--shadow", "--since", "2026-10-01", "--project", "lithos-loom"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "gate-9" in result.output
+    assert "overall: agreement 1/1" in result.output
+    assert fake.mutating_calls == []
+
+
+def test_gates_shadow_rejects_a_bad_window(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_client(monkeypatch, FakeLithosClient())
+
+    result = runner.invoke(app, ["gates", "--shadow", "--since", "last-week"])
+
+    assert result.exit_code == 2
+    assert "--since" in _ANSI.sub("", result.output)
+
+
+def test_window_flags_need_shadow(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_client(monkeypatch, FakeLithosClient())
+
+    result = runner.invoke(app, ["gates", "--since", "7d"])
+
+    assert result.exit_code == 2
+    assert "--shadow" in _ANSI.sub("", result.output)
+
+
+def test_project_alone_needs_shadow(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_client(monkeypatch, FakeLithosClient())
+    result = runner.invoke(app, ["gates", "--project", "lithos-lens"])
+    assert result.exit_code == 2
+    assert "--shadow" in _ANSI.sub("", result.output)
+
+
+def test_an_overflowing_window_is_a_flag_error_not_a_crash(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_client(monkeypatch, FakeLithosClient())
+    result = runner.invoke(app, ["gates", "--shadow", "--since", "99999999999d"])
+    assert result.exit_code == 2
+    assert "--since" in _ANSI.sub("", result.output)
+
+
+def test_the_default_listing_header_only_gains_the_shadow_column() -> None:
+    rows = [classify_gate(_gate("gate-1"), "story-1", _story("story-1"))]
+    assert render_report(rows)[0].split() == [
+        "GATE",
+        "TYPE",
+        "REF",
+        "STATE",
+        "SHADOW",
+        "WAITER",
+        "WAITER",
+        "STATUS",
+        "HEALTH",
+    ]
