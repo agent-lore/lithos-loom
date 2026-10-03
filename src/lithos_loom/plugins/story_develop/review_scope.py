@@ -78,13 +78,15 @@ def reviewer_block(config: DevelopConfig) -> str:
         f"{config.review_scope}\n\n"
         "Judge every finding inside this model. A defect whose failure needs an "
         "actor or condition that neither the acceptance criteria nor this model "
-        "names is **minor at most** — say in its rationale which actor or "
-        "condition it needs. A defect inside the model — including a lifecycle "
-        "the acceptance criteria name — keeps its full severity. The story's "
-        "acceptance criteria can widen the model for that story. When the coder "
-        "disputes a finding as needing an actor the model does not name, accept "
-        "the dispute unless you can quote the criterion or model line that "
-        "names it."
+        "places in scope — one the model excludes, or one neither mentions — is "
+        "**minor at most**; say in its rationale which actor or condition it "
+        "needs. An explicit exclusion in the model is evidence FOR that cap, "
+        "never a reason to block, unless the story's acceptance criteria bring "
+        "that actor into scope. A defect inside the model — including a "
+        "lifecycle the acceptance criteria describe — keeps its full severity. "
+        "When the coder disputes a finding as needing an actor outside the "
+        "model, accept the dispute unless you can quote the criterion or model "
+        "line that brings that actor into scope."
     )
 
 
@@ -95,8 +97,9 @@ def coder_block(config: DevelopConfig) -> str:
     return (
         "\n\n## Operational model (the scope your change is judged in)\n\n"
         f"{config.review_scope}\n\n"
-        "Build for this model; do not add protocol for actors it does not name. "
-        "The story's acceptance criteria can widen it for this story."
+        "Build for this model; do not add protocol for actors or conditions it "
+        "excludes or leaves out. The story's acceptance criteria can widen it "
+        "for this story."
     )
 
 
@@ -113,7 +116,8 @@ def coder_route(config: DevelopConfig, *, decisions_enabled: bool) -> str:
     head = (
         "**A finding outside the operational model.** When a finding's failure "
         "needs an actor or condition that neither the acceptance criteria nor the "
-        "operational model above names"
+        "operational model above places in scope (one the model excludes, or one "
+        "neither mentions)"
     )
     if not decisions_enabled:
         return _list_paragraph(

@@ -10,8 +10,9 @@
        dispute, which then costs further rounds, so contest only when you can
        point at that line. When the question asks whether an actor or
        condition is in scope, the line you quote must be the criterion or
-       operational-model line that names that actor — one that only touches
-       the topic is not a citation, so concede; or
+       operational-model line that brings that actor into scope — a line that
+       excludes it (an "out of the model" list), or only touches the topic,
+       is not a citation, so concede; or
      - `decision_verdict: concede` **and no `decision_contest:`** — you
        cannot, and the question is the operator's. (The two keys together
        contradict each other and are rejected.)

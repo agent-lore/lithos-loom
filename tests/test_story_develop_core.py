@@ -3402,8 +3402,8 @@ def test_regression_a1817376_an_in_model_contract_depth_is_a_decision(
     assert "How deep does <contract> go" in fix
     review = _flat(state["review_prompts"][-1])
     assert (
-        "including a lifecycle the acceptance criteria name — keeps its full severity"
-        in review
+        "including a lifecycle the acceptance criteria describe — "
+        "keeps its full severity" in review
     )
 
 

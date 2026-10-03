@@ -1936,7 +1936,7 @@ def test_regression_86613f8e_a_concurrent_hand_run_finding_meets_the_model(
     """R1 fixture, run 86613f8e (fd71001f `converge-push`, $112, max_rounds):
     the round-5 blocking finding needed a SECOND `converge-push --yes` started
     while the first ran. With the scope block, the re-review that judges it
-    names that actor as outside the model and the rule that caps it at minor —
+    excludes that actor from the model and the rule that caps it at minor —
     the prompt-side half of the expected minor / needs-decision verdict."""
     from lithos_loom.plugins.story_develop.handoff import parse_review_handoff
 
@@ -1958,4 +1958,7 @@ def test_regression_86613f8e_a_concurrent_hand_run_finding_meets_the_model(
     assert "a second `converge-push --yes` started while the first" in prompt
     assert "two concurrent invocations of the same hand-run command" in prompt
     assert "**minor at most**" in prompt
+    # the model LISTS this actor under "Out of the model" — an explicit
+    # exclusion must read as evidence for minor, not as "the model names it"
+    assert "explicit exclusion" in " ".join(prompt.split())
     assert _under_the_criteria(prompt, config)

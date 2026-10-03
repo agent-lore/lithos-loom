@@ -483,10 +483,12 @@ def test_every_coder_template_with_findings_offers_the_scope_route(name: str) ->
     assert "{scope_route}" in load_prompt(name)
 
 
-def test_a_scope_contest_must_quote_the_line_that_names_the_actor() -> None:
+def test_a_scope_contest_must_quote_the_line_that_brings_the_actor_into_scope() -> None:
     # R1: a reviewer contesting an "is <actor> in scope?" decision cites the
     # criterion or operational-model line naming that actor, else concedes.
     for name in ("reviewer_decision_answer.md", "FORMAT.md"):
         text = " ".join(load_prompt(name).split())
         assert "operational-model line" in text, name
-        assert "names that actor" in text, name
+        assert "brings that actor into scope" in text, name
+        # PR #443 review: quoting the model's own exclusion is not a contest
+        assert "excludes it" in text, name

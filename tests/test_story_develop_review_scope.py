@@ -69,14 +69,23 @@ def test_reviewer_block_states_the_model_and_the_severity_rule(
     assert "**minor at most**" in block
     # in-model lifecycles keep their severity (a1817376 addendum)
     assert "keeps its full severity" in block
-    assert "acceptance criteria can widen the model" in block
-    assert "quote the criterion or model line" in block
+    assert "acceptance criteria bring that actor into scope" in " ".join(block.split())
+    flat = " ".join(block.split())
+    # PR #443 review: "names" let a model's own exclusion list ("Out of the
+    # model: a second host") count as naming the actor. The test is scope.
+    assert "places in scope" in flat
+    assert "names" not in flat
+    assert "explicit exclusion" in flat
+    assert "quote the criterion or model line that brings that actor into scope" in flat
 
 
 def test_coder_block_builds_for_the_model(tmp_path: Path) -> None:
     block = coder_block(_config(tmp_path, _LOOM))
     assert _LOOM in block
-    assert "do not add protocol for actors it does not name" in block
+    assert (
+        "do not add protocol for actors or conditions it excludes or leaves out"
+        in " ".join(block.split())
+    )
 
 
 def test_story_develop_route_is_a_needs_decision(tmp_path: Path) -> None:
@@ -90,6 +99,18 @@ def test_story_develop_route_is_a_needs_decision(tmp_path: Path) -> None:
     assert "keep the model and record the limit" in route
     # the in-model contract-depth question (a1817376) takes the same exit
     assert "how deep" in route
+
+
+@pytest.mark.parametrize("decisions", [True, False])
+def test_the_route_treats_an_excluded_actor_as_out_of_scope(
+    tmp_path: Path, decisions: bool
+) -> None:
+    route = " ".join(
+        coder_route(_config(tmp_path, _LOOM), decisions_enabled=decisions).split()
+    )
+    assert "places in scope" in route
+    assert "one the model excludes" in route
+    assert "names" not in route
 
 
 def test_converge_route_is_a_dispute_citing_the_model(tmp_path: Path) -> None:
