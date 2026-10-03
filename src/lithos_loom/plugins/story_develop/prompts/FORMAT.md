@@ -33,6 +33,7 @@ One short paragraph. The coder also reports test results here.
   evidence: <path[:symbol]> — what in THIS change satisfies it
   test: <tests/path::name> | none: <why no test can prove it>
   verdict: met | unmet | deferred   (reviewers only)
+  deferred_to: <deferred only — the out-of-scope finding's id, or new:<n>>
 ```
 
 **Acceptance-criteria map (`## Criteria`).** Approval means the task is done,
@@ -51,8 +52,11 @@ not only that the diff is sound, so the map is how an approval shows it:
   record it at blocking severity, so the review does not pass. `deferred`
   is for a criterion that is another story's work: it rests on an
   `out-of-scope` finding with its `deferral_reason:` (this round's, or one you
-  deferred in an earlier round) — name that finding in the entry's
-  `evidence:`. A value that runs over several lines is written `key: >` with
+  deferred in an earlier round), which the entry names in `deferred_to:` —
+  the finding's id, or `new:<n>` for the n-th finding of this handoff when
+  that finding is new (it has no id yet). Each deferred criterion cites its
+  own finding. `test:` names a test, or says `none: <why>` — a bare `none` is
+  rejected. A value that runs over several lines is written `key: >` with
   its lines indented beneath it — a line starting with `- ` starts a new entry. A blocking review may omit the map. A passing
   review without a complete map is rejected and re-prompted once; a second
   failure marks your review invalid and fails the run. Each field is at most

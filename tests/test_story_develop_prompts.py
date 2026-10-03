@@ -432,12 +432,13 @@ def test_every_coder_handoff_step_asks_for_the_criteria_map(name: str) -> None:
 def test_format_md_defines_the_criteria_map_for_both_roles() -> None:
     fmt = " ".join(load_prompt("FORMAT.md").split())
     assert "## Criteria" in fmt
-    for key in ("id:", "criterion:", "evidence:", "test:", "verdict:"):
+    for key in ("id:", "criterion:", "evidence:", "test:", "verdict:", "deferred_to:"):
         assert key in fmt
     assert "met | unmet | deferred" in fmt
     # the rules the orchestrator enforces are the rules FORMAT.md states
     assert "**every id the coder listed**" in fmt
     assert "re-prompted once" in fmt
+    assert "new:<n>" in fmt and "bare `none` is rejected" in fmt
     from lithos_loom.plugins.story_develop import criteria_map
 
     assert f"at most {criteria_map.MAX_ENTRIES} entries" in fmt

@@ -152,11 +152,48 @@ def test_missing_or_unknown_verdict_is_rejected() -> None:
     assert _check(_LGTM + _MAP.replace("verdict: met", "verdict: maybe", 1))
 
 
-def test_deferred_needs_an_out_of_scope_finding() -> None:
-    deferred = _MAP.replace("verdict: met", "verdict: deferred", 1)
-    assert _check(_LGTM + deferred) is not None
-    with_deferral = _MINOR + _OUT_OF_SCOPE + deferred
-    assert _check(with_deferral) is None
+def _defer(to: str | None) -> str:
+    """_MAP with AC-1 deferred, linked to *to* (no link when None)."""
+    link = f"  deferred_to: {to}\n" if to is not None else ""
+    return _MAP.replace("  verdict: met\n", "  verdict: deferred\n" + link, 1)
+
+
+def test_deferred_must_name_the_finding_it_rests_on() -> None:
+    # PR #442 review (Medium): one out-of-scope finding anywhere must not let
+    # EVERY criterion defer — each deferral cites its own finding.
+    err = _check(_MINOR + _OUT_OF_SCOPE + _defer(None))
+    assert err is not None
+    assert "deferred_to" in err
+
+
+def test_deferred_to_a_new_out_of_scope_finding_by_position() -> None:
+    # _MINOR is finding 1 (open), _OUT_OF_SCOPE is finding 2 (new, deferred);
+    # a new finding has no id yet, so it is cited by its place in the list.
+    assert _check(_MINOR + _OUT_OF_SCOPE + _defer("new:2")) is None
+
+
+def test_deferred_to_a_finding_that_is_not_out_of_scope_is_rejected() -> None:
+    err = _check(_MINOR + _OUT_OF_SCOPE + _defer("new:1"))
+    assert err is not None
+    assert "new:1" in err
+    assert _check(_MINOR + _OUT_OF_SCOPE + _defer("new:3")) is not None
+    assert _check(_MINOR + _OUT_OF_SCOPE + _defer("new:x")) is not None
+
+
+def test_deferred_to_an_unknown_id_is_rejected() -> None:
+    err = _check(_MINOR + _OUT_OF_SCOPE + _defer("f-009"))
+    assert err is not None
+    assert "f-009" in err
+
+
+def test_deferred_to_an_existing_finding_marked_out_of_scope_this_round() -> None:
+    marked = (
+        "## Status: FINDINGS\n## Summary\nDeferred.\n## Findings\n"
+        "- finding_id: f-004\n  severity: major\n  status: out-of-scope\n"
+        "  deferral_reason: story 2 owns it\n"
+    )
+    assert _check(marked + _defer("f-004")) is None
+    assert _check(marked + _defer("F-004")) is None  # ids match case-insensitively
 
 
 def test_duplicate_ids_are_rejected() -> None:
@@ -287,14 +324,15 @@ def test_a_ledger_error_and_a_missing_map_share_one_correction() -> None:
 
 
 def test_deferred_may_rest_on_an_out_of_scope_finding_from_an_earlier_round() -> None:
-    deferred = _MAP.replace("verdict: met", "verdict: deferred", 1)
-    parsed = _parsed(_LGTM + deferred)
+    # A re-review lists only what is still open, so a finding deferred in an
+    # earlier round lives in the reviewer's ledger, not this handoff.
+    parsed = _parsed(_LGTM + _defer("f-002"))
     assert (
         check_map(
             parsed,
             block_threshold="major",
             required_ids=frozenset(),
-            prior_deferral=True,
+            prior_deferrals=frozenset({"f-002"}),
         )
         is None
     )
@@ -302,9 +340,33 @@ def test_deferred_may_rest_on_an_out_of_scope_finding_from_an_earlier_round() ->
         lambda _: None,
         block_threshold="major",
         required_ids=frozenset(),
-        prior_deferral=True,
+        prior_deferrals=frozenset({"f-002"}),
     )
     assert validate(parsed) is None
+    assert _check(_LGTM + _defer("f-002")) is not None  # not in this ledger
+
+
+def test_for_reviewer_reads_prior_deferrals_from_the_ledger(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop.config import DevelopConfig
+    from lithos_loom.plugins.story_develop.findings import FindingLedger
+
+    ledger = FindingLedger("correctness")
+    ledger.apply_review(_parsed(_MINOR + _OUT_OF_SCOPE), round_no=1)
+    (deferred_id,) = [
+        fid for fid, e in ledger.entries.items() if e.status == "out-of-scope"
+    ]
+    config = DevelopConfig(repo=tmp_path, description="x", work_dir=tmp_path / "w")
+    validate = criteria_map.for_reviewer(lambda _: None, ledger, "major", config, 2)
+    assert validate(_parsed(_LGTM + _defer(deferred_id))) is None
+    assert validate(_parsed(_LGTM + _defer("f-999"))) is not None
+
+
+@pytest.mark.parametrize("value", ["none", "None", "none:", "none:   ", "n/a", "-"])
+def test_a_test_field_without_a_test_or_a_reason_is_rejected(value: str) -> None:
+    # PR #442 review (Low): FORMAT.md promises a test OR `none: <why>`.
+    err = _check(_LGTM + _MAP.replace("tests/test_greeting.py::test_exists", value))
+    assert err is not None
+    assert "none: <why>" in err
 
 
 def test_an_empty_entry_explains_how_a_bullet_line_splits_an_entry() -> None:

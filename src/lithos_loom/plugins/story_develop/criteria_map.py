@@ -47,6 +47,10 @@ MAX_FIELD_CHARS = 2000
 _REQUIRED_FIELDS = ("id", "criterion", "evidence", "test")
 _PASSING_VERDICTS = ("met", "deferred")
 _VERDICTS = (*_PASSING_VERDICTS, "unmet")
+# A `test:` that names no test and gives no reason (PR #442 review): FORMAT.md
+# promises a test reference OR `none: <why>`.
+_NO_TEST_TOKENS = frozenset({"none", "n/a", "na", "-", "—"})
+_NEW_PREFIX = "new:"
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,10 @@ class CriterionEvidence:
     evidence: str
     test: str
     verdict: str
+    # A deferred criterion's link to the out-of-scope finding it rests on: an
+    # existing id, or ``new:<n>`` — the n-th finding of this same handoff,
+    # since a new finding has no id until the ledger assigns one.
+    deferred_to: str = ""
 
 
 def parse_criteria(text: str) -> tuple[CriterionEvidence, ...]:
@@ -72,6 +80,7 @@ def parse_criteria(text: str) -> tuple[CriterionEvidence, ...]:
                 evidence=clean.get("evidence", ""),
                 test=clean.get("test", ""),
                 verdict=clean.get("verdict", "").lower(),
+                deferred_to=clean.get("deferred_to", ""),
             )
         )
     return tuple(entries)
@@ -82,14 +91,14 @@ def check_map(
     *,
     block_threshold: str,
     required_ids: frozenset[str],
-    prior_deferral: bool = False,
+    prior_deferrals: frozenset[str] = frozenset(),
 ) -> str | None:
     """A correction message when a passing review's map is missing or short.
 
     ``None`` when the review blocks (its open findings already hold approval)
-    or its map is complete. *prior_deferral*: this reviewer's ledger already
-    holds an out-of-scope finding from an earlier round — a re-review lists
-    only what is still open, so a ``deferred`` criterion may rest on it.
+    or its map is complete. *prior_deferrals*: the out-of-scope finding ids
+    this reviewer's ledger already holds — a re-review lists only what is
+    still open, so a ``deferred`` criterion may rest on one of them.
     """
     if not parsed.passes(block_threshold):
         return None
@@ -106,56 +115,95 @@ def check_map(
             f"the '## Criteria' map has {len(entries)} entries — at most "
             f"{MAX_ENTRIES}; group related criteria under one id"
         )
-    deferral = prior_deferral or any(
-        f.status == "out-of-scope" for f in parsed.findings
-    )
-    return _entry_error(entries, deferral=deferral) or _coverage_error(
+    targets = _deferral_targets(parsed, prior_deferrals)
+    return _entry_error(entries, targets=targets) or _coverage_error(
         entries, required_ids
     )
 
 
+def _deferral_targets(parsed: ReviewHandoff, prior: frozenset[str]) -> frozenset[str]:
+    """Every out-of-scope finding a deferral may cite, lower-cased.
+
+    Each deferred criterion must cite ITS finding (PR #442 review): a single
+    out-of-scope finding anywhere must not let every criterion defer.
+    """
+    targets = {i.lower() for i in prior}
+    for n, f in enumerate(parsed.findings, start=1):
+        if f.status != "out-of-scope":
+            continue
+        targets.add(f.finding_id.lower() if f.finding_id else f"{_NEW_PREFIX}{n}")
+    return frozenset(targets)
+
+
 def _entry_error(
-    entries: tuple[CriterionEvidence, ...], *, deferral: bool
+    entries: tuple[CriterionEvidence, ...], *, targets: frozenset[str]
 ) -> str | None:
     seen: set[str] = set()
     for idx, entry in enumerate(entries, start=1):
         label = entry.id or f"entry {idx}"
-        for name in _REQUIRED_FIELDS:
-            value = getattr(entry, name)
-            if not value:
-                return (
-                    f"criteria {label}: '{name}:' is empty — every entry needs "
-                    f"{', '.join(_REQUIRED_FIELDS)} and verdict (a line starting "
-                    "with '- ' starts a new entry: write a long value as "
-                    "'key: >' with its lines indented beneath it)"
-                )
-            if len(value) > MAX_FIELD_CHARS:
-                return (
-                    f"criteria {label}: '{name}:' is over {MAX_FIELD_CHARS} characters"
-                )
+        err = _field_error(entry, label) or _verdict_error(entry, label, targets)
+        if err:
+            return err
         key = entry.id.lower()
         if key in seen:
             return f"criteria id {entry.id} appears more than once"
         seen.add(key)
-        if entry.verdict == "unmet":
+    return None
+
+
+def _field_error(entry: CriterionEvidence, label: str) -> str | None:
+    for name in _REQUIRED_FIELDS:
+        value = getattr(entry, name)
+        if not value:
             return (
-                f"criteria {label} is unmet, but the review passes — an unmet "
-                "criterion is a finding: record it at blocking severity, or as "
-                "out-of-scope with a deferral_reason if it is another story's "
-                "(then mark the criterion 'deferred')"
+                f"criteria {label}: '{name}:' is empty — every entry needs "
+                f"{', '.join(_REQUIRED_FIELDS)} and verdict (a line starting "
+                "with '- ' starts a new entry: write a long value as "
+                "'key: >' with its lines indented beneath it)"
             )
-        if entry.verdict not in _VERDICTS:
-            return (
-                f"criteria {label}: 'verdict:' must be one of "
-                f"{', '.join(_PASSING_VERDICTS)} in a passing review "
-                f"(got {entry.verdict!r})"
-            )
-        if entry.verdict == "deferred" and not deferral:
-            return (
-                f"criteria {label} is deferred, but no out-of-scope finding "
-                "backs it — a deferred criterion needs one (with its "
-                "deferral_reason), named in the entry's evidence"
-            )
+        if len(value) > MAX_FIELD_CHARS:
+            return f"criteria {label}: '{name}:' is over {MAX_FIELD_CHARS} characters"
+    test = entry.test.lower()
+    if test.rstrip(":").strip() in _NO_TEST_TOKENS:
+        return (
+            f"criteria {label}: 'test:' names no test and gives no reason — "
+            "name the test that proves the criterion, or write 'none: <why>' "
+            "saying why no test can"
+        )
+    return None
+
+
+def _verdict_error(
+    entry: CriterionEvidence, label: str, targets: frozenset[str]
+) -> str | None:
+    if entry.verdict == "unmet":
+        return (
+            f"criteria {label} is unmet, but the review passes — an unmet "
+            "criterion is a finding: record it at blocking severity, or as "
+            "out-of-scope with a deferral_reason if it is another story's "
+            "(then mark the criterion 'deferred' with 'deferred_to:')"
+        )
+    if entry.verdict not in _VERDICTS:
+        return (
+            f"criteria {label}: 'verdict:' must be one of "
+            f"{', '.join(_PASSING_VERDICTS)} in a passing review "
+            f"(got {entry.verdict!r})"
+        )
+    if entry.verdict != "deferred":
+        return None
+    if not entry.deferred_to:
+        return (
+            f"criteria {label} is deferred but has no 'deferred_to:' — name the "
+            "out-of-scope finding it rests on: its finding id, or 'new:<n>' for "
+            "the n-th finding of this handoff when that finding is new"
+        )
+    if entry.deferred_to.lower() not in targets:
+        return (
+            f"criteria {label} is deferred_to {entry.deferred_to!r}, which is not "
+            "an out-of-scope finding in this review or your earlier rounds — "
+            "defer only to a finding marked out-of-scope (with its "
+            "deferral_reason), cited by id or as 'new:<n>'"
+        )
     return None
 
 
@@ -223,7 +271,7 @@ def with_criteria(
     *,
     block_threshold: str,
     required_ids: frozenset[str],
-    prior_deferral: bool = False,
+    prior_deferrals: frozenset[str] = frozenset(),
 ) -> Callable[[ReviewHandoff], str | None]:
     """*validate* (the ledger check) and the criteria map, as ONE correction.
 
@@ -239,7 +287,7 @@ def with_criteria(
                 parsed,
                 block_threshold=block_threshold,
                 required_ids=required_ids,
-                prior_deferral=prior_deferral,
+                prior_deferrals=prior_deferrals,
             ),
         ]
         found = [e for e in errors if e]
@@ -257,12 +305,14 @@ def for_reviewer(
 ) -> Callable[[ReviewHandoff], str | None]:
     """:func:`with_criteria` for one reviewer's turn in *round_no*.
 
-    Anchored on this round's coder map; a ``deferred`` criterion may rest on
-    an out-of-scope finding this reviewer's ledger already holds.
+    Anchored on this round's coder map; a ``deferred`` criterion may cite an
+    out-of-scope finding this reviewer's ledger already holds.
     """
     return with_criteria(
         validate,
         block_threshold=block_threshold,
         required_ids=required_ids_for(config.handoff_dir, round_no),
-        prior_deferral=any(e.status == "out-of-scope" for e in ledger.entries.values()),
+        prior_deferrals=frozenset(
+            fid for fid, e in ledger.entries.items() if e.status == "out-of-scope"
+        ),
     )
