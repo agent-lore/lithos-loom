@@ -90,7 +90,11 @@ Foundation  = ["Bus", "Config", "Errors", "LithosClient", "GitHub", "Tasks", "No
 cross_component_edges  = 71   # 65->68: b91177d2 notifications.py (Notifications) imported by Subscriptions + Children, and importing GitHub; 68->70: #407 slice 2a — the daemon entry (main) imports Runners for the boot-time orphan-container reap (the one place that runs before any child), and the develop CLI imports Runners for the SIGTERM-as-SystemExit install shared with the plugin entry (both run subprocess lifecycles the daemon terminates); direction: down; 70->71: #431 — the watcher's dispatchers publish a crashed child's last output line into a story's finding, so Subscriptions imports publish_text (Plugins) for the ONE neutraliser every publisher shares rather than copying its character class; same tier (Core -> Core), direction: sideways
 component_cycles       = 1    # Render <-> Subscriptions; goal: 0
 module_cycles          = 1    # agent_session <-> panel <-> rounds SCC; goal: 0
-modules_over_800_lines = 12 # 11->12: 5dbeb0c8 slice C — run_outcome.py (819) took the ATOMIC
+modules_over_800_lines = 13 # 12->13: M1 (664d84c4) — _develop_pr_merge.py (815) is where each
+                               # pr-gate resolution happens, so it hands the shadow-merge record its
+                               # inputs on all three exits (open, merged, closed); the logic itself
+                               # lives in shadow_merge.py and the resolver only wires it;
+                               # 11->12: 5dbeb0c8 slice C — run_outcome.py (819) took the ATOMIC
                                # state.json write the per-round checkpoint depends on
                                # (correctness/f-001: an in-place rewrite truncates first, so a host
                                # death mid-write — the one boundary this slice exists to survive —

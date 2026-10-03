@@ -77,6 +77,7 @@ from lithos_loom.subscriptions.reconciliation_state import (
     closed_state_marker,
 )
 from lithos_loom.subscriptions.remediation_budget import RemediationNotifier
+from lithos_loom.subscriptions.shadow_merge import SHADOW_KEY, outcome_marker
 
 __all__ = [
     "DELIVERED_PR_CLOSED",
@@ -202,15 +203,19 @@ async def _raise_stranding_gate(
     story_metadata: Mapping[str, Any],
     notifier: RemediationNotifier | None,
     ctx: SubscriptionContext,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, bool]:
     """Raise the loom ``human`` gate that supersedes *gate*.
 
-    Returns ``(human_gate_id, problem)`` like the core it wraps. The record
-    hook writes *gate_marker* + :data:`SUPERSEDED_BY_KEY` on the ``pr`` gate
-    in one ``task_update`` and ``needs_human_gate_id`` on the story; either
-    failing is folded into the ``[NeedsHuman]`` finding as friction — the
-    next sweep finds the raised gate on the story's edges, so no second gate.
+    Returns ``(human_gate_id, problem, gate_marked)`` — the first two like
+    the core it wraps. The record hook writes *gate_marker* +
+    :data:`SUPERSEDED_BY_KEY` on the ``pr`` gate in one ``task_update`` and
+    ``needs_human_gate_id`` on the story; either failing is folded into the
+    ``[NeedsHuman]`` finding as friction — the next sweep finds the raised
+    gate on the story's edges, so no second gate. ``gate_marked`` says
+    whether the ``pr`` gate's write landed (the caller must not complete a
+    gate whose shadow-merge outcome is still owed).
     """
+    gate_marked: list[bool] = []
     what = _describe(merge_state)
     brief: dict[str, Any] = {
         "pr_url": spec.pr_url,
@@ -236,6 +241,7 @@ async def _raise_stranding_gate(
             marker={**gate_marker, SUPERSEDED_BY_KEY: human_gate_id},
             subsystem=_SUBSYSTEM,
         )
+        gate_marked.append(landed)
         try:
             await ctx.lithos.task_update(
                 task_id=story_id,
@@ -253,7 +259,7 @@ async def _raise_stranding_gate(
             return False
         return landed
 
-    return await raise_needs_human(
+    human_gate_id, problem = await raise_needs_human(
         ctx.lithos,
         task_id=story_id,
         route=STRANDING_ROUTE,
@@ -267,6 +273,7 @@ async def _raise_stranding_gate(
             "finds it on the story's edges and completes the pr gate"
         ),
     )
+    return human_gate_id, problem, any(gate_marked)
 
 
 def _describe(merge_state: str) -> str:
@@ -313,6 +320,8 @@ async def convert_stranded_gate(
         MERGE_STATE_KEY: merge_state,
         MERGE_STATE_URL_KEY: spec.pr_url,
         **closed_state_marker(spec.pr_url, merge_state),  # PRD S7: one write
+        # M1: the operator's outcome rides the same write
+        **outcome_marker(gate.metadata, pr_url=spec.pr_url, how=merge_state),
     }
     already_marked = (
         gate.metadata.get(MERGE_STATE_KEY) == merge_state
@@ -320,6 +329,8 @@ async def convert_stranded_gate(
     )
     recorded = gate.metadata.get(SUPERSEDED_BY_KEY)
     human_gate_id = recorded if isinstance(recorded, str) and recorded else None
+    # M1: whether this call's gate write carried the shadow-merge outcome
+    outcome_landed = SHADOW_KEY not in gate_marker
     if human_gate_id is None:
         escalation = await story_escalation_state(story_id, ctx)
         if escalation is None:
@@ -344,7 +355,7 @@ async def convert_stranded_gate(
             # leaving it open while the operator may tick the human gate
             # would ready a story the runner then declines without a re-check.
             human_gate_id = escalation.open_gate_id
-            await write_marker(
+            outcome_landed = await write_marker(
                 ctx,
                 task_id=gate.id,
                 marker={**gate_marker, SUPERSEDED_BY_KEY: human_gate_id},
@@ -354,7 +365,7 @@ async def convert_stranded_gate(
                 escalation.open_gate, gate, spec, merge_state, ctx
             )
         else:
-            human_gate_id, problem = await _raise_stranding_gate(
+            human_gate_id, problem, outcome_landed = await _raise_stranding_gate(
                 gate=gate,
                 story_id=story_id,
                 spec=spec,
@@ -371,6 +382,8 @@ async def convert_stranded_gate(
             return merge_state
         if not already_marked:
             await _post_closed(gate, story_id, spec, reason, human_gate_id, ctx)
+    if not outcome_landed:
+        await _retry_outcome(gate, spec, gate_marker, ctx)
     # The human gate holds the story; the pr gate has nothing left to watch.
     if not await complete_swallowing(
         ctx, task_id=gate.id, subject=f"gate {gate.id}", subsystem=_SUBSYSTEM
@@ -385,6 +398,33 @@ async def convert_stranded_gate(
         reason,
     )
     return merge_state
+
+
+async def _retry_outcome(
+    gate: Any,
+    spec: PrGateSpec,
+    gate_marker: Mapping[str, Any],
+    ctx: SubscriptionContext,
+) -> None:
+    """M1: the gate's completion takes it out of every later sweep, so an
+    outcome its write did not carry gets one more write of its own. It does
+    NOT hold the completion — once a human gate holds the story the pr gate
+    must complete (see the reuse branch above): the workflow outranks the
+    measurement, and a sample lost to two failed writes is named instead."""
+    if await write_marker(
+        ctx,
+        task_id=gate.id,
+        marker={SHADOW_KEY: gate_marker[SHADOW_KEY]},
+        subsystem=_SUBSYSTEM,
+    ):
+        return
+    ctx.logger.warning(
+        "[Friction] %s: shadow-merge outcome for %s (gate %s) did not land; "
+        "the gate completes without it — one sample lost to the M1 reading",
+        _SUBSYSTEM,
+        spec.pr_url,
+        gate.id,
+    )
 
 
 async def _annotate_reused_gate(
@@ -430,8 +470,10 @@ async def _tidy_finished_story(
     ctx: SubscriptionContext,
 ) -> str:
     """The story is already terminal: nothing to decide, nobody to tell — the
-    ``pr`` gate is just noise on every board. Mark it and complete it."""
-    if not already_marked and not await write_marker(
+    ``pr`` gate is just noise on every board. Mark it and complete it (a
+    marked gate whose shadow-merge outcome is still owed is re-marked)."""
+    owed = not already_marked or SHADOW_KEY in gate_marker
+    if owed and not await write_marker(
         ctx, task_id=gate.id, marker=gate_marker, subsystem=_SUBSYSTEM
     ):
         return "error"

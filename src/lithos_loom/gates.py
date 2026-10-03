@@ -347,13 +347,16 @@ async def create_pr_gate(
     pr_url: str,
     project: str | None,
     agent: str,
+    extra_metadata: Mapping[str, object] | None = None,
 ) -> str:
     """Create a ``pr`` gate for *story_id*'s delivered PR and link it.
 
     Returns the new gate's id. Raises ``ValueError`` when *pr_url* is not a
     parseable GitHub PR url (the caller cannot build a resolvable gate without
     ``repo`` + ``pr_number``). See :func:`_create_gate_with_edge` for the
-    all-or-nothing contract.
+    all-or-nothing contract. *extra_metadata* rides in the creation write
+    (the delivery's approval record, review-convergence M1); it cannot
+    override the gate's own keys.
     """
     ref = parse_github_ref(pr_url)
     if ref is None or ref.kind != "pull":
@@ -372,6 +375,7 @@ async def create_pr_gate(
     }
     if project:
         metadata["project"] = project
+    metadata = {**(extra_metadata or {}), **metadata}
 
     return await _create_gate_with_edge(
         client,
@@ -390,6 +394,7 @@ async def create_pr_gate_best_effort(
     pr_url: object,
     project: str | None,
     agent: str,
+    extra_metadata: Mapping[str, object] | None = None,
 ) -> tuple[str | None, str | None]:
     """Create a ``pr`` gate for a delivered story, degrading instead of raising.
 
@@ -423,6 +428,7 @@ async def create_pr_gate_best_effort(
             pr_url=pr_url,
             project=project,
             agent=agent,
+            extra_metadata=extra_metadata,
         )
     except (ValueError, OSError, LithosClientError):
         logger.exception("creating pr gate for story %s failed", story_id)

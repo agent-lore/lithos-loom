@@ -14,7 +14,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli` | XS | 0 | 0 |
 | `lithos_loom.cli._converge_push_facts` | L | 5 | 8 |
 | `lithos_loom.cli._deliver_converge` | S | 1 | 3 |
-| `lithos_loom.cli._deliver_facts` | M | 2 | 9 |
+| `lithos_loom.cli._deliver_facts` | M | 2 | 10 |
 | `lithos_loom.cli._deliver_lithos` | L | 8 | 4 |
 | `lithos_loom.cli._deliver_output` | M | 0 | 7 |
 | `lithos_loom.cli._deliver_preflight` | S | 0 | 5 |
@@ -70,6 +70,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `story_reason` — The stop reason as the STORY carries it: control-stripped, bounded, and honest about which of those it had to do.
 - def `provenance_lines` — The PR body's ``## Provenance`` block: where this branch came from.
 - def `approval_unbound` — Why a recorded approval does NOT describe what this PR delivers, or ``""`` when it does.
+- def `gate_approval` — The approved head the delivered ``pr`` gate records (review-convergence M1), or ``""`` for none.
 - def `reviews_summary` — The Review section's verdict line: what the panel recorded, if anything.
 - def `pr_body` — The generated body for a newly opened PR — the shared builder plus this delivery's provenance. Built lazily: an adopted PR needs none.
 

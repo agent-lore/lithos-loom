@@ -220,6 +220,7 @@ async def record_result(
         budget,
         "reverted" if reverted is not None else str(status),
         succeeded and reverted is None,
+        panel_approved=_panel_approved(data),
     )
     if data.get("pushed") and pushed_sha:
         budget = pushed(budget, pushed_sha, observed=True)
@@ -316,6 +317,18 @@ async def record_result(
             detail=str(data.get("message") or status),
             cost=cost if isinstance(cost, int | float) else None,
         )
+
+
+def _panel_approved(data: dict[str, Any]) -> bool:
+    """Whether the run's own fix loop ran and its panel approved — the
+    signal a round-0 triage exit (``already_clean`` with no loop) lacks."""
+    rounds = data.get("rounds")
+    return (
+        data.get("develop_status") == "approved"
+        and isinstance(rounds, int)
+        and not isinstance(rounds, bool)
+        and rounds > 0
+    )
 
 
 async def _refund_no_change(

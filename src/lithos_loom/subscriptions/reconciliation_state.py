@@ -65,9 +65,11 @@ __all__ = [
     "Busy",
     "Derived",
     "Dispositions",
+    "Settled",
     "closed_state_marker",
     "derive_state",
     "record_state",
+    "settle_state",
 ]
 
 STATE_KEY = "reconciliation_state"
@@ -456,6 +458,17 @@ def closed_state_marker(pr_url: str, merge_state: str) -> dict[str, Any]:
     return _marker(Derived("needs_human", _closed_detail(merge_state)), pr_url, _now())
 
 
+@dataclass(frozen=True)
+class Settled:
+    """What :func:`settle_state` derived, and from which gate metadata —
+    so a later step of the same sweep reads the gate as the state saw it
+    instead of re-reading it."""
+
+    meta: Mapping[str, Any]
+    derived: Derived
+    transition: str | None
+
+
 async def record_state(
     gate: Any,
     pr: Any,
@@ -468,7 +481,24 @@ async def record_state(
     """Derive the still-open gate's state from the gate AS IT IS NOW and
     write it when it moved. Returns the new state on a transition, ``None``
     otherwise (unchanged, a detail-only move, or a failed write — the next
-    sweep re-derives). Never raises.
+    sweep re-derives). Never raises. See :func:`settle_state`.
+    """
+    settled = await settle_state(
+        gate, pr, pr_url, ctx, busy=busy, dispositions=dispositions
+    )
+    return settled.transition
+
+
+async def settle_state(
+    gate: Any,
+    pr: Any,
+    pr_url: str,
+    ctx: SubscriptionContext,
+    *,
+    busy: Busy,
+    dispositions: Dispositions | None = None,
+) -> Settled:
+    """:func:`record_state`, returning what it derived and from what.
 
     Re-reads the gate first: the dispatchers wrote their records earlier in
     this same sweep, so the gate the sweep was handed is stale. A failed
@@ -495,7 +525,7 @@ async def record_state(
     previous = meta.get(STATE_KEY) if same_pr else None
     transition = derived.state != previous
     if not transition and meta.get(DETAIL_KEY) == derived.detail:
-        return None
+        return Settled(meta, derived, None)
     kept = meta.get(SINCE_KEY)
     since = kept if not transition and isinstance(kept, str) and kept else _now()
     landed = await write_marker(
@@ -504,16 +534,14 @@ async def record_state(
         marker=_marker(derived, pr_url, since),
         subsystem=_SUBSYSTEM,
     )
-    if not landed:
-        return None
-    if transition:
-        ctx.logger.info(
-            "%s: %s %s → %s (%s)",
-            _SUBSYSTEM,
-            pr_url,
-            previous or "unset",
-            derived.state,
-            derived.detail,
-        )
-        return derived.state
-    return None
+    if not landed or not transition:
+        return Settled(meta, derived, None)
+    ctx.logger.info(
+        "%s: %s %s → %s (%s)",
+        _SUBSYSTEM,
+        pr_url,
+        previous or "unset",
+        derived.state,
+        derived.detail,
+    )
+    return Settled(meta, derived, derived.state)

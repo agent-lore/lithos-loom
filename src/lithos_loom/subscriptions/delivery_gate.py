@@ -25,6 +25,7 @@ from lithos_loom.subscriptions.dispatch_guards import (
     AttemptStampStore,
     last_attempt_key,
 )
+from lithos_loom.subscriptions.shadow_merge import approval_marker
 
 __all__ = ["gate_and_release", "record_delivery_on_story"]
 
@@ -65,13 +66,15 @@ async def gate_and_release(
     problems: list[str] = []
 
     project = (payload.get("metadata") or {}).get("project")
+    pr_url = result.get("pr_url")
     gate_id, gate_problem = await create_pr_gate_best_effort(
         lithos,
         story_id=task_id,
         story_title=str(payload.get("title") or task_id),
-        pr_url=result.get("pr_url"),
+        pr_url=pr_url,
         project=project if isinstance(project, str) else None,
         agent=agent,
+        extra_metadata=_approval(pr_url, result),
     )
     if gate_problem is not None:
         problems.append(gate_problem)
@@ -127,6 +130,23 @@ async def gate_and_release(
     )
     with contextlib.suppress(Exception):
         await lithos.finding_post(task_id=task_id, summary=summary, agent=agent)
+
+
+def _approval(pr_url: object, result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The M1 approval record for the gate: a delivering run's last commit
+    is the head its panel approved (``commits`` is oldest first, taken at
+    the end of the last round). No commits, no record — the gate then reads
+    ``no_approval_record`` and the shadow report counts it as unmeasured."""
+    commits = result.get("commits")
+    if not isinstance(pr_url, str) or not isinstance(commits, list) or not commits:
+        return None
+    run_id = result.get("run_id")
+    return approval_marker(
+        pr_url,
+        commits[-1],
+        source="run",
+        run_id=run_id if isinstance(run_id, str) else "",
+    )
 
 
 async def record_delivery_on_story(

@@ -94,6 +94,14 @@ class RemediationBudget:
     # run — see runner.orphans.ProcessIdentity
     in_flight_pid_start: int = 0
     in_flight_host_boot: str = ""
+    # review-convergence M1 (the shadow-merge record reads both): when the
+    # last round was reserved — a round answers an open review only when it
+    # was reserved after that review was ingested — and whether that round's
+    # own fix loop ran and its panel approved. `already_clean` alone does not
+    # say: external triage returns it at round 0, before any coder or panel
+    # (#380's approval-as-finding exit). Reserving clears the flag.
+    last_reserved_at: str = ""
+    last_panel_approved: bool = False
 
     def as_marker(self) -> dict[str, Any]:
         return {
@@ -110,6 +118,8 @@ class RemediationBudget:
             "in_flight_pid": self.in_flight_pid,
             "in_flight_pid_start": self.in_flight_pid_start,
             "in_flight_host_boot": self.in_flight_host_boot,
+            "last_reserved_at": self.last_reserved_at,
+            "last_panel_approved": self.last_panel_approved,
         }
 
 
@@ -146,6 +156,12 @@ def read_budget(gate: Any, pr_url: str) -> RemediationBudget:
             if isinstance(raw.get("in_flight_host_boot"), str)
             else ""
         ),
+        last_reserved_at=(
+            raw["last_reserved_at"]
+            if isinstance(raw.get("last_reserved_at"), str)
+            else ""
+        ),
+        last_panel_approved=raw.get("last_panel_approved") is True,
     )
 
 

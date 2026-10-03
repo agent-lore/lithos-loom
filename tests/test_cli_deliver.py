@@ -1692,6 +1692,43 @@ def test_an_approved_salvage_records_its_approval_and_delivery_failure(
     assert "had stopped approved" not in findings[0]
 
 
+def _pr_gate_metadata(lithos: FakeLithosClient) -> Any:
+    gates = [_get(lithos, e.from_task_id) for e in _edges_into(lithos, _STORY)]
+    (gate,) = [g for g in gates if g.metadata.get("gate_type") == "pr"]
+    return gate.metadata
+
+
+def test_a_bound_approval_rides_the_delivered_gate(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """M1: the shadow-merge record measures loom's merge judgement against
+    the operator's, so the gate must say which head the panel approved — and
+    only when the delivered head IS that head."""
+    _approved_salvage(run_dir, approved_head=_head(repo))
+
+    assert _invoke(_RUN).exit_code == 0
+
+    metadata = _pr_gate_metadata(lithos)
+    approval = metadata["delivered_approval"]
+    assert approval["head_sha"] == _head(repo)
+    assert approval["source"] == "deliver"
+    assert approval["run_id"] == _RUN
+    assert approval["pr_url"] == metadata["pr_url"]
+
+
+def test_an_unbound_approval_never_rides_the_gate(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    _approved_salvage(run_dir, approved_head=_head(repo))
+    (repo / "sneaked.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "after the review")
+
+    assert _invoke(_RUN).exit_code == 0
+
+    assert "delivered_approval" not in _pr_gate_metadata(lithos)
+
+
 def test_an_approval_is_never_published_for_a_revision_the_panel_never_saw(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:
@@ -3610,6 +3647,20 @@ def converge(monkeypatch: pytest.MonkeyPatch, lithos: FakeLithosClient) -> dict:
 
     monkeypatch.setattr(cli, "run_converge", _run)
     return calls
+
+
+def test_a_chained_converge_leaves_the_gate_unmeasured(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict, converge: dict
+) -> None:
+    """M1 (review H2): the chained converge may push before the gate exists,
+    so nothing on the gate attributes that push — the sweep would read it as
+    a human's and count a false disagreement. No approval is recorded; the
+    shadow record reads ``no_approval_record`` (unmeasured)."""
+    _approved_salvage(run_dir, approved_head=_head(repo))
+
+    assert _invoke(_RUN, "--converge").exit_code == 0
+
+    assert "delivered_approval" not in _pr_gate_metadata(lithos)
 
 
 def test_converge_runs_after_the_pr_exists_and_before_the_gate_is_observable(
