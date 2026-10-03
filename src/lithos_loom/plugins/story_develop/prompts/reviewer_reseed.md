@@ -35,9 +35,18 @@ agent input.
 1. Form your own view of the change against the acceptance criteria — you may
    confirm, drop, or add to the outgoing reviewer's findings, but do not
    re-litigate points the dialogue already resolved without new evidence.
-2. Write your verdict to `/workspace/.handoff/{review_file}` using the format
+2. **Map the acceptance criteria to evidence — one by one**, against the code
+   as it stands: for each criterion, the code path **and** the test that
+   satisfy it. A criterion you cannot tie to specific evidence is unmet — a
+   finding. Write the walk down as the `## Criteria` map (FORMAT.md); if the
+   coder's handoff carries a criteria map, verify each entry, keep its ids,
+   and cover **every** one of them.
+3. Write your verdict to `/workspace/.handoff/{review_file}` using the format
    in `/workspace/.handoff/FORMAT.md`:
-   - **No remaining issues** → `## Status: LGTM` with a one-paragraph `## Summary`.
+   - **No remaining issues** → `## Status: LGTM` with a one-paragraph `## Summary`
+     and the `## Criteria` map, every entry `met` (or `deferred` to an
+     out-of-scope finding). A review that passes without a complete map is
+     rejected.
    - **Otherwise** → `## Status: FINDINGS` with a `## Summary` and a
      `## Findings` block, each entry with `severity:` (critical | major | minor),
      `status: open`, `files:`, and `rationale:`.

@@ -29,14 +29,23 @@ from lithos_loom.plugins.story_develop.test_gate import GateResult
 from lithos_loom.plugins.story_develop.turns import TurnResult
 from lithos_loom.runner import git
 
-_LGTM = "## Status: LGTM\n## Summary\nLooks correct and complete.\n"
+# A passing review carries its acceptance-criteria evidence map (R5a).
+_CRITERIA = (
+    "## Criteria\n- id: AC-1\n  criterion: add a greeting file\n"
+    "  evidence: greeting.txt\n  test: tests/test_greeting.py::test_exists\n"
+    "  verdict: met\n"
+)
+_LGTM = "## Status: LGTM\n## Summary\nLooks correct and complete.\n" + _CRITERIA
 # NEW findings carry a BLANK id — the orchestrator's ledger assigns f-001 etc.
 _FINDINGS_MAJOR = (
     "## Status: FINDINGS\n## Summary\nOne issue.\n## Findings\n"
     "- finding_id:\n  severity: major\n  status: open\n"
     '  files: ["greeting.txt:1"]\n  rationale: needs work\n  coder_response:\n'
 )
-_FINDINGS_MINOR = _FINDINGS_MAJOR.replace("severity: major", "severity: minor")
+# Below the default threshold, so it passes — and a passing review maps its criteria.
+_FINDINGS_MINOR = (
+    _FINDINGS_MAJOR.replace("severity: major", "severity: minor") + _CRITERIA
+)
 # A re-review that keeps the (ledger-assigned) first finding open by id.
 _FINDINGS_KEEP_F001 = (
     "## Status: FINDINGS\n## Summary\nStill not addressed.\n## Findings\n"
@@ -3154,7 +3163,7 @@ _FINDINGS_DEFER_F001 = (
     "## Status: FINDINGS\n## Summary\nReal, but not this story's.\n## Findings\n"
     "- finding_id: f-001\n  severity: major\n  status: out-of-scope\n"
     '  files: ["greeting.txt:1"]\n'
-    "  deferral_reason: pre-existing on the base; belongs to its own task\n"
+    "  deferral_reason: pre-existing on the base; belongs to its own task\n" + _CRITERIA
 )
 
 
@@ -3226,3 +3235,60 @@ def test_persistent_auth_failure_ends_infra_failed(
     assert result.message.startswith("INFRA FAILURE: ")
     assert result.host_action in result.message
     assert "sessions + handoffs preserved" in result.message
+
+
+# --- R5a: approval carries a verified acceptance-criteria map ----------------
+
+_CODER_TWO_CRITERIA = (
+    "## Status: LGTM\n## Summary\nRound 1: did the work.\n"
+    "## Criteria\n"
+    "- id: AC-1\n  criterion: add a greeting file\n  evidence: greeting.txt\n"
+    "  test: tests/test_greeting.py::test_exists\n"
+    "- id: AC-2\n  criterion: the greeting says hello\n  evidence: greeting.txt:1\n"
+    "  test: none: wording, read in the diff\n"
+)
+_BARE_LGTM = "## Status: LGTM\n## Summary\nLooks correct and complete.\n"
+
+
+def test_the_coders_criteria_map_reaches_and_binds_the_round_one_review(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5a: the round-1 reviewer sees the coder's map, and an LGTM that skips
+    one of its ids is corrected before the run may approve."""
+    full = _LGTM + (
+        "- id: AC-2\n  criterion: the greeting says hello\n"
+        "  evidence: greeting.txt:1\n  test: none: wording\n  verdict: met\n"
+    )
+    state = _install_fakes(
+        monkeypatch,
+        config,
+        coder_handoffs={1: _CODER_TWO_CRITERIA},
+        reviews=[{"text": _LGTM, "retry_text": full}],
+    )
+
+    result = develop_mod.develop(config)
+
+    assert result.status == "approved"
+    first = state["review_prompts"][0]
+    assert "Criteria map (the coder's claims)" in first
+    assert "AC-2" in first
+    # quoted as agent input, like the coder's decision text
+    assert "criterion> the greeting says hello" in first
+    corrections = [p for p in state["review_prompts"] if "was not valid" in p]
+    assert corrections and "AC-2" in corrections[0]
+
+
+def test_an_lgtm_that_never_maps_its_criteria_fails_the_run(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5a: 'approved' always carries a map — a reviewer that will not write
+    one is a malformed handoff (one correction, then invalid)."""
+    _install_fakes(
+        monkeypatch,
+        config,
+        reviews=[{"text": _BARE_LGTM, "retry_text": _BARE_LGTM}],
+    )
+
+    result = develop_mod.develop(config)
+
+    assert result.status == "failed"

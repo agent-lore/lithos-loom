@@ -31,6 +31,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.containers` | M | 0 | 7 |
 | `lithos_loom.plugins.story_develop.converge` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.converge_result` | S | 2 | 1 |
+| `lithos_loom.plugins.story_develop.criteria_map` | M | 1 | 6 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 17 |
 | `lithos_loom.plugins.story_develop.develop` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
@@ -42,7 +43,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.gate_findings` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.generated` | M | 1 | 8 |
 | `lithos_loom.plugins.story_develop.github_access` | S | 1 | 4 |
-| `lithos_loom.plugins.story_develop.handoff` | L | 3 | 18 |
+| `lithos_loom.plugins.story_develop.handoff` | L | 3 | 19 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
 | `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
@@ -189,6 +190,15 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `ConvergeResult` — Outcome of a :func:`converge_pr` run.
 - def `nothing_to_change_message` — The ``already_clean`` message for a batch that needed no change (#380): which ids the coder judged not a defect, and which triage refuted.
 
+### `lithos_loom.plugins.story_develop.criteria_map`
+- class `CriterionEvidence` — One ``## Criteria`` entry. ``verdict`` is empty on a coder's map.
+- def `parse_criteria` — Every entry readable from a ``## Criteria`` body; validation is separate.
+- def `check_map` — A correction message when a passing review's map is missing or short.
+- def `required_ids_for` — The criterion ids this round's coder mapped; empty when it mapped none.
+- def `render_coder_map` — The coder's map for a reviewer prompt: quoted, cleaned and bounded.
+- def `with_criteria` — *validate* (the ledger check) and the criteria map, as ONE correction.
+- def `for_reviewer` — :func:`with_criteria` for one reviewer's turn in *round_no*.
+
 ### `lithos_loom.plugins.story_develop.daemon_io`
 - def `read_task_payload` — Parse the runner's ``task.json`` into a :class:`TaskContext`.
 - def `read_resume_run_dir` — The run dir the runner asked this dispatch to RESUME, or ``None``.
@@ -317,6 +327,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `render_log_section` — Render one conversation-log section as a list of lines (the caller joins).
 - def `conversation_log` — Assemble an ordered, human-readable log of every round's handoffs.
 - def `seed_handoff_dir` — Create *handoff_dir* and write ``FORMAT.md`` into it.
+- def `parse_entries` — Split a ``- key: value`` list body into one raw dict per entry.
 - def `parse_review_handoff` — Parse + validate a reviewer handoff. Raises :class:`HandoffError`.
 - def `file_fingerprint` — Content identity of a handoff file (``None`` = absent / unreadable).
 

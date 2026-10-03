@@ -69,7 +69,10 @@ it finishes**. The run fails if you stop before writing the handoff.
 3. Write your response to `/workspace/.handoff/{handoff_file}` using the format
    in `/workspace/.handoff/FORMAT.md`: `## Status: LGTM` plus a `## Summary` of
    what you did (and, per id, what you changed or why you disagree) — plus the
-   `## Findings` block for any disputes, as above. Writing this handoff file is
-   the **last and required** step.
+   `## Findings` block for any disputes, as above. End it with the `## Criteria`
+   map (FORMAT.md): number the acceptance criteria `AC-1`, `AC-2`, … and give
+   each the change and the test that close it, describing the tree as it now
+   stands — reviewers verify every entry and must cover each id. Writing this
+   handoff file is the **last and required** step.
 
 Do not commit — the orchestrator handles git. Do not push or open a PR.

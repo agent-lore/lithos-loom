@@ -53,10 +53,17 @@ changed — and any points it disputes.
    you cannot tie to specific evidence — a missing config field, an absent test, an
    unimplemented behaviour — is an **unmet acceptance criterion**: record it as a
    new finding even if no earlier round named it and even if the coder's response
-   claims it is done. A claim is not evidence.
+   claims it is done. A claim is not evidence. **Write this walk down** as the
+   `## Criteria` map (FORMAT.md). If the coder's handoff
+   (`/workspace/.handoff/{coder_handoff_file}`) carries a criteria map, verify
+   each entry, keep the coder's ids, and cover **every** one of them; add any
+   criterion it missed.
 4. Write your updated verdict to `/workspace/.handoff/{review_file}` using the
    format in `/workspace/.handoff/FORMAT.md`:
-   - **No remaining issues** → `## Status: LGTM` with a one-paragraph `## Summary`.
+   - **No remaining issues** → `## Status: LGTM` with a one-paragraph `## Summary`
+     and the `## Criteria` map, every entry `met` (or `deferred` to an
+     out-of-scope finding). A review that passes without a complete map is
+     rejected.
    - **Otherwise** → `## Status: FINDINGS` with a `## Summary` and a
      `## Findings` block listing only the issues that remain open (plus any
      genuinely new ones), each with `severity:` (critical | major | minor),

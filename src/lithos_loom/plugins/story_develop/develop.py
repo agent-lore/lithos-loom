@@ -53,6 +53,7 @@ from . import (
     autoformat,
     check_runner,
     containers,
+    criteria_map,
     engines,
     external_reviews,
     handoff,
@@ -222,7 +223,8 @@ def _coder_summary(config: DevelopConfig, round_no: int) -> str:
     In external mode the handoff's ``## External findings`` acknowledgements
     ride along (PR #396 review): the round-1 panel is asked to judge the
     coder's per-id claims — a no-change claim above all — so it must see
-    them, and the reviewer template renders only this summary.
+    them, and the reviewer template renders only this summary. So does the
+    coder's ``## Criteria`` map (R5a), which a passing review must cover.
     """
     path = config.handoff_dir / handoff.coder_handoff_name(round_no)
     try:
@@ -230,13 +232,14 @@ def _coder_summary(config: DevelopConfig, round_no: int) -> str:
     except OSError:
         return "(coder summary unavailable)"
     try:
-        summary = handoff.parse_review_handoff(text).summary or (
-            "(the coder wrote no summary)"
-        )
+        parsed = handoff.parse_review_handoff(text)
+        summary = parsed.summary or "(the coder wrote no summary)"
+        criteria = parsed.criteria_text
     except HandoffError:
-        summary = "(coder summary unavailable)"
+        summary, criteria = "(coder summary unavailable)", ""
     acks = external_reviews.ack_section(text)
-    return f"{summary}\n\n{acks}" if acks else summary
+    parts = (summary, criteria_map.render_coder_map(criteria), acks)
+    return "\n\n".join(p for p in parts if p)
 
 
 # ARCH-1.S8 (public-surface flip): the S2/S4/S5 back-compat aliases and the

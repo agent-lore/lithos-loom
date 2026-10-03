@@ -48,7 +48,10 @@ will not get that chance, and the run fails if you stop before the handoff.
 3. Write a short summary of what you did to
    `/workspace/.handoff/{handoff_file}` using the handoff format described in
    `/workspace/.handoff/FORMAT.md`. For this first turn, use
-   `## Status: LGTM` and put your summary under `## Summary`. Writing this
-   handoff file is the **last and required** step — the run fails without it.
+   `## Status: LGTM` and put your summary under `## Summary`. End it with the
+   `## Criteria` map (FORMAT.md): number the acceptance criteria `AC-1`,
+   `AC-2`, … and give each the change and the test that close it — reviewers
+   verify every entry and must cover each id. Writing this handoff file is the
+   **last and required** step — the run fails without it.
 
 Do not commit — the orchestrator handles git. Do not push or open a PR.

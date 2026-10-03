@@ -165,6 +165,11 @@ class ReviewHandoff:
     status: str  # "LGTM" | "FINDINGS"
     summary: str
     findings: list[Finding] = field(default_factory=list)
+    # The raw ``## Criteria`` body (R5a): the per-criterion evidence map a
+    # passing review must carry. Kept as text here and parsed + checked by
+    # :mod:`.criteria_map` for reviewer turns only — coder, external and
+    # resume parses carry it unchecked.
+    criteria_text: str = ""
 
     @property
     def is_lgtm(self) -> bool:
@@ -523,17 +528,15 @@ def _split_files(value: str) -> list[str]:
 _FOLD_MARKERS = (">", "|", ">-", "|-", ">+", "|+")
 
 
-def _parse_findings(block: str) -> list[Finding]:
-    """Parse the ``## Findings`` body into a list of :class:`Finding`.
+def parse_entries(block: str) -> list[dict[str, str]]:
+    """Split a ``- key: value`` list body into one raw dict per entry.
 
-    Supports YAML-style folded/literal scalars (``rationale: >`` / ``|`` with
-    indented continuation lines) — reviewers write them in practice, and
-    dropping the text silently would starve the lifecycle ledger (T7) and the
-    coder prompts of the rationale.
-
-    A finding with no id is left with ``finding_id=""`` — canonical ids are
-    assigned by the orchestrator's ledger, never invented here (a per-file
-    fallback would collide across rounds).
+    The shared reader for every structured handoff list (``## Findings``,
+    ``## Criteria``): keys are lower-cased, values are unsanitized and
+    unvalidated — each caller applies its own rules. Supports YAML-style
+    folded/literal scalars (``rationale: >`` / ``|`` with indented
+    continuation lines) — agents write them in practice, and dropping the
+    text silently would starve the ledger and the prompts of it.
     """
     items: list[dict[str, str]] = []
     current: dict[str, str] | None = None
@@ -583,9 +586,18 @@ def _parse_findings(block: str) -> list[Finding]:
         if kv:
             _start_kv(current, kv.group(1).lower(), kv.group(2).strip(), indent)
     _flush_fold()
+    return items
 
+
+def _parse_findings(block: str) -> list[Finding]:
+    """Parse the ``## Findings`` body into a list of :class:`Finding`.
+
+    A finding with no id is left with ``finding_id=""`` — canonical ids are
+    assigned by the orchestrator's ledger, never invented here (a per-file
+    fallback would collide across rounds).
+    """
     findings: list[Finding] = []
-    for idx, item in enumerate(items, start=1):
+    for idx, item in enumerate(parse_entries(block), start=1):
         # Sanitize BEFORE any mandatory-field check (correctness/f-004): a
         # `rationale` that is only U+200B and a `deferral_reason` that is only
         # U+202E both pass a `.strip()` non-blank test and then sanitize to the
@@ -669,7 +681,12 @@ def parse_review_handoff(text: str) -> ReviewHandoff:
         raise HandoffError(
             "Status is FINDINGS but no '## Findings' entries were parsed"
         )
-    return ReviewHandoff(status=status, summary=summary, findings=findings)
+    return ReviewHandoff(
+        status=status,
+        summary=summary,
+        findings=findings,
+        criteria_text=sections.get("criteria", ""),
+    )
 
 
 def file_fingerprint(path: Path) -> str | None:

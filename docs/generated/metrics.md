@@ -16,7 +16,7 @@ lower a budget after improving the code to lock in the gain.
 | `cross_module_private_refs` | 8 | 8 | 0 |
 | `max_module_lines` | 2036 | 2100 | 64 |
 | `module_cycles` | 1 | 1 | 0 |
-| `modules_over_800_lines` | 13 | 13 | 0 |
+| `modules_over_800_lines` | 14 | 14 | 0 |
 | `tests_private_imports` | 99 | 99 | 0 |
 
 ## Import graph
@@ -45,7 +45,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | GitHub | 5 | 2623 | 1987 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 3 |
 | LithosClient | 2 | 2268 | 1904 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 293 | 245 | 2 | 1 | 0.33 | 7 (`lithos_loom.notifications.build_notifier`) | 0 |
-| Plugins | 56 | 23191 | 18416 | 3 | 5 | 0.62 | 100 (`lithos_loom.plugins.story_develop.__main__.main`) | 58 |
+| Plugins | 57 | 23533 | 18706 | 3 | 5 | 0.62 | 100 (`lithos_loom.plugins.story_develop.__main__.main`) | 58 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
 | Runners | 8 | 1917 | 1541 | 5 | 1 | 0.17 | 12 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 1 |
@@ -57,9 +57,9 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **205**, lines: **79507**, SLOC: **64167**
+- Modules: **206**, lines: **79849**, SLOC: **64457**
 - Largest module: `lithos_loom.cli.develop` (2036 lines)
-- Modules over 800 lines: **13**
+- Modules over 800 lines: **14**
   - `lithos_loom.cli._deliver_lithos`
   - `lithos_loom.cli.deliver`
   - `lithos_loom.cli.develop`
@@ -68,6 +68,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
   - `lithos_loom.lithos_client`
   - `lithos_loom.plugins.story_develop.__main__`
   - `lithos_loom.plugins.story_develop.daemon_io`
+  - `lithos_loom.plugins.story_develop.develop`
   - `lithos_loom.plugins.story_develop.rounds`
   - `lithos_loom.plugins.story_develop.run_outcome`
   - `lithos_loom.subscriptions._develop_pr_merge`
@@ -76,7 +77,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **2019**, cyclomatic > 10: **201**
+- Functions: **2032**, cyclomatic > 10: **201**
 
 Top 10 most complex functions:
 
@@ -143,4 +144,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.51** (120106 test lines / 79507 source lines)
+- Test-to-source line ratio: **1.51** (120751 test lines / 79849 source lines)

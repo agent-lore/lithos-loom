@@ -64,9 +64,16 @@ acceptance criteria below.
    says it is done and the code that does exist looks correct**. A claim is not
    evidence. An unmet acceptance criterion is the most common way an
    otherwise-clean diff fails to actually finish the task.
+   **Write this walk down** as the `## Criteria` map (FORMAT.md): one entry per
+   criterion with `evidence:`, `test:` and `verdict:`. If the coder's summary
+   above carries a criteria map, those are claims — verify each entry, keep the
+   coder's ids, and cover **every** one of them; add any criterion it missed.
 4. Write your review to `/workspace/.handoff/{review_file}` using the handoff
    format in `/workspace/.handoff/FORMAT.md`:
-   - **No issues at all** → `## Status: LGTM` with a one-paragraph `## Summary`.
+   - **No issues at all** → `## Status: LGTM` with a one-paragraph `## Summary`
+     and the `## Criteria` map, every entry `met` (or `deferred` to an
+     out-of-scope finding). A review that passes without a complete map is
+     rejected.
    - **Otherwise** → `## Status: FINDINGS` with a `## Summary` and a `## Findings`
      block — one entry per issue, each with `severity:` (critical | major | minor),
      `status: open`, `files:`, and `rationale:`. Leave `coder_response:` blank.

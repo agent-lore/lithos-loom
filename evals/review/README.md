@@ -85,6 +85,11 @@ whose only case is promoted to `floor` leaves the mean, and two arms are
 comparable only over the same class list (the line prints it). A class with
 no valid sample is named `0/0 (no valid sample, excluded)`.
 
+A review that passes must carry its `## Criteria` evidence map (R5a, SPEC
+§5.5); a reviewer that withholds it through the one correction re-prompt is
+`invalid` and its sample errored, never a catch or a miss. Readings across
+that change compare different prompts — take the control in the same session.
+
 A reviewer turn that **crashes** (a failed/short-circuited turn — `status`
 `invalid` / `not-run`, e.g. a provider usage limit) produces no verdict. Such a
 sample is **errored**: excluded from the catch / FP denominators and reported as

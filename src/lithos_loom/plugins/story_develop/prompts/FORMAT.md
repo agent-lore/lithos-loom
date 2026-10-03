@@ -25,7 +25,42 @@ One short paragraph. The coder also reports test results here.
   decision_options: <needs-decision only — the options, and what each costs>
   decision_verdict: <reviewer only — contest | concede, on a pending needs-decision>
   decision_contest: <reviewer only — the acceptance line the finding already meets>
+
+## Criteria
+(the acceptance-criteria map — see below; one block per criterion)
+- id: AC-1
+  criterion: <the criterion, briefly>
+  evidence: <path[:symbol]> — what in THIS change satisfies it
+  test: <tests/path::name> | none: <why no test can prove it>
+  verdict: met | unmet | deferred   (reviewers only)
+  deferred_to: <deferred only — the out-of-scope finding's id, or new:<n>>
 ```
+
+**Acceptance-criteria map (`## Criteria`).** Approval means the task is done,
+not only that the diff is sound, so the map is how an approval shows it:
+
+- **Coders** end every handoff with the map: number the acceptance criteria
+  `AC-1`, `AC-2`, … and give each the change (`evidence:`) and the test
+  (`test:`) that closes it. Re-emit it after every fix so it describes the
+  tree as it stands. A criterion no test can prove (wording, docs) says
+  `test: none: <why>`.
+- **Reviewers:** a review that **passes** — `LGTM`, or findings all below your
+  blocking threshold — **must** carry the map, with every entry's `verdict:`
+  `met` or `deferred`. Verify each of the coder's entries rather than copying
+  it; the map must cover **every id the coder listed** (keep the coder's ids)
+  and add any criterion the coder missed. An `unmet` criterion is a finding:
+  record it at blocking severity, so the review does not pass. `deferred`
+  is for a criterion that is another story's work: it rests on an
+  `out-of-scope` finding with its `deferral_reason:` (this round's, or one you
+  deferred in an earlier round), which the entry names in `deferred_to:` —
+  the finding's id, or `new:<n>` for the n-th finding of this handoff when
+  that finding is new (it has no id yet). Each deferred criterion cites its
+  own finding. `test:` names a test, or says `none: <why>` — a bare `none` is
+  rejected. A value that runs over several lines is written `key: >` with
+  its lines indented beneath it — a line starting with `- ` starts a new entry. A blocking review may omit the map. A passing
+  review without a complete map is rejected and re-prompted once; a second
+  failure marks your review invalid and fails the run. Each field is at most
+  2000 characters; at most 50 entries.
 
 **Reviewers:** `LGTM` means *no issues at all* (it closes every finding you
 previously raised). Record every issue as a structured finding with an honest
@@ -101,4 +136,4 @@ precisely what the rule exists to catch.
 
 For the coder's first turn there are no findings — just write
 `## Status: LGTM` plus a `## Summary` of what you implemented and the result of
-running the project's tests.
+running the project's tests, and the `## Criteria` map.
