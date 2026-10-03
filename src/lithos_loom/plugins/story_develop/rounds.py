@@ -45,6 +45,7 @@ from . import (
     containers,
     engines,
     handoff,
+    review_scope,
     turns,
 )
 from .check_set import Check, CheckResult, CheckSetResult, render_check_summary
@@ -289,6 +290,10 @@ def round1_coder_prompt(ctx: RoundContext) -> str:
         return render_prompt(
             handoff.load_prompt(ctx.coder_init_template),
             acceptance_criteria=config.effective_acceptance_criteria,
+            review_scope=review_scope.coder_block(config),
+            scope_route=review_scope.coder_route(
+                config, decisions_enabled=ctx.decisions_enabled
+            ),
             commit_log=(
                 git.log_between(ctx.wt, git.fork_point(ctx.wt, ctx.base))
                 or "(no commits in range)"
@@ -314,6 +319,7 @@ def round1_coder_prompt(ctx: RoundContext) -> str:
         handoff.load_prompt("coder_init.md"),
         description=config.description,
         acceptance_criteria_section=ac_section,
+        review_scope=review_scope.coder_block(config),
         handoff_file=handoff.coder_handoff_name(1),
         sandbox_facts=_sandbox_section(config.image, for_coder=True),
     )
@@ -362,6 +368,10 @@ def coder_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
             handoff.load_prompt("coder_fix.md"),
             round_no=str(round_no),
             acceptance_criteria=config.effective_acceptance_criteria,
+            review_scope=review_scope.coder_block(config),
+            scope_route=review_scope.coder_route(
+                config, decisions_enabled=ctx.decisions_enabled
+            ),
             findings=ctx.render_panel_findings(ctx.final_reviews),
             gate_summary=gate_summary_value,
             review_files=review_files,

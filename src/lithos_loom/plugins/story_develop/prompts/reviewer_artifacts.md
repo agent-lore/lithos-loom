@@ -6,7 +6,7 @@ reviewer has seen these images yet. Approval is held until this pass.
 {sandbox_facts}
 ## Acceptance criteria
 
-{acceptance_criteria}
+{acceptance_criteria}{review_scope}
 
 {gate_summary}
 

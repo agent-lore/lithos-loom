@@ -105,6 +105,12 @@ name = "story-develop"
 # those paths textually — a conflict there takes either side and the generator runs on the
 # composed tree, so a generated-only conflict is a zero-token push. Declared together;
 # --generated-path / --regenerate-command are the CLI fallbacks.
+# develop_review_scope = "Single operator; hand-run commands, one at a time; …" states the
+# project's OPERATIONAL MODEL (review-convergence R1): Markdown text, at most 4000 chars, no {name}-shaped text,
+# rendered under the acceptance criteria in every reviewer, triage and coder prompt. A
+# finding that needs an actor or condition neither the criteria nor this text places in scope is
+# minor at most; the coder routes it to a needs-decision (story-develop) or a dispute
+# quoting the model (converge). Per project — no host default; a task may override it.
 # On Python repos with ruff present, an informational `lint` check also runs and
 # its findings are structured into a stable gate/<check>-NNN ledger surfaced to
 # the panel + [DevelopResult] (non-blocking; #132).

@@ -23,7 +23,7 @@ work **both** survive, correctly composed.
 
 ## Acceptance criteria
 
-{acceptance_criteria}
+{acceptance_criteria}{review_scope}
 
 ## Commit history
 

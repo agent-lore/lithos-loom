@@ -60,6 +60,7 @@ from .panel_prompts import (
     reviewer_brief,
     round_prompt,
 )
+from .review_scope import reviewer_block
 from .rounds import Services
 from .sandbox_facts import for_prompt as _sandbox_section
 from .turns import TurnResult
@@ -578,6 +579,7 @@ def _run_reviewer_with_reaction(
                 sandbox_facts=_sandbox_section(config.image, for_coder=False),
                 round_no=str(round_no),
                 acceptance_criteria=config.effective_acceptance_criteria,
+                review_scope=reviewer_block(config),
                 base_sha=base[:12],
                 coder_handoff_file=handoff.coder_handoff_name(round_no),
                 # security/f-005: the reseed runs under the SAME validator,

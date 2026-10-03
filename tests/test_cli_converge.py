@@ -906,6 +906,7 @@ def story_stubs(stubs: dict, monkeypatch: pytest.MonkeyPatch) -> dict:
             reviewers=panel,
             reviewers_explicit=True,
             coder="codex",
+            review_scope="Single operator; hand-run commands, one at a time.",
             # the resolver's contract: the task's profile arrives parsed
             review_profile_task=meta.get("develop_review_profile"),
         ),
@@ -1022,6 +1023,9 @@ def test_story_settings_are_the_base_layer(story_stubs: dict) -> None:
     assert [s.name for s in cfg.reviewers] == ["correctness", "tests"]
     # the story's PR body is still the acceptance-criteria source
     assert cfg.acceptance_criteria == "the intent"
+    # R1: the project's operational model reaches every --story converge mode
+    # (the watcher's --from-github and --resolve-conflicts both pass --story)
+    assert cfg.review_scope == "Single operator; hand-run commands, one at a time."
 
 
 def test_explicit_flags_win_over_the_story(story_stubs: dict) -> None:

@@ -509,3 +509,23 @@ def test_citation_paths_are_normalised_to_the_repo_root() -> None:
     )
     verdicts = parse_triage_verdicts(text, ["f-001", "f-002"], repo_files=repo_files)
     assert set(verdicts.rejections) == {"f-001", "f-002"}
+
+
+def test_triage_prompt_carries_the_operational_model_under_the_criteria(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # R1 (34bb82c4): triage weighs external claims against the same model.
+    import dataclasses
+
+    scope = "Single operator; hand-run commands, one at a time."
+    config = dataclasses.replace(_config(tmp_path), review_scope=scope)
+    captured = _install(monkeypatch, tmp_path, verdict_text="- f-001: PROCEED\n")
+    captured["config"] = config
+
+    triage_external_findings(config, _change(), _outcome(), timeout=600)
+
+    prompt = captured["prompt"]
+    ac = config.effective_acceptance_criteria
+    assert prompt.index(ac) < prompt.index("## Operational model")
+    assert scope in prompt
+    assert "{review_scope}" not in prompt

@@ -1826,3 +1826,139 @@ def test_the_artifact_pass_needs_no_criteria_map(tmp_path: Path) -> None:
     assert calls["n"] == 1
     out = result.round_reviews[0]
     assert out.status == "LGTM" and out.passed is True
+
+
+# --- R1: the operational model renders under the acceptance criteria ---------
+
+_LOOM_SCOPE = (
+    "Single operator. `lithos-loom develop …` and other hand-run commands are run "
+    "by that operator, one at a time. Out of the model: a second host or a second "
+    "daemon, two concurrent invocations of the same hand-run command, and a Lithos "
+    "outage longer than the claim TTL."
+)
+_SCOPE_HEADING = "## Operational model (the scope findings are judged in)"
+
+
+def _scoped(tmp_path: Path, scope: str | None = _LOOM_SCOPE) -> DevelopConfig:
+    return dataclasses.replace(_config(tmp_path), review_scope=scope)
+
+
+def _under_the_criteria(prompt: str, config: DevelopConfig) -> bool:
+    ac = prompt.index(config.effective_acceptance_criteria)
+    heading = prompt.index(_SCOPE_HEADING)
+    between = prompt[ac + len(config.effective_acceptance_criteria) : heading]
+    return ac < heading and "## " not in between  # nothing sits between them
+
+
+@pytest.mark.parametrize("round_no", [1, 2])
+def test_the_operational_model_sits_under_the_criteria_in_every_round(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, round_no: int
+) -> None:
+    config = _scoped(tmp_path)
+    calls = _install_reviewer_stub(monkeypatch)
+    _run(config, [_reviewer("correctness", tmp_path)], round_no=round_no)
+    prompt = calls[0]["prompt"]
+    assert _LOOM_SCOPE in prompt
+    assert _under_the_criteria(prompt, config)
+    assert "**minor at most**" in prompt
+
+
+def test_no_operational_model_renders_no_section(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _scoped(tmp_path, None)
+    calls = _install_reviewer_stub(monkeypatch)
+    for round_no in (1, 2):
+        _run(config, [_reviewer("correctness", tmp_path)], round_no=round_no)
+    for call in calls:
+        assert "Operational model" not in call["prompt"]
+        assert "{review_scope}" not in call["prompt"]
+
+
+def test_the_operational_model_reaches_the_artifact_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _scoped(tmp_path)
+    calls = _install_reviewer_stub(monkeypatch)
+    panel_mod.run_panel_round(
+        config,
+        [_reviewer("correctness", tmp_path)],
+        wt=config.repo,
+        base=panel_mod.git.RangeBase("0" * 40),
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        artifact_pass=True,
+    )
+    assert _LOOM_SCOPE in calls[0]["prompt"]
+    assert "{review_scope}" not in calls[0]["prompt"]
+
+
+def test_the_operational_model_survives_a_usage_limit_reseed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _scoped(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    rstate = _ReviewerState(
+        ReviewerSpec(name="correctness", fallback_chain=("codex",)),
+        "cid-correctness",
+        [],
+        tmp_path,
+    )
+    monkeypatch.setattr(panel_mod.containers, "stop_container", lambda c: None)
+    monkeypatch.setattr(panel_mod.containers, "start_container", lambda cmd: "cid2")
+    monkeypatch.setattr(panel_mod, "build_run_cmd", lambda *a, **k: ("cid2", ["cmd"]))
+    prompts: list[str] = []
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return _limited_turn()
+        (
+            config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "correctness")
+        ).write_text(_ART_LGTM)
+        return _ok_turn(session_id)
+
+    _run_live_round(config, [rstate], run_turn)
+    assert len(prompts) == 2
+    assert all(_LOOM_SCOPE in p for p in prompts)
+    assert _under_the_criteria(prompts[1], config)
+
+
+def test_regression_86613f8e_a_concurrent_hand_run_finding_meets_the_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R1 fixture, run 86613f8e (fd71001f `converge-push`, $112, max_rounds):
+    the round-5 blocking finding needed a SECOND `converge-push --yes` started
+    while the first ran. With the scope block, the re-review that judges it
+    excludes that actor from the model and the rule that caps it at minor —
+    the prompt-side half of the expected minor / needs-decision verdict."""
+    from lithos_loom.plugins.story_develop.handoff import parse_review_handoff
+
+    config = _scoped(tmp_path)
+    rstate = _reviewer("correctness", tmp_path)
+    rstate.ledger.apply_review(
+        parse_review_handoff(
+            "## Status: FINDINGS\n## Summary\nA race.\n## Findings\n"
+            "- finding_id:\n  severity: critical\n  status: open\n"
+            "  files: src/lithos_loom/cli/converge_push.py:120\n"
+            "  rationale: a second `converge-push --yes` started while the first "
+            "is running reads the same intent and pushes twice\n"
+        ),
+        round_no=1,
+    )
+    calls = _install_reviewer_stub(monkeypatch)
+    _run(config, [rstate], round_no=2)
+    prompt = calls[0]["prompt"]
+    assert "a second `converge-push --yes` started while the first" in prompt
+    assert "two concurrent invocations of the same hand-run command" in prompt
+    assert "**minor at most**" in prompt
+    # the model LISTS this actor under "Out of the model" — an explicit
+    # exclusion must read as evidence for minor, not as "the model names it"
+    assert "explicit exclusion" in " ".join(prompt.split())
+    assert _under_the_criteria(prompt, config)

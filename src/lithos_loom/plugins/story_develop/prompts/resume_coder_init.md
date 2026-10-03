@@ -26,7 +26,7 @@ reason you state in your handoff.
 
 ## Acceptance criteria
 
-{acceptance_criteria}
+{acceptance_criteria}{review_scope}
 
 ## Commit history so far
 
@@ -61,7 +61,7 @@ it finishes**. The run fails if you stop before writing the handoff.
    **dispute it formally**: include a `## Findings` block in your handoff with
    that finding's exact id, `status: disputed`, and your reasoning in
    `coder_response:`. The reviewer weighs it next round; a dispute that
-   persists is escalated to the human operator rather than ground forever.
+   persists is escalated to the human operator rather than ground forever.{scope_route}
 2. You do **not** need to run the full test suite — the orchestrator runs an
    objective test gate after your turn. Do run the **targeted fast test(s)** for
    what you changed to confirm red→green, but never run the full suite and never

@@ -5,7 +5,7 @@ worktree on a dedicated branch). Implement the task below.
 ## Task
 
 {description}
-{acceptance_criteria_section}
+{acceptance_criteria_section}{review_scope}
 {sandbox_facts}
 ## How to work
 

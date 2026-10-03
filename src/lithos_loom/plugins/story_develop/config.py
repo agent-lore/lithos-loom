@@ -608,6 +608,11 @@ class DevelopConfig:
     # ecosystem the per-check catalog doesn't model (e.g. C/C++) it is the PRIMARY gate.
     # None = no parity check.
     parity_command: str | None = None
+    # Review-convergence R1: the project's operational model
+    # (``develop_review_scope``) — rendered under the acceptance criteria in
+    # every reviewer, triage and coder prompt (:mod:`.review_scope`). None =
+    # no model stated; the blocks render as nothing.
+    review_scope: str | None = None
     # PRD pr-reconciliation S4 (the loom half): repo-relative prefixes whose
     # content is GENERATED, and the command that regenerates them. Loom's own
     # merges (the S3 trial merge, the S5 resolve intake) never merge these

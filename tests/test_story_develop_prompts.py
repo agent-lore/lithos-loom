@@ -330,8 +330,9 @@ def test_needs_decision_is_taught_on_every_surface_that_uses_it() -> None:
     assert "status: needs-decision" in escape
     assert "decision_question:" in escape
     # the slot is the whole paragraph, so the prompt reads cleanly either way
-    filled = render_prompt(coder, decision_escape=escape)
-    empty = render_prompt(coder, decision_escape="")
+    # (scope_route="": no operational model set — R1 renders nothing there)
+    filled = render_prompt(coder, decision_escape=escape, scope_route="")
+    empty = render_prompt(coder, decision_escape="", scope_route="")
     assert "rather than ground forever.\n\n   If the finding" in filled
     assert "ordinary dispute.\n\n2. You do" in filled
     assert "rather than ground forever.\n\n2. You do" in empty
@@ -443,3 +444,51 @@ def test_format_md_defines_the_criteria_map_for_both_roles() -> None:
 
     assert f"at most {criteria_map.MAX_ENTRIES} entries" in fmt
     assert f"at most {criteria_map.MAX_FIELD_CHARS} characters" in fmt
+
+
+_REVIEWER_TEMPLATES = (
+    "reviewer_round.md",
+    "reviewer_rereview.md",
+    "reviewer_reseed.md",
+    "reviewer_artifacts.md",
+    "external_triage.md",
+)
+_CODER_TEMPLATES = (
+    "coder_init.md",
+    "coder_fix.md",
+    "converge_coder_init.md",
+    "resolve_coder_init.md",
+    "resume_coder_init.md",
+)
+
+
+@pytest.mark.parametrize("name", _REVIEWER_TEMPLATES + _CODER_TEMPLATES)
+def test_every_agent_template_carries_the_operational_model_under_its_criteria(
+    name: str,
+) -> None:
+    # R1 (34bb82c4): the model is judged against the criteria, so it sits
+    # directly under them — appended to the criteria line, so an unset scope
+    # leaves no trace.
+    text = load_prompt(name)
+    assert (
+        "{acceptance_criteria}{review_scope}" in text
+        or "{acceptance_criteria_section}{review_scope}" in text
+    )
+
+
+@pytest.mark.parametrize(
+    "name", ["coder_fix.md", "converge_coder_init.md", "resume_coder_init.md"]
+)
+def test_every_coder_template_with_findings_offers_the_scope_route(name: str) -> None:
+    assert "{scope_route}" in load_prompt(name)
+
+
+def test_a_scope_contest_must_quote_the_line_that_brings_the_actor_into_scope() -> None:
+    # R1: a reviewer contesting an "is <actor> in scope?" decision cites the
+    # criterion or operational-model line naming that actor, else concedes.
+    for name in ("reviewer_decision_answer.md", "FORMAT.md"):
+        text = " ".join(load_prompt(name).split())
+        assert "operational-model line" in text, name
+        assert "brings that actor into scope" in text, name
+        # PR #443 review: quoting the model's own exclusion is not a contest
+        assert "excludes it" in text, name

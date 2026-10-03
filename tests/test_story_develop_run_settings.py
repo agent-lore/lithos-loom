@@ -68,8 +68,10 @@ def test_overrides_carry_only_what_the_story_pinned() -> None:
             regenerate_command="make diagrams",
             image="img:x",
             fallback_chain=("codex",),
+            review_scope="Single operator.",
         )
     )
+    assert pinned["review_scope"] == "Single operator."
     assert pinned["generated_paths"] == ("docs/generated",)
     assert pinned["regenerate_command"] == "make diagrams"
     assert pinned["max_rounds"] == 8

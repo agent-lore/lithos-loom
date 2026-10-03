@@ -3292,3 +3292,169 @@ def test_an_lgtm_that_never_maps_its_criteria_fails_the_run(
     result = develop_mod.develop(config)
 
     assert result.status == "failed"
+
+
+# --- R1: the operational model in the coder prompts --------------------------
+
+_LOOM_SCOPE = (
+    "Single operator. `lithos-loom develop …` and other hand-run commands are run "
+    "by that operator, one at a time. Out of the model: a second host or a second "
+    "daemon, two concurrent invocations of the same hand-run command, and a Lithos "
+    "outage longer than the claim TTL."
+)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_story_develop_coder_prompts_carry_the_model_and_the_decision_route(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, review_scope=_LOOM_SCOPE)
+    state = _install_fakes(
+        monkeypatch, cfg, reviews=[{"text": _FINDINGS_MAJOR}, {"text": _LGTM}]
+    )
+
+    develop_mod.develop(cfg)
+
+    init, fix = state["coder_prompts"][0], state["coder_prompts"][1]
+    assert _LOOM_SCOPE in init and "do not add protocol" in init
+    assert "{review_scope}" not in init
+    assert _LOOM_SCOPE in fix
+    flat = _flat(fix)
+    assert "Mark it `needs-decision`" in flat
+    assert "in scope for" in flat
+    assert "{scope_route}" not in fix
+
+
+def test_converge_coder_prompt_routes_out_of_model_findings_to_a_dispute(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Converge has no operator gate behind it (decisions disabled): the exit
+    # for an out-of-model finding is a dispute quoting the model.
+    from dataclasses import replace
+
+    cfg = replace(config, test_command="fake-tests", review_scope=_LOOM_SCOPE)
+    state = _install_fakes(
+        monkeypatch,
+        cfg,
+        write_source=False,
+        coder_handoffs={1: _NO_CHANGE_HANDOFF},
+        reviews=[{"text": _LGTM}],
+    )
+
+    develop_mod.develop(cfg, entry=_no_change_entry(cfg))
+
+    flat = _flat(state["coder_prompts"][0])
+    assert _LOOM_SCOPE in flat
+    assert "mark it `disputed`" in flat
+    assert "quote the operational model line" in flat
+    assert "Mark it `needs-decision`" not in flat
+
+
+def test_unset_scope_leaves_the_coder_prompts_unchanged(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _install_fakes(
+        monkeypatch, config, reviews=[{"text": _FINDINGS_MAJOR}, {"text": _LGTM}]
+    )
+
+    develop_mod.develop(config)
+
+    for prompt in state["coder_prompts"]:
+        assert "Operational model" not in prompt
+        assert "{review_scope}" not in prompt and "{scope_route}" not in prompt
+
+
+_TRIPLE_FAILURE = (
+    "## Status: FINDINGS\n## Summary\nResume settlement.\n## Findings\n"
+    "- finding_id:\n  severity: critical\n  status: open\n"
+    '  files: ["src/lithos_loom/plugins/story_develop/resume.py:200"]\n'
+    "  rationale: an infra death, then the resumed run ends interrupted, then a "
+    "scheduled usage retry that is not a resumed_from successor, then a second "
+    "infra death leaves the resume chain unsettled\n"
+)
+
+
+def test_regression_a1817376_an_in_model_contract_depth_is_a_decision(
+    config: DevelopConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 fixture, run a1817376 (#433 remediation, $102, max_rounds): the late
+    findings were IN the model — the story is about surviving infra deaths —
+    but asked how deep the resume contract goes (a triple-failure lifecycle).
+    The coder's exit is a needs-decision naming that depth, and the reviewer
+    keeps full severity for a lifecycle the criteria name."""
+    from dataclasses import replace
+
+    cfg = replace(config, review_scope=_LOOM_SCOPE)
+    state = _install_fakes(
+        monkeypatch, cfg, reviews=[{"text": _TRIPLE_FAILURE}, {"text": _LGTM}]
+    )
+
+    develop_mod.develop(cfg)
+
+    fix = _flat(state["coder_prompts"][1])
+    assert "a scheduled usage retry that is not a resumed_from successor" in fix
+    assert "how deep an in-model contract goes" in fix
+    assert "How deep does <contract> go" in fix
+    review = _flat(state["review_prompts"][-1])
+    assert (
+        "including a lifecycle the acceptance criteria describe — "
+        "keeps its full severity" in review
+    )
+
+
+@pytest.mark.parametrize(
+    ("template", "extra", "decisions", "route"),
+    [
+        (
+            "resume_coder_init.md",
+            {"description": "the story", "resume_brief": "resume here"},
+            True,
+            "Mark it `needs-decision`",
+        ),
+        (
+            "resolve_coder_init.md",
+            {"conflict_brief": "the conflicted paths"},
+            False,
+            None,  # merge-conflict resolution: the model, no finding route
+        ),
+    ],
+)
+def test_resume_and_resolve_coder_prompts_carry_the_model(
+    config: DevelopConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    template: str,
+    extra: dict,
+    decisions: bool,
+    route: str | None,
+) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, test_command="fake-tests", review_scope=_LOOM_SCOPE)
+    state = _install_fakes(
+        monkeypatch,
+        cfg,
+        write_source=False,
+        coder_handoffs={1: _NO_CHANGE_HANDOFF},
+        reviews=[{"text": _LGTM}],
+    )
+    entry = replace(
+        _no_change_entry(cfg),
+        coder_init_template=template,
+        coder_init_extra=extra,
+        decisions_enabled=decisions,
+    )
+
+    develop_mod.develop(cfg, entry=entry)
+
+    prompt = state["coder_prompts"][0]
+    assert _LOOM_SCOPE in prompt
+    assert "{review_scope}" not in prompt and "{scope_route}" not in prompt
+    if route:
+        assert route in _flat(prompt)
+    else:
+        assert "A finding outside the operational model" not in prompt

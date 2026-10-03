@@ -118,6 +118,11 @@ filed them; the others cite theirs.
    filed, including the in-model triple-failure case from a1817376. **Lands
    before T3's first slice**: T3 is write paths behind a trusted-network
    boundary, exactly the shape that churned five reviews.
+   **Built 2026-10-03** (SPEC §5.5): the block reaches every reviewer, triage
+   and coder prompt in every mode. Converge, which has no decision exit,
+   routes the coder to a dispute that quotes the model; giving
+   watcher-dispatched converge the `needs-decision` exit is its own task
+   (c754617a).
 2. **R2 — A churning review stops with the question** (task a3f17c21). As
    the operator, I want the shared round loop (story-develop, `converge`,
    `--from-github`, `--resolve-conflicts`) to compare each round's blocking

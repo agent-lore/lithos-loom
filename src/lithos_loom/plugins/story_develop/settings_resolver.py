@@ -39,6 +39,7 @@ from .config import (
     parse_test_command,
 )
 from .generated import parse_generated_paths, parse_regenerate_command
+from .review_scope import parse_review_scope
 
 # A config parser: ``(value, *, where) -> parsed | None``, raising ``ValueError`` on
 # a malformed value (the shared contract of parse_model / parse_image / … in config).
@@ -86,6 +87,9 @@ class ScalarSettings:
     # together: paths without a command are dropped with a friction.
     generated_paths: tuple[str, ...] = ()
     regenerate_command: str | None = None
+    # Review-convergence R1: the operational model (``develop_review_scope``),
+    # project-then-task. None = unset.
+    review_scope: str | None = None
     # The `develop_*` keys whose value a parser rejected (bare key, either
     # layer), in resolution order — the structural twin of the friction text.
     rejected_keys: tuple[str, ...] = ()
@@ -461,6 +465,17 @@ def resolve_scalar_settings(
         frictions,
         rejected,
     )
+    # Review-convergence R1, appended last like every newer field so the
+    # pinned friction order is unchanged.
+    review_scope = _resolve_project_then_task(
+        _ProjectThenTaskField(
+            "review_scope", "develop_review_scope", parse_review_scope
+        ),
+        meta,
+        task_metadata,
+        frictions,
+        rejected,
+    )
     if generated_paths and not regenerate_command:
         frictions.append(
             "develop_generated_paths: declared without develop_regenerate_command "
@@ -487,5 +502,6 @@ def resolve_scalar_settings(
         generated_paths=generated_paths,
         regenerate_command=regenerate_command,
         copilot_review=copilot_review,
+        review_scope=review_scope,
         rejected_keys=tuple(dict.fromkeys(rejected)),
     )

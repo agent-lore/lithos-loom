@@ -8,7 +8,11 @@
        acceptance-criteria line the finding already meets (or the in-scope
        code path that satisfies it) — this downgrades it to an ordinary
        dispute, which then costs further rounds, so contest only when you can
-       point at that line; or
+       point at that line. When the question asks whether an actor or
+       condition is in scope, the line you quote must be the criterion or
+       operational-model line that brings that actor into scope — a line that
+       excludes it (an "out of the model" list), or only touches the topic,
+       is not a citation, so concede; or
      - `decision_verdict: concede` **and no `decision_contest:`** — you
        cannot, and the question is the operator's. (The two keys together
        contradict each other and are rejected.)
