@@ -59,7 +59,10 @@ it finishes**. The run fails if you stop before writing the handoff.
 3. Write your response to `/workspace/.handoff/{handoff_file}` using the format
    in `/workspace/.handoff/FORMAT.md`: `## Status: LGTM` plus a `## Summary`
    that says, **per conflicted file**, which side won where and why, and what
-   you changed outside the markers to make the composition hold. Writing this
-   handoff file is the **last and required** step.
+   you changed outside the markers to make the composition hold. End it with the
+   `## Criteria` map (FORMAT.md): number the acceptance criteria `AC-1`, `AC-2`,
+   … and give each the change and the test that close it, describing the tree as
+   it now stands — reviewers verify every entry and must cover each id. Writing
+   this handoff file is the **last and required** step.
 
 Do not commit — the orchestrator handles git. Do not push or open a PR.

@@ -396,3 +396,49 @@ def test_needs_decision_is_taught_on_every_surface_that_uses_it() -> None:
 
     assert "both keys are required" in flat(escape).lower()
     assert "Both are required" in flat(fmt)
+
+
+@pytest.mark.parametrize(
+    "name", ["reviewer_round.md", "reviewer_rereview.md", "reviewer_reseed.md"]
+)
+def test_every_verdict_prompt_requires_the_written_criteria_map(name: str) -> None:
+    # R5a: the per-criterion walk is an OUTPUT the orchestrator checks — every
+    # reviewer prompt that can produce a passing verdict must ask for it, say
+    # it covers the coder's ids, and warn that a passing review without it is
+    # rejected. (The artifact pass is exempt: its verdict is ANDed with these.)
+    text = " ".join(load_prompt(name).split())
+    assert "## Criteria" in text
+    assert "one by one" in text.lower()
+    assert "every** one of them" in text
+    assert "without a complete map is rejected" in text
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "coder_init.md",
+        "coder_fix.md",
+        "converge_coder_init.md",
+        "resume_coder_init.md",
+        "resolve_coder_init.md",
+    ],
+)
+def test_every_coder_handoff_step_asks_for_the_criteria_map(name: str) -> None:
+    text = " ".join(load_prompt(name).split())
+    assert "`## Criteria` map" in text
+    assert "`AC-1`" in text
+
+
+def test_format_md_defines_the_criteria_map_for_both_roles() -> None:
+    fmt = " ".join(load_prompt("FORMAT.md").split())
+    assert "## Criteria" in fmt
+    for key in ("id:", "criterion:", "evidence:", "test:", "verdict:"):
+        assert key in fmt
+    assert "met | unmet | deferred" in fmt
+    # the rules the orchestrator enforces are the rules FORMAT.md states
+    assert "**every id the coder listed**" in fmt
+    assert "re-prompted once" in fmt
+    from lithos_loom.plugins.story_develop import criteria_map
+
+    assert f"at most {criteria_map.MAX_ENTRIES} entries" in fmt
+    assert f"at most {criteria_map.MAX_FIELD_CHARS} characters" in fmt

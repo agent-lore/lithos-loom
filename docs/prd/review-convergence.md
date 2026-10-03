@@ -160,6 +160,11 @@ filed them; the others cite theirs.
    [`prd-to-graph.md`](prd-to-graph.md) P1 adds to each slice is the input
    this checklist reads. **Precondition for M1**: a shadow record built on an
    approval that means only "locally sound" measures the wrong thing.
+   **Split 2026-10-03:** **R5a** (77064874) is the approval half — a review
+   that passes must carry a `## Criteria` map (criterion → code path + test),
+   checked by the panel against the coder's own map, a missing one re-prompted
+   once and then failing the run (SPEC §5.5). **R5b** (79b256cf) is the
+   gate-code half, after R5a. M1's reading window opens at R5a's merge.
 6. **M1 — Shadow auto-merge recording** (task 664d84c4). As the operator, I
    want the reconcile sweep to record, on each delivered PR's `pr` gate, the
    first moment loom *would* have merged it — `reconciliation_state =
@@ -233,7 +238,7 @@ per-reviewer model explicitly (3b38e86b).
 | Order | Story | Why here |
 |---|---|---|
 | 1 | R1 | before T3's first slice dispatches (with lithos-core bd66d57c, T3's own precondition) |
-| 2 | R5 | M1's precondition; the checklist half is already in the prompts |
+| 2 | R5a (R5b after) | M1's precondition; the checklist was in the prompts, R5a makes it an output the panel checks |
 | 3 | M1 | zero tokens; starts recording as soon as T3 delivers PRs |
 | 4 | R2 | the next run that churns is the acceptance test |
 | as they bite | R3, R4 | each has a known trigger (a conflicted resolution; a base move that breaks a delivered PR) |

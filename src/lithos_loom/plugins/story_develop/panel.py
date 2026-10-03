@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ...runner import git
-from . import check_artifacts, containers, engines, handoff, limits
+from . import check_artifacts, containers, criteria_map, engines, handoff, limits
 from .agent_session import (
     _CONTINUATION_PROMPT,
     INFRA_CONTINUATION_PROMPT,
@@ -418,6 +418,10 @@ def _run_reviewer_with_reaction(
     validate = reviewer_validator(
         rstate.ledger, findings_are_new=skip_lifecycle_validation
     )
+    if not skip_lifecycle_validation:  # R5a; the artifact pass is ANDed with this
+        validate = criteria_map.for_reviewer(
+            validate, rstate.ledger, rstate.spec.block_threshold, config, round_no
+        )
     review, rev_failed, rstate.session = _review_turn(
         config,
         services=services,

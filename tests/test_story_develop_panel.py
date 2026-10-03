@@ -316,7 +316,13 @@ def test_run_panel_round_routes_the_reviewer_turn_through_injected_services(
 # --- artifact pass: the artifact handoff controls the verdict (#291 re-review)
 
 
-_ART_LGTM = "## Status: LGTM\n## Summary\nCode looked fine earlier.\n"
+# Every passing review carries its acceptance-criteria map (R5a).
+_ART_LGTM = (
+    "## Status: LGTM\n## Summary\nCode looked fine earlier.\n"
+    "## Criteria\n- id: AC-1\n  criterion: greeting exists\n"
+    "  evidence: greeting.txt\n  test: tests/test_greeting.py::test_exists\n"
+    "  verdict: met\n"
+)
 _ART_FINDINGS = (
     "## Status: FINDINGS\n## Summary\nVisual breakage.\n## Findings\n"
     "- finding_id:\n  severity: major\n  status: open\n"
@@ -934,7 +940,7 @@ def test_tool_switch_uses_the_fallback_tools_default_model(
             return _limited_turn()
         (
             config.handoff_dir / handoff_mod.reviewer_handoff_name(1, "security")
-        ).write_text("## Status: LGTM\n## Summary\nok\n## Findings\n(none)\n")
+        ).write_text(_ART_LGTM)
         return _ok_turn(session_id)
 
     result = panel_mod.run_panel_round(
@@ -1688,3 +1694,135 @@ def test_a_symlinked_prior_review_is_not_reseeded_into_the_fallback_prompt(
 
     assert "hostfile" not in text
     assert "round one" in text
+
+
+# --- R5a: a passing review must carry its '## Criteria' evidence map ---------
+
+_NO_MAP_LGTM = "## Status: LGTM\n## Summary\nLooks done.\n"
+_TWO_CRITERIA = (
+    "## Criteria\n"
+    "- id: AC-1\n  criterion: greeting exists\n  evidence: greeting.txt\n"
+    "  test: tests/test_greeting.py::test_exists\n  verdict: met\n"
+    "- id: AC-2\n  criterion: greeting is polite\n  evidence: greeting.txt:1\n"
+    "  test: none: wording, read in the diff\n  verdict: met\n"
+)
+
+
+def _review_path(config: DevelopConfig, name: str = "correctness") -> Path:
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    return config.handoff_dir / handoff_mod.reviewer_handoff_name(1, name)
+
+
+def test_lgtm_without_a_criteria_map_is_corrected_then_passes(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    prompts: list[str] = []
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        prompts.append(prompt)
+        text = _NO_MAP_LGTM if len(prompts) == 1 else _NO_MAP_LGTM + _TWO_CRITERIA
+        _review_path(config).write_text(text)
+        return _ok_turn(session_id)
+
+    result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
+
+    assert len(prompts) == 2  # the one malformed-handoff correction
+    assert "## Criteria" in prompts[1]
+    out = result.round_reviews[0]
+    assert out.status == "LGTM" and out.passed is True
+    assert result.invalid_reviewer is None
+
+
+def test_lgtm_that_never_writes_a_map_is_invalid(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        _review_path(config).write_text(_NO_MAP_LGTM)
+        return _ok_turn(session_id)
+
+    result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
+
+    assert result.round_reviews[0].status == "invalid"
+    assert result.invalid_reviewer == "correctness"
+
+
+def test_a_passing_review_must_cover_the_coders_criteria(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    coder_map = _TWO_CRITERIA.replace("  verdict: met\n", "") + (
+        "- id: AC-3\n  criterion: farewell exists\n  evidence: farewell.txt\n"
+        "  test: tests/test_farewell.py::test_exists\n"
+    )
+    (config.handoff_dir / handoff_mod.coder_handoff_name(1)).write_text(
+        "## Status: LGTM\n## Summary\nImplemented.\n" + coder_map
+    )
+    prompts: list[str] = []
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        prompts.append(prompt)
+        _review_path(config).write_text(_NO_MAP_LGTM + _TWO_CRITERIA)
+        return _ok_turn(session_id)
+
+    result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
+
+    assert len(prompts) == 2
+    assert "AC-3" in prompts[1]
+    assert result.invalid_reviewer == "correctness"
+
+
+def test_a_blocking_review_needs_no_criteria_map(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    calls = {"n": 0}
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        calls["n"] += 1
+        _review_path(config).write_text(_ART_FINDINGS)
+        return _ok_turn(session_id)
+
+    result = _run_live_round(config, [_reviewer("correctness", tmp_path)], run_turn)
+
+    assert calls["n"] == 1
+    assert result.round_reviews[0].status == "FINDINGS"
+    assert result.invalid_reviewer is None
+
+
+def test_the_artifact_pass_needs_no_criteria_map(tmp_path: Path) -> None:
+    """The visual pass is ANDed with the regular review, which carries the map."""
+    config = _config(tmp_path)
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    _review_path(config).write_text(_NO_MAP_LGTM + _TWO_CRITERIA)
+    shots = config.artifacts_dir / "round_01" / "repo-parity"
+    shots.mkdir(parents=True)
+    (shots / "note-320.png").write_text("png")
+    calls = {"n": 0}
+
+    def run_turn(*, container, prompt, session_id, resume, timeout, engine, **kw):
+        calls["n"] += 1
+        _review_path(config, "correctness_artifacts").write_text(_NO_MAP_LGTM)
+        return _ok_turn(session_id)
+
+    result = panel_mod.run_panel_round(
+        config,
+        [_reviewer("correctness", tmp_path)],
+        wt=config.repo,
+        base=panel_mod.git.RangeBase("0" * 40),
+        round_no=1,
+        check_set=None,
+        gate_ledger=GateLedger(),
+        budget=panel_mod.PauseBudget(0),
+        reviewer_timeout=60,
+        coder_summary="",
+        services=_live_services(run_turn),
+        artifact_pass=True,
+    )
+
+    assert calls["n"] == 1
+    out = result.round_reviews[0]
+    assert out.status == "LGTM" and out.passed is True
