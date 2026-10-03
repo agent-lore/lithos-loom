@@ -43,11 +43,14 @@ can never be read across one (see :func:`_pusher`).
 
 **Open external review.** Ingestion consumes the actionable rows it posts,
 and a remediation that declines them (off, project opt-out, untrusted
-author, exhausted) leaves nothing durable, so the sweep passes
-``review_open`` and the record pins it to the head (``review_open_head``).
-A remediation round answers it: a converged push clears it with the head;
-a round seen in flight after the pin (``review_round_seen``) that settles
-without a push (findings refuted, nothing to change) clears it in place.
+author, exhausted) leaves nothing else durable, so ingestion writes a
+:data:`PIN_KEY` in the same write as its seen marks and the record pins
+that head (``review_open_head``), once per pin. A remediation round
+answers it: a converged push clears it with the head; a round seen in
+flight after the pin (``review_round_seen``) that settles without a push
+clears it in place — and re-approves the head when it was the loop's
+panel that settled it (``already_clean``). A sweep whose ingestion failed
+records no would-merge: its reviews are unknown.
 
 **Invalidation** (first one kept): after would-merge, a human push, an
 open review, or a stop state (``gate_failed`` / ``needs_human``). Transient
@@ -75,16 +78,21 @@ __all__ = [
     "APPROVAL_KEY",
     "BASES",
     "OUTCOMES",
+    "PIN_KEY",
     "SHADOW_KEY",
     "approval_marker",
     "observe",
     "outcome",
     "outcome_marker",
     "record_shadow",
+    "review_pin_marker",
 ]
 
 APPROVAL_KEY = "delivered_approval"
 SHADOW_KEY = "shadow_merge"
+# Written by ingestion in the SAME write that consumes an actionable batch
+# (the seen marks), so an open review survives a lost shadow write.
+PIN_KEY = "shadow_review_pin"
 
 BASES: tuple[str, ...] = ("approval", "no_approval_record")
 OUTCOMES: tuple[str, ...] = (
@@ -110,8 +118,11 @@ _REMEDIATION = "external_remediation"
 # `loom` is a loom push whose own record has since moved on
 _CARRYING_PUSHES = frozenset({"merge_gate", "conflict_resolve", "loom"})
 # a remediation round that settled the PR without pushing: every finding
-# refuted, or nothing to change (#380)
+# refuted, or nothing to change (#380). `already_clean` is the loop's gate
+# and panel approving the unchanged head, so it also binds an approval;
+# `triage_rejected` ran no panel.
 _NO_CHANGE_SETTLES = frozenset({"already_clean", "triage_rejected"})
+_PANEL_SETTLES = frozenset({"already_clean"})
 _STOP_STATES = frozenset({"gate_failed", "needs_human"})
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -161,6 +172,21 @@ def approval_marker(
     return {APPROVAL_KEY: record}
 
 
+def review_pin_marker(
+    pr_url: str, head_sha: str, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """The :data:`PIN_KEY` entry ingestion folds into the write that consumes
+    an actionable batch: the head it arrived on, and when (the pin's
+    identity — the shadow record applies each pin once)."""
+    return {
+        PIN_KEY: {
+            "pr_url": pr_url,
+            "head_sha": head_sha,
+            "at": (now or datetime.now(UTC)).isoformat(),
+        }
+    }
+
+
 def _fresh(meta: Mapping[str, Any], pr_url: str) -> dict[str, Any]:
     approval = _record(meta, APPROVAL_KEY, pr_url)
     approved = _full_sha(approval.get("head_sha"))
@@ -178,6 +204,7 @@ def _fresh(meta: Mapping[str, Any], pr_url: str) -> dict[str, Any]:
         "pushes_after_would_merge": {"loom": 0, "human": 0},
         "review_open_head": "",
         "review_round_seen": False,
+        "review_pin_at": "",
     }
 
 
@@ -252,6 +279,8 @@ def _review_settled(
         and budget.get("last_settled") is True
         and budget.get("last_status") in _NO_CHANGE_SETTLES
     ):
+        if budget.get("last_status") in _PANEL_SETTLES:
+            record["approved_head"] = record["observed_head"]
         record["review_open_head"] = ""
         record["review_round_seen"] = False
 
@@ -300,30 +329,52 @@ def _invalidation(record: Mapping[str, Any], pusher: str, head: str, state: str)
     return ""
 
 
+def _pin(record: dict[str, Any], head: str, pin_at: str) -> dict[str, Any]:
+    return {
+        **record,
+        "review_open_head": head,
+        "review_round_seen": False,
+        "review_pin_at": pin_at,
+    }
+
+
 def observe(
     meta: Mapping[str, Any],
     *,
     pr_url: str,
     head_sha: str,
     state: str,
-    review_open: bool,
+    review_failed: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
     """One sweep's observation of a still-open gate: the updated record, or
     ``None`` when nothing moved (or the record already has its outcome, or
-    the head is unknown). Pure; never raises on a malformed record."""
+    the head is unknown). Pure; never raises on a malformed record.
+
+    *review_failed* is a sweep whose review ingestion did not complete: the
+    reviews are unknown, so it records no would-merge (pushes are still
+    attributed). A new :data:`PIN_KEY` on the gate pins its head as open —
+    at the pinned head when the record last saw it (so the push since is
+    carried or settled as any other), else at the current head."""
     head = _full_sha(head_sha)
     stored = _load(meta, pr_url)
     if not head or (stored is not None and "outcome" in stored):
         return None
-    record, pusher = _apply_push(stored or _fresh(meta, pr_url), meta, pr_url, head)
-    if review_open:
-        record["review_open_head"] = head
-        record["review_round_seen"] = False
+    record = stored or _fresh(meta, pr_url)
+    pin = _record(meta, PIN_KEY, pr_url)
+    pin_at = _str(pin.get("at"))
+    new_pin = bool(pin_at) and pin_at != record["review_pin_at"]
+    pinned = _full_sha(pin.get("head_sha"))
+    if new_pin and pinned and pinned == record["observed_head"]:
+        record, new_pin = _pin(record, pinned, pin_at), False
+    record, pusher = _apply_push(record, meta, pr_url, head)
+    if new_pin:
+        record = _pin(record, head, pin_at)
     _review_settled(record, meta, pr_url)
     at = (now or datetime.now(UTC)).isoformat()
     qualifies = (
-        record["basis"] == "approval"
+        not review_failed
+        and record["basis"] == "approval"
         and state == "ready_to_merge"
         and record["approved_head"] == head
         and record["review_open_head"] != head
@@ -429,13 +480,17 @@ async def record_shadow(
     pr_url: str,
     head_sha: str,
     state: str,
-    review_open: bool,
+    review_failed: bool = False,
 ) -> bool:
     """Observe a still-open gate and write its record when it moved. Returns
-    whether a write landed. Never raises: a lost write is re-derived from
-    the PR next sweep (only a push between the two goes unattributed)."""
+    whether a write landed. Never raises: a lost write is re-derived next
+    sweep from the PR and the gate (the review pin is durable on its own)."""
     record = observe(
-        meta, pr_url=pr_url, head_sha=head_sha, state=state, review_open=review_open
+        meta,
+        pr_url=pr_url,
+        head_sha=head_sha,
+        state=state,
+        review_failed=review_failed,
     )
     if record is None:
         return False

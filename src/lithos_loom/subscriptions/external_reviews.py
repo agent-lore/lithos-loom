@@ -337,6 +337,7 @@ async def ingest_external_reviews(
     extra_note: str | None = None,
     post_merge: bool = False,
     pending_marker_for: PendingMarkerProvider | None = None,
+    actionable_marker: Mapping[str, Any] | None = None,
 ) -> IngestResult:
     """Ingest new review activity on one still-open gate's PR. Never raises.
 
@@ -360,8 +361,10 @@ async def ingest_external_reviews(
     1+3) marks the merged-path final observation: the rendered record says
     the activity was discovered after merge, and the caller reads
     ``IngestResult.failed`` to defer gate resolution instead of losing the
-    record. Returns the posted batch for the
-    dispatcher — see :class:`IngestResult`.
+    record. ``actionable_marker`` (review-convergence M1) rides the same
+    write whenever the batch carries an actionable row: the shadow-merge
+    record's open-review pin, durable exactly when the batch is consumed.
+    Returns the posted batch for the dispatcher — see :class:`IngestResult`.
     """
     seen = _read_seen(gate, spec.pr_url)
     try:
@@ -395,6 +398,8 @@ async def ingest_external_reviews(
     marker: dict[str, Any] = {
         REVIEW_SEEN_KEY: _new_marker(spec.pr_url, seen, activities)
     }
+    if batch and actionable_marker:
+        marker.update(actionable_marker)
 
     if not batch and not approvals:
         # Only silent material (dismissals, replies, our own automated

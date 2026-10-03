@@ -71,7 +71,11 @@ from lithos_loom.subscriptions.reconciliation_state import (
     settle_state,
 )
 from lithos_loom.subscriptions.remediation_budget import RemediationNotifier
-from lithos_loom.subscriptions.shadow_merge import outcome_marker, record_shadow
+from lithos_loom.subscriptions.shadow_merge import (
+    outcome_marker,
+    record_shadow,
+    review_pin_marker,
+)
 
 # A deferred reconciliation-state write: the sweep awaits these after every
 # gate has been through the dispatchers (PR #369 round 3).
@@ -354,10 +358,8 @@ async def reconcile_pr_gate(
         # commit reads as a human push and resets the S5b budget
         await conflict_resolve.recover_debt(gate, spec, story_id, ctx)
     said = Dispositions()
-    # M1: ingestion consumes actionable rows, and a remediation that declines
-    # them (off, project opt-out, untrusted, exhausted) leaves nothing durable
-    # — the shadow record pins them to this head until a round answers them
-    review_open = False
+    # M1: a sweep whose review check did not complete records no would-merge
+    review_failed = False
     if ingest_reviews:
         budget = None
         note = None
@@ -383,8 +385,12 @@ async def reconcile_pr_gate(
                 if remediation is not None and budget is not None
                 else None
             ),
+            # M1: an actionable batch pins this head as open in the write
+            # that consumes it — a remediation that declines it (off, opt-out,
+            # untrusted, exhausted) leaves nothing else durable
+            actionable_marker=review_pin_marker(spec.pr_url, pr.head_sha),
         )
-        review_open = bool(ingest.actionable)
+        review_failed = ingest.failed
         if remediation is not None and budget is not None:
             if ingest.actionable:
                 label: str | None = await remediation.consider(
@@ -471,7 +477,7 @@ async def reconcile_pr_gate(
             pr_url=spec.pr_url,
             head_sha=pr.head_sha,
             state=settled.derived.state,
-            review_open=review_open,
+            review_failed=review_failed,
         )
 
     if merge_gate is None or said.regate != "probing":

@@ -8,6 +8,7 @@ operator actually did. Zero tokens: a recording, never a decision.
 
 from __future__ import annotations
 
+import itertools
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -17,12 +18,14 @@ from lithos_loom.subscriptions import SubscriptionContext
 from lithos_loom.subscriptions.shadow_merge import (
     APPROVAL_KEY,
     OUTCOMES,
+    PIN_KEY,
     SHADOW_KEY,
     approval_marker,
     observe,
     outcome,
     outcome_marker,
     record_shadow,
+    review_pin_marker,
 )
 from tests.support import FakeLithosClient
 
@@ -40,26 +43,39 @@ def _approval(head: str = _A, *, url: str = _URL) -> dict[str, Any]:
     return marker
 
 
+_PINS = itertools.count()
+
+
+def _with_pin(meta: dict[str, Any], head: str) -> dict[str, Any]:
+    """What ingestion leaves on the gate when it consumes an actionable batch."""
+    stamp = _T0 + timedelta(microseconds=next(_PINS))
+    return {**meta, **review_pin_marker(_URL, head, now=stamp)}
+
+
 def _observe(
     meta: dict[str, Any],
     *,
     head: str = _A,
     state: str = "ready_to_merge",
     review_open: bool = False,
+    review_failed: bool = False,
     at: datetime = _T0,
 ) -> dict[str, Any] | None:
     return observe(
-        meta,
+        _with_pin(meta, head) if review_open else meta,
         pr_url=_URL,
         head_sha=head,
         state=state,
-        review_open=review_open,
+        review_failed=review_failed,
         now=at,
     )
 
 
 def _step(meta: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-    """One sweep: observe, then fold the record back in as the write would."""
+    """One sweep: ingestion's pin (when *review_open*), then the observation,
+    folded back in as the two writes would."""
+    if kwargs.pop("review_open", False):
+        meta = _with_pin(meta, kwargs.get("head", _A))
     record = _observe(meta, **kwargs)
     return {**meta, SHADOW_KEY: record} if record is not None else meta
 
@@ -389,7 +405,6 @@ async def test_record_shadow_writes_only_when_the_record_moves() -> None:
         "pr_url": _URL,
         "head_sha": _A,
         "state": "ready_to_merge",
-        "review_open": False,
     }
     assert await record_shadow(gate.id, gate.metadata, ctx, **kwargs) is True
     stored = await client.task_get(task_id=gate_id)
@@ -417,7 +432,6 @@ async def test_record_shadow_never_raises_on_a_failed_write() -> None:
         pr_url=_URL,
         head_sha=_A,
         state="ready_to_merge",
-        review_open=False,
     )
     assert landed is False
 
@@ -533,3 +547,93 @@ def test_a_merge_before_the_would_merge_stamp_reads_zero_elapsed() -> None:
     record = outcome(meta, pr_url=_URL, how="merged", head_sha=_A, merged_at=early)
     assert record is not None
     assert record["elapsed_s"] == 0
+
+
+# ── PR #440 review (davesnowdon) ─────────────────────────────────────────
+
+
+def test_a_failed_review_check_records_no_would_merge() -> None:
+    """F1: the reviews are unknown, so the verdict waits for a sweep that
+    read them — it is recorded once and never revised."""
+    record = _observe(_approval(), review_failed=True)
+    assert record is not None
+    assert record["would_merge_at"] == ""
+    later = _observe(_approval(), at=_T0 + timedelta(hours=1))
+    assert later is not None and later["would_merge_head"] == _A
+
+
+def test_a_failed_review_check_still_attributes_pushes() -> None:
+    meta = _step(_approval(), state="behind")
+    record = _observe(_loom_push(meta, _B, "merge_gate"), head=_B, review_failed=True)
+    assert record is not None
+    assert record["approved_head"] == _B
+    assert record["would_merge_at"] == ""
+
+
+def test_a_pin_survives_a_lost_shadow_write() -> None:
+    """F2: ingestion consumed the batch and wrote its pin; the shadow write
+    of that sweep was lost. The next sweep finds the pin and still blocks."""
+    meta = _with_pin(_step(_approval(), state="behind"), _A)  # no shadow write
+    record = _observe(meta)
+    assert record is not None
+    assert record["review_open_head"] == _A
+    assert record["would_merge_at"] == ""
+
+
+def test_a_pin_is_applied_once() -> None:
+    meta = _step(_approval(), review_open=True)
+    meta = _step({**meta, **_budget(in_flight_boot_id="b")}, state="reconciling")
+    done = _budget(
+        in_flight_boot_id="", last_status="triage_rejected", last_settled=True
+    )
+    meta = _step({**meta, **done})
+    assert meta[SHADOW_KEY]["review_open_head"] == ""
+    assert PIN_KEY in meta  # the pin is still on the gate…
+    assert _observe(meta) is None  # the next sweep finds nothing to change
+    assert meta[SHADOW_KEY]["would_merge_head"] == _A  # …and did not re-pin
+
+
+def test_a_pin_on_a_head_the_record_last_saw_is_carried_by_a_base_merge() -> None:
+    meta = _with_pin(_step(_approval(), state="behind"), _A)  # pin at A, unseen
+    record = _observe(_loom_push(meta, _B, "merge_gate"), head=_B)
+    assert record is not None
+    assert record["review_open_head"] == _B
+    assert record["would_merge_at"] == ""
+
+
+def test_a_pin_on_a_head_the_record_last_saw_is_settled_by_a_remediation() -> None:
+    meta = _with_pin(_step(_approval(), state="behind"), _A)
+    record = _observe(_loom_push(meta, _B, "remediation"), head=_B)
+    assert record is not None
+    assert record["review_open_head"] == ""
+    assert record["would_merge_head"] == _B
+
+
+def test_a_panel_approved_no_change_round_re_approves_a_human_head() -> None:
+    """F3: `already_clean` is the loop's gate + panel approving the unchanged
+    head — after a human push it binds the approval to that head."""
+    meta = _step(_approval(), state="awaiting_review")
+    meta = _step(meta, head=_B, review_open=True)  # human push, then a review
+    assert meta[SHADOW_KEY]["approved_head"] == ""
+    meta = _step(
+        {**meta, **_budget(in_flight_boot_id="b")}, head=_B, state="reconciling"
+    )
+    done = _budget(in_flight_boot_id="", last_status="already_clean", last_settled=True)
+    meta = _step({**meta, **done}, head=_B)
+    assert meta[SHADOW_KEY]["approved_head"] == _B
+    assert meta[SHADOW_KEY]["would_merge_head"] == _B
+
+
+def test_a_triage_rejection_settles_the_review_but_binds_no_approval() -> None:
+    meta = _step(_approval(), state="awaiting_review")
+    meta = _step(meta, head=_B, review_open=True)
+    meta = _step(
+        {**meta, **_budget(in_flight_boot_id="b")}, head=_B, state="reconciling"
+    )
+    done = _budget(
+        in_flight_boot_id="", last_status="triage_rejected", last_settled=True
+    )
+    meta = _step({**meta, **done}, head=_B)
+    assert meta[SHADOW_KEY]["review_open_head"] == ""
+    assert meta[SHADOW_KEY]["approved_head"] == ""
+    assert meta[SHADOW_KEY]["would_merge_at"] == ""

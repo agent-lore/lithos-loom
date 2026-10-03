@@ -65,7 +65,7 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 | `lithos_loom.subscriptions.resume_record` | S | 1 | 5 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 2 |
-| `lithos_loom.subscriptions.shadow_merge` | M | 0 | 5 |
+| `lithos_loom.subscriptions.shadow_merge` | M | 0 | 6 |
 
 ## Public API
 
@@ -348,10 +348,11 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 
 ### `lithos_loom.subscriptions.shadow_merge`
 - def `approval_marker` — The :data:`APPROVAL_KEY` entry for a gate's creation metadata, or ``None`` when *head_sha* is not a full object name (a short or missing record binds nothing — the gate then reads ``no_approval_record``).
+- def `review_pin_marker` — The :data:`PIN_KEY` entry ingestion folds into the write that consumes an actionable batch: the head it arrived on, and when (the pin's identity — the shadow record applies each pin once).
 - def `observe` — One sweep's observation of a still-open gate: the updated record, or ``None`` when nothing moved (or the record already has its outcome, or the head is unknown). Pure; never raises on a malformed record.
 - def `outcome` — The record with the operator's outcome, or ``None`` when one is already recorded. *how* is the gate's resolution: ``merged`` (classified against the would-merge head), ``closed_unmerged``, ``gone`` or ``waiter_resolved``.
 - def `outcome_marker` — :func:`outcome` as a marker to fold into the resolution's own write, or ``{}`` when the outcome is already recorded.
-- def `record_shadow` — Observe a still-open gate and write its record when it moved. Returns whether a write landed. Never raises: a lost write is re-derived from the PR next sweep (only a push between the two goes unattributed).
+- def `record_shadow` — Observe a still-open gate and write its record when it moved. Returns whether a write landed. Never raises: a lost write is re-derived next sweep from the PR and the gate (the review pin is durable on its own).
 
 ## Dependencies
 

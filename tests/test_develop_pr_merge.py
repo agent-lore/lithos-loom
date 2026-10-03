@@ -2850,3 +2850,93 @@ async def test_a_lost_outcome_write_holds_the_merged_gate_for_a_retry() -> None:
     done = await _get(client, gate.id)
     assert done.status == "completed"
     assert done.metadata[SHADOW_KEY]["outcome"] == "merged_at_head"
+
+
+async def test_a_reused_gate_retries_the_outcome_its_marker_write_lost() -> None:
+    """PR #440 review F4: the conversion completes the pr gate (the human
+    gate holds the story), so an outcome the marker write lost gets one
+    write of its own first."""
+    from lithos_loom.subscriptions.shadow_merge import SHADOW_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate, existing = await _story_under_conflict_gate(client)
+    original = client.task_update
+    failed: list[bool] = []
+
+    async def _first_gate_write_fails(**kwargs: Any) -> Any:
+        if kwargs["task_id"] == gate.id and not failed:
+            failed.append(True)
+            raise LithosClientError("internal", "boom")
+        return await original(**kwargs)
+
+    client.task_update = _first_gate_write_fails  # type: ignore[method-assign]
+
+    outcome = await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    assert outcome == "closed_unmerged"
+    done = await _get(client, gate.id)
+    assert done.status == "completed"
+    assert done.metadata[SHADOW_KEY]["outcome"] == "closed_unmerged"
+
+
+async def test_a_terminal_story_re_marks_a_gate_whose_outcome_is_owed() -> None:
+    """The tidy path holds nothing: a gate marked before the outcome existed
+    (or whose outcome write was lost) is re-marked before it completes."""
+    from lithos_loom.subscriptions.shadow_merge import SHADOW_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    story, gate = await _gate_with_story(client)
+    await client.task_update(
+        task_id=gate.id,
+        metadata={MERGE_STATE_KEY: "closed_unmerged", MERGE_STATE_URL_KEY: _PR_URL},
+    )
+    await client.task_complete(task_id=story)
+    gate = await _get(client, gate.id)
+
+    await reconcile_pr_gate(
+        gate, _github(_pr(state="closed", merged=False)), _ctx(client)
+    )
+
+    done = await _get(client, gate.id)
+    assert done.status == "completed"
+    assert done.metadata[SHADOW_KEY]["outcome"] == "closed_unmerged"
+
+
+async def test_a_failed_review_fetch_records_no_would_merge() -> None:
+    """PR #440 review F1: an actionable review may be behind the failure,
+    and the first verdict is never revised — so none is recorded."""
+    from lithos_loom.subscriptions.shadow_merge import SHADOW_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    _, gate = await _approved_gate(client)
+    github = _review_github(_landable_open_pr())
+    github.list_pull_request_reviews.side_effect = GitHubError("boom")
+
+    await reconcile_pr_gate(gate, github, _ctx(client), ingest_reviews=True)
+
+    record = (await _get(client, gate.id)).metadata[SHADOW_KEY]
+    assert record["would_merge_at"] == ""
+
+
+async def test_the_review_pin_rides_the_write_that_consumes_the_batch() -> None:
+    """PR #440 review F2: the seen marks consume the batch, so the open-review
+    pin must be durable in that same write, not in a later shadow write."""
+    from lithos_loom.subscriptions.external_reviews import REVIEW_SEEN_KEY
+    from lithos_loom.subscriptions.shadow_merge import PIN_KEY
+
+    client = FakeLithosClient(agent_id="a")
+    _, gate = await _approved_gate(client)
+
+    await reconcile_pr_gate(
+        gate, _review_github(_landable_open_pr()), _ctx(client), ingest_reviews=True
+    )
+
+    (consumed,) = [
+        c["metadata"]
+        for c in client.calls_to("task_update")
+        if c["task_id"] == gate.id and REVIEW_SEEN_KEY in c["metadata"]
+    ]
+    assert consumed[PIN_KEY]["head_sha"] == _APPROVED
+    assert consumed[PIN_KEY]["pr_url"] == _PR_URL
