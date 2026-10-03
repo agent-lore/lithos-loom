@@ -540,6 +540,21 @@ def approval_unbound(facts: RunFacts, *, delivered_head: str) -> str:
     return "; ".join(reasons)
 
 
+def gate_approval(facts: RunFacts, *, delivered_head: str, chained: bool) -> str:
+    """The approved head the delivered ``pr`` gate records (review-convergence
+    M1), or ``""`` for none.
+
+    Only an approval bound to the revision the PR delivers, judged against
+    the run's own story (:func:`approval_unbound`). And none after a chained
+    converge: it may push before the gate exists, where nothing attributes
+    the push to loom — the sweep would read it as a human's and record a
+    disagreement that never happened, so the gate is left unmeasured.
+    """
+    if chained or approval_unbound(facts, delivered_head=delivered_head):
+        return ""
+    return facts.approved_head
+
+
 def reviews_summary(facts: RunFacts, *, delivered_head: str = "") -> str:
     """The Review section's verdict line: what the panel recorded, if anything.
 

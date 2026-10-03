@@ -169,7 +169,9 @@ filed them; the others cite theirs.
    unmerged; merged although loom never reached would-merge) with the delta,
    reported by `lithos-loom gates` or an eval summary, so that the
    merge-policy dial is turned on a measured agreement rate rather than a
-   feeling. Zero tokens: every input already exists on the gate. The escape
+   feeling. Zero tokens: every input is on the gate except the approved
+   head, which lived only in the run's `result.json` until the delivery
+   began writing it onto the gate (2026-10-03, SPEC §2.2). The escape
    corpus already holds recorded external-review verdicts for 21 lens PRs and
    is the retrospective half of the same measurement. Decision 2026-09-29:
    "if it is cheap, get it in early."

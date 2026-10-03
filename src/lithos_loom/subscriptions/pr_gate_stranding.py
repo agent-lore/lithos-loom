@@ -77,6 +77,7 @@ from lithos_loom.subscriptions.reconciliation_state import (
     closed_state_marker,
 )
 from lithos_loom.subscriptions.remediation_budget import RemediationNotifier
+from lithos_loom.subscriptions.shadow_merge import outcome_marker
 
 __all__ = [
     "DELIVERED_PR_CLOSED",
@@ -313,6 +314,8 @@ async def convert_stranded_gate(
         MERGE_STATE_KEY: merge_state,
         MERGE_STATE_URL_KEY: spec.pr_url,
         **closed_state_marker(spec.pr_url, merge_state),  # PRD S7: one write
+        # M1: the operator's outcome rides the same write
+        **outcome_marker(gate.metadata, pr_url=spec.pr_url, how=merge_state),
     }
     already_marked = (
         gate.metadata.get(MERGE_STATE_KEY) == merge_state

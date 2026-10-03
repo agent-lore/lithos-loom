@@ -66,6 +66,7 @@ from lithos_loom.gates import (
 )
 from lithos_loom.subscriptions.delivery_gate import record_delivery_on_story
 from lithos_loom.subscriptions.dispatch_guards import LAST_ATTEMPT_KEY_PREFIX
+from lithos_loom.subscriptions.shadow_merge import approval_marker
 
 __all__ = [
     "DELIVERY_MARKER_KEY",
@@ -639,9 +640,16 @@ async def gate_delivery(
     run_id: str,
     agent: str,
     dispatch_routes: Sequence[str],
+    approved_head: str = "",
 ) -> GateOutcome:
     """Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire this run's
     own human gate(s).
+
+    *approved_head* is the run's panel-approved revision when it is bound to
+    the delivered head (:func:`~._deliver_facts.approval_unbound`), else
+    ``""``. A gate this pass raises carries it as the M1 approval record
+    (:mod:`lithos_loom.subscriptions.shadow_merge`); an adopted gate keeps
+    whatever its creator recorded.
 
     Ordering is load-bearing: the ``pr`` gate must hold the story **before**
     any human gate is completed, or the story is momentarily on the ready
@@ -710,6 +718,9 @@ async def gate_delivery(
             pr_url=pr_url,
             project=live.project,
             agent=agent,
+            extra_metadata=approval_marker(
+                pr_url, approved_head, source="deliver", run_id=run_id
+            ),
         )
         if problem is not None:
             outcome.problems.append(problem)

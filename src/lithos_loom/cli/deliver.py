@@ -97,6 +97,7 @@ from lithos_loom.cli._deliver_converge import (
 )
 from lithos_loom.cli._deliver_facts import (
     RunFacts,
+    gate_approval,
     pr_body,
     sanitize_for_terminal,
 )
@@ -736,6 +737,11 @@ def _deliver_claimed(
                 pr_url=pr_url,
                 run_id=facts.run_id,
                 dispatch_routes=routes,
+                approved_head=gate_approval(
+                    facts,
+                    delivered_head=record["pr_head_sha"],
+                    chained=record.get("converge") is not None,
+                ),
             )
         except DeliverRefused as exc:
             notes.append(

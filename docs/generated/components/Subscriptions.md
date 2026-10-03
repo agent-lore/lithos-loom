@@ -52,7 +52,7 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 | `lithos_loom.subscriptions.pr_gate_stranding` | M | 1 | 4 |
 | `lithos_loom.subscriptions.pr_landability` | S | 0 | 2 |
 | `lithos_loom.subscriptions.ready_recheck` | S | 1 | 1 |
-| `lithos_loom.subscriptions.reconciliation_state` | M | 3 | 3 |
+| `lithos_loom.subscriptions.reconciliation_state` | M | 4 | 4 |
 | `lithos_loom.subscriptions.remediation_budget` | S | 3 | 1 |
 | `lithos_loom.subscriptions.remediation_lifecycle` | M | 1 | 0 |
 | `lithos_loom.subscriptions.remediation_lifecycle._escalation` | S | 0 | 3 |
@@ -65,6 +65,7 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 | `lithos_loom.subscriptions.resume_record` | S | 1 | 5 |
 | `lithos_loom.subscriptions.retry` | XS | 0 | 1 |
 | `lithos_loom.subscriptions.route_runner` | L | 1 | 2 |
+| `lithos_loom.subscriptions.shadow_merge` | M | 0 | 5 |
 
 ## Public API
 
@@ -275,7 +276,9 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 - class `Derived`
 - def `derive_state` — The PR's state from the gate's markers + the fetched PR + what runs + what the dispatchers said (see the module doc for the precedence). Pure; never raises on a malformed marker — a marker it cannot read is a marker that is absent. The detail is truncated here, so what is compared is what is stored.
 - def `closed_state_marker` — The state keys for a closed / deleted PR, folded into the merge marker's own write so the two never disagree.
-- def `record_state` — Derive the still-open gate's state from the gate AS IT IS NOW and write it when it moved. Returns the new state on a transition, ``None`` otherwise (unchanged, a detail-only move, or a failed write — the next sweep re-derives). Never raises.
+- class `Settled` — What :func:`settle_state` derived, and from which gate metadata — so a later step of the same sweep reads the gate as the state saw it instead of re-reading it.
+- def `record_state` — Derive the still-open gate's state from the gate AS IT IS NOW and write it when it moved. Returns the new state on a transition, ``None`` otherwise (unchanged, a detail-only move, or a failed write — the next sweep re-derives). Never raises. See :func:`settle_state`.
+- def `settle_state` — :func:`record_state`, returning what it derived and from what.
 
 ### `lithos_loom.subscriptions.remediation_budget`
 - class `RemediationNotifier`
@@ -342,6 +345,13 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 - def `resumable_checkpoint_under` — The first run dir under *work_dir* whose checkpoint has a committed round.
 - def `leaves_a_resumable_run` — Whether *result*'s exit is one a later dispatch may CONTINUE on its branch.
 - class `RouteRunner` — One claim-bound subscriber per route.
+
+### `lithos_loom.subscriptions.shadow_merge`
+- def `approval_marker` — The :data:`APPROVAL_KEY` entry for a gate's creation metadata, or ``None`` when *head_sha* is not a full object name (a short or missing record binds nothing — the gate then reads ``no_approval_record``).
+- def `observe` — One sweep's observation of a still-open gate: the updated record, or ``None`` when nothing moved (or the record already has its outcome, or the head is unknown). Pure; never raises on a malformed record.
+- def `outcome` — The record with the operator's outcome, or ``None`` when one is already recorded. *how* is the gate's resolution: ``merged`` (classified against the would-merge head), ``closed_unmerged``, ``gone`` or ``waiter_resolved``.
+- def `outcome_marker` — :func:`outcome` as a marker to fold into the resolution's own write, or ``{}`` when the outcome is already recorded.
+- def `record_shadow` — Observe a still-open gate and write its record when it moved. Returns whether a write landed. Never raises: a lost write is re-derived from the PR next sweep (only a push between the two goes unattributed).
 
 ## Dependencies
 

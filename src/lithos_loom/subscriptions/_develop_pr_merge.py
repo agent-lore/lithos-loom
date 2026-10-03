@@ -26,7 +26,7 @@ gate is now the sole merge-tracking and re-dispatch path.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -68,9 +68,10 @@ from lithos_loom.subscriptions.reconciliation_state import (
     Busy,
     Dispositions,
     closed_state_marker,
-    record_state,
+    settle_state,
 )
 from lithos_loom.subscriptions.remediation_budget import RemediationNotifier
+from lithos_loom.subscriptions.shadow_merge import outcome_marker, record_shadow
 
 # A deferred reconciliation-state write: the sweep awaits these after every
 # gate has been through the dispatchers (PR #369 round 3).
@@ -310,7 +311,16 @@ async def reconcile_pr_gate(
                     spec.pr_url,
                 )
                 return "error"
-        if await _resolve_gate_merged(gate, story_id, spec.pr_url, pr, ctx):
+        shadow = outcome_marker(
+            gate.metadata,
+            pr_url=spec.pr_url,
+            how="merged",
+            head_sha=pr.head_sha,
+            merged_at=pr.merged_at,
+        )
+        if await _resolve_gate_merged(
+            gate, story_id, spec.pr_url, pr, ctx, shadow=shadow
+        ):
             return "merged"
         # A completion failed transiently; the gate is left open and retried
         # next sweep. Report it as `error` (not `merged`) so the sweep summary
@@ -344,6 +354,10 @@ async def reconcile_pr_gate(
         # commit reads as a human push and resets the S5b budget
         await conflict_resolve.recover_debt(gate, spec, story_id, ctx)
     said = Dispositions()
+    # M1: ingestion consumes actionable rows, and a remediation that declines
+    # them (off, project opt-out, untrusted, exhausted) leaves nothing durable
+    # — the shadow record pins them to this head until a round answers them
+    review_open = False
     if ingest_reviews:
         budget = None
         note = None
@@ -370,6 +384,7 @@ async def reconcile_pr_gate(
                 else None
             ),
         )
+        review_open = bool(ingest.actionable)
         if remediation is not None and budget is not None:
             if ingest.actionable:
                 label: str | None = await remediation.consider(
@@ -430,7 +445,7 @@ async def reconcile_pr_gate(
     async def write_state(regate: str | None) -> None:
         # busy is read at WRITE time: a probe that found a moved fingerprint
         # starts its run as it settles
-        await record_state(
+        settled = await settle_state(
             gate,
             pr,
             spec.pr_url,
@@ -446,6 +461,17 @@ async def reconcile_pr_gate(
                 and conflict_resolve.debt_on(spec.pr_url),
             ),
             dispositions=replace(said, regate=regate),
+        )
+        # M1: the shadow record reads the state the sweep just derived, from
+        # the same re-read of the gate
+        await record_shadow(
+            gate.id,
+            settled.meta,
+            ctx,
+            pr_url=spec.pr_url,
+            head_sha=pr.head_sha,
+            state=settled.derived.state,
+            review_open=review_open,
         )
 
     if merge_gate is None or said.regate != "probing":
@@ -470,7 +496,13 @@ async def reconcile_pr_gate(
 
 
 async def _resolve_gate_merged(
-    gate: Any, story_id: str | None, pr_url: str, pr: Any, ctx: SubscriptionContext
+    gate: Any,
+    story_id: str | None,
+    pr_url: str,
+    pr: Any,
+    ctx: SubscriptionContext,
+    *,
+    shadow: Mapping[str, Any] | None = None,
 ) -> bool:
     """PR merged: complete the story, then the gate, then post ``[GateResolved]``.
 
@@ -506,7 +538,13 @@ async def _resolve_gate_merged(
     own completion), with one breadcrumb on the story. A failed
     completion or an unreadable edge list still returns ``False`` here without
     nudging anyone, so that retry stays possible.
+
+    *shadow* is the M1 outcome marker (:mod:`.shadow_merge`): it rides the
+    nudge record's write, or its own, before the gate's completion — no
+    sweep follows that, so a write that does not land holds the completion
+    and the next sweep recomputes the same outcome from the same record.
     """
+    marker: dict[str, Any] = dict(shadow or {})
     if story_id is not None:
         completion = await _complete_story(story_id, gate, pr_url, ctx)
         if completion is None:
@@ -520,17 +558,22 @@ async def _resolve_gate_merged(
             # or losing it (see NUDGE_RECOVERED_KEY). Best-effort like the
             # nudge itself: if it does not land the next sweep re-nudges,
             # which is the pre-existing behaviour and no worse than it.
-            await write_marker(
-                ctx,
-                task_id=gate.id,
-                marker={NUDGE_RECOVERED_KEY: completion.record.as_metadata()},
-                subsystem="pr-gate",
-            )
+            marker[NUDGE_RECOVERED_KEY] = completion.record.as_metadata()
+        landed = not marker or await write_marker(
+            ctx, task_id=gate.id, marker=marker, subsystem="pr-gate"
+        )
+        if shadow and not landed:
+            return False  # the outcome must land before the completion
+        marker = {}
         if completion.defer:
             # Candidates left unclassified: keep the gate in the swept open set
             # so the next sweep can finish the job. Reported as `error`, not
             # `merged` — the resolution has not landed.
             return False
+    if marker and not await write_marker(  # an orphan gate: nothing above wrote
+        ctx, task_id=gate.id, marker=marker, subsystem="pr-gate"
+    ):
+        return False
     if not await complete_swallowing(
         ctx, task_id=gate.id, subject=f"gate {gate.id}", subsystem="pr-gate"
     ):
@@ -652,7 +695,11 @@ async def _waiter_resolved(
     ) and not await write_marker(
         ctx,
         task_id=gate.id,
-        marker={MERGE_STATE_KEY: "waiter_resolved", MERGE_STATE_URL_KEY: spec.pr_url},
+        marker={
+            MERGE_STATE_KEY: "waiter_resolved",
+            MERGE_STATE_URL_KEY: spec.pr_url,
+            **outcome_marker(gate.metadata, pr_url=spec.pr_url, how="waiter_resolved"),
+        },
         subsystem="pr-gate",
     ):
         return "error"  # the audit trail must land before the completion
@@ -699,6 +746,7 @@ async def _gate_closed(
             MERGE_STATE_KEY: marker,
             MERGE_STATE_URL_KEY: spec.pr_url,
             **closed_state_marker(spec.pr_url, marker),  # PRD S7: one write
+            **outcome_marker(gate.metadata, pr_url=spec.pr_url, how=marker),
         },
         subsystem="pr-gate",
     )

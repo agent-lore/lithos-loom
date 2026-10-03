@@ -1654,6 +1654,39 @@ async def test_completes_task_false_creates_pr_gate(
     lithos.task_release.assert_awaited_once()
 
 
+async def test_a_delivered_head_rides_the_gate_as_its_approval_record(
+    tmp_path: Path,
+) -> None:
+    """M1: the head the panel approved is ``result.json``'s last commit —
+    nothing else in Lithos holds it, so the delivery writes it onto the gate
+    in the creation write (the shadow-merge record reads it there)."""
+    approved = "d" * 40
+    bus = EventBus()
+    lithos = _lithos_mock()
+    lithos.task_create.return_value = "gate-1"
+    runner, _ = _make_runner(
+        bus=bus,
+        route=_develop_route(),
+        lithos=lithos,
+        work_dir=tmp_path,
+        succeeded_result={
+            **_delivered_result(),
+            "run_id": "run-9",
+            "commits": ["c" * 40, approved],
+        },
+    )
+
+    await bus.publish(_evt(payload=_payload(tags=("trigger:story-develop",))))
+    await _run_for(runner)
+
+    approval = lithos.task_create.await_args.kwargs["metadata"]["delivered_approval"]
+    assert approval["pr_url"] == _PR_URL
+    assert approval["head_sha"] == approved
+    assert approval["source"] == "run"
+    assert approval["run_id"] == "run-9"
+    assert approval["delivered_at"]
+
+
 async def test_completes_task_false_without_pr_url_posts_friction(
     tmp_path: Path,
 ) -> None:
