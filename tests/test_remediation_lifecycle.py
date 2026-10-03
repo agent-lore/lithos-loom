@@ -111,3 +111,66 @@ def test_only_lifecycle_implementation_constructs_budget_updates() -> None:
     assert not writers, "Budget updates must go through lifecycle events: " + ", ".join(
         writers
     )
+
+
+async def test_a_round_records_when_it_was_reserved_and_whether_its_panel_approved(
+    tmp_path: Path,
+) -> None:
+    """Review-convergence M1 reads both: a round answers an open review only
+    when it was reserved after it, and re-approves only when its OWN loop ran
+    and the panel approved — triage's round-0 `already_clean` ran neither."""
+    client = FakeLithosClient()
+    ctx = SubscriptionContext(
+        lithos=client, logger=logging.getLogger(__name__), agent_id="a"
+    )
+    url = "https://github.com/agent-lore/lithos-loom/pull/12"
+    story = await client.task_create(title="Story", agent="a")
+    gate_id = await create_pr_gate(
+        client, story_id=story, story_title="Story", pr_url=url, project="p", agent="a"
+    )
+    settings = RemediationSettings(trusted_bots=(), budget=5, work_dir=tmp_path)
+    identity = ProcessIdentity(pid=123, start_ticks=456, host_boot="host-boot")
+
+    async def current() -> RemediationLifecycle:
+        gate = await client.task_get(task_id=gate_id)
+        assert gate is not None
+        spec = parse_pr_gate(gate)
+        assert spec is not None
+        return RemediationLifecycle(
+            ctx,
+            gate_id=gate_id,
+            spec=spec,
+            snapshot=read_budget(gate, url),
+            settings=settings,
+            story_id=story,
+        )
+
+    for data, approved in (
+        (
+            {
+                "status": "already_clean",
+                "succeeded": True,
+                "rounds": 1,
+                "develop_status": "approved",
+            },
+            True,
+        ),
+        (
+            {
+                "status": "already_clean",
+                "succeeded": True,
+                "rounds": 0,
+                "develop_status": None,
+            },
+            False,
+        ),
+    ):
+        run = await current()
+        assert await run.reserve(boot_id="watcher-boot", identity=identity)
+        reserved = (await current()).snapshot
+        assert reserved.last_reserved_at
+        assert reserved.last_panel_approved is False  # reserving clears it
+        await run.finished(data=data, returncode=0, output="", repo=tmp_path)
+        done = (await current()).snapshot
+        assert done.last_panel_approved is approved, data
+        assert done.last_reserved_at == reserved.last_reserved_at

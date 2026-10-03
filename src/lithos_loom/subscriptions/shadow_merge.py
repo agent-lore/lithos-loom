@@ -46,10 +46,11 @@ and a remediation that declines them (off, project opt-out, untrusted
 author, exhausted) leaves nothing else durable, so ingestion writes a
 :data:`PIN_KEY` in the same write as its seen marks and the record pins
 that head (``review_open_head``), once per pin. A remediation round
-answers it: a converged push clears it with the head; a round seen in
-flight after the pin (``review_round_seen``) that settles without a push
-clears it in place — and re-approves the head when it was the loop's
-panel that settled it (``already_clean``). A sweep whose ingestion failed
+answers it: a converged push clears it with the head; a round reserved
+after the pin (the budget's ``last_reserved_at``) that settles without a
+push clears it in place — and re-approves the head only when that round's
+own panel approved it (``last_panel_approved``; triage can say
+``already_clean`` at round 0 with no panel at all). A sweep whose ingestion failed
 records no would-merge: its reviews are unknown.
 
 **Invalidation** (first one kept): after would-merge, a human push, an
@@ -118,11 +119,9 @@ _REMEDIATION = "external_remediation"
 # `loom` is a loom push whose own record has since moved on
 _CARRYING_PUSHES = frozenset({"merge_gate", "conflict_resolve", "loom"})
 # a remediation round that settled the PR without pushing: every finding
-# refuted, or nothing to change (#380). `already_clean` is the loop's gate
-# and panel approving the unchanged head, so it also binds an approval;
-# `triage_rejected` ran no panel.
+# refuted, or nothing to change (#380) — whether a panel approved is the
+# budget's own `last_panel_approved`, never the status
 _NO_CHANGE_SETTLES = frozenset({"already_clean", "triage_rejected"})
-_PANEL_SETTLES = frozenset({"already_clean"})
 _STOP_STATES = frozenset({"gate_failed", "needs_human"})
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -203,7 +202,6 @@ def _fresh(meta: Mapping[str, Any], pr_url: str) -> dict[str, Any]:
         "invalidated_reason": "",
         "pushes_after_would_merge": {"loom": 0, "human": 0},
         "review_open_head": "",
-        "review_round_seen": False,
         "review_pin_at": "",
     }
 
@@ -222,7 +220,6 @@ def _load(meta: Mapping[str, Any], pr_url: str) -> dict[str, Any] | None:
     }
     if raw.get("basis") not in BASES:
         loaded["basis"] = base["basis"]
-    loaded["review_round_seen"] = raw.get("review_round_seen") is True
     pushes = raw.get("pushes_after_would_merge")
     pushes = pushes if isinstance(pushes, Mapping) else {}
     loaded["pushes_after_would_merge"] = {
@@ -261,28 +258,39 @@ def _pusher(meta: Mapping[str, Any], pr_url: str, head: str) -> str:
     return "remediation" if converged and budget.get("last_settled") is True else "loom"
 
 
+def _later(value: object, than: str) -> bool:
+    """Whether ISO time *value* is strictly after *than*; ``False`` for
+    anything unreadable (an unanswerable question leaves the pin open)."""
+    try:
+        return datetime.fromisoformat(_str(value)) > datetime.fromisoformat(than)
+    except (ValueError, TypeError):
+        return False
+
+
 def _review_settled(
     record: dict[str, Any], meta: Mapping[str, Any], pr_url: str
 ) -> None:
-    """Track the remediation round that answers an open review; clear the
-    pin when that round settled the PR without a push (a push clears it in
-    :func:`_apply_push`). Only a round seen in flight AFTER the pin counts:
-    the reservation clears the last status, so an older settle is no answer.
-    """
-    if record["review_open_head"] != record["observed_head"]:
+    """Clear the pin when a remediation round answered it without a push (a
+    push clears it in :func:`_apply_push`): the budget's last round was
+    reserved AFTER the pin (an older round never saw the review), it is no
+    longer in flight, and it settled with nothing to change. Read off the
+    gate alone, so a lost shadow write delays the answer, never loses it.
+    That round re-approves the head only when its own panel approved it."""
+    if not record["review_open_head"] or (
+        record["review_open_head"] != record["observed_head"]
+    ):
         return
     budget = _record(meta, _REMEDIATION, pr_url)
-    if budget.get("in_flight_boot_id"):
-        record["review_round_seen"] = True
-    elif (
-        record["review_round_seen"]
-        and budget.get("last_settled") is True
-        and budget.get("last_status") in _NO_CHANGE_SETTLES
+    if (
+        budget.get("in_flight_boot_id")
+        or budget.get("last_settled") is not True
+        or budget.get("last_status") not in _NO_CHANGE_SETTLES
+        or not _later(budget.get("last_reserved_at"), record["review_pin_at"])
     ):
-        if budget.get("last_status") in _PANEL_SETTLES:
-            record["approved_head"] = record["observed_head"]
-        record["review_open_head"] = ""
-        record["review_round_seen"] = False
+        return
+    if budget.get("last_panel_approved") is True:
+        record["approved_head"] = record["observed_head"]
+    record["review_open_head"] = ""
 
 
 def _apply_push(
@@ -304,7 +312,6 @@ def _apply_push(
         review = head if review == prev else review
     else:
         approved = ""
-    seen = record["review_round_seen"] and review == head
     pushes = dict(record["pushes_after_would_merge"])
     if record["would_merge_at"]:
         side = "human" if pusher == "human" else "loom"
@@ -314,7 +321,6 @@ def _apply_push(
         "observed_head": head,
         "approved_head": approved,
         "review_open_head": review,
-        "review_round_seen": seen,
         "pushes_after_would_merge": pushes,
     }, pusher
 
@@ -333,7 +339,6 @@ def _pin(record: dict[str, Any], head: str, pin_at: str) -> dict[str, Any]:
     return {
         **record,
         "review_open_head": head,
-        "review_round_seen": False,
         "review_pin_at": pin_at,
     }
 

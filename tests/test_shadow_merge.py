@@ -488,45 +488,65 @@ def _budget(**fields: Any) -> dict[str, Any]:
     return {"external_remediation": {"pr_url": _URL, **fields}}
 
 
+_BEFORE = (_T0 - timedelta(hours=1)).isoformat()  # reserved before the pin
+_AFTER = (_T0 + timedelta(hours=1)).isoformat()  # reserved after it
+
+
+def _round(
+    status: str, *, reserved: str = _AFTER, panel: bool = False
+) -> dict[str, Any]:
+    """A remediation round that has finished, as its outcome write leaves it."""
+    return _budget(
+        last_reserved_at=reserved,
+        last_status=status,
+        last_settled=status in ("already_clean", "triage_rejected", "converged"),
+        last_panel_approved=panel,
+    )
+
+
 def test_a_review_stays_open_until_a_round_reserved_after_it_settles() -> None:
     """M1: with remediation on, a review is consumed at ingestion; it is
-    open until a round that started AFTER it settles the PR without a push
+    open until a round reserved AFTER it settles the PR without a push
     (refuted / nothing to change) or pushes a fix."""
-    stale = _budget(last_status="already_clean", last_settled=True)
+    stale = _round("already_clean", reserved=_BEFORE, panel=True)
     meta = _step({**_approval(), **stale}, review_open=True)
     assert meta[SHADOW_KEY]["review_open_head"] == _A
     assert meta[SHADOW_KEY]["would_merge_at"] == ""  # a stale settle is no answer
 
-    running = _budget(in_flight_boot_id="boot-1", last_status="")
+    running = _budget(in_flight_boot_id="boot-1", last_reserved_at=_AFTER)
     meta = _step({**meta, **running}, state="reconciling")
     assert meta[SHADOW_KEY]["review_open_head"] == _A
 
-    done = _budget(
-        in_flight_boot_id="", last_status="triage_rejected", last_settled=True
-    )
-    meta = _step({**meta, **done})
+    meta = _step({**meta, **_round("triage_rejected")})
     assert meta[SHADOW_KEY]["review_open_head"] == ""
     assert meta[SHADOW_KEY]["would_merge_head"] == _A
 
 
 def test_a_round_that_did_not_settle_leaves_the_review_open() -> None:
     meta = _step(_approval(), review_open=True)
-    meta = _step({**meta, **_budget(in_flight_boot_id="b")}, state="reconciling")
-    failed = _budget(
-        in_flight_boot_id="", last_status="not_converged", last_settled=False
-    )
-    meta = _step({**meta, **failed})
+    meta = _step({**meta, **_round("not_converged")})
     assert meta[SHADOW_KEY]["review_open_head"] == _A
     assert meta[SHADOW_KEY]["would_merge_at"] == ""
 
 
-def test_a_round_in_flight_at_the_pin_counts_as_seen() -> None:
-    """The dispatch happens in the same sweep as the ingestion, before the
-    shadow record is written — so the pin itself sees the reservation."""
-    meta = _step({**_approval(), **_budget(in_flight_boot_id="b")}, review_open=True)
-    done = _budget(in_flight_boot_id="", last_status="already_clean", last_settled=True)
-    meta = _step({**meta, **done})
-    assert meta[SHADOW_KEY]["review_open_head"] == ""
+def test_a_round_settled_between_sweeps_after_a_lost_shadow_write_still_answers() -> (
+    None
+):
+    """PR #440 follow-up F2: the reservation and the outcome both happened
+    while the shadow record was not written — the budget alone says the
+    round came after the pin, so the pin still clears."""
+    pinned = _with_pin(_step(_approval(), state="behind"), _A)  # shadow write lost
+    record = _observe({**pinned, **_round("already_clean", panel=True)})
+    assert record is not None
+    assert record["review_open_head"] == ""
+    assert record["would_merge_head"] == _A
+
+
+def test_an_unreadable_reservation_time_leaves_the_review_open() -> None:
+    for reserved in ("", "not-a-time"):
+        meta = _step(_approval(), review_open=True)
+        meta = _step({**meta, **_round("already_clean", reserved=reserved, panel=True)})
+        assert meta[SHADOW_KEY]["review_open_head"] == _A, reserved
 
 
 def test_a_human_push_merged_before_the_next_sweep_invalidates() -> None:
@@ -582,11 +602,7 @@ def test_a_pin_survives_a_lost_shadow_write() -> None:
 
 def test_a_pin_is_applied_once() -> None:
     meta = _step(_approval(), review_open=True)
-    meta = _step({**meta, **_budget(in_flight_boot_id="b")}, state="reconciling")
-    done = _budget(
-        in_flight_boot_id="", last_status="triage_rejected", last_settled=True
-    )
-    meta = _step({**meta, **done})
+    meta = _step({**meta, **_round("triage_rejected")})
     assert meta[SHADOW_KEY]["review_open_head"] == ""
     assert PIN_KEY in meta  # the pin is still on the gate…
     assert _observe(meta) is None  # the next sweep finds nothing to change
@@ -610,30 +626,32 @@ def test_a_pin_on_a_head_the_record_last_saw_is_settled_by_a_remediation() -> No
 
 
 def test_a_panel_approved_no_change_round_re_approves_a_human_head() -> None:
-    """F3: `already_clean` is the loop's gate + panel approving the unchanged
-    head — after a human push it binds the approval to that head."""
+    """F3: the round's own loop ran and its panel approved the unchanged
+    head — after a human push that binds the approval to that head."""
     meta = _step(_approval(), state="awaiting_review")
     meta = _step(meta, head=_B, review_open=True)  # human push, then a review
     assert meta[SHADOW_KEY]["approved_head"] == ""
-    meta = _step(
-        {**meta, **_budget(in_flight_boot_id="b")}, head=_B, state="reconciling"
-    )
-    done = _budget(in_flight_boot_id="", last_status="already_clean", last_settled=True)
-    meta = _step({**meta, **done}, head=_B)
+    meta = _step({**meta, **_round("already_clean", panel=True)}, head=_B)
     assert meta[SHADOW_KEY]["approved_head"] == _B
     assert meta[SHADOW_KEY]["would_merge_head"] == _B
+
+
+def test_a_round_zero_already_clean_binds_no_approval() -> None:
+    """PR #440 follow-up F1: external triage returns `already_clean` at round
+    0 when the batch only approves — no coder, no gate, no panel. It settles
+    the review; it approves nothing."""
+    meta = _step(_approval(), state="awaiting_review")
+    meta = _step(meta, head=_B, review_open=True)
+    meta = _step({**meta, **_round("already_clean", panel=False)}, head=_B)
+    assert meta[SHADOW_KEY]["review_open_head"] == ""
+    assert meta[SHADOW_KEY]["approved_head"] == ""
+    assert meta[SHADOW_KEY]["would_merge_at"] == ""
 
 
 def test_a_triage_rejection_settles_the_review_but_binds_no_approval() -> None:
     meta = _step(_approval(), state="awaiting_review")
     meta = _step(meta, head=_B, review_open=True)
-    meta = _step(
-        {**meta, **_budget(in_flight_boot_id="b")}, head=_B, state="reconciling"
-    )
-    done = _budget(
-        in_flight_boot_id="", last_status="triage_rejected", last_settled=True
-    )
-    meta = _step({**meta, **done}, head=_B)
+    meta = _step({**meta, **_round("triage_rejected")}, head=_B)
     assert meta[SHADOW_KEY]["review_open_head"] == ""
     assert meta[SHADOW_KEY]["approved_head"] == ""
     assert meta[SHADOW_KEY]["would_merge_at"] == ""
