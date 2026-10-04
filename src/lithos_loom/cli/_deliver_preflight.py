@@ -214,11 +214,24 @@ def refuse_if_the_run_is_still_the_daemons(
       exists for, and the common case for an operator cleaning up after a
       crash;
     * ``--branch``/``--story`` with no run id, which is the operator asserting
-      the lifecycle is over in the first place.
+      the lifecycle is over in the first place;
+    * a run that recorded that **no automated delivery follows it** (a hand
+      ``develop resume``, or a standalone run without ``--open-pr``): no
+      daemon dispatched it, so there is no result handoff to wait for.
+
+    A resumed run's escalation names the run it continued, not its own new
+    id, so the handoff is read across its verified resume lineage.
     """
     if not facts.run_dir:
         return  # the operator's own explicit assertion
-    if story.escalation_landed(run_id=facts.run_id, dispatch_routes=routes):
+    if run_outcome.delivery_not_automated(Path(facts.run_dir)):
+        # A hand resume / standalone run: no daemon dispatched it, so no
+        # daemon is applying its result. (Live dispatch claims are still
+        # checked separately — this guard is only about the result handoff.)
+        return
+    if story.escalation_landed(
+        run_id=facts.run_id, dispatch_routes=routes, ancestors=facts.lineage
+    ):
         return
     if story.delivery_visible(facts.run_id):
         return

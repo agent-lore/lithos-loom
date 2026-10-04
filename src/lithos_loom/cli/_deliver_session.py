@@ -69,6 +69,7 @@ async def _gate_coro(
     run_id: str,
     dispatch_routes: Sequence[str],
     approved_head: str,
+    ancestors: Sequence[str],
 ) -> GateOutcome:
     async with LithosClient(url, agent_id=agent) as client:
         return await gate_delivery(
@@ -79,6 +80,7 @@ async def _gate_coro(
             agent=agent,
             dispatch_routes=dispatch_routes,
             approved_head=approved_head,
+            ancestors=ancestors,
         )
 
 
@@ -155,6 +157,7 @@ def run_gate_delivery(
     run_id: str,
     dispatch_routes: Sequence[str],
     approved_head: str = "",
+    ancestors: Sequence[str] = (),
 ) -> GateOutcome:
     """Steps 3 + 4, in one client session."""
     return run_lithos(
@@ -166,6 +169,7 @@ def run_gate_delivery(
             run_id=run_id,
             dispatch_routes=dispatch_routes,
             approved_head=approved_head,
+            ancestors=ancestors,
         )
     )
 

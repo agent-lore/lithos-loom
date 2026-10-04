@@ -48,7 +48,7 @@ from typing import Any, cast
 from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_exit
 
 from ...plugin_runner import write_result_atomically
-from . import check_runner, engines, sandbox_facts
+from . import check_runner, engines, run_outcome, sandbox_facts
 from .check_set import CheckState
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
@@ -1062,6 +1062,11 @@ def main(argv: list[str] | None = None) -> int:
         github_issue_url=github_issue_url,
         task_id=args.task_id,
     )
+    if result.approved and not args.open_pr:
+        # Standalone and approved with nothing to deliver it: say so, so
+        # `develop deliver <run>` takes it without waiting on a daemon that is
+        # not involved. (The daemon path never writes this.)
+        run_outcome.record_no_automated_delivery(config.run_dir)
     if args.open_pr and result.approved:
         if delivery is not None:
             print(f"  pr:       {delivery.pr_url}")

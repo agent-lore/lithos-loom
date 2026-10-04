@@ -176,7 +176,13 @@ partial first pass finishes the job and changes nothing else.
      --from-github` spend money and push to the delivered PR again. That
      consent is the operator's alone, and a denylist would admit the next
      subsystem to raise a gate;
-   - **the gate names the run being delivered** (`metadata.run_id`). A story
+   - **the gate names the run being delivered** (`metadata.run_id`), or a run
+     it verifiably continues. A `develop resume` is a new run id doing the work
+     of the run that died, and the daemon raised that run's gate under the old
+     id; the resumed run's `resumed_from` chain (loom's own record, each link
+     checked to be a sibling in the same task dir) supplies those ids. That
+     lineage widens "this run" to the runs it continued and to nothing else.
+     A story
      can legitimately match two dispatch routes, each with its own stopped run
      and its own open escalation; retiring route B's gate because route A's
      branch was delivered discards a decision nobody made. When no candidate
@@ -272,13 +278,20 @@ the swap was made. Two guards close it, before anything is written:
   the ready frontier — reading it as a handoff would deliver the old run in
   exactly the window the route walks from *ready* to *claimed*, and the run it
   dispatches would raise its own gate over a story this command had just
-  reported as delivered. Three things let a delivery past it, each meaning
-  there is no producer to race: the
-  story already carries a delivery of its own (an idempotent re-run behind its
-  own open `pr` gate), **no loom daemon is running on this work dir** (the
-  pidfile `drain` uses — the salvage this command exists for), or the
-  run-dir-less `--branch`/`--story` form, which is the operator asserting the
-  lifecycle is over.
+  reported as delivered. "Naming this run" includes the runs it verifiably
+  continues, as above, so a resumed run finds the escalation its source run
+  left. Four things let a delivery past it, each meaning there is no producer
+  to race:
+  - the story already carries a delivery of its own (an idempotent re-run
+    behind its own open `pr` gate);
+  - **no loom daemon is running on this work dir** (the pidfile `drain` uses —
+    the salvage this command exists for);
+  - the run-dir-less `--branch`/`--story` form, which is the operator asserting
+    the lifecycle is over;
+  - the run recorded that **no automated delivery follows it**: an approved hand
+    `develop resume`, or a standalone run without `--open-pr`. No daemon
+    dispatched it, so no result is waiting to be applied. A live dispatch's
+    claim on the story is still checked separately.
 
 Both of those are reads, and a read is point-in-time: a daemon can boot the
 moment after them, bootstrap the story, and pass its readiness check while the

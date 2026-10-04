@@ -57,7 +57,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.profiles` | M | 5 | 3 |
 | `lithos_loom.plugins.story_develop.prompts` | XS | 0 | 0 |
 | `lithos_loom.plugins.story_develop.publish_text` | M | 0 | 6 |
-| `lithos_loom.plugins.story_develop.resume` | M | 2 | 2 |
+| `lithos_loom.plugins.story_develop.resume` | L | 2 | 3 |
 | `lithos_loom.plugins.story_develop.review_only` | M | 1 | 4 |
 | `lithos_loom.plugins.story_develop.review_report` | S | 4 | 0 |
 | `lithos_loom.plugins.story_develop.review_resolve` | M | 3 | 1 |
@@ -437,6 +437,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 ### `lithos_loom.plugins.story_develop.resume`
 - class `ResumePlan` — What is being continued: the dead run, its checkpoint, its last review.
 - class `Resumption` — A resume ready to run: the remainder-budget config, the loop entry, the plan.
+- def `resume_lineage` — The run ids *run_dir* verifiably continues, nearest first.
 - def `prepare_resume` — Plan a resume of *prior_run_dir* under *config*, or say why not.
 - def `record_resumed_from` — Record on the RESUMED run whose branch it continues (provenance).
 

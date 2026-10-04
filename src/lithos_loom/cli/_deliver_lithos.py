@@ -230,6 +230,13 @@ class GateRetirement:
     that still holds the story is worse than leaving a stale key."""
 
 
+def _lineage(run_id: str, ancestors: Sequence[str]) -> frozenset[str]:
+    """This run plus the runs it verifiably continues — the run ids whose
+    escalation this delivery answers (empty ids dropped, so "no run" never
+    matches a gate that names none)."""
+    return frozenset(r for r in (run_id, *ancestors) if r)
+
+
 @dataclass(frozen=True)
 class StoryState:
     """The live story, and the gates that hold it."""
@@ -252,7 +259,11 @@ class StoryState:
     one signal that says "this run's lifecycle is not finished"."""
 
     def retirement(
-        self, *, run_id: str, dispatch_routes: Sequence[str]
+        self,
+        *,
+        run_id: str,
+        dispatch_routes: Sequence[str],
+        ancestors: Sequence[str] = (),
     ) -> GateRetirement:
         """Which open ``human`` gates THIS delivery retires (pure).
 
@@ -265,8 +276,11 @@ class StoryState:
            guessing wrong the other way completes a *consent* gate: an
            ``external-remediation`` gate's completion re-arms a paid budget,
            and unlike leaving a gate open it cannot be undone by doing nothing.
-        2. **The gate names THIS run.** A story may match two dispatch routes,
-           each with its own stopped run and its own open escalation; retiring
+        2. **The gate names THIS run** — or a run this one verifiably
+           continues (*ancestors*: its ``develop resume`` lineage), whose
+           escalation the resume is the answer to. A story may match two
+           dispatch routes, each with its own stopped run and its own open
+           escalation; retiring
            route B's gate because route A's branch was delivered silently
            discards a decision nobody made. When no candidate names any run
            (an older gate, or an escalation raised without one) a **single**
@@ -291,8 +305,9 @@ class StoryState:
                     )
                 )
         named = [gate for gate in candidates if gate.run_id]
-        if run_id and any(gate.run_id == run_id for gate in candidates):
-            superseded = [gate for gate in candidates if gate.run_id == run_id]
+        ours = _lineage(run_id, ancestors)
+        if any(gate.run_id in ours for gate in candidates):
+            superseded = [gate for gate in candidates if gate.run_id in ours]
         elif named:
             # every candidate names a run, and none of them is ours
             superseded = []
@@ -364,7 +379,13 @@ class StoryState:
             )
         )
 
-    def escalation_landed(self, *, run_id: str, dispatch_routes: Sequence[str]) -> bool:
+    def escalation_landed(
+        self,
+        *,
+        run_id: str,
+        dispatch_routes: Sequence[str],
+        ancestors: Sequence[str] = (),
+    ) -> bool:
         """Whether the daemon has handed THIS run's stop over **and the story
         is still holding it** — the signal that no dispatch can be under way.
 
@@ -394,21 +415,26 @@ class StoryState:
         raise its own gate afterwards, over a story this command had just
         reported as delivered.
         """
-        if run_id and any(gate.run_id == run_id for gate in self.human_gates):
+        ours = _lineage(run_id, ancestors)
+        if any(gate.run_id in ours for gate in self.human_gates):
             return True
-        if self.retirement(run_id=run_id, dispatch_routes=dispatch_routes).superseded:
+        if self.retirement(
+            run_id=run_id, dispatch_routes=dispatch_routes, ancestors=ancestors
+        ).superseded:
             return True
-        if not run_id:
+        if not ours:
             return False
         return any(
             isinstance(marker, Mapping)
-            and str(marker.get("run_id") or "") == run_id
+            and str(marker.get("run_id") or "") in ours
             and not marker.get("gate_id")
             for key, marker in self.metadata.items()
             if key.startswith(LAST_ATTEMPT_KEY_PREFIX)
         )
 
-    def unretired_run_gates(self, run_id: str) -> tuple[HumanGateRef, ...]:
+    def unretired_run_gates(
+        self, run_id: str, ancestors: Sequence[str] = ()
+    ) -> tuple[HumanGateRef, ...]:
         """Open loom ``human`` gates that could still be THIS run's escalation.
 
         A gate naming another run is certainly not; one naming this run
@@ -422,10 +448,9 @@ class StoryState:
         silenced by the record the first one wrote. Measured against the gates
         themselves, the answer only ever improves as gates are retired.
         """
+        ours = _lineage(run_id, ancestors)
         return tuple(
-            gate
-            for gate in self.human_gates
-            if not gate.run_id or gate.run_id == run_id
+            gate for gate in self.human_gates if not gate.run_id or gate.run_id in ours
         )
 
     def delivery_visible(self, run_id: str) -> bool:
@@ -641,9 +666,11 @@ async def gate_delivery(
     agent: str,
     dispatch_routes: Sequence[str],
     approved_head: str = "",
+    ancestors: Sequence[str] = (),
 ) -> GateOutcome:
     """Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire this run's
-    own human gate(s).
+    own human gate(s) — including those of the runs it verifiably continues
+    (*ancestors*, its ``develop resume`` lineage).
 
     *approved_head* is the run's panel-approved revision when it is bound to
     the delivered head (:func:`~._deliver_facts.approval_unbound`), else
@@ -683,7 +710,9 @@ async def gate_delivery(
         return outcome
     ours = [gate for gate in live.pr_gates if gate.pr_url == pr_url]
     foreign = [gate for gate in live.pr_gates if gate.pr_url != pr_url]
-    retirement = live.retirement(run_id=run_id, dispatch_routes=dispatch_routes)
+    retirement = live.retirement(
+        run_id=run_id, dispatch_routes=dispatch_routes, ancestors=ancestors
+    )
     outcome.human_gates_retained = list(retirement.retained)
 
     if foreign:
@@ -787,7 +816,7 @@ async def gate_delivery(
     # swap; the invocation that can retire it must still be able to say so).
     outcome.swap_complete = not [
         gate
-        for gate in live.unretired_run_gates(run_id)
+        for gate in live.unretired_run_gates(run_id, ancestors)
         if gate.gate_id not in outcome.human_gates_completed
     ]
     # Read LAST: whether this delivery's provenance is already recorded

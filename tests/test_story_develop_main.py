@@ -358,6 +358,33 @@ def test_main_standalone_informational_red_test_does_not_print_blocks(
     assert "BLOCKS approval" not in out  # ... but it does not claim to block
 
 
+@pytest.mark.parametrize("open_pr", [False, True])
+def test_main_standalone_approval_without_open_pr_records_no_automated_delivery(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, open_pr: bool
+) -> None:
+    # PR #447: a standalone run approved with --open-pr off has nothing to
+    # deliver it, so it says so in its run dir — `develop deliver <run>` (and
+    # its daemon-handoff guard) can then tell it from a daemon run still
+    # applying its result. With --open-pr the run delivers itself and says
+    # nothing of the kind.
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop import pr_delivery, run_outcome
+
+    seen: dict = {}
+
+    def fake_develop(config, **kw):
+        config.run_dir.mkdir(parents=True, exist_ok=True)
+        seen["run_dir"] = config.run_dir
+        return _approved_with_red_test(tmp_path)
+
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(pr_delivery, "deliver", lambda *a, **k: None)
+    argv = ["--repo", str(tmp_git_repo), "--description", "x"]
+    main_mod.main([*argv, "--open-pr"] if open_pr else argv)
+
+    assert run_outcome.delivery_not_automated(seen["run_dir"]) is (not open_pr)
+
+
 def test_main_standalone_required_red_test_prints_blocks(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
 ) -> None:

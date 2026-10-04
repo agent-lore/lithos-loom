@@ -12,7 +12,7 @@
         "max_function": "lithos_loom.children.obsidian_sync._amain"
       },
       "Cli": {
-        "functions_over_10": 47,
+        "functions_over_10": 46,
         "max_complexity": 63,
         "max_function": "lithos_loom.cli.converge.converge_command"
       },
@@ -58,7 +58,7 @@
       },
       "Plugins": {
         "functions_over_10": 58,
-        "max_complexity": 100,
+        "max_complexity": 102,
         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
       },
       "ProjectContext": {
@@ -102,10 +102,10 @@
         "max_function": "lithos_loom.gates.human_gate_brief"
       }
     },
-    "functions_over_10": 201,
+    "functions_over_10": 200,
     "top_functions": [
       {
-        "complexity": 100,
+        "complexity": 102,
         "qualname": "lithos_loom.plugins.story_develop.__main__.main"
       },
       {
@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.plugins.story_develop.converge.converge_pr"
       }
     ],
-    "total_functions": 2039
+    "total_functions": 2042
   },
   "domain": {
     "associations": 2,
@@ -262,7 +262,7 @@
       }
     },
     "cross_component_edges": 72,
-    "cross_component_module_edges": 433,
+    "cross_component_module_edges": 434,
     "longest_component_chain": 6,
     "module_cycle_count": 1,
     "module_cycles": [
@@ -365,13 +365,13 @@
       },
       "Cli": {
         "classes": 47,
-        "functions": 291,
+        "functions": 292,
         "largest_module": "lithos_loom.cli.develop",
         "largest_module_lines": 2036,
-        "lines": 13930,
+        "lines": 13987,
         "modules": 26,
         "public_symbols": 158,
-        "sloc": 11532
+        "sloc": 11583
       },
       "Config": {
         "classes": 11,
@@ -455,13 +455,13 @@
       },
       "Plugins": {
         "classes": 84,
-        "functions": 576,
+        "functions": 578,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
-        "largest_module_lines": 1154,
-        "lines": 23796,
+        "largest_module_lines": 1159,
+        "lines": 23827,
         "modules": 58,
-        "public_symbols": 381,
-        "sloc": 18912
+        "public_symbols": 382,
+        "sloc": 18937
       },
       "ProjectContext": {
         "classes": 0,
@@ -562,13 +562,13 @@
       "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 80120,
+    "total_lines": 80208,
     "total_modules": 207,
-    "total_sloc": 64669
+    "total_sloc": 64745
   },
   "tests": {
     "ratio": 1.52,
-    "src_lines": 80120,
-    "test_lines": 121972
+    "src_lines": 80208,
+    "test_lines": 122143
   }
 }

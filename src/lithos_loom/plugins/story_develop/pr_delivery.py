@@ -621,10 +621,6 @@ def deliver_guarded(
     writers live in :mod:`run_outcome` (ARCH-3.R2); this only calls them.
     """
     if not (open_pr and result.approved):
-        if result.approved:
-            # Approved with open_pr off: nothing will deliver this run, so
-            # `develop deliver <run>` must not wait for a delivery to settle.
-            run_outcome.record_no_automated_delivery(config.run_dir)
         return None, None
     run_outcome.record_delivery_deadline(
         config.run_dir,

@@ -993,36 +993,9 @@ def test_deliver_guarded_skips_when_nothing_to_deliver(
     assert called["n"] == 0  # deliver() untouched in either skip case
     # No deadline in either skip case: nothing is being delivered.
     assert run_outcome.delivery_deadline(config.run_dir) is None
-    # An APPROVED run with open_pr off has no automated delivery coming, and
-    # says so — `develop deliver <run>` then knows it races nothing.
-    assert run_outcome.delivery_not_automated(config.run_dir)
-
-
-def test_deliver_guarded_records_no_automated_delivery_only_for_an_approved_skip(
-    config: DevelopConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A run that did not approve has nothing to deliver at all, and an open_pr
-    # run is the daemon's own delivery: neither may claim "no automated delivery".
-    config.run_dir.mkdir(parents=True)  # so a wrongly written marker would land
-    approved = _result(config, tmp_path)
-    monkeypatch.setattr(pr_delivery, "deliver", lambda *a, **k: object())
-    pr_delivery.deliver_guarded(
-        config,
-        replace(approved, status="max_rounds"),
-        open_pr=False,
-        copilot_review=False,
-        github_issue_url=None,
-        task_id=None,
-    )
-    assert not run_outcome.delivery_not_automated(config.run_dir)
-    pr_delivery.deliver_guarded(
-        config,
-        approved,
-        open_pr=True,
-        copilot_review=False,
-        github_issue_url=None,
-        task_id=None,
-    )
+    # Nor the no-automated-delivery marker: this seam is SHARED with the
+    # daemon, which applies the run's result after it returns — only an entry
+    # point that knows no daemon is involved may say so (PR #447 review).
     assert not run_outcome.delivery_not_automated(config.run_dir)
 
 
