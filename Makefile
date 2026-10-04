@@ -1,4 +1,4 @@
-.PHONY: install fmt lint typecheck test check diagrams metrics-history metrics-diff
+.PHONY: install fmt lint typecheck test check diagrams gate-exec metrics-history metrics-diff
 
 install:
 	uv sync
@@ -23,6 +23,13 @@ check: lint typecheck test
 # fails if the committed artifacts drift from the code (.github/workflows/ci.yml).
 diagrams:
 	uv run pytest tests/guardrail/ -q
+
+# Execute every Python check-catalog command for real, in the sandbox image, on a
+# clean and a defective fixture (R5b). Host only — needs docker, the image
+# (LOOM_GATE_EXEC_IMAGE, default ralph-sandbox:latest) and the network. NOT part of
+# `check` or CI: run it by hand after any change to the gate definitions (AGENTS.md).
+gate-exec:
+	LOOM_GATE_EXEC=1 uv run pytest tests/test_check_catalog_exec.py -v
 
 # Print the architecture-metrics trend mined from the git history of
 # docs/generated/metrics.json. FORMAT=csv|mermaid (default csv).

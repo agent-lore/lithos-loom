@@ -170,6 +170,16 @@ filed them; the others cite theirs.
    checked by the panel against the coder's own map, a missing one re-prompted
    once and then failing the run (SPEC §5.5). **R5b** (79b256cf) is the
    gate-code half, after R5a. M1's reading window opens at R5a's merge.
+   **R5b shipped as the small version (2026-10-03, Dave's call):**
+   `make gate-exec` executes every Python catalog command through the real
+   gate path in the sandbox image, against a clean fixture (each must pass)
+   and a defective one (each must block), with a broken and a no-op command
+   as negative controls. It is opt-in and host-only, so a gate-definition
+   change triggers it by **rule** (AGENTS.md), not automatically; the full
+   version — a run whose diff touches the definitions runs the candidate's
+   own commands as a required check — is deferred until a second #173 says
+   the rule is not enough. Its first run found a real defect: bare-Python
+   `coverage` cannot pass in the image (b9822c09).
 6. **M1 — Shadow auto-merge recording** (task 664d84c4). As the operator, I
    want the reconcile sweep to record, on each delivered PR's `pr` gate, the
    first moment loom *would* have merged it — `reconciliation_state =
@@ -243,7 +253,7 @@ per-reviewer model explicitly (3b38e86b).
 | Order | Story | Why here |
 |---|---|---|
 | 1 | R1 | before T3's first slice dispatches (with lithos-core bd66d57c, T3's own precondition) |
-| 2 | R5a (R5b after) | M1's precondition; the checklist was in the prompts, R5a makes it an output the panel checks |
+| 2 | R5a (R5b after; shipped small) | M1's precondition; the checklist was in the prompts, R5a makes it an output the panel checks |
 | 3 | M1 | zero tokens; starts recording as soon as T3 delivers PRs |
 | 4 | R2 | the next run that churns is the acceptance test |
 | as they bite | R3, R4 | each has a known trigger (a conflicted resolution; a base move that breaks a delivered PR) |

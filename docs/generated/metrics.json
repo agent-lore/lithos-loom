@@ -325,6 +325,7 @@
       "tests/test_story_develop_idempotency.py -> lithos_loom.plugins.story_develop.idempotency._record_path (x2)",
       "tests/test_story_develop_panel.py -> lithos_loom.plugins.story_develop.panel._read_review (x2)",
       "tests/test_awaiting_review.py -> lithos_loom.subscriptions._awaiting_review",
+      "tests/test_check_catalog_exec.py -> lithos_loom.plugins.story_develop.check_catalog._BY_NAME",
       "tests/test_child_boot.py -> lithos_loom.children._boot",
       "tests/test_cli_converge.py -> lithos_loom.cli.converge._EXIT_CODES",
       "tests/test_cli_converge_push.py -> lithos_loom.cli._converge_push_facts",
@@ -336,10 +337,9 @@
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._follow_state",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._iter_run_dirs",
       "tests/test_cli_develop.py -> lithos_loom.cli.develop._latest_mtime",
-      "tests/test_cli_develop.py -> lithos_loom.cli.develop._round_and_reviewers",
-      "tests/test_cli_develop.py -> lithos_loom.cli.develop._sanitize"
+      "tests/test_cli_develop.py -> lithos_loom.cli.develop._round_and_reviewers"
     ],
-    "tests_private_imports": 99
+    "tests_private_imports": 100
   },
   "size": {
     "components": {
@@ -569,6 +569,6 @@
   "tests": {
     "ratio": 1.52,
     "src_lines": 80043,
-    "test_lines": 121355
+    "test_lines": 121805
   }
 }
