@@ -941,7 +941,7 @@ findings, run through the four buckets above.
   fp 0/25 valid samples on both arms (judge-scoped). Known-good blocked: persona 18/20 across the four correctness cases (lens79 5/5, lens81 5/5, lens87 4/5, lens83 4/5) + 5/5 on lens78 with security = 23/25; generalist 2/5, 5/5, 2/5, 1/5, 3/5 — its blocks are a different genre (a D6 classifier duplicated, the
   panel's full detail fan-out) and mostly major-rated nits; lens79's 5/5 is
   on a duplication the external reviewer explicitly called non-blocking.
-  Readings — held to the method's own power rule (§"How many samples": a single K=5 delta on a mid-band case is not evidence, nor is the difference between two): (1) **no arm dominates — a hypothesis, not a finding.** The per-class leaders differ, but every between-arm delta except the tie-break sits inside the "not evidence" band (two-sided Fisher: limiter coverage 3/4 vs 1/5 p≈0.21; authority coverage 0/5 vs 3/5 p≈0.17; sibling-surface 3/5 vs 5/5 p≈0.44) AND is confounded by engine (correctness = codex, generalist = claude). What these rows do establish: a cold generalist pass is not a *demonstrated* substitute for the persona panel, and which arms are worth powering. A same-persona engine control (`correctness.tool=claude` on lens81, ~$10) comes before any persona attribution. (2) **Rule conformance was anchoring**: the
+  Readings — held to the method's own power rule (§"How many samples": a single K=5 delta on a mid-band case is not evidence, nor is the difference between two): (1) **no arm dominates — a hypothesis, not a finding.** The per-class leaders differ, but every between-arm delta except the tie-break sits inside the "not evidence" band (two-sided Fisher: limiter coverage 3/4 vs 1/5 p≈0.21; authority coverage 0/5 vs 3/5 p≈0.17; sibling-surface 3/5 vs 5/5 p≈0.44) AND is confounded by engine (correctness = codex, generalist = claude). What these rows do establish: a cold generalist pass is not a *demonstrated* substitute for the persona panel, and which arms are worth powering. A same-persona engine control comes before any persona attribution; it has run (322be40d, **Engine control** below), and on the one readable question the catch followed the engine, not the brief. (2) **Rule conformance was anchoring**: the
   tie-break caught 5/5 cold by the persona that missed it live over two
   rounds with the coder summary in front of it — the #208 per-criterion
   checklist, no lens. (3) **Resource-bound completeness splits in two**:
@@ -949,9 +949,9 @@ findings, run through the four buckets above.
   claude reviewer; "every read path under the shared limiter" only by security in this reading (3/4 vs 1/5, p≈0.21 — not distinguishable at K=5) — a persona lens removed from its panel on 2026-09-08 for pacing /
   OWASP findings inapplicable to a local single-user tool (the same persona
   blocked lens #78's converge for $68 on an "unpaced `_build_nodes` pass",
-  and blocked this corpus's known-good 5/5). The design that would keep the two catches and drop the noise is an `availability` canonical persona (bounds under writable inputs + limiter coverage; no web-attack or pacing classes) — the HYPOTHESIS these rows motivate, to be tested as availability vs security vs the generalist on lens78 + lens81 at K≈20 per arm after the engine control; nothing is adopted on these rows. (4) **Partition reuse** read low for every reviewer tried (1/5 server, 1/5 client, 0/5 generalist — three low-band readings, none distinguishable from the others);
+  and blocked this corpus's known-good 5/5). The design that would keep the two catches and drop the noise is an `availability` canonical persona (bounds under writable inputs + limiter coverage; no web-attack or pacing classes) — the HYPOTHESIS these rows motivate, to be tested as availability vs security vs the generalist on lens78 + lens81 at K≈20 per arm, now that the engine control has run (322be40d below). Hold each arm's engine fixed and name it, because the control shows the engine moves catches. The limiter catch here was security on **claude**. Nothing is adopted on these rows. (4) **Partition reuse** read low for every reviewer tried (1/5 server, 1/5 client, 0/5 generalist — three low-band readings, none distinguishable from the others);
   closed, so an enumerate-the-inputs lens on the correctness brief is
-  admissible under the RH-1 rule — control in-session first. (5) **Authority coverage** (0/5 persona, 3/5 generalist; p≈0.17) reads as a persona blind spot the generalist may not share — a hypothesis for the same powered arm. (6) The harness's known-good "noise" is a
+  admissible under the RH-1 rule, but control in-session first. 322be40d is why: the same generalist-claude arm blocked known-good 13/25 in September and 20/20 in its session, so a stored baseline would have misled. (5) **Authority coverage** (0/5 persona, 3/5 generalist; p≈0.17) reads as a persona blind spot the generalist may not share — a hypothesis for the same powered arm. (6) The harness's known-good "noise" is a
   stream of lens defects: the edge-read phase's missing deadline after the
   A1 fix, the blocked tint inferred from a fetched edge rather than
   `task_blocked`, `Topology.edges` order under reversed input, singleton
@@ -966,6 +966,40 @@ findings, run through the four buckets above.
   ~$15/case at ~17 min/sample on opus; one persona-arm sample errored to
   loom #403 (the sandbox's auth bind mount stranded by a host-side token
   refresh), fixed in #405.
+
+  **Engine control (322be40d, 2026-10-03/04).** Report `engine-control-2026-10-03b`, from the pinned tree `d8fa6e14` (R5a), one session.
+  - **Setup:** reviewers were claude-opus-5 and gpt-5.6-sol. The persona cells ran at `high` effort; the generalist cells at the CLI default, so the "brief" axis is brief **and** effort together, while within a brief only the engine differs. Each cell's `summary.json` records the resolved panel and judge models (#303). The judge was claude-opus-5; K=5. Counts are per expected defect, taken from the judge files over **valid** samples only.
+  - **Four cells:** the persona brief (correctness, plus security on lens78) and the brief-less generalist (`--reviewer code-quality`), each run on codex and on claude.
+  - **Codex coverage:** the codex cells cover **lens79 only**. An upstream stall held every codex model call for ~300 s, so a codex sample took ~50 min and Dave trimmed the codex arms; lens81 persona-codex stopped at 1 valid sample.
+  - **lens87:** not run; its case was never committed.
+
+  On lens79:
+
+  | lens79 | persona brief | generalist |
+  |---|---|---|
+  | **codex** | tie-break **4/5**, partition 2/5, known-good blocked 2/2 (3 known-good samples timed out) | tie-break **2/4**, partition 2/4, known-good blocked 2/5 |
+  | **claude** | tie-break **1/5**, partition 3/5, known-good blocked 4/5 | tie-break **0/5**, partition 0/5, known-good blocked 5/5 |
+
+  The claude cells on the other cases, persona vs generalist:
+  - lens81 authority 2/5 vs 1/5;
+  - lens83 sibling surface 3/5 vs 5/5;
+  - lens78 far endpoints 2/2 vs 4/5 (security on codex here, so the persona has 2 valid samples);
+  - lens78 limiter 0/2 vs 0/5;
+  - known-good blocked over all four cases 17/19 vs 20/20.
+
+  Readings, by the same power rule:
+
+  1. **The tie-break follows the engine, not the brief.** It is codex 6/9 vs claude 1/10 pooled over briefs (two-sided Fisher p≈0.02). Within each brief: persona codex 4/5 vs claude 1/5 (p≈0.21), generalist 2/4 vs 0/5 (p≈0.17). The brief moves neither engine: codex 4/5 vs 2/4 (p≈0.52), claude 1/5 vs 0/5 (p=1.0). September's 5/5-vs-0/5 replicates in its own cells (persona-codex 4/5, generalist-claude 0/5), so the "persona caught it" reading was the engine. Two caveats: the pooled p assumes no brief×engine interaction, and it rests on one case. The within-brief engine comparisons are the clean ones, since effort is held fixed there.
+  2. **Known-good blocking: not answerable, and the September contrast does not survive.** The in-session baseline moved: generalist-claude blocked known-good 20/20 here against 13/25 in September (p<0.001). The prompts changed in between, including R5a's criteria map in `d8fa6e14`. Within this session claude is near-saturated under either brief (17/19 vs 20/20, p≈0.23), so it does not follow the brief. Codex blocking less is a hypothesis only (lens79 generalist 2/5 vs claude 5/5, p≈0.17): the codex cells cover one case and lost samples to the stall.
+  3. **The rest are not distinguishable at K=5:**
+     - lens81 authority 2/5 vs 1/5 (p=1.0);
+     - lens83 sibling surface 3/5 vs 5/5 (p≈0.44);
+     - lens79 partition reuse, 0/5 to 3/5 across the four cells;
+     - lens78 limiter: 0/2 valid with security on **codex** vs 0/5; September's 3/4 was security on claude.
+
+  **What this changes.** Which tool runs correctness matters more than its brief for rule conformance, so production keeps correctness on codex. Any persona A/B must fix each arm's engine.
+
+  **Cost:** not recorded. The harness keeps no per-sample cost and its run dirs are torn down after each sample. Codex samples ran ~50 min each, claude ~17–20 min.
 
 ## Scoring (how a finding matches)
 
