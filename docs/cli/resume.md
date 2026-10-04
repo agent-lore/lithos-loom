@@ -92,7 +92,7 @@ rounds and budget left, the intake round) without starting a container.
 
 The resumed run's branch is local. `lithos-loom develop resume` writes nothing to
 Lithos and opens no PR; [`develop deliver <run>`](deliver.md) is what pushes the
-branch, opens (or adopts) its PR and raises the `pr` gate.
+branch, opens (or adopts) its PR and raises the `pr` gate. An approved resume records in its run dir that no automated delivery follows, so `deliver` takes it by run id. That also lets `develop list` and `prune` attribute the PR to this run, which the run-dir-less `--branch`/`--story` form cannot.
 
 ## Scope
 

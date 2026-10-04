@@ -143,6 +143,56 @@ def test_resume_hands_the_loop_the_branch_and_the_remainder(
     assert "develop deliver" in out  # the branch is local only
 
 
+@pytest.mark.parametrize("approved", [True, False])
+def test_resume_records_that_no_automated_delivery_follows_an_approval(
+    host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, approved: bool
+) -> None:
+    """A hand resume never delivers, so an approved one says so in its run dir —
+    that is what lets `develop deliver <run>` (which it tells the operator to
+    run) tell it from a daemon run still pushing. A failed run records nothing."""
+    from lithos_loom.plugins.story_develop import run_outcome
+
+    repo, base, head = _repo(tmp_path)
+    _dead_run(host, repo=repo, base=base, head=head)
+    seen: dict[str, Any] = {}
+
+    def fake_develop(config, **kw):
+        config.run_dir.mkdir(parents=True, exist_ok=True)
+        seen["run_dir"] = config.run_dir
+        return SimpleNamespace(
+            run_id=config.run_id,
+            status="approved" if approved else "failed",
+            approved=approved,
+            message="done",
+        )
+
+    monkeypatch.setattr(resume_mod, "develop", fake_develop)
+
+    def run() -> None:
+        resume_mod.resume_command(
+            run="dead",
+            repo=None,
+            story=None,
+            no_story_settings=True,
+            description=None,
+            profile=None,
+            max_rounds=6,
+            max_cost=None,
+            image=None,
+            base=None,
+            dry_run=False,
+            config=None,
+        )
+
+    if approved:
+        run()
+    else:
+        with pytest.raises(typer.Exit):
+            run()
+
+    assert run_outcome.delivery_not_automated(seen["run_dir"]) is approved
+
+
 def test_dry_run_resolves_everything_and_starts_nothing(
     host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
 ) -> None:

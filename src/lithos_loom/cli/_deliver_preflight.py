@@ -121,7 +121,10 @@ def _refuse_if_run_may_be_live(run_dir: Path, facts: RunFacts) -> None:
       ``result.json`` all happen after it returns
       (:func:`run_outcome.delivery_complete` documents that window). The
       salvage this command exists for is a delivery that positively **failed**
-      (#194) or whose recorded budget has **expired** (#189).
+      (#194) or whose recorded budget has **expired** (#189) — or a run that
+      recorded no automated delivery follows it at all (a hand ``develop
+      resume`` or a standalone run without ``--open-pr``), which has nothing
+      to race.
 
     The run-dir-less ``--branch`` + ``--story`` form stays the operator's own
     assertion for a reaped run: no on-disk state claims anything there.
@@ -143,6 +146,8 @@ def _refuse_if_run_may_be_live(run_dir: Path, facts: RunFacts) -> None:
         return  # a recorded failure: exactly the salvage case
     if run_outcome.delivery_budget_expired(run_dir):
         return  # the automated delivery outlived its own budget
+    if run_outcome.delivery_not_automated(run_dir):
+        return  # a hand resume / standalone run: nothing will deliver it
     raise DeliverRefused(
         f"run {facts.run_id} was APPROVED and its automated delivery has "
         "neither completed nor failed — the daemon may be pushing and opening "

@@ -63,7 +63,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.review_resolve` | M | 3 | 1 |
 | `lithos_loom.plugins.story_develop.review_scope` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.rounds` | L | 3 | 18 |
-| `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 30 |
+| `lithos_loom.plugins.story_develop.run_outcome` | L | 1 | 32 |
 | `lithos_loom.plugins.story_develop.run_owner` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.sandbox_facts` | M | 2 | 9 |
 | `lithos_loom.plugins.story_develop.settings_resolver` | M | 1 | 1 |
@@ -509,6 +509,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `delivery_timed_out` — Whether an in-flight delivery has exceeded its bound (#189).
 - def `record_delivery_deadline` — Record when this run's PR delivery budget expires, for `develop attach` (#189).
 - def `record_delivery_failure` — Mark this run's PR delivery as FAILED in its private delivery.json (#194).
+- def `record_no_automated_delivery` — Record that no automated delivery follows THIS run's approval.
+- def `delivery_not_automated` — Whether THIS run recorded that no automated delivery follows its approval (:func:`record_no_automated_delivery`). ``False`` for anything else — a missing or unreadable marker, or the daemon's deadline-only one — so every unknown keeps ``develop deliver``'s race guard.
 - def `record_manual_delivery` — Record that ``develop deliver`` put this run's branch behind *pr_url* — and, once the delivery has FINISHED, that it did (*complete*).
 - def `manual_delivery_complete` — Whether a hand delivery of this run FINISHED — the bit ``prune`` reads.
 - def `manual_delivery_pr` — The PR a HAND delivery put this run's branch behind, or ``None``.

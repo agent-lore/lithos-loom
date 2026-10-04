@@ -239,6 +239,9 @@ def resume_command(
     typer.echo(f"run {result.run_id}: {result.status.upper()} — {result.message}")
     if not result.approved:
         raise typer.Exit(1)
+    # Nothing delivers a hand resume: say so in the run dir, so the command
+    # recommended below can tell it from a daemon run that is still pushing.
+    run_outcome.record_no_automated_delivery(resumption.config.run_dir)
     typer.echo(
         f"the branch is local only — `lithos-loom develop deliver {result.run_id}` "
         "pushes it, opens its PR and raises the pr gate"

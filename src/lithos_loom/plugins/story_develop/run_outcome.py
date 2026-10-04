@@ -549,6 +549,44 @@ def record_delivery_failure(run_dir: Path, *, reason: str) -> None:
         marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
 
 
+def record_no_automated_delivery(run_dir: Path) -> None:
+    """Record that no automated delivery follows THIS run's approval.
+
+    A daemon run delivers itself after ``develop()`` returns, so an approved
+    run dir normally means "a push and a PR may be on their way"
+    (:func:`delivery_deadline`), and ``develop deliver`` refuses it rather than
+    race that delivery. A run nothing will deliver is different: a hand
+    ``develop resume``, or a standalone plugin run without ``--open-pr``. Its
+    own output points the operator at ``develop deliver <run>``, so it says so
+    here, merged into the private ``delivery.json`` like the failure marker.
+    Best-effort: a write failure only costs the run-id form of ``deliver``, and
+    ``--branch``/``--story`` still works.
+    """
+    marker = run_dir / DELIVERY_MARKER
+    data: dict[str, object] = {}
+    try:
+        existing = json.loads(marker.read_text(encoding="utf-8"))
+        if isinstance(existing, dict):
+            data = existing
+    except (OSError, json.JSONDecodeError):
+        pass
+    data["automated"] = False
+    with contextlib.suppress(OSError):
+        marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+
+def delivery_not_automated(run_dir: Path) -> bool:
+    """Whether THIS run recorded that no automated delivery follows its
+    approval (:func:`record_no_automated_delivery`). ``False`` for anything
+    else — a missing or unreadable marker, or the daemon's deadline-only one —
+    so every unknown keeps ``develop deliver``'s race guard."""
+    try:
+        data = json.loads((run_dir / DELIVERY_MARKER).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("automated") is False
+
+
 def record_manual_delivery(
     run_dir: Path, *, pr_url: str, complete: bool = False
 ) -> None:

@@ -1636,6 +1636,50 @@ def test_an_approved_run_past_its_delivery_budget_is_salvageable(
     assert len(gh["created"]) == 1
 
 
+def test_an_approved_hand_run_with_no_automated_delivery_is_deliverable(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """A hand `develop resume` (or a standalone run without --open-pr) ends
+    APPROVED with no automated delivery to come; it records that, and the
+    command its own output recommends — `develop deliver <run>` — must work.
+    Delivering by run id is also what makes `develop list` show the PR: the
+    run's own marker, and the story's marker naming THIS run."""
+    from lithos_loom.plugins.story_develop import run_outcome
+
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    run_outcome.record_no_automated_delivery(run_dir)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    assert len(gh["created"]) == 1
+    assert run_outcome.run_pr_url(run_dir) == _PR_URL
+    assert _get(lithos, _STORY).metadata["manual_delivery"]["run_id"] == _RUN
+
+
+def test_a_daemon_deadline_alone_does_not_read_as_no_automated_delivery(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """The negative of the above: an approved run whose delivery.json holds
+    only the daemon's live deadline is still mid-delivery, and refused."""
+    from lithos_loom.plugins.story_develop import run_outcome
+
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "delivery.json").write_text(
+        json.dumps({"deadline": "2999-01-01T00:00:00+00:00"}), encoding="utf-8"
+    )
+    assert not run_outcome.delivery_not_automated(run_dir)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert gh["created"] == []
+
+
 def _approved_salvage(run_dir: Path, *, approved_head: str | None) -> None:
     """Rewrite the fixture run as the #194 salvage: approved, delivery failed.
 

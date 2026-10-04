@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from lithos_loom.github_client import GitHubError, GitHubTransportError
-from lithos_loom.plugins.story_develop import pr_delivery
+from lithos_loom.plugins.story_develop import pr_delivery, run_outcome
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.develop import DevelopResult, ReviewOutcome
 from lithos_loom.plugins.story_develop.pr_delivery import (
@@ -944,7 +944,6 @@ def test_delivery_fallback_exceeds_the_full_default_delivery_budget() -> None:
     # budget past the fallback, this fails instead of silently under-bounding attach.
     from types import SimpleNamespace
 
-    from lithos_loom.plugins.story_develop import run_outcome
     from lithos_loom.plugins.story_develop.config import (
         DEFAULT_TEST_TIMEOUT,
     )
@@ -966,6 +965,7 @@ def test_deliver_guarded_skips_when_nothing_to_deliver(
 ) -> None:
     # (None, None) — and deliver() is never called — when open_pr is off OR the
     # run wasn't approved. No deadline marker is recorded in the skip case.
+    config.run_dir.mkdir(parents=True)  # a real run's dir exists by now
     approved = _result(config, tmp_path)
     not_approved = replace(approved, status="max_rounds")
     called = {"n": 0}
@@ -991,7 +991,39 @@ def test_deliver_guarded_skips_when_nothing_to_deliver(
         task_id=None,
     ) == (None, None)
     assert called["n"] == 0  # deliver() untouched in either skip case
-    assert not (config.run_dir / "delivery.json").exists()  # no deadline recorded
+    # No deadline in either skip case: nothing is being delivered.
+    assert run_outcome.delivery_deadline(config.run_dir) is None
+    # An APPROVED run with open_pr off has no automated delivery coming, and
+    # says so — `develop deliver <run>` then knows it races nothing.
+    assert run_outcome.delivery_not_automated(config.run_dir)
+
+
+def test_deliver_guarded_records_no_automated_delivery_only_for_an_approved_skip(
+    config: DevelopConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A run that did not approve has nothing to deliver at all, and an open_pr
+    # run is the daemon's own delivery: neither may claim "no automated delivery".
+    config.run_dir.mkdir(parents=True)  # so a wrongly written marker would land
+    approved = _result(config, tmp_path)
+    monkeypatch.setattr(pr_delivery, "deliver", lambda *a, **k: object())
+    pr_delivery.deliver_guarded(
+        config,
+        replace(approved, status="max_rounds"),
+        open_pr=False,
+        copilot_review=False,
+        github_issue_url=None,
+        task_id=None,
+    )
+    assert not run_outcome.delivery_not_automated(config.run_dir)
+    pr_delivery.deliver_guarded(
+        config,
+        approved,
+        open_pr=True,
+        copilot_review=False,
+        github_issue_url=None,
+        task_id=None,
+    )
+    assert not run_outcome.delivery_not_automated(config.run_dir)
 
 
 def test_deliver_guarded_returns_outcome_and_records_deadline_on_success(
