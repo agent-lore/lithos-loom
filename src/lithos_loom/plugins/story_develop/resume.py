@@ -56,6 +56,7 @@ __all__ = [
     "Resumption",
     "prepare_resume",
     "record_resumed_from",
+    "resume_lineage",
 ]
 
 # ``state.json``'s provenance block on the RESUMED run: which run's branch it
@@ -430,6 +431,31 @@ def _prior_link(run_dir: Path) -> Path | None:
         )
         return None
     return prior
+
+
+def resume_lineage(run_dir: Path) -> tuple[str, ...]:
+    """The run ids *run_dir* verifiably continues, nearest first.
+
+    Each link is :func:`_prior_link` — loom's own ``resumed_from`` record,
+    re-checked to be a sibling in the same per-task dir — so the walk can
+    only ever name runs of this task. Bounded by :data:`MAX_RESUME_CHAIN`
+    and stopped at the first repeat. ``()`` for a run that resumed nothing.
+
+    ``develop deliver`` reads it to recognise the escalation a resumed run is
+    continuing: the daemon raised that gate naming the run that died, and the
+    resume is a new run id doing the same work.
+    """
+    lineage: list[str] = []
+    seen = {run_dir.resolve()}
+    current = run_dir
+    for _ in range(MAX_RESUME_CHAIN):
+        prior = _prior_link(current)
+        if prior is None or prior.resolve() in seen:
+            break
+        seen.add(prior.resolve())
+        lineage.append(prior.name)
+        current = prior
+    return tuple(lineage)
 
 
 def _intake_reviews(

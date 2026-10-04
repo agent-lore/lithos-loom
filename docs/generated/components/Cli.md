@@ -17,7 +17,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._deliver_facts` | M | 2 | 10 |
 | `lithos_loom.cli._deliver_lithos` | L | 8 | 4 |
 | `lithos_loom.cli._deliver_output` | M | 0 | 7 |
-| `lithos_loom.cli._deliver_preflight` | S | 0 | 5 |
+| `lithos_loom.cli._deliver_preflight` | M | 0 | 5 |
 | `lithos_loom.cli._deliver_repo` | M | 2 | 10 |
 | `lithos_loom.cli._deliver_session` | M | 2 | 7 |
 | `lithos_loom.cli._github_metadata` | S | 2 | 6 |
@@ -86,7 +86,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - class `StoryState` — The live story, and the gates that hold it.
 - def `read_story` — Read the story plus the open gates blocking it.
 - class `GateOutcome` — What the Lithos half of the delivery managed to do.
-- def `gate_delivery` — Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire this run's own human gate(s).
+- def `gate_delivery` — Steps 3 + 4: raise (or adopt) the ``pr`` gate, then retire this run's own human gate(s) — including those of the runs it verifiably continues (*ancestors*, its ``develop resume`` lineage).
 - def `mark_delivery_finding` — Record on the **story** that this delivery's finding was posted.
 
 ### `lithos_loom.cli._deliver_output`

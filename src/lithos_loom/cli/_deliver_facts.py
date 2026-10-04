@@ -43,6 +43,7 @@ from lithos_loom.plugins.story_develop.publish_text import (
     CONTROL_CHARS_RE,
     defang_markup,
 )
+from lithos_loom.plugins.story_develop.resume import resume_lineage
 
 __all__ = [
     "RunFacts",
@@ -97,6 +98,12 @@ class RunFacts:
     acceptance criteria this PR publishes are then not the ones the panel
     reviewed against."""
     run_dir: str = ""
+    lineage: tuple[str, ...] = ()
+    """The runs this one verifiably continues (a ``develop resume`` chain,
+    nearest first — :func:`~lithos_loom.plugins.story_develop.resume
+    .resume_lineage`). Their escalation is this delivery's to retire: the
+    daemon raised it naming the run that died, and the resume carried on the
+    same work under a new run id."""
 
 
 def _opt_rounds(value: Any) -> int | None:
@@ -297,6 +304,7 @@ def run_facts(run_dir: Path) -> RunFacts:
         coder_summary=coder_summary(run_dir / "handoff"),
         approved_head=_approved_head(status, result),
         run_dir=str(run_dir),
+        lineage=resume_lineage(run_dir),
     )
 
 

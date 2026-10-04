@@ -1636,6 +1636,50 @@ def test_an_approved_run_past_its_delivery_budget_is_salvageable(
     assert len(gh["created"]) == 1
 
 
+def test_an_approved_hand_run_with_no_automated_delivery_is_deliverable(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """A hand `develop resume` (or a standalone run without --open-pr) ends
+    APPROVED with no automated delivery to come; it records that, and the
+    command its own output recommends — `develop deliver <run>` — must work.
+    Delivering by run id is also what makes `develop list` show the PR: the
+    run's own marker, and the story's marker naming THIS run."""
+    from lithos_loom.plugins.story_develop import run_outcome
+
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    run_outcome.record_no_automated_delivery(run_dir)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    assert len(gh["created"]) == 1
+    assert run_outcome.run_pr_url(run_dir) == _PR_URL
+    assert _get(lithos, _STORY).metadata["manual_delivery"]["run_id"] == _RUN
+
+
+def test_a_daemon_deadline_alone_does_not_read_as_no_automated_delivery(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """The negative of the above: an approved run whose delivery.json holds
+    only the daemon's live deadline is still mid-delivery, and refused."""
+    from lithos_loom.plugins.story_develop import run_outcome
+
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "delivery.json").write_text(
+        json.dumps({"deadline": "2999-01-01T00:00:00+00:00"}), encoding="utf-8"
+    )
+    assert not run_outcome.delivery_not_automated(run_dir)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 1, result.output
+    assert gh["created"] == []
+
+
 def _approved_salvage(run_dir: Path, *, approved_head: str | None) -> None:
     """Rewrite the fixture run as the #194 salvage: approved, delivery failed.
 
@@ -3050,6 +3094,143 @@ def _daemon(monkeypatch: pytest.MonkeyPatch, *, alive: bool) -> None:
         pidfile, "read_pidfile", lambda path: identity if alive else None
     )
     monkeypatch.setattr(pidfile, "daemon_alive", lambda path, ident: alive)
+
+
+_RESUMED = "b0b0b0b0"
+
+
+def _resumed_run(run_dir: Path, lithos: FakeLithosClient) -> Path:
+    """The real daemon shape a hand resume leaves (PR #447 review).
+
+    Source run A (the fixture's ``_RUN``) died: the daemon raised gate-human
+    NAMING A and wrote a failed-attempt marker naming A and that gate. The
+    operator then ran ``develop resume A``, which is a NEW run B beside it:
+    approved, its ``resumed_from`` naming A, and its no-automated-delivery
+    marker written by the resume command.
+    """
+    from lithos_loom.plugins.story_develop import run_outcome
+
+    gate = _get(lithos, "gate-human")
+    asyncio.run(
+        lithos.task_update(
+            task_id="gate-human",
+            agent="loom",
+            metadata={**gate.metadata, "run_id": _RUN},
+        )
+    )
+    asyncio.run(
+        lithos.task_update(
+            task_id=_STORY,
+            agent="loom",
+            metadata={
+                "loom_last_attempt:story-develop": {
+                    "status": "failed",
+                    "run_id": _RUN,
+                    "gate_id": "gate-human",
+                }
+            },
+        )
+    )
+    resumed = run_dir.parent / _RESUMED
+    (resumed / "handoff").mkdir(parents=True)
+    (resumed / "state.json").write_text(
+        json.dumps(
+            {
+                "status": "approved",
+                "run_id": _RESUMED,
+                "branch": _BRANCH,
+                "rounds": 2,
+                "resumed_from": {"run_id": _RUN, "branch": _BRANCH},
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_outcome.record_no_automated_delivery(resumed)
+    return resumed
+
+
+@pytest.mark.parametrize("daemon_alive", [True, False])
+def test_a_resumed_run_delivers_and_retires_its_source_runs_escalation(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    daemon_alive: bool,
+) -> None:
+    """PR #447 review, both Mediums. With the daemon running, the lifecycle
+    guard must accept a run that recorded no automated delivery follows it (the
+    escalation names the SOURCE run). Either way, the gate swap must retire the
+    source run's gate and its failed-attempt marker: the resumed run continues
+    that very escalation, and a gate left open would keep the conflict resolver
+    from ever acting on the delivered PR."""
+    _resumed_run(run_dir, lithos)
+    _daemon(monkeypatch, alive=daemon_alive)
+
+    result = _invoke(_RESUMED)
+
+    assert result.exit_code == 0, result.output
+    assert len(gh["created"]) == 1
+    assert _get(lithos, "gate-human").status == "completed"
+    story = _get(lithos, _STORY)
+    assert "loom_last_attempt:story-develop" not in story.metadata
+    assert STORY_HUMAN_GATE_ID_KEY not in story.metadata
+    assert story.metadata["manual_delivery"]["run_id"] == _RESUMED
+
+
+def test_resume_lineage_never_retires_an_unrelated_runs_gate(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The negative: lineage widens "this run" to the runs it verifiably
+    continued, and to nothing else. A gate naming some other run stays open,
+    described, and the swap is not reported complete."""
+    _resumed_run(run_dir, lithos)
+    gate = _get(lithos, "gate-human")
+    asyncio.run(
+        lithos.task_update(
+            task_id="gate-human",
+            agent="loom",
+            metadata={**gate.metadata, "run_id": "c0c0c0c0"},
+        )
+    )
+    _daemon(monkeypatch, alive=False)
+
+    result = _invoke(_RESUMED)
+
+    assert _get(lithos, "gate-human").status == "open"
+    assert "raised by another run" in result.output
+
+
+def test_a_standalone_run_with_no_escalation_delivers_while_a_daemon_runs(
+    host,
+    lithos: FakeLithosClient,
+    run_dir: Path,
+    repo: Path,
+    gh: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #447 review, Medium 1's second shape: a standalone run (no route, so
+    no escalation will ever land) that recorded no automated delivery follows
+    it is not the daemon's to apply, whatever else the daemon is doing."""
+    from lithos_loom.plugins.story_develop import run_outcome
+
+    _drop_the_human_gate(lithos)
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "approved"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    run_outcome.record_no_automated_delivery(run_dir)
+    _daemon(monkeypatch, alive=True)
+
+    result = _invoke(_RUN)
+
+    assert result.exit_code == 0, result.output
+    assert len(gh["created"]) == 1
 
 
 def _drop_the_human_gate(client: FakeLithosClient) -> None:

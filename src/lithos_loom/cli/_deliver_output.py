@@ -422,7 +422,9 @@ def preview(
         state=state,
         title=title,
         no_gate=no_gate,
-        retirement=story.retirement(run_id=facts.run_id, dispatch_routes=routes),
+        retirement=story.retirement(
+            run_id=facts.run_id, dispatch_routes=routes, ancestors=facts.lineage
+        ),
         converge=(
             ()
             if converge is None

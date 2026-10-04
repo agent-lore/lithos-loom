@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from lithos_loom.plugins.story_develop import checkpoint
+from lithos_loom.plugins.story_develop import resume as resume_mod
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.daemon_io import read_resume_run_dir
 from lithos_loom.plugins.story_develop.handoff import (
@@ -528,7 +529,6 @@ def test_the_intake_caps_the_files_it_reads_and_the_text_it_carries(
     cap exists to close, so the count and the rendered text are both capped and
     the remainder is named rather than silently dropped.
     """
-    from lithos_loom.plugins.story_develop import resume as resume_mod
 
     repo, base, head = _repo(tmp_path)
     run_dir = _dead_run(
@@ -568,7 +568,6 @@ def test_the_text_budget_counts_what_the_renderer_actually_emits(
     text sat in ``files:`` rendered 800 kB inside a 20 kB "budget". Measuring
     through the renderer itself is what cannot drift from it.
     """
-    from lithos_loom.plugins.story_develop import resume as resume_mod
 
     repo, base, head = _repo(tmp_path)
     fat_files = ", ".join(f'"{"p" * 12000}:{i}"' for i in range(8))
@@ -607,7 +606,6 @@ def test_the_directory_listing_itself_is_bounded(tmp_path: Path) -> None:
     elision the intake reports: it names what the SCAN saw, so a bounded listing
     names one page and an unbounded one names every planted file.
     """
-    from lithos_loom.plugins.story_develop import resume as resume_mod
 
     repo, base, head = _repo(tmp_path)
     # a legacy checkpoint (no recorded reviewed round) with none of the panel's
@@ -902,3 +900,39 @@ def test_a_fork_point_that_is_not_behind_the_head_is_not_resumable(
 
     assert resumption is None
     assert "is not an ancestor of its head" in refused
+
+
+# ── resume_lineage: the runs a resumed run verifiably continues ─────────
+
+
+def _link(run_dir: Path, prior: str | None) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state: dict = {"run_id": run_dir.name}
+    if prior is not None:
+        state["resumed_from"] = {"run_id": prior}
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    return run_dir
+
+
+def test_resume_lineage_walks_the_chain_nearest_first(tmp_path: Path) -> None:
+    task = tmp_path / "work" / "t-1"
+    _link(task / "a", None)
+    _link(task / "b", "a")
+    c = _link(task / "c", "b")
+    assert resume_mod.resume_lineage(c) == ("b", "a")
+    assert resume_mod.resume_lineage(task / "a") == ()
+
+
+def test_resume_lineage_follows_only_contained_links_and_stops_on_a_cycle(
+    tmp_path: Path,
+) -> None:
+    task = tmp_path / "work" / "t-1"
+    # a link out of the task dir is not followed — the same containment rule
+    # as the intake walk
+    (tmp_path / "work" / "other" / "x").mkdir(parents=True)
+    out = _link(task / "out", "../other/x")
+    assert resume_mod.resume_lineage(out) == ()
+    # a cycle ends the walk, each run listed once
+    _link(task / "p", "q")
+    q = _link(task / "q", "p")
+    assert resume_mod.resume_lineage(q) == ("p",)

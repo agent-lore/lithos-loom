@@ -176,7 +176,13 @@ partial first pass finishes the job and changes nothing else.
      --from-github` spend money and push to the delivered PR again. That
      consent is the operator's alone, and a denylist would admit the next
      subsystem to raise a gate;
-   - **the gate names the run being delivered** (`metadata.run_id`). A story
+   - **the gate names the run being delivered** (`metadata.run_id`), or a run
+     it verifiably continues. A `develop resume` is a new run id doing the work
+     of the run that died, and the daemon raised that run's gate under the old
+     id; the resumed run's `resumed_from` chain (loom's own record, each link
+     checked to be a sibling in the same task dir) supplies those ids. That
+     lineage widens "this run" to the runs it continued and to nothing else.
+     A story
      can legitimately match two dispatch routes, each with its own stopped run
      and its own open escalation; retiring route B's gate because route A's
      branch was delivered discards a decision nobody made. When no candidate
@@ -272,13 +278,20 @@ the swap was made. Two guards close it, before anything is written:
   the ready frontier — reading it as a handoff would deliver the old run in
   exactly the window the route walks from *ready* to *claimed*, and the run it
   dispatches would raise its own gate over a story this command had just
-  reported as delivered. Three things let a delivery past it, each meaning
-  there is no producer to race: the
-  story already carries a delivery of its own (an idempotent re-run behind its
-  own open `pr` gate), **no loom daemon is running on this work dir** (the
-  pidfile `drain` uses — the salvage this command exists for), or the
-  run-dir-less `--branch`/`--story` form, which is the operator asserting the
-  lifecycle is over.
+  reported as delivered. "Naming this run" includes the runs it verifiably
+  continues, as above, so a resumed run finds the escalation its source run
+  left. Four things let a delivery past it, each meaning there is no producer
+  to race:
+  - the story already carries a delivery of its own (an idempotent re-run
+    behind its own open `pr` gate);
+  - **no loom daemon is running on this work dir** (the pidfile `drain` uses —
+    the salvage this command exists for);
+  - the run-dir-less `--branch`/`--story` form, which is the operator asserting
+    the lifecycle is over;
+  - the run recorded that **no automated delivery follows it**: an approved hand
+    `develop resume`, or a standalone run without `--open-pr`. No daemon
+    dispatched it, so no result is waiting to be applied. A live dispatch's
+    claim on the story is still checked separately.
 
 Both of those are reads, and a read is point-in-time: a daemon can boot the
 moment after them, bootstrap the story, and pass its readiness check while the
@@ -448,7 +461,7 @@ unreviewed code merges on a reviewed PR's reputation.
 | Exit | Meaning |
 |------|---------|
 | `0` | Delivered (or adopted with nothing left to do; or a `--dry-run` plan printed). |
-| `1` | **Refused, and this run wrote nothing**: a diverged remote branch, an unknown run, a story a live route dispatch still holds a claim on — including one that claims it between the preflight reads and the delivery's own dispatch hold — or a stopped run whose escalation has not appeared on the story while a loom daemon is running here (a pidfile that exists but cannot be read counts as running: a daemon rewrites it under its lock while booting) (its result may still be being applied — wait for the `[NeedsHuman]` gate, `drain` the daemon, or assert it with the run-dir-less `--branch`/`--story` form), a run that has recorded **no outcome** (no terminal `state.json` — the plugin writes it only at run end, so the run may be mid-round; `--branch` cannot stand in for it, and the run-dir-less `--branch --story` form is the explicit assertion for a reaped run), an **approved** run whose automated delivery has neither completed nor failed (the daemon may be opening its PR right now — watch it with `develop attach`; a recorded delivery failure or an expired delivery budget *is* deliverable), a branch absent from the checkout, a run that already delivered its PR, a story that is not open (without `--no-gate`), a project with no `[projects.<slug>]` mapping, an `origin` that is not a GitHub repository, another `deliver` holding the story's claim, an unreachable Lithos — or a `gh` failure / unadoptable PR **when the branch was already on `origin`**, so nothing of this run's is outside the host. |
+| `1` | **Refused, and this run wrote nothing**: a diverged remote branch, an unknown run, a story a live route dispatch still holds a claim on — including one that claims it between the preflight reads and the delivery's own dispatch hold — or a stopped run whose escalation has not appeared on the story while a loom daemon is running here (a pidfile that exists but cannot be read counts as running: a daemon rewrites it under its lock while booting) (its result may still be being applied — wait for the `[NeedsHuman]` gate, `drain` the daemon, or assert it with the run-dir-less `--branch`/`--story` form), a run that has recorded **no outcome** (no terminal `state.json` — the plugin writes it only at run end, so the run may be mid-round; `--branch` cannot stand in for it, and the run-dir-less `--branch --story` form is the explicit assertion for a reaped run), an **approved** run whose automated delivery has neither completed nor failed (the daemon may be opening its PR right now — watch it with `develop attach`; a recorded delivery failure or an expired delivery budget *is* deliverable, and so is a run that recorded that no automated delivery follows it — an approved hand `develop resume`, or a standalone run without `--open-pr`), a branch absent from the checkout, a run that already delivered its PR, a story that is not open (without `--no-gate`), a project with no `[projects.<slug>]` mapping, an `origin` that is not a GitHub repository, another `deliver` holding the story's claim, an unreachable Lithos — or a `gh` failure / unadoptable PR **when the branch was already on `origin`**, so nothing of this run's is outside the host. |
 | `2` | **Partial — something is committed and something is owed.** The branch was pushed but no PR could be opened or adopted; or an external write may or may not have landed and the read that would settle it failed too (`PUSH UNCERTAIN` / `PR UNCERTAIN` — never reported as "nothing written", and never as an absence this run did not establish); or the PR is open but the gate half did not complete (no `pr` gate, a gate watching another PR, a needs-human gate that would not close, a lost story write, a `[ManualDelivery]` that would not post); or the `--json` record the operator asked for could not be written. Whatever landed is printed and the `[Friction]` says what is owed; re-running finishes it. The classification follows what has been **committed**, not which step raised — once anything is outside the host, this command never claims it wrote nothing. |
 
 ## Requirements

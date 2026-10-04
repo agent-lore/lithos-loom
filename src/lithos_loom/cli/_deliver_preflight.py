@@ -121,7 +121,10 @@ def _refuse_if_run_may_be_live(run_dir: Path, facts: RunFacts) -> None:
       ``result.json`` all happen after it returns
       (:func:`run_outcome.delivery_complete` documents that window). The
       salvage this command exists for is a delivery that positively **failed**
-      (#194) or whose recorded budget has **expired** (#189).
+      (#194) or whose recorded budget has **expired** (#189) — or a run that
+      recorded no automated delivery follows it at all (a hand ``develop
+      resume`` or a standalone run without ``--open-pr``), which has nothing
+      to race.
 
     The run-dir-less ``--branch`` + ``--story`` form stays the operator's own
     assertion for a reaped run: no on-disk state claims anything there.
@@ -143,6 +146,8 @@ def _refuse_if_run_may_be_live(run_dir: Path, facts: RunFacts) -> None:
         return  # a recorded failure: exactly the salvage case
     if run_outcome.delivery_budget_expired(run_dir):
         return  # the automated delivery outlived its own budget
+    if run_outcome.delivery_not_automated(run_dir):
+        return  # a hand resume / standalone run: nothing will deliver it
     raise DeliverRefused(
         f"run {facts.run_id} was APPROVED and its automated delivery has "
         "neither completed nor failed — the daemon may be pushing and opening "
@@ -209,11 +214,24 @@ def refuse_if_the_run_is_still_the_daemons(
       exists for, and the common case for an operator cleaning up after a
       crash;
     * ``--branch``/``--story`` with no run id, which is the operator asserting
-      the lifecycle is over in the first place.
+      the lifecycle is over in the first place;
+    * a run that recorded that **no automated delivery follows it** (a hand
+      ``develop resume``, or a standalone run without ``--open-pr``): no
+      daemon dispatched it, so there is no result handoff to wait for.
+
+    A resumed run's escalation names the run it continued, not its own new
+    id, so the handoff is read across its verified resume lineage.
     """
     if not facts.run_dir:
         return  # the operator's own explicit assertion
-    if story.escalation_landed(run_id=facts.run_id, dispatch_routes=routes):
+    if run_outcome.delivery_not_automated(Path(facts.run_dir)):
+        # A hand resume / standalone run: no daemon dispatched it, so no
+        # daemon is applying its result. (Live dispatch claims are still
+        # checked separately — this guard is only about the result handoff.)
+        return
+    if story.escalation_landed(
+        run_id=facts.run_id, dispatch_routes=routes, ancestors=facts.lineage
+    ):
         return
     if story.delivery_visible(facts.run_id):
         return

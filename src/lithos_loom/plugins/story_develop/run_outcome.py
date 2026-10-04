@@ -533,20 +533,62 @@ def record_delivery_failure(run_dir: Path, *, reason: str) -> None:
     the recorded deadline is preserved. Best-effort: a write failure just means
     attach falls back to the deadline/grace bound.
     """
-    marker = run_dir / DELIVERY_MARKER
-    data: dict[str, object] = {}
-    try:
-        existing = json.loads(marker.read_text(encoding="utf-8"))
-        if isinstance(existing, dict):
-            data = existing
-    except (OSError, json.JSONDecodeError):
-        # Best-effort merge: if the prior marker is missing/unreadable/invalid,
-        # continue with a fresh payload and still record this failure.
-        pass
+    data = _delivery_marker_fields(run_dir)
     data["failed"] = True
     data["reason"] = reason
     with contextlib.suppress(OSError):
-        marker.write_text(json.dumps(data) + "\n", encoding="utf-8")
+        (run_dir / DELIVERY_MARKER).write_text(
+            json.dumps(data) + "\n", encoding="utf-8"
+        )
+
+
+def _delivery_marker_fields(run_dir: Path) -> dict[str, object]:
+    """The private ``delivery.json``'s fields, to merge a new one into.
+
+    Best-effort: a missing, unreadable or non-object marker reads as empty, so
+    each writer still records its own fact rather than dropping it.
+    """
+    try:
+        existing = json.loads((run_dir / DELIVERY_MARKER).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return existing if isinstance(existing, dict) else {}
+
+
+def record_no_automated_delivery(run_dir: Path) -> None:
+    """Record that no automated delivery follows THIS run's approval.
+
+    A daemon run delivers itself after ``develop()`` returns, so an approved
+    run dir normally means "a push and a PR may be on their way"
+    (:func:`delivery_deadline`), and ``develop deliver`` refuses it rather than
+    race that delivery. A run nothing will deliver is different: a hand
+    ``develop resume``, or a standalone plugin run without ``--open-pr``. Its
+    own output points the operator at ``develop deliver <run>``, so it says so
+    here, merged into the private ``delivery.json`` like the failure marker.
+    Only an entry point that no daemon drives may write it — never the
+    delivery seam the daemon shares — because ``deliver`` reads it as "no
+    daemon will apply this run's result".
+    Best-effort: a write failure only costs the run-id form of ``deliver``, and
+    ``--branch``/``--story`` still works.
+    """
+    data = _delivery_marker_fields(run_dir)
+    data["automated"] = False
+    with contextlib.suppress(OSError):
+        (run_dir / DELIVERY_MARKER).write_text(
+            json.dumps(data) + "\n", encoding="utf-8"
+        )
+
+
+def delivery_not_automated(run_dir: Path) -> bool:
+    """Whether THIS run recorded that no automated delivery follows its
+    approval (:func:`record_no_automated_delivery`). ``False`` for anything
+    else — a missing or unreadable marker, or the daemon's deadline-only one —
+    so every unknown keeps ``develop deliver``'s race guard."""
+    try:
+        data = json.loads((run_dir / DELIVERY_MARKER).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("automated") is False
 
 
 def record_manual_delivery(

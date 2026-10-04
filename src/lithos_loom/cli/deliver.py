@@ -737,6 +737,7 @@ def _deliver_claimed(
                 pr_url=pr_url,
                 run_id=facts.run_id,
                 dispatch_routes=routes,
+                ancestors=facts.lineage,
                 approved_head=gate_approval(
                     facts,
                     delivered_head=record["pr_head_sha"],
@@ -800,7 +801,7 @@ def _deliver_claimed(
     swapped = (
         outcome.swap_complete
         if outcome is not None
-        else not story.unretired_run_gates(facts.run_id)
+        else not story.unretired_run_gates(facts.run_id, facts.lineage)
     )
     marked = (
         outcome.finding_marked
