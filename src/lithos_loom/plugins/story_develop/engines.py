@@ -321,6 +321,31 @@ _CODEX_REASONING_EFFORT: dict[str, str] = {
 }
 
 
+# Every codex turn runs on a loom-defined model provider (2026-10-04). An
+# upstream stall left each codex model call silent until the built-in provider's
+# 300 s stream idle timeout before a reconnect fetched the answer — on every
+# call, host and container alike — so a ~20-call review blew the 60-minute turn
+# limit. The idle timeout is a provider setting, and the built-in `openai`
+# provider cannot be overridden ("reserved built-in provider ID"), so loom
+# declares its own with a 90 s timeout: a stalled call then costs ~1.5 minutes,
+# not 5, while the longest healthy silence observed was ~30 s. There is no
+# `base_url`: with `requires_openai_auth` codex picks the endpoint from the
+# auth mode (ChatGPT sign-in -> chatgpt.com/backend-api, verified against
+# codex-cli 0.159.3), so an API-key login is not sent to the wrong host. A
+# thread created on the built-in provider resumes on this one with its context
+# (verified), so runs in flight across the change are unaffected.
+CODEX_PROVIDER_ID = "loom-codex"
+CODEX_STREAM_IDLE_TIMEOUT_MS = 90_000
+_CODEX_PROVIDER_OVERRIDES: tuple[str, ...] = (
+    f'model_provider="{CODEX_PROVIDER_ID}"',
+    f'model_providers.{CODEX_PROVIDER_ID}.name="lithos-loom"',
+    f'model_providers.{CODEX_PROVIDER_ID}.wire_api="responses"',
+    f"model_providers.{CODEX_PROVIDER_ID}.requires_openai_auth=true",
+    f"model_providers.{CODEX_PROVIDER_ID}.stream_idle_timeout_ms="
+    f"{CODEX_STREAM_IDLE_TIMEOUT_MS}",
+)
+
+
 class CodexEngine(_BaseEngine):
     name = "codex"
     meters_cost_usd = False  # reports tokens, not USD — the #102 boundary
@@ -373,6 +398,8 @@ class CodexEngine(_BaseEngine):
             argv += ["-m", model]
         if effort:
             argv += ["-c", f"model_reasoning_effort={_CODEX_REASONING_EFFORT[effort]}"]
+        for override in _CODEX_PROVIDER_OVERRIDES:
+            argv += ["-c", override]
         argv += [prompt]
         return argv
 

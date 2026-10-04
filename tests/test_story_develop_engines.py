@@ -187,7 +187,48 @@ def test_codex_cli_argv_effort_levels_pass_through(level: str) -> None:
 
 def test_codex_cli_argv_omits_effort_override_when_none() -> None:
     argv = CodexEngine().cli_argv(prompt="p", session_id="s")
-    assert "-c" not in argv and not any("model_reasoning_effort" in a for a in argv)
+    assert not any("model_reasoning_effort" in o for o in _codex_overrides(argv))
+
+
+def _codex_overrides(argv: list[str]) -> list[str]:
+    """Every ``-c key=value`` config override in a codex argv, in order."""
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
+
+
+_LOOM_PROVIDER_OVERRIDES = [
+    'model_provider="loom-codex"',
+    'model_providers.loom-codex.name="lithos-loom"',
+    'model_providers.loom-codex.wire_api="responses"',
+    "model_providers.loom-codex.requires_openai_auth=true",
+    "model_providers.loom-codex.stream_idle_timeout_ms=90000",
+]
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_codex_runs_on_the_loom_provider_with_a_short_stream_idle_timeout(
+    resume: bool,
+) -> None:
+    # 2026-10-04: an upstream stall left codex model calls silent until the
+    # built-in 300 s stream idle timeout, every call, so a ~20-call review blew
+    # the 60-minute turn limit. The built-in `openai` provider cannot be
+    # overridden, so every turn (first and resume alike) runs on a loom-defined
+    # provider with a 90 s idle timeout.
+    argv = CodexEngine().cli_argv(
+        prompt="p", session_id="t-1", resume=resume, effort="high"
+    )
+    overrides = _codex_overrides(argv)
+    assert overrides[0] == "model_reasoning_effort=high"
+    assert overrides[1:] == _LOOM_PROVIDER_OVERRIDES
+    assert argv[-1] == "p"  # every override precedes the positional prompt
+
+
+def test_codex_provider_leaves_the_endpoint_to_the_auth_mode() -> None:
+    # No base_url: with requires_openai_auth codex picks the endpoint from the
+    # auth mode (ChatGPT sign-in -> chatgpt.com/backend-api, verified with
+    # codex-cli 0.159.3), so an API-key login is not pointed at the wrong host.
+    argv = CodexEngine().cli_argv(prompt="p", session_id=None)
+    assert not any("base_url" in o for o in _codex_overrides(argv))
+    assert _codex_overrides(argv) == _LOOM_PROVIDER_OVERRIDES
 
 
 def test_codex_cli_argv_effort_survives_resume() -> None:
