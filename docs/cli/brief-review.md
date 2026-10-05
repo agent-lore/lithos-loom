@@ -64,6 +64,10 @@ If nothing needs adding, the answer is `No change` with a one-line reason.
   artifacts mount, never as prompt text, because a brief can contain
   `{braces}`:
   - the brief (title plus description, or `--brief-file`);
+  - the story's explicit `metadata.acceptance_criteria`, under a closing
+    `## Acceptance criteria` heading in the brief file. It is read exactly as
+    dispatch reads it: a blank or non-string value is absent. The coder
+    receives that section separately, so the reviewer checks it too;
   - `metadata.prd` and `metadata.prd_sections`;
   - the first-parent history of the base since the story's `created_at`, at
     most 200 commits, the newest kept.
@@ -89,7 +93,10 @@ The agent's file is checked:
 - every item sits under a section;
 - ids are well formed, unique and carry their section's letter;
 - every decision and scope cut has a `Basis:` line;
-- the file says something: items, or a reasoned `No change`, but not both.
+- the file says something: items, or a reasoned `No change`, but not both;
+- no line is left that the parse cannot place. An item-like line it cannot
+  read, such as `- **D1: …**` with a colon for the full stop, or prose in a
+  section outside any item, is reported, never silently dropped.
 
 A draft that fails gets **one** correction turn in the same session, told every
 problem.
@@ -97,7 +104,7 @@ problem.
 | Exit | Meaning | stdout | stderr |
 |---|---|---|---|
 | 0 | addendum drafted | the rendered addendum | counts and cost |
-| 1 | degraded: failed turn, no file, or still invalid after the correction | the agent's raw text, if any | the note |
+| 1 | degraded: failed turn, no file, still invalid after the correction, or a runtime failure (docker unavailable, a turn that raised) | the agent's raw text, if any | the note |
 | 2 | refused before any agent ran: unknown story, unmapped project, a ref that is not a commit | — | the reason |
 
 The rendered addendum opens with a header naming the base it was checked

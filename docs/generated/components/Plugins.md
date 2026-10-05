@@ -47,7 +47,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.handoff` | L | 3 | 19 |
 | `lithos_loom.plugins.story_develop.idempotency` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.limits` | M | 3 | 7 |
-| `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 4 |
+| `lithos_loom.plugins.story_develop.lithos_io` | M | 3 | 5 |
 | `lithos_loom.plugins.story_develop.loop_entry` | S | 2 | 0 |
 | `lithos_loom.plugins.story_develop.merge_gate` | M | 2 | 3 |
 | `lithos_loom.plugins.story_develop.model_policy` | S | 0 | 6 |
@@ -98,11 +98,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.brief_review`
 - class `BriefItem` — One addendum item. *text* is the item exactly as written, minus the leading ``- `` of its first line: the bold id and title, the body, and every nested line with its own indentation — so rendering it back is ``"- " + text``. *kind* is the kind of the section it was found under (``None``: it appeared before any heading).
-- class `Addendum` — The parsed items, in document order, or a delta's *no_change* reason (``""`` when the heading was there but no reason followed it).
+- class `Addendum` — The parsed items, in document order, or a delta's *no_change* reason (``""`` when the heading was there but no reason followed it). *stray* holds the lines the parse could not place: an item-like line it cannot read as one, or prose inside a section but outside any item.
 - def `parse_addendum` — Read an addendum — an agent's draft, a rendered one, or the pilot's.
 - def `validate_addendum` — What is wrong with *addendum* as a brief review's answer, one line each.
 - def `render_addendum` — The canonical Markdown of *addendum*, as it is appended to a story.
-- class `BriefInputs` — What the reviewer reads about the story. *brief* is the description as dispatch would hand it to the coder (any approved addendum included); *written_at* is the story's ``created_at`` (ISO), the start of the history a full review reads; *prd* / *prd_sections* are the story's ``metadata.prd`` / ``metadata.prd_sections`` provenance.
+- class `BriefInputs` — What the reviewer reads about the story. *brief* is the description as dispatch would hand it to the coder (any approved addendum included); *acceptance_criteria* is the story's explicit ``metadata.acceptance_criteria`` (``lithos_io.explicit_acceptance_criteria``), which the coder's prompt carries as its own section — so the reviewer checks it too (PR #448 review); *written_at* is the story's ``created_at`` (ISO), the start of the history a full review reads; *prd* / *prd_sections* are the story's ``metadata.prd`` / ``metadata.prd_sections`` provenance.
 - class `BriefReviewResult` — The pass's answer. *addendum* is ``None`` when it degraded; *note* then says why, and *raw* keeps whatever the agent wrote.
 - def `review_brief` — Run the read-only brief review at *base_sha* and return its addendum.
 
@@ -364,6 +364,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.lithos_io`
 - class `TaskContext` — What the plugin needs from a Lithos task to run against it.
+- def `explicit_acceptance_criteria` — A story's ``metadata.acceptance_criteria`` — the explicit criteria the coder's prompt carries as their own section — or ``None`` when it is absent, not a string, or blank. The ONE reading of that field: dispatch, the standalone run and the brief review all take it from here.
 - class `LithosIOError` — A Lithos round-trip operation failed (fetch is fatal; post is not).
 - def `fetch_task_context` — Fetch the task and distil the run context. Raises :class:`LithosIOError`.
 - class `DeferredSpawn` — One deferred finding's spawn outcome (819370e5).

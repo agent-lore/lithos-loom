@@ -39,6 +39,7 @@ from lithos_loom.plugins.story_develop.brief_review import (
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.daemon_io import fetch_task
+from lithos_loom.plugins.story_develop.lithos_io import explicit_acceptance_criteria
 from lithos_loom.runner import worktree
 
 # The base branch a dispatched coder is cut from (the story-develop route
@@ -125,6 +126,7 @@ def brief_review_command(
             prd=_text(metadata.get("prd")),
             prd_sections=_text(metadata.get("prd_sections")),
             written_at=task.created_at.isoformat() if task.created_at else None,
+            acceptance_criteria=explicit_acceptance_criteria(metadata),
         ),
         base_sha=base_sha,
         mode=mode,

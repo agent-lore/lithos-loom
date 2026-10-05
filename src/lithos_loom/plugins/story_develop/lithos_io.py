@@ -68,6 +68,15 @@ class TaskContext:
         return f"{self.title}\n\n{body}" if body else self.title
 
 
+def explicit_acceptance_criteria(metadata: Mapping[str, Any]) -> str | None:
+    """A story's ``metadata.acceptance_criteria`` — the explicit criteria the
+    coder's prompt carries as their own section — or ``None`` when it is
+    absent, not a string, or blank. The ONE reading of that field: dispatch,
+    the standalone run and the brief review all take it from here."""
+    ac = metadata.get("acceptance_criteria")
+    return ac if isinstance(ac, str) and ac.strip() else None
+
+
 class LithosIOError(RuntimeError):
     """A Lithos round-trip operation failed (fetch is fatal; post is not)."""
 
@@ -89,12 +98,11 @@ def fetch_task_context(url: str, task_id: str) -> TaskContext:
                     f"task {task_id} is {task.status}, not open — refusing to "
                     "develop against a terminal task"
                 )
-            ac = task.metadata.get("acceptance_criteria")
             return TaskContext(
                 task_id=task.id,
                 title=task.title,
                 description=task.description or "",
-                acceptance_criteria=ac if isinstance(ac, str) and ac.strip() else None,
+                acceptance_criteria=explicit_acceptance_criteria(task.metadata),
                 metadata=dict(task.metadata),
             )
 

@@ -16,7 +16,10 @@ redesign the story.
 Read these files first (they are read-only):
 
 - `{inputs_dir}brief.md`: the brief, exactly as the coding agent will
-  receive it. Any addendum already approved is at its end.
+  receive it. Any addendum already approved is at its end. When the story
+  carries explicit acceptance criteria, they close the file under
+  `## Acceptance criteria`; the coding agent receives them as their own
+  section, so check them like the rest of the brief.
 - `{inputs_dir}story.md`: the story's id, its PRD and PRD sections, and the
   base commit.
 - `{inputs_dir}history.md`: what has merged on the mainline since the brief

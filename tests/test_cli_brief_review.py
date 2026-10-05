@@ -158,6 +158,30 @@ def test_prints_the_rendered_addendum_reviewed_at_the_given_base(
     assert "1 fact" in _plain(result.stderr) and "$0.42" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            "- An edge write evicts both endpoints.",
+            "- An edge write evicts both endpoints.",
+        ),
+        ("   ", None),  # blank: dispatch reads it as absent, so must this
+        (["a list"], None),  # not a string: likewise
+    ],
+)
+def test_the_story_s_explicit_acceptance_criteria_reach_the_reviewer(
+    env: dict[str, Any], value: object, expected: str | None
+) -> None:
+    # PR #448 review: the coder gets metadata.acceptance_criteria as its own
+    # section, so the reviewer must check it — read exactly as dispatch reads it.
+    env["story"].metadata = {**env["story"].metadata, "acceptance_criteria": value}
+
+    result = _invoke("24ad5f91", "--base", "HEAD")
+
+    assert result.exit_code == 0, result.output
+    assert env["inputs"].acceptance_criteria == expected
+
+
 def test_the_default_base_is_origin_main_as_a_coder_would_cut_it(
     env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

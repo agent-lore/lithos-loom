@@ -201,6 +201,57 @@ def test_an_item_before_any_section_is_reported() -> None:
     assert any("F1 appears before any section" in p for p in problems)
 
 
+# PR #448 review, finding 2: a model's ordinary formatting slip — a colon for
+# the id's full stop — must reach the correction turn, never vanish. The lenient
+# parse cannot read such a line as an item, so it is kept as STRAY content and
+# validation reports it.
+_COLON_ID = """\
+## Facts
+
+- **F1. The funnel classifies a raise.** `write_funnel.py:412`.
+
+## Decisions
+
+- **D1: Add a new module.** Put the routes in `edge_routes.py`.
+  - Basis: F1.
+"""
+
+
+def test_a_malformed_item_line_with_no_open_item_is_reported_not_dropped() -> None:
+    addendum = parse_addendum(_COLON_ID)
+
+    problems = validate_addendum(addendum)
+
+    assert [i.id for i in addendum.items] == ["F1"]
+    assert any(
+        "- **D1: Add a new module.**" in p and "could not be read" in p
+        for p in problems
+    ), problems
+
+
+def test_a_malformed_item_line_after_a_valid_item_is_reported() -> None:
+    # The slip here would be swallowed into D1's text, not dropped: the D2
+    # decision would be approved as a nested line of D1.
+    text = _VALID + "- **D2: Second decision.** do that\n  - Basis: F2.\n"
+
+    problems = validate_addendum(parse_addendum(text))
+
+    assert any("- **D2: Second decision.**" in p for p in problems), problems
+
+
+def test_prose_in_a_section_outside_any_item_is_reported() -> None:
+    text = "## Facts\n\nTwo facts matter here.\n\n- **F1. One.** `a.py:1`.\n"
+
+    problems = validate_addendum(parse_addendum(text))
+
+    assert any("Two facts matter here." in p for p in problems), problems
+
+
+def test_the_pilot_addenda_carry_no_unreadable_lines() -> None:
+    for name in ("w6", "w7", "w8"):
+        assert parse_addendum(_fixture(name)).stray == (), name
+
+
 # --- the pass ---------------------------------------------------------------
 
 
@@ -452,3 +503,115 @@ def test_a_missing_handoff_file_degrades(
 
     assert result.addendum is None
     assert "wrote no" in result.note
+
+
+def test_a_malformed_item_gets_the_correction_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    captured = _install(monkeypatch, tmp_path, config, drafts=[_COLON_ID, _VALID])
+
+    result = review_brief(config, _inputs(), base_sha=BASE)
+
+    assert len(captured["turns"]) == 2
+    assert "- **D1: Add a new module.**" in captured["turns"][1]["prompt"]
+    assert result.addendum is not None
+    assert [i.id for i in result.addendum.items] == ["F1", "F2", "D1"]
+
+
+# PR #448 review, finding 1: the coder receives metadata.acceptance_criteria as
+# its own section, so the reviewer must check it too.
+
+
+def test_explicit_acceptance_criteria_reach_the_reviewer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    _install(monkeypatch, tmp_path, config, drafts=[_VALID])
+
+    review_brief(
+        config,
+        _inputs(acceptance_criteria="- An edge write evicts both endpoints."),
+        base_sha=BASE,
+    )
+
+    brief = (config.artifacts_dir / br.INPUTS_DIR_NAME / "brief.md").read_text()
+    assert "## Acceptance criteria" in brief
+    assert "- An edge write evicts both endpoints." in brief
+    assert brief.index("{relation sentences}") < brief.index("## Acceptance criteria")
+
+
+def test_no_acceptance_section_when_the_story_has_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    _install(monkeypatch, tmp_path, config, drafts=[_VALID])
+
+    review_brief(config, _inputs(), base_sha=BASE)
+
+    brief = (config.artifacts_dir / br.INPUTS_DIR_NAME / "brief.md").read_text()
+    assert "## Acceptance criteria" not in brief
+
+
+# PR #448 review, finding 3: a runtime failure is a degraded result too.
+
+
+def test_a_container_start_failure_degrades_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    captured = _install(monkeypatch, tmp_path, config, drafts=[_VALID])
+
+    def refuse(cmd):
+        raise RuntimeError("docker run failed: Cannot connect to the Docker daemon")
+
+    monkeypatch.setattr(br.containers, "start_container", refuse)
+
+    result = review_brief(config, _inputs(), base_sha=BASE)
+
+    assert result.addendum is None
+    assert "Cannot connect to the Docker daemon" in result.note
+    assert captured["removed"] == tmp_path / "wt"
+    assert captured["turns"] == []
+
+
+def test_a_raising_correction_turn_degrades_and_keeps_the_first_draft(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    bad = "## Decisions\n\n- **D1. No basis.** do it\n"
+    captured = _install(monkeypatch, tmp_path, config, drafts=[bad])
+    real = br.turns.run_turn
+
+    def second_raises(**kwargs):
+        if captured["turns"]:
+            raise OSError("docker exec: container vanished")
+        return real(**kwargs)
+
+    monkeypatch.setattr(br.turns, "run_turn", second_raises)
+
+    result = review_brief(config, _inputs(), base_sha=BASE)
+
+    assert result.addendum is None
+    assert "container vanished" in result.note
+    assert result.raw.startswith("## Decisions")
+    assert captured["stopped"] == "brief-review-container"
+    assert captured["removed"] == tmp_path / "wt"
+
+
+def test_a_worktree_failure_degrades(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    captured = _install(monkeypatch, tmp_path, config, drafts=[_VALID])
+
+    def no_worktree(*a, **k):
+        raise RuntimeError("git worktree add failed: invalid reference")
+
+    monkeypatch.setattr(br.worktree, "create_at", no_worktree)
+
+    result = review_brief(config, _inputs(), base_sha=BASE)
+
+    assert result.addendum is None
+    assert "invalid reference" in result.note
+    assert "removed" not in captured  # nothing was created, nothing removed

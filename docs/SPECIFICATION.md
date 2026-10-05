@@ -824,6 +824,9 @@ description change. See [`docs/cli/brief-review.md`](cli/brief-review.md).
 - **Inputs reach the agent as files** under the read-only artifacts mount, never as
   prompt text:
   - the brief (`--brief-file` replaces the description);
+  - the story's explicit `metadata.acceptance_criteria`, read exactly as
+    dispatch reads it. The coder gets it as its own section, so the reviewer
+    checks it too;
   - the story's `metadata.prd` / `metadata.prd_sections`;
   - the first-parent history since the story's `created_at`.
 - **`--delta-from REF`** is the recheck. The brief, with its approved addendum, was
@@ -831,14 +834,17 @@ description change. See [`docs/cli/brief-review.md`](cli/brief-review.md).
   base and reports only what they change, or `No change`.
 - **The draft is validated:**
   - ids are well formed, unique and in the section their letter names;
-  - every decision and scope cut has a `Basis:` line.
+  - every decision and scope cut has a `Basis:` line;
+  - no line is left that the parse cannot place. An item-like line it
+    cannot read (`- **D1: …**`) or prose outside any item is reported, never
+    dropped.
 
   A draft that fails gets **one** correction turn in the same session.
 - **Exit codes:**
   - **0:** the addendum is on stdout, with a count line and the cost on stderr.
-  - **1:** degraded (a failed turn, no file, or a draft still invalid after the
-    correction). The note is on stderr, and the agent's raw text, if any, is on
-    stdout.
+  - **1:** degraded (a failed turn, no file, a draft still invalid after the
+    correction, or a runtime failure such as docker being unavailable). The note
+    is on stderr, and the agent's raw text, if any, is on stdout.
   - **2:** refused before any agent ran (an unknown story, an unmapped project, a
     ref that is not a commit).
 

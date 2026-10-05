@@ -107,6 +107,10 @@ _HEADING_RE = re.compile(
 # followed by a full stop; ``- **F1, exactly.**`` (a recheck's back-reference
 # to an earlier item) is prose, not a new item.
 _ITEM_RE = re.compile(r"^- \*\*(?P<id>[A-Z]\d+)\.")
+# Anything that LOOKS like an item at column 0. One the parse cannot read
+# (``- **D1: …**``, a colon for the full stop) is kept as stray content and
+# reported, never silently dropped or folded into the item above it.
+_ITEM_LIKE_RE = re.compile(r"^- \*\*")
 _ID_RE = re.compile(r"^[SFD]\d+$")
 _BASIS_RE = re.compile(
     r"^[ \t]*(?:-[ \t]*)?Basis:[ \t]*\S", re.IGNORECASE | re.MULTILINE
@@ -131,10 +135,13 @@ class BriefItem:
 @dataclass(frozen=True)
 class Addendum:
     """The parsed items, in document order, or a delta's *no_change* reason
-    (``""`` when the heading was there but no reason followed it)."""
+    (``""`` when the heading was there but no reason followed it). *stray*
+    holds the lines the parse could not place: an item-like line it cannot
+    read as one, or prose inside a section but outside any item."""
 
     items: tuple[BriefItem, ...] = ()
     no_change: str | None = None
+    stray: tuple[str, ...] = ()
 
     def of_kind(self, kind: str) -> tuple[BriefItem, ...]:
         return tuple(i for i in self.items if i.kind == kind)
@@ -155,11 +162,14 @@ class Addendum:
 def parse_addendum(text: str) -> Addendum:
     """Read an addendum — an agent's draft, a rendered one, or the pilot's.
 
-    Lenient by design: it never raises. Lines before the first item of a
-    section (the header paragraph, a section's own intro) are not items;
-    an item runs from its ``- **<id>.`` line to the next item or heading,
-    blank lines and nested blocks included, trailing blank lines dropped.
-    Structure problems are :func:`validate_addendum`'s to report.
+    Lenient by design: it never raises. The header paragraph before the
+    first section is not an item; an item runs from its ``- **<id>.`` line
+    to the next item or heading, blank lines and nested blocks included,
+    trailing blank lines dropped. What it cannot place goes to ``stray``
+    rather than vanishing: an item-like line it cannot read (kept in the
+    open item's text too, so the text stays verbatim), and prose inside a
+    section before its first item. Structure problems are
+    :func:`validate_addendum`'s to report.
     """
     items: list[BriefItem] = []
     kind: str | None = None
@@ -167,6 +177,7 @@ def parse_addendum(text: str) -> Addendum:
     no_change: str | None = None
     in_no_change = False
     no_change_lines: list[str] = []
+    stray: list[str] = []
 
     def close() -> None:
         nonlocal current
@@ -193,10 +204,14 @@ def parse_addendum(text: str) -> Addendum:
             in_no_change = False
             current = (item.group("id"), kind, [line[2:]])
             continue
+        if _ITEM_LIKE_RE.match(line):
+            stray.append(line.strip())
         if current is not None:
             current[2].append(line)
         elif in_no_change and line.strip():
             no_change_lines.append(line.strip())
+        elif kind is not None and line.strip() and not _ITEM_LIKE_RE.match(line):
+            stray.append(line.strip())
     close()
     if no_change is None:
         rendered = _NO_CHANGE_LINE_RE.search(text)
@@ -204,7 +219,7 @@ def parse_addendum(text: str) -> Addendum:
             no_change = rendered.group("reason").strip()
     elif no_change_lines:
         no_change = " ".join(no_change_lines)
-    return Addendum(items=tuple(items), no_change=no_change)
+    return Addendum(items=tuple(items), no_change=no_change, stray=tuple(stray))
 
 
 def validate_addendum(addendum: Addendum, *, strict: bool = True) -> list[str]:
@@ -234,6 +249,12 @@ def validate_addendum(addendum: Addendum, *, strict: bool = True) -> list[str]:
             "no items: write at least one `- **F1. …**` item under a section "
             "heading, or a `## No change` section with its reason"
         )
+    problems.extend(
+        f"this line could not be read as part of an item: `{line}` — start "
+        "every item with `- **<id>. ` (the id, then a full stop) at the start "
+        "of a line, and keep any other text inside an item"
+        for line in addendum.stray
+    )
     seen: set[str] = set()
     for item in addendum.items:
         if item.kind is None:
@@ -325,9 +346,13 @@ def _section_heading(kind: str, base: str) -> str:
 class BriefInputs:
     """What the reviewer reads about the story. *brief* is the description
     as dispatch would hand it to the coder (any approved addendum included);
-    *written_at* is the story's ``created_at`` (ISO), the start of the
-    history a full review reads; *prd* / *prd_sections* are the story's
-    ``metadata.prd`` / ``metadata.prd_sections`` provenance."""
+    *acceptance_criteria* is the story's explicit
+    ``metadata.acceptance_criteria`` (``lithos_io.explicit_acceptance_criteria``),
+    which the coder's prompt carries as its own section — so the reviewer
+    checks it too (PR #448 review); *written_at* is the story's
+    ``created_at`` (ISO), the start of the history a full review reads;
+    *prd* / *prd_sections* are the story's ``metadata.prd`` /
+    ``metadata.prd_sections`` provenance."""
 
     story_id: str
     title: str
@@ -335,6 +360,7 @@ class BriefInputs:
     prd: str | None = None
     prd_sections: str | None = None
     written_at: str | None = None
+    acceptance_criteria: str | None = None
 
 
 @dataclass(frozen=True)
@@ -382,32 +408,35 @@ def review_brief(
     *prior_base*, the base the approved review stood on; the reviewer then
     reports only what the commits between the two bases change.
 
-    Never raises for a degraded run (failed turn, no file, a draft still
-    invalid after the correction): the result's ``note`` says what happened
-    and ``raw`` keeps the agent's text.
+    Never raises once it starts (PR #448 review): a failed turn, no file, a
+    draft still invalid after the correction, AND a runtime failure on the
+    way — the worktree, the inputs, docker, a turn that raises — all come
+    back as a degraded result whose ``note`` says what happened and whose
+    ``raw`` keeps any text the agent had written. Only a caller's mistake
+    (a delta with no *prior_base*) raises.
     """
     if mode == MODE_DELTA and not prior_base:
         raise ValueError("a delta review needs prior_base, the approved review's base")
 
-    config.run_dir.mkdir(parents=True, exist_ok=True)
-    run_owner.record_owner(config.run_dir, turn_timeout_seconds=timeout)
-    config.worktree_parent.mkdir(parents=True, exist_ok=True)
-    config.coder_config_dir.mkdir(parents=True, exist_ok=True)
-    handoff.seed_handoff_dir(config.handoff_dir)
-    wt = worktree.create_at(
-        config.repo, base_sha, config.description, parent=config.worktree_parent
-    )
-    # Read-only container: the handoff bind-mountpoint must pre-exist in the
-    # worktree (docker cannot create it inside an RO /workspace).
-    (wt / HANDOFF_MOUNT_NAME).mkdir(parents=True, exist_ok=True)
-
     engine = engines.get_engine(config.coder)
+    wt: Path | None = None
     name: str | None = None
     cost = 0.0
     raw = ""
     problems: list[str] = []
     addendum: Addendum | None = None
     try:
+        config.run_dir.mkdir(parents=True, exist_ok=True)
+        run_owner.record_owner(config.run_dir, turn_timeout_seconds=timeout)
+        config.worktree_parent.mkdir(parents=True, exist_ok=True)
+        config.coder_config_dir.mkdir(parents=True, exist_ok=True)
+        handoff.seed_handoff_dir(config.handoff_dir)
+        wt = worktree.create_at(
+            config.repo, base_sha, config.description, parent=config.worktree_parent
+        )
+        # Read-only container: the handoff bind-mountpoint must pre-exist in
+        # the worktree (docker cannot create it inside an RO /workspace).
+        (wt / HANDOFF_MOUNT_NAME).mkdir(parents=True, exist_ok=True)
         _write_inputs(
             config, wt, inputs, base_sha=base_sha, mode=mode, prior_base=prior_base
         )
@@ -462,13 +491,24 @@ def review_brief(
                 handoff_path=f"{WORKSPACE_MOUNT}/{HANDOFF_MOUNT_NAME}/{BRIEF_REVIEW_HANDOFF_NAME}",
                 problems="\n".join(f"- {p}" for p in problems),
             )
+    except Exception as exc:  # noqa: BLE001 — degrade, never raise (see above)
+        logger.exception("brief review %s could not run", config.run_id)
+        return _degraded(
+            f"the brief review could not run: {exc}",
+            base_sha,
+            mode,
+            prior_base,
+            cost,
+            raw,
+        )
     finally:
         if name is not None:
             containers.stop_container(name)
-        try:
-            worktree.remove(wt, force=True)
-        except Exception:  # noqa: BLE001 — cleanup only
-            logger.warning("brief review: failed to remove worktree %s", wt)
+        if wt is not None:
+            try:
+                worktree.remove(wt, force=True)
+            except Exception:  # noqa: BLE001 — cleanup only
+                logger.warning("brief review: failed to remove worktree %s", wt)
 
     if problems:
         joined = "; ".join(problems)
@@ -521,9 +561,12 @@ def _write_inputs(
     """Write the reviewer's inputs under the read-only artifacts mount."""
     out = config.artifacts_dir / INPUTS_DIR_NAME
     out.mkdir(parents=True, exist_ok=True)
-    (out / "brief.md").write_text(
-        f"# {inputs.title}\n\n{inputs.brief.rstrip()}\n", encoding="utf-8"
-    )
+    brief = f"# {inputs.title}\n\n{inputs.brief.rstrip()}\n"
+    if inputs.acceptance_criteria:
+        # The section the coder's round-1 prompt gets (rounds.py), in the
+        # same words: the criteria are part of what the coder builds to.
+        brief += f"\n## Acceptance criteria\n\n{inputs.acceptance_criteria.strip()}\n"
+    (out / "brief.md").write_text(brief, encoding="utf-8")
     story = [
         "# The story under review",
         "",

@@ -44,7 +44,7 @@ from .config import (
     parse_reviewer_entry,
 )
 from .findings import not_admitted_note
-from .lithos_io import AGENT_ID, TaskContext
+from .lithos_io import AGENT_ID, TaskContext, explicit_acceptance_criteria
 from .model_policy import apply_panel_default_models
 from .panel import findings_by_severity
 from .personas import canonical_personas
@@ -97,12 +97,11 @@ def read_task_payload(path: Path) -> TaskContext:
     metadata = task.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
-    ac = metadata.get("acceptance_criteria")
     return TaskContext(
         task_id=task_id,
         title=title,
         description=str(task.get("description") or ""),
-        acceptance_criteria=ac if isinstance(ac, str) and ac.strip() else None,
+        acceptance_criteria=explicit_acceptance_criteria(metadata),
         metadata=dict(metadata),
     )
 
