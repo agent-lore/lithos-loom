@@ -45,6 +45,10 @@ from lithos_loom.runner import worktree
 # The base branch a dispatched coder is cut from (the story-develop route
 # passes no --branch, so `main`).
 _BASE_BRANCH = "main"
+# This command's subtree of the host work dir. An ON-DEMAND subtree like
+# `converge` / `review` / `merge-gate`: its name is not a story id, so
+# `develop prune` must keep it out of the story-gate read (`_ON_DEMAND_DIRS`).
+BRIEF_REVIEW_WORK_DIR = "brief-review"
 
 
 def brief_review_command(
@@ -108,7 +112,7 @@ def brief_review_command(
             **{
                 "repo": checkout,
                 "description": task.title,
-                "work_dir": host.orchestrator.work_dir / "brief-review",
+                "work_dir": host.orchestrator.work_dir / BRIEF_REVIEW_WORK_DIR,
                 **overrides,
             }
         ),

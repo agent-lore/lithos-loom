@@ -1064,6 +1064,31 @@ def test_prune_removes_killed_merge_gate_worktree(
     assert "removed mg1 (task merge-gate)" in out and "KiB" in out
 
 
+def test_prune_never_sends_an_on_demand_dir_to_the_story_gate_read(
+    patched: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The story-gate attribution is ONE best-effort batch: a pseudo task id in
+    # it (an on-demand subtree's name) can fail the whole read and cost every
+    # real story run its delivery answer. `develop brief-review` (604fb936)
+    # writes under its own subtree, which must be excluded like the others.
+    from lithos_loom.cli.brief_review import BRIEF_REVIEW_WORK_DIR
+
+    _make_run(patched, task_id="t-1", run_id="story1", rounds={1: ["cq"]})
+    for subtree in ("converge", "review", "merge-gate", BRIEF_REVIEW_WORK_DIR):
+        (patched / subtree / f"{subtree}-run" / "handoff").mkdir(parents=True)
+    asked: list[str] = []
+
+    def fake_delivered(cfg, runs):
+        asked.extend(task for task, _, _ in runs)
+        return {}
+
+    monkeypatch.setattr(develop, "delivered_runs", fake_delivered)
+    monkeypatch.setattr(develop, "_run_containers", lambda rid: [])
+    develop.develop_prune(config=None, dry_run=True, output_format="text")
+
+    assert asked == ["t-1"]
+
+
 def test_prune_keeps_live_merge_gate_worktree(
     patched: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
