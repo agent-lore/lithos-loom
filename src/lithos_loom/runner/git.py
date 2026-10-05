@@ -404,6 +404,32 @@ def log_between(worktree: Path, base: str, head: str = "HEAD") -> str:
     )
 
 
+def log_since(
+    worktree: Path, since: str, head: str = "HEAD", *, max_count: int = 200
+) -> str:
+    """Return *head*'s first-parent commits after the moment *since*, oldest first.
+
+    Feeds the brief review's "what merged since this brief was written"
+    (604fb936): *since* is the story's ``created_at`` (any date ``git log
+    --since`` reads, an ISO stamp with an offset included), so the reviewer
+    sees the merges the brief could not have known about. First-parent: on a
+    mainline that is one line per merged PR. *max_count* keeps the NEWEST
+    commits — the ones closest to the base the brief is checked against — so
+    an old story's history stays bounded. One ``%h %ad %s`` line per commit.
+    """
+    return _git(
+        worktree,
+        "log",
+        "--reverse",
+        "--first-parent",
+        f"--max-count={max_count}",
+        f"--since={since}",
+        "--date=short",
+        "--format=%h %ad %s",
+        head,
+    )
+
+
 def diff_stat(worktree: Path, base: str) -> str:
     """Return ``git diff --stat base...HEAD`` — the branch's cumulative change.
 

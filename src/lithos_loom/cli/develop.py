@@ -151,6 +151,16 @@ from lithos_loom.cli.resume import resume_command  # noqa: E402
 
 develop_app.command("resume")(resume_command)
 
+# `develop brief-review` (604fb936): draft a story's brief-review addendum —
+# the read-only pass dispatch runs before a coder starts — and print it.
+# Writes nothing to Lithos. Impl in `cli/brief_review.py`.
+from lithos_loom.cli.brief_review import (  # noqa: E402
+    BRIEF_REVIEW_WORK_DIR,
+    brief_review_command,
+)
+
+develop_app.command("brief-review")(brief_review_command)
+
 _FORMAT_TEXT = "text"
 _FORMAT_JSON = "json"
 # Active-agent label when docker is unavailable: we can't tell which (if any)
@@ -780,8 +790,9 @@ _DEFAULT_IDLE_SECONDS = float(DEFAULT_CODER_TIMEOUT)
 # forever. It is finished with its parent run.
 _INTAKE_SUFFIX = "-intake"
 # The on-demand work-dir subtrees (`develop converge` / `review` / `merge-gate`
-# runs): their parent dir is not a story id, so they take no gate attribution.
-_ON_DEMAND_DIRS = frozenset({"converge", "review", "merge-gate"})
+# / `brief-review` runs): their parent dir is not a story id, so they take no
+# gate attribution.
+_ON_DEMAND_DIRS = frozenset({"converge", "review", "merge-gate", BRIEF_REVIEW_WORK_DIR})
 
 # What ``prune`` recognises as a run dir — deliberately wider than
 # :func:`~story_develop.run_outcome.is_run_dir` (which the observability

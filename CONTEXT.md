@@ -77,6 +77,16 @@ dialogue-based** cycle.
   completion store (#196); each marker is bound to *its* run, not a prior one (#198); a failed
   delivery is not a clean success (#194). Owned by the `run_outcome` module — the single home
   for these invariants, read by the CLI and written by the plugin.
+- **brief review** — the read-only pass that checks a story's brief against the exact
+  tree its coder will start from, before the coder starts (604fb936, from the lens T3 hand
+  pilot of 2026-10-05). Its answer is an **addendum**. `lithos-loom develop brief-review`
+  runs it on demand and writes nothing; holding a dispatch for it is phase 1's second half.
+- **addendum** — a brief review's answer, appended to the story's description once the
+  operator approves it. Three kinds of item: **scope cuts** (`S#`, proposals to drop part of
+  the brief), **facts** (`F#`, they *describe* the code at the base and never say what to
+  build) and **decisions** (`D#`, anything that prescribes, chooses or changes scope; each
+  ends with a `Basis:` line). In doubt, an item is a decision. A **recheck** (delta mode)
+  reports only what the commits since an approved review's base change.
 
 ## PR maintenance
 

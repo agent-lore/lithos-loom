@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -139,6 +140,39 @@ def test_log_between_lists_commit_messages(tmp_git_repo: Path) -> None:
 def test_log_between_empty_without_commits(tmp_git_repo: Path) -> None:
     base = git.base_sha(tmp_git_repo)
     assert git.log_between(tmp_git_repo, base) == ""  # base == HEAD
+
+
+def _commit_on(repo: Path, name: str, when: str) -> None:
+    (repo / name).write_text(name)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    env = {**os.environ, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+    subprocess.run(
+        ["git", "commit", "-m", f"add {name}"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+
+
+def test_log_since_lists_first_parent_commits_after_a_moment(
+    tmp_git_repo: Path,
+) -> None:
+    # The brief review's "what merged since this brief was written" (604fb936):
+    # the story's created_at is the moment, so an ISO stamp with an offset.
+    _commit_on(tmp_git_repo, "old.txt", "2026-09-01T10:00:00+00:00")
+    _commit_on(tmp_git_repo, "w5.txt", "2026-10-02T10:00:00+00:00")
+    _commit_on(tmp_git_repo, "w6.txt", "2026-10-03T10:00:00+00:00")
+
+    log = git.log_since(tmp_git_repo, "2026-10-01T08:29:44+00:00")
+
+    assert "add w5.txt" in log and "add w6.txt" in log
+    assert "add old.txt" not in log
+    assert log.index("add w5.txt") < log.index("add w6.txt")  # oldest first
+    assert "2026-10-02" in log  # each line dated
+    capped = git.log_since(tmp_git_repo, "2026-10-01T00:00:00+00:00", max_count=1)
+    # the cap keeps the NEWEST commits — the ones closest to the base
+    assert "add w6.txt" in capped and "add w5.txt" not in capped
 
 
 def test_raises_on_bad_repo(tmp_path: Path) -> None:
