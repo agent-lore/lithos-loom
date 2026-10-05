@@ -102,6 +102,7 @@ from lithos_loom.subscriptions.admission_count import (
     TOTAL_KEY,
     AdmissionLimits,
     escalated_count,
+    held_for_review,
     limits_for,
     live_gates,
     open_gates,
@@ -152,7 +153,8 @@ _UNANSWERED_NAG_EVERY = 10
 class AdmissionVerdict:
     """What :meth:`Admission.admit` decided and why.
 
-    ``reason`` is ``admitted`` / ``unlimited`` (the admissions) or ``limit``
+    ``reason`` is ``admitted`` / ``unlimited`` / ``reserved`` (the admissions
+    — the last a story taking back the slot its brief-review hold kept) or ``limit``
     / ``total_cap`` / ``unreadable`` / ``queued`` (the refusals — the last
     one a free slot that another held story is ahead for, ADR 0012).
     """
@@ -177,6 +179,11 @@ class _Headroom:
     running: int
     escalated: int
     at_cap: bool
+    holders: frozenset[str] = frozenset()
+    """Every open story in the bucket holding a brief-review reservation
+    (604fb936) — the asker included, so it can be admitted against its own."""
+    holds: int = 0
+    """How many of *holders* count against the limit: all but the asker."""
 
     @property
     def urls(self) -> tuple[str, ...]:
@@ -194,7 +201,10 @@ class _Headroom:
         total = len(self.gates) + self.running
         room = []
         if self.limits.limit:
-            room.append(self.limits.limit - (total - self.escalated))
+            # a story held for its brief review keeps its slot (604fb936):
+            # against the per-project limit only — it has no PR yet, and the
+            # total is a backstop on open PRs
+            room.append(self.limits.limit - (total - self.escalated) - self.holds)
         if self.limits.total:
             room.append(self.limits.total - total)
         return max(0, min(room)) if room else sys.maxsize
@@ -415,6 +425,12 @@ class Admission:
             limits, project, bucket, own=asker, ordering=bool(others)
         )
         facts = (len(room.gates), room.escalated, limits, room.urls, room.running)
+        if task_id in room.holders:
+            # 604fb936: the story's own brief-review reservation IS its slot —
+            # admitted ahead of the release order, or a deferred sibling would
+            # outrank it, be refused by the very hold, and the two livelock.
+            self._admit(bucket, route, task_id, left=left)
+            return AdmissionVerdict(True, "reserved", *facts)
         if room.at_cap:
             self._defer(bucket, route, task_id, left=left)
             await self._notify_held(
@@ -468,10 +484,12 @@ class Admission:
         count then decides how many held stories are nudged, and an
         under-count would leave a slot to the sleepers (review round 3)."""
         gates = await open_gates(self._lithos, GATE_TYPE_PR, project)
+        holders = await held_for_review(self._lithos, project)
+        holds = len(holders - ({own[1]} if own else set()))
         running = len(self._in_flight.get(bucket, set()) - ({own} if own else set()))
         total = len(gates) + running
         at_cap = bool(limits.total) and total >= limits.total
-        at_limit = bool(limits.limit) and total >= limits.limit
+        at_limit = bool(limits.limit) and total + holds >= limits.limit
         if at_cap or at_limit:
             # #372: a gate whose story is already terminal (the work landed
             # via another PR, the issue mirror completed it, the PR stayed
@@ -481,11 +499,13 @@ class Admission:
             gates = await live_gates(self._lithos, gates)
             total = len(gates) + running
             at_cap = bool(limits.total) and total >= limits.total
-            at_limit = bool(limits.limit) and total >= limits.limit
+            at_limit = bool(limits.limit) and total + holds >= limits.limit
         escalated = 0
         if at_cap or at_limit or ordering:
             escalated = await escalated_count(self._lithos, project, gates)
-        return _Headroom(limits, gates, running, escalated, at_cap)
+        return _Headroom(
+            limits, gates, running, escalated, at_cap, holders=holders, holds=holds
+        )
 
     async def wake(self, project: str | None) -> int:
         """A slot in *project*'s bucket may have freed: republish the held

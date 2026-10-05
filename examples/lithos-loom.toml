@@ -121,6 +121,12 @@ name = "story-develop"
 # --copilot-review as the ROUTE-LEVEL fallback for the one-shot Copilot
 # request at PR open; per-project/per-task develop_copilot_review metadata
 # overrides it (default off — spend Copilot deliberately, gate 15690a0e).
+# Brief review at dispatch (604fb936) has no route flag: set
+# develop_brief_review: true in a project's context-doc metadata (a story can
+# opt out with develop_brief_review: false) and each PRD slice — a story with
+# metadata.prd — is checked against the commit its coder would start from and
+# held behind a `Brief review:` gate until the operator approves its addendum
+# (SPEC §2.2). The held story keeps the project's admission slot.
 # The --coder-model/--coder-effort/--reviewer-model/--reviewer-effort
 # flags may be appended here as a ROUTE-LEVEL DEFAULT that project/task
 # metadata overrides (they fill only what metadata leaves unset), e.g.:

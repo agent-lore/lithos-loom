@@ -20,7 +20,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.__main__` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.agent_session` | M | 1 | 5 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 4 |
-| `lithos_loom.plugins.story_develop.brief_review` | M | 4 | 4 |
+| `lithos_loom.plugins.story_develop.brief_review` | L | 4 | 10 |
+| `lithos_loom.plugins.story_develop.brief_review_phase` | M | 1 | 2 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 11 |
@@ -105,6 +106,17 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - class `BriefInputs` — What the reviewer reads about the story. *brief* is the description as dispatch would hand it to the coder (any approved addendum included); *acceptance_criteria* is the story's explicit ``metadata.acceptance_criteria`` (``lithos_io.explicit_acceptance_criteria``), which the coder's prompt carries as its own section — so the reviewer checks it too (PR #448 review); *written_at* is the story's ``created_at`` (ISO), the start of the history a full review reads; *prd* / *prd_sections* are the story's ``metadata.prd`` / ``metadata.prd_sections`` provenance.
 - class `BriefReviewResult` — The pass's answer. *addendum* is ``None`` when it degraded; *note* then says why, and *raw* keeps whatever the agent wrote.
 - def `review_brief` — Run the read-only brief review at *base_sha* and return its addendum.
+- def `item_digest` — A short digest of an item's text, blind to whitespace-only edits.
+- def `draft_entry` — One record entry for a pass at *base_sha*: its items by id, kind and digest (none when it produced no draft), and its *outcome* so far.
+- def `item_outcomes` — What the operator did to each drafted item, by id: ``unchanged``, ``edited`` (same id, different text), ``cut`` (the id is gone), and ``added`` for an id the draft did not have.
+- def `records_of` — The story's well-formed record entries, oldest first (an entry is a mapping carrying an ``outcome``; anything else is skipped, never trusted).
+- def `latest_entry`
+- def `plan_review` — What the dispatch about to cut a worktree at *start_sha* does first: ``(PLAN_FULL, None)``, ``(PLAN_DELTA, prior_base)`` or ``(PLAN_PROCEED, None)``.
+
+### `lithos_loom.plugins.story_develop.brief_review_phase`
+- class `PhaseOutcome` — What the dispatch does next. *proceed*: develop, cut at *start_sha* when set (the base the review checked), with *description* as the story's text when set (it may now end with an appended recheck). Not *proceed*: end the run held, reporting *escalation*.
+- def `run_phase` — Run the brief-review phase for *ctx*'s story before its coder starts at *start_sha* (see the module doc). The caller has already decided the phase applies (the knob is on, the story carries ``metadata.prd``, the run is not a resume). Raises ``LookupError`` for a story Lithos cannot find, and lets a Lithos write failure propagate — the caller reports either as the run's failure, never as a dispatch.
+- def `run_brief_review_phase` — The daemon's entry: resolve the base the coder would be cut at (the same fetch :func:`worktree.create` makes) ONCE, then run the phase against it. The caller cuts the coder at the outcome's ``start_sha``, so a base that moves after this fetch cannot slip past the review.
 
 ### `lithos_loom.plugins.story_develop.check_artifacts`
 - def `collect_check_artifacts` — Rescue a check's artifacts dir from its doomed tree export (#283).

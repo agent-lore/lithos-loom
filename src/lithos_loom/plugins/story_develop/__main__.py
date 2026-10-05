@@ -49,6 +49,7 @@ from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_
 
 from ...plugin_runner import write_result_atomically
 from . import check_runner, engines, run_outcome, sandbox_facts
+from .brief_review_phase import run_brief_review_phase
 from .check_set import CheckState
 from .config import (
     DEFAULT_BLOCK_THRESHOLD,
@@ -75,6 +76,7 @@ from .config import (
 )
 from .daemon_io import (
     EXIT_BAD_INPUT,
+    EXIT_FAILED,
     EXIT_SUCCEEDED,
     build_result_payload,
     layer_run_settings,
@@ -618,6 +620,53 @@ def _daemon_main(args: argparse.Namespace) -> int:
             config, entry = resumption.config, resumption.entry
             record_resumed_from(config.run_dir, resumption.plan)
             print(f"story-develop: {resumption.note}")
+
+    # 604fb936: with develop_brief_review on, a PRD slice is checked against
+    # the exact base its coder would start from BEFORE the coder starts. The
+    # phase either proceeds — the coder then cut at the reviewed commit, with
+    # the story's text as it now reads (a facts-only recheck may have been
+    # appended) — or holds the story behind a brief-review gate the runner
+    # raises from this run's escalation. A resumed run continues its branch.
+    prd = ctx.metadata.get("prd")
+    if entry is None and settings.brief_review and isinstance(prd, str) and prd.strip():
+        try:
+            phase = run_brief_review_phase(args.lithos_url, config, ctx)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("brief review phase failed")
+            return _fail_payload("lithos", f"brief review could not run: {exc}", 1)
+        for friction in phase.frictions:
+            print(f"[Friction] {friction}", file=sys.stderr)
+        post_frictions(args.lithos_url, ctx.task_id, phase.frictions)
+        if not phase.proceed:
+            escalation = phase.escalation or {}
+            write_result_atomically(
+                result_file,
+                {
+                    "schema_version": 1,
+                    "task_id": ctx.task_id,
+                    "status": "failed",
+                    "exit_code": EXIT_FAILED,
+                    "started_at": started_at.isoformat(timespec="seconds"),
+                    "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "run_id": config.run_id,
+                    "error": {
+                        "category": "input",
+                        "message": "held for brief review: "
+                        + str(escalation.get("summary") or ""),
+                    },
+                    "escalation": escalation,
+                },
+            )
+            print(
+                f"story-develop {config.run_id}: held for brief review — "
+                f"{escalation.get('summary', '')}"
+            )
+            return EXIT_FAILED
+        if phase.start_sha:
+            config = replace(config, start_sha=phase.start_sha)
+        if phase.description is not None:
+            reviewed = replace(ctx, description=phase.description)
+            config = replace(config, description=reviewed.task_text)
 
     try:
         result = develop(

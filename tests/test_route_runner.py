@@ -4225,3 +4225,187 @@ async def test_resume_pointer_continues_the_interrupted_run_from_the_record(
     )
     await _run_for(runner2)
     assert "resume" not in envelopes[-1]
+
+
+# ── brief review at dispatch (604fb936): the approval on the dispatch path ──
+
+_BRIEF = "Slice W8. Build the relation sentences."
+_DRAFT = """\
+**Brief review against `aaaaaaaaaaaa` (2026-10-05)** — checked.
+
+**Facts** (the code at `aaaaaaaaaaaa` — no judgment involved)
+
+- **F1. One.** `a.py:1`.
+
+**Decisions**
+
+- **D1. Do it.** this way.
+  - Basis: F1."""
+
+
+def _brief_runner(
+    fake: Any, tmp_path: Path, plugin_runner: Any
+) -> tuple[RouteRunner, EventBus]:
+    bus = EventBus()
+    runner = RouteRunner(
+        route=_route(),
+        bus=bus,
+        lithos=fake,
+        agent_id="lithos-orchestrator-test",
+        work_dir_base=tmp_path,
+        renew_interval_seconds=3600,
+        plugin_runner=plugin_runner,
+    )
+    return runner, bus
+
+
+async def _held_story(fake: Any, tmp_path: Path) -> str:
+    """Dispatch a story whose plugin run holds it for brief review — the
+    plugin's own writes (pending record + hold flag) and its result — and
+    return the brief-review gate the runner raised from that result."""
+    from lithos_loom.gates import STORY_HUMAN_GATE_ID_KEY
+    from lithos_loom.plugins.story_develop.brief_review import (
+        HOLD_KEY,
+        MODE_FULL,
+        OUTCOME_PENDING,
+        RECORD_KEY,
+        draft_entry,
+        parse_addendum,
+    )
+
+    fake.add_task(
+        make_task(
+            "story-1",
+            tags=("trigger:story-develop",),
+            description=_BRIEF,
+            metadata={"project": "loom", "prd": "docs/prd/x.md"},
+        )
+    )
+
+    async def holds(**kwargs: Any) -> dict[str, Any]:
+        entry = draft_entry(
+            run_id="held1",
+            mode=MODE_FULL,
+            base_sha="a" * 40,
+            addendum=parse_addendum(_DRAFT),
+            drafted_at=datetime(2026, 10, 5, 20, tzinfo=UTC),
+            outcome=OUTCOME_PENDING,
+        )
+        await fake.task_update(
+            task_id="story-1", metadata={RECORD_KEY: [entry], HOLD_KEY: True}
+        )
+        return {
+            "schema_version": 1,
+            "task_id": "story-1",
+            "status": "failed",
+            "exit_code": 1,
+            "run_id": "held1",
+            "error": {"category": "input", "message": "held for brief review"},
+            "escalation": {
+                "reason": "brief_review",
+                "summary": "brief review at aaaaaaaaaaaa: 1 fact, 1 decision",
+                "brief": {"base_sha": "a" * 40, "mode": MODE_FULL, "addendum": _DRAFT},
+            },
+        }
+
+    runner, bus = _brief_runner(fake, tmp_path, holds)
+    await bus.publish(_evt(payload=_payload("story-1", metadata={"project": "loom"})))
+    await _run_for(runner)
+    story = await fake.task_get(task_id="story-1")
+    assert story is not None
+    return story.metadata[STORY_HUMAN_GATE_ID_KEY]
+
+
+async def _dispatch_again(fake: Any, tmp_path: Path, plugin: Any) -> None:
+    story = await fake.task_get(task_id="story-1")
+    runner, bus = _brief_runner(fake, tmp_path, plugin)
+    await bus.publish(
+        _evt(
+            payload=_payload("story-1", metadata=dict(story.metadata)),
+            origin="bootstrap",
+        )
+    )
+    await _run_for(runner)
+
+
+async def test_an_approved_brief_review_dispatches_with_the_addendum(
+    tmp_path: Path,
+) -> None:
+    from lithos_loom.gates import brief_review_block
+    from lithos_loom.plugins.story_develop.brief_review import (
+        HOLD_KEY,
+        OUTCOME_APPROVED,
+        RECORD_KEY,
+    )
+
+    fake = FakeLithosClient()
+    gate_id = await _held_story(fake, tmp_path)
+    gate = await fake.task_get(task_id=gate_id)
+    assert gate is not None and brief_review_block(gate.description) == _DRAFT
+    await fake.task_complete(task_id=gate_id, agent="dave")
+    seen: dict[str, Any] = {}
+
+    async def develops(*, task_json_path: Path, **kwargs: Any) -> dict[str, Any]:
+        seen["task"] = json.loads(task_json_path.read_text())["task"]
+        return {
+            "schema_version": 1,
+            "task_id": "story-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    await _dispatch_again(fake, tmp_path, develops)
+
+    # task.json — what the coder is handed — carries the approved addendum
+    assert seen["task"]["description"] == f"{_BRIEF}\n\n{_DRAFT}\n"
+    story = await fake.task_get(task_id="story-1")
+    assert story is not None
+    assert story.metadata[RECORD_KEY][-1]["outcome"] == OUTCOME_APPROVED
+    assert HOLD_KEY not in story.metadata
+    assert "needs_human_gate_id" not in story.metadata
+
+
+async def test_a_refused_approval_raises_a_fresh_gate_and_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    from lithos_loom.gates import brief_review_block
+
+    fake = FakeLithosClient()
+    gate_id = await _held_story(fake, tmp_path)
+    gate = await fake.task_get(task_id=gate_id)
+    assert gate is not None and gate.description is not None
+    await fake.task_update(
+        task_id=gate_id,
+        description=gate.description.replace("#### End of addendum", ""),
+    )
+    await fake.task_complete(task_id=gate_id, agent="dave")
+    plugin = AsyncMock()
+
+    await _dispatch_again(fake, tmp_path, plugin)
+
+    plugin.assert_not_awaited()
+    story = await fake.task_get(task_id="story-1")
+    assert story is not None
+    fresh_id = story.metadata["needs_human_gate_id"]
+    assert fresh_id != gate_id
+    fresh = await fake.task_get(task_id=fresh_id)
+    assert fresh is not None and fresh.status == "open"
+    assert "**F1. One.**" in (brief_review_block(fresh.description) or "")
+    assert story.description == _BRIEF
+
+
+async def test_a_failed_approval_read_releases_the_claim_and_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    fake = FakeLithosClient()
+    gate_id = await _held_story(fake, tmp_path)
+    await fake.task_complete(task_id=gate_id, agent="dave")
+    fake.raise_on["task_edge_list"] = RuntimeError("Lithos hiccup")
+    plugin = AsyncMock()
+    gates_before = len(fake.calls_to("task_create"))
+
+    await _dispatch_again(fake, tmp_path, plugin)
+
+    plugin.assert_not_awaited()
+    assert len(fake.calls_to("task_create")) == gates_before  # no new gate
+    assert fake.calls_to("task_release")  # the story is free to re-dispatch

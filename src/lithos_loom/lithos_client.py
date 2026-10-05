@@ -173,6 +173,7 @@ class TaskClient(Protocol):
         description: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        expected_updated_at: datetime | str | None = None,
     ) -> datetime | None: ...
 
     async def task_complete(
@@ -1078,6 +1079,7 @@ class LithosClient:
         description: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        expected_updated_at: datetime | str | None = None,
     ) -> datetime | None:
         """Update mutable task fields.
 
@@ -1097,6 +1099,13 @@ class LithosClient:
         failed-retry guard (#339) records because the marker it just
         wrote cannot contain the stamp its own write created. ``None``
         on a pre-#415 server.
+
+        ``expected_updated_at`` is Lithos's optimistic lock: the stamp of the
+        read this write is based on (a :class:`datetime` is sent as its
+        ``isoformat()``, the exact string Lithos stamps; a string is sent
+        as is). If the task changed since, nothing is written and the call
+        raises :class:`LithosClientError` with code ``version_conflict`` —
+        re-read and decide again.
         """
         if title is None and description is None and tags is None and metadata is None:
             raise LithosClientError(
@@ -1115,6 +1124,12 @@ class LithosClient:
             arguments["tags"] = tags
         if metadata is not None:
             arguments["metadata"] = metadata
+        if expected_updated_at is not None:
+            arguments["expected_updated_at"] = (
+                expected_updated_at.isoformat()
+                if isinstance(expected_updated_at, datetime)
+                else expected_updated_at
+            )
         payload = await self._call("lithos_task_update", arguments)
         if isinstance(payload, dict):
             return _parse_iso_datetime(payload.get("updated_at"))

@@ -56,6 +56,7 @@ from lithos_loom.plugins.story_develop.checkpoint import (
     RESUMABLE_ESCALATION_REASONS,
     resumable_checkpoint,
 )
+from lithos_loom.subscriptions.brief_review_approval import apply_brief_approval
 from lithos_loom.subscriptions.delivery_gate import gate_and_release
 from lithos_loom.subscriptions.dispatch_guards import (
     AttemptStampStore,
@@ -506,6 +507,42 @@ class RouteRunner:
         # task ID are skipped rather than racing into a second plugin run.
         self._processed_tasks.add(task_id)
         logger.info("RouteRunner %s: claimed %s", self.route.name, task_id)
+        # 604fb936: a story whose brief-review gate was just completed carries
+        # an approved addendum — appended HERE, on every origin, before the
+        # escalation is cleared and task.json is written (readiness flipped the
+        # moment the gate completed, so no other point sees every dispatch).
+        try:
+            approval = await apply_brief_approval(
+                self.lithos,
+                task_id=task_id,
+                route=self.route.name,
+                agent=self.agent_id,
+                payload=payload,
+            )
+        except Exception:
+            # Unread is not refused: raising a draft-less gate beside the
+            # approved one would make the next approval ambiguous. Free the
+            # story; its re-check asks again.
+            logger.exception(
+                "RouteRunner %s: could not read %s's brief-review approval; "
+                "releasing it to retry",
+                self.route.name,
+                task_id,
+            )
+            self._processed_tasks.discard(task_id)
+            with contextlib.suppress(Exception):
+                await self.lithos.task_release(
+                    task_id=task_id, aspect=self.route.name, agent=self.agent_id
+                )
+            self._rechecker.schedule(task_id, why="brief-review approval unread")
+            return
+        if approval.refused is not None:
+            await self._escalate(
+                task_id, approval.refused, payload=payload, run_id=approval.run_id
+            )
+            return
+        if approval.applied and approval.payload is not None:
+            payload = approval.payload
         # b91177d2: a story carrying a needs-human gate id that has just passed
         # the readiness check has had its gate resolved — clear the provenance
         # + the failed-attempt marker HERE, on every origin, so the loop's

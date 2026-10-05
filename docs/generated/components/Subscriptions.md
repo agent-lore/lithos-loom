@@ -33,8 +33,9 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 | `lithos_loom.subscriptions._subprocess` | S | 0 | 2 |
 | `lithos_loom.subscriptions._task_archive` | S | 0 | 1 |
 | `lithos_loom.subscriptions.admission` | L | 2 | 0 |
-| `lithos_loom.subscriptions.admission_count` | S | 1 | 4 |
+| `lithos_loom.subscriptions.admission_count` | S | 1 | 5 |
 | `lithos_loom.subscriptions.admission_waker` | S | 1 | 0 |
+| `lithos_loom.subscriptions.brief_review_approval` | S | 1 | 1 |
 | `lithos_loom.subscriptions.conflict_resolve_dispatch` | M | 2 | 1 |
 | `lithos_loom.subscriptions.conflict_resolve_outcome` | S | 0 | 9 |
 | `lithos_loom.subscriptions.conflict_resolve_record` | S | 1 | 1 |
@@ -159,12 +160,17 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 ### `lithos_loom.subscriptions.admission_count`
 - class `AdmissionLimits` — ``limit`` bounds non-escalated open ``pr`` gates; ``total`` bounds all of them. ``0`` = unlimited.
 - def `open_gates` — The bucket's open gates of *gate_type* — one filtered read for a project; for the projectless bucket, every open gate of the type that names no project (``metadata_match`` cannot say "absent").
+- def `held_for_review` — The bucket's open stories holding a brief-review reservation (604fb936): held at dispatch until the operator approves their addendum, each keeps its project's slot. One exact read — the flag is a constant — narrowed to projectless stories for the projectless bucket, as :func:`open_gates` does.
 - def `limits_for` — The project's dials, or ``None`` when its context doc cannot be read — the caller holds the story rather than guess. Projectless work has no doc: the host defaults.
 - def `live_gates` — *gates* minus those whose waiter is terminal (#372). A waiter that cannot be read, or that Lithos no longer returns ("gone" is not "done"), keeps its gate counted — fail closed, as the escalation read does. The story is named by the gate's ``story_id`` metadata first (the cheap link, as ``_escalated_count`` reads it) and the ``waits_on_gate`` edge only for an older gate: ``create_pr_gate`` writes both or neither, so they disagree only after a hand edit.
 - def `escalated_count` — How many of *gates* wait on a story that an OPEN loom ``human`` gate structurally blocks. The human gate's ``waits_on_gate`` edge is the authority (review #368 F4): gate creation is not atomic, and a gate task whose edge never landed blocks nothing — its ``story_id`` alone must not free a slot. Unreadable → 0 (every gate counts).
 
 ### `lithos_loom.subscriptions.admission_waker`
 - class `AdmissionWaker` — One subscriber per route-runner child: when a ``pr`` gate closes or a loom ``human`` gate escalates one, ask :meth:`Admission.wake` to republish that project's held stories — in release order — so the runner re-asks admission now rather than after the re-check backoff. A nudge only — the sleeper is the fallback, and admission itself enforces the order at every ask. A story's own terminal event is the other thing it carries: :meth:`Admission.discard` releases the scheduler's memory of it (PR #398 review), so that memory is bounded by the open stories.
+
+### `lithos_loom.subscriptions.brief_review_approval`
+- class `ApprovalOutcome` — *applied*: the approved text is on the story and *payload* is its fresh read, to dispatch with. *refused*: the approval could not be applied — escalate it, do not run. Neither: no approval to apply.
+- def `apply_brief_approval` — Apply the story's approved brief-review addendum, if it has one (see the module doc). *payload* is the dispatch payload; only its metadata is read, to skip every round trip for a story with no pending review.
 
 ### `lithos_loom.subscriptions.conflict_resolve_dispatch`
 - def `spawn_resolve` — Run the resolve subprocess (cancellation-safe, bounded).

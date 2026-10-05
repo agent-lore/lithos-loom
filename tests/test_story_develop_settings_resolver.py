@@ -479,6 +479,33 @@ def test_bad_copilot_review_frictions_and_falls_back() -> None:
     assert len(frictions) == 1 and "develop_copilot_review" in frictions[0]
 
 
+# ── develop_brief_review (604fb936) ──────────────────────────────────────────
+
+
+def test_brief_review_defaults_unset() -> None:
+    settings, frictions = _resolve()
+    assert settings.brief_review is None  # off: dispatch as before
+    assert frictions == ()
+
+
+def test_brief_review_project_layer_and_task_override() -> None:
+    # A project switches the review on; one story can opt out (e.g. a brief
+    # the operator has just rewritten by hand) — and vice versa.
+    settings, frictions = _resolve({"develop_brief_review": True})
+    assert settings.brief_review is True and frictions == ()
+
+    settings, frictions = _resolve(
+        {"develop_brief_review": True}, {"develop_brief_review": False}
+    )
+    assert settings.brief_review is False and frictions == ()
+
+
+def test_bad_brief_review_frictions_and_stays_off() -> None:
+    settings, frictions = _resolve({"develop_brief_review": "sure"})
+    assert settings.brief_review is None
+    assert len(frictions) == 1 and "develop_brief_review" in frictions[0]
+
+
 # ── PR #360 re-review 3: the resolver records WHICH keys it rejected ─────────
 
 

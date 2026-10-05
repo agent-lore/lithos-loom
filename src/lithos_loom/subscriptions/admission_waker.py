@@ -18,7 +18,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from lithos_loom.bus import Event, EventBus, Subscription
-from lithos_loom.gates import GATE_TYPE_HUMAN, GATE_TYPE_PR, RAISED_BY_LOOM
+from lithos_loom.gates import (
+    BRIEF_REVIEW_REASON,
+    GATE_TYPE_HUMAN,
+    GATE_TYPE_PR,
+    RAISED_BY_LOOM,
+)
+from lithos_loom.plugins.story_develop.brief_review import HOLD_KEY
 from lithos_loom.subscriptions.admission import Admission
 from lithos_loom.subscriptions.dispatch_guards import project_of
 
@@ -75,6 +81,10 @@ class AdmissionWaker:
                 task_id = event.payload.get("id")
                 if isinstance(task_id, str) and task_id:
                     await self.admission.discard(task_id)
+                if metadata.get(HOLD_KEY) is True:
+                    # 604fb936: a story that ended while holding its
+                    # brief-review reservation gives the slot back
+                    await self.admission.wake(project_of(metadata))
             return
         if not _frees_a_slot(event.type, metadata):
             return
@@ -96,8 +106,12 @@ def _frees_a_slot(event_type: str, metadata: Any) -> bool:
     if gate_type == GATE_TYPE_PR:
         return event_type in ("lithos.task.completed", "lithos.task.cancelled")
     if gate_type == GATE_TYPE_HUMAN:
+        # An escalation on a DELIVERED story frees a slot (its PR stops
+        # counting); a brief-review gate holds an undelivered story whose
+        # reservation keeps the slot (604fb936) — nothing frees.
         return (
             event_type == "lithos.task.created"
             and metadata.get("raised_by") == RAISED_BY_LOOM
+            and metadata.get("escalation_reason") != BRIEF_REVIEW_REASON
         )
     return False

@@ -4251,3 +4251,32 @@ def test_a_partial_delivery_marks_the_pr_but_not_completion(
 
     assert run_outcome.manual_delivery_pr(run_dir) == _PR_URL
     assert not run_outcome.manual_delivery_complete(run_dir)  # prune keeps it
+
+
+def test_a_delivery_never_retires_a_brief_review_gate() -> None:
+    # 604fb936: a brief-review gate is the operator's approval of an addendum,
+    # not a stopped run's escalation. It names its (held) run on a dispatch
+    # route, so without an explicit rule a delivery naming that run would
+    # retire it — and the addendum would never be approved or appended.
+    from lithos_loom.cli._deliver_lithos import HumanGateRef, StoryState
+
+    story = StoryState(
+        story_id="s-1",
+        title="T",
+        description="",
+        status="open",
+        metadata={},
+        human_gates=(
+            HumanGateRef(
+                gate_id="g-brief",
+                route="story-develop",
+                reason="brief_review",
+                run_id="held1",
+            ),
+        ),
+    )
+
+    plan = story.retirement(run_id="held1", dispatch_routes=("story-develop",))
+
+    assert plan.superseded == ()
+    assert any("g-brief" in kept and "brief-review" in kept for kept in plan.retained)

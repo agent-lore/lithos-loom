@@ -202,6 +202,9 @@ class ProjectDevelopSettings:
     # open (``develop_copilot_review``). ``None`` = unset at both layers; the
     # daemon falls back to the route-level ``--copilot-review`` flag.
     copilot_review: bool | None = None
+    # 604fb936: hold a PRD slice at dispatch for an operator-approved brief
+    # review (``develop_brief_review``). ``None`` = unset at both layers = off.
+    brief_review: bool | None = None
     # PR #348 review F3: True when the project-context doc could not be READ
     # (Lithos/transport failure) — as opposed to read-and-absent. A failed
     # read may be hiding an explicit opt-out, so spend dials (the Copilot
@@ -362,6 +365,7 @@ def _degraded_settings(
         test_command=scalars.test_command,
         test_gate=scalars.test_gate,
         copilot_review=scalars.copilot_review,
+        brief_review=scalars.brief_review,
         check_commands=scalars.check_commands,
         check_states=scalars.check_states,
         parity_command=scalars.parity_command,
@@ -445,6 +449,7 @@ def resolve_project_settings(
         test_command=scalars.test_command,
         test_gate=scalars.test_gate,
         copilot_review=scalars.copilot_review,
+        brief_review=scalars.brief_review,
         check_commands=scalars.check_commands,
         check_states=scalars.check_states,
         parity_command=scalars.parity_command,

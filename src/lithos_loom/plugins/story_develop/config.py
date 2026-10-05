@@ -572,6 +572,11 @@ class DevelopConfig:
     # project-then-task). ``None`` = no collection.
     artifacts_path: str | None = None
     base_branch: str = "main"
+    # 604fb936: cut the coder's branch at EXACTLY this commit instead of the
+    # base branch's tip at cut time — the commit the brief review checked,
+    # so a base that moves between the review and the cut cannot slip past
+    # it. None = the base tip, as before.
+    start_sha: str | None = None
     # Single-reviewer convenience fields (the T2-era surface; still the
     # default path). T6: `reviewers` holds full multi-reviewer specs and,
     # when non-empty, takes precedence — see `effective_reviewers`.

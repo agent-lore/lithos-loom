@@ -33,13 +33,15 @@ spliced into.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 from ...runner import git, worktree
 from . import containers, engines, handoff, run_owner, turns
@@ -50,17 +52,37 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "BRIEF_REVIEW_HANDOFF_NAME",
+    "HOLD_KEY",
     "INPUTS_DIR_NAME",
+    "ITEM_ADDED",
+    "ITEM_CUT",
+    "ITEM_EDITED",
+    "ITEM_UNCHANGED",
     "KIND_DECISION",
     "KIND_FACT",
     "KIND_SCOPE_CUT",
     "MODE_DELTA",
     "MODE_FULL",
+    "OUTCOME_APPROVED",
+    "OUTCOME_AUTO_APPENDED",
+    "OUTCOME_FAILED",
+    "OUTCOME_NO_CHANGE",
+    "OUTCOME_PENDING",
+    "PLAN_DELTA",
+    "PLAN_FULL",
+    "PLAN_PROCEED",
+    "RECORD_KEY",
     "Addendum",
     "BriefInputs",
     "BriefItem",
     "BriefReviewResult",
+    "draft_entry",
+    "item_digest",
+    "item_outcomes",
+    "latest_entry",
     "parse_addendum",
+    "plan_review",
+    "records_of",
     "render_addendum",
     "review_brief",
     "validate_addendum",
@@ -646,3 +668,133 @@ def _degraded(
         note=note,
         raw=raw,
     )
+
+
+# --- the records a review leaves on its story ----------------------------------
+#
+# ``metadata.brief_review`` is a list of entries, newest last, one per pass.
+# Phase 2 (10cc6310) decides from them whether a facts-only addendum may skip
+# the gate, so each item is recorded by id, kind and a digest of its text: the
+# approval compares the operator's text with the draft item by item.
+# ``metadata.brief_review_hold`` is the flag that reserves the story's
+# admission slot while it waits at its gate (a constant, so admission can
+# find the holders with one exact ``metadata_match``).
+
+RECORD_KEY = "brief_review"
+HOLD_KEY = "brief_review_hold"
+
+OUTCOME_PENDING = "pending"  # drafted; held behind its gate for approval
+OUTCOME_APPROVED = "approved"  # the operator approved it; appended
+OUTCOME_AUTO_APPENDED = "auto_appended"  # a facts-only recheck, appended
+OUTCOME_NO_CHANGE = "no_change"  # a recheck that found nothing to add
+OUTCOME_FAILED = "failed"  # the pass produced no draft
+
+# The outcomes a later dispatch can build on: the brief, as it now reads,
+# was checked against the entry's base.
+_SETTLED = frozenset({OUTCOME_APPROVED, OUTCOME_AUTO_APPENDED, OUTCOME_NO_CHANGE})
+
+ITEM_UNCHANGED = "unchanged"
+ITEM_EDITED = "edited"
+ITEM_CUT = "cut"
+ITEM_ADDED = "added"
+
+PLAN_FULL = "full"  # no settled review: check the whole brief
+PLAN_DELTA = "delta"  # settled at another base: what moved?
+PLAN_PROCEED = "proceed"  # settled at this base: dispatch as is
+
+
+def item_digest(text: str) -> str:
+    """A short digest of an item's text, blind to whitespace-only edits."""
+    normal = " ".join(text.split())
+    return hashlib.sha256(normal.encode("utf-8")).hexdigest()[:16]
+
+
+def draft_entry(
+    *,
+    run_id: str,
+    mode: str,
+    base_sha: str,
+    addendum: Addendum | None,
+    drafted_at: datetime,
+    outcome: str,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """One record entry for a pass at *base_sha*: its items by id, kind and
+    digest (none when it produced no draft), and its *outcome* so far."""
+    entry: dict[str, Any] = {
+        "run_id": run_id,
+        "mode": mode,
+        "base_sha": base_sha,
+        "drafted_at": drafted_at.isoformat(),
+        "outcome": outcome,
+        "items": [
+            {"id": item.id, "kind": item.kind, "sha": item_digest(item.text)}
+            for item in (addendum.items if addendum is not None else ())
+        ],
+    }
+    if note:
+        entry["note"] = note
+    return entry
+
+
+def item_outcomes(entry: Mapping[str, Any], approved: Addendum) -> dict[str, str]:
+    """What the operator did to each drafted item, by id: ``unchanged``,
+    ``edited`` (same id, different text), ``cut`` (the id is gone), and
+    ``added`` for an id the draft did not have."""
+    drafted: dict[str, str] = {}
+    for item in entry.get("items") or ():
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str):
+            drafted[item["id"]] = str(item.get("sha") or "")
+    kept = {item.id: item_digest(item.text) for item in approved.items}
+    outcomes: dict[str, str] = {}
+    for item_id, sha in drafted.items():
+        if item_id not in kept:
+            outcomes[item_id] = ITEM_CUT
+        elif kept[item_id] == sha:
+            outcomes[item_id] = ITEM_UNCHANGED
+        else:
+            outcomes[item_id] = ITEM_EDITED
+    for item_id in kept:
+        if item_id not in drafted:
+            outcomes[item_id] = ITEM_ADDED
+    return outcomes
+
+
+def records_of(metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The story's well-formed record entries, oldest first (an entry is a
+    mapping carrying an ``outcome``; anything else is skipped, never trusted)."""
+    raw = metadata.get(RECORD_KEY)
+    if not isinstance(raw, list):
+        return []
+    return [
+        dict(entry)
+        for entry in raw
+        if isinstance(entry, Mapping) and isinstance(entry.get("outcome"), str)
+    ]
+
+
+def latest_entry(metadata: Mapping[str, Any]) -> dict[str, Any] | None:
+    entries = records_of(metadata)
+    return entries[-1] if entries else None
+
+
+def plan_review(metadata: Mapping[str, Any], start_sha: str) -> tuple[str, str | None]:
+    """What the dispatch about to cut a worktree at *start_sha* does first:
+    ``(PLAN_FULL, None)``, ``(PLAN_DELTA, prior_base)`` or
+    ``(PLAN_PROCEED, None)``.
+
+    Only the NEWEST entry decides. A settled one (approved, auto-appended,
+    no change) means the brief as it now reads was checked at its base: the
+    same base proceeds, another rechecks the commits between. A pending one
+    (an approval never applied — its gate was cancelled) or a failed one is
+    nothing to build on, so the whole brief is reviewed again.
+    """
+    entry = latest_entry(metadata)
+    if entry is None or entry["outcome"] not in _SETTLED:
+        return PLAN_FULL, None
+    base = entry.get("base_sha")
+    if not isinstance(base, str) or not base:
+        return PLAN_FULL, None
+    if base == start_sha:
+        return PLAN_PROCEED, None
+    return PLAN_DELTA, base
