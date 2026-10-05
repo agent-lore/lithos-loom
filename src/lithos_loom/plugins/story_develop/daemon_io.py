@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
 
+    from ...lithos_types import Task
     from .develop import DevelopResult
     from .pr_delivery import DeliveryOutcome
 
@@ -1066,19 +1067,25 @@ def story_config_overrides(settings: ProjectDevelopSettings) -> dict[str, Any]:
     return overrides
 
 
-def fetch_task_metadata(url: str, task_id: str) -> tuple[str, Mapping[str, Any]]:
-    """``(title, metadata)`` of *task_id* from Lithos at *url* (raises on a
-    missing task or an unreachable server — an on-demand run asked for a
-    story must not silently proceed without it)."""
+def fetch_task(url: str, task_id: str) -> Task:
+    """The full record of *task_id* from Lithos at *url* (raises on a missing
+    task or an unreachable server — an on-demand run asked for a story must
+    not silently proceed without it)."""
 
-    async def _fetch() -> tuple[str, Mapping[str, Any]]:
+    async def _fetch() -> Task:
         async with LithosClient(url, agent_id=AGENT_ID) as client:
             task = await client.task_get(task_id=task_id)
             if task is None:
                 raise LookupError(f"Lithos task {task_id!r} not found at {url}")
-            meta = getattr(task, "metadata", None)
-            return str(getattr(task, "title", "") or ""), (
-                meta if isinstance(meta, Mapping) else {}
-            )
+            return task
 
     return asyncio.run(_fetch())
+
+
+def fetch_task_metadata(url: str, task_id: str) -> tuple[str, Mapping[str, Any]]:
+    """``(title, metadata)`` of *task_id* — :func:`fetch_task`, narrowed."""
+    task = fetch_task(url, task_id)
+    meta = getattr(task, "metadata", None)
+    return str(getattr(task, "title", "") or ""), (
+        meta if isinstance(meta, Mapping) else {}
+    )

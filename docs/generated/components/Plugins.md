@@ -20,6 +20,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.__main__` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.agent_session` | M | 1 | 5 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 4 |
+| `lithos_loom.plugins.story_develop.brief_review` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
 | `lithos_loom.plugins.story_develop.check_runner` | L | 0 | 11 |
@@ -32,7 +33,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.converge` | L | 0 | 1 |
 | `lithos_loom.plugins.story_develop.converge_result` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.criteria_map` | M | 1 | 6 |
-| `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 17 |
+| `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 18 |
 | `lithos_loom.plugins.story_develop.develop` | L | 2 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.external_record` | S | 1 | 3 |
@@ -94,6 +95,16 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `resolve_formatters` — The runnable write-mode formatter commands for *wt*, probed once for the run.
 - def `within_tree` — Whether *target* resolves to a path inside *root* (write-side traversal guard).
 - def `run_format_pass` — Format the coder's commit in isolation and commit any change separately.
+
+### `lithos_loom.plugins.story_develop.brief_review`
+- class `BriefItem` — One addendum item. *text* is the item exactly as written, minus the leading ``- `` of its first line: the bold id and title, the body, and every nested line with its own indentation — so rendering it back is ``"- " + text``. *kind* is the kind of the section it was found under (``None``: it appeared before any heading).
+- class `Addendum` — The parsed items, in document order, or a delta's *no_change* reason (``""`` when the heading was there but no reason followed it).
+- def `parse_addendum` — Read an addendum — an agent's draft, a rendered one, or the pilot's.
+- def `validate_addendum` — What is wrong with *addendum* as a brief review's answer, one line each.
+- def `render_addendum` — The canonical Markdown of *addendum*, as it is appended to a story.
+- class `BriefInputs` — What the reviewer reads about the story. *brief* is the description as dispatch would hand it to the coder (any approved addendum included); *written_at* is the story's ``created_at`` (ISO), the start of the history a full review reads; *prd* / *prd_sections* are the story's ``metadata.prd`` / ``metadata.prd_sections`` provenance.
+- class `BriefReviewResult` — The pass's answer. *addendum* is ``None`` when it degraded; *note* then says why, and *raw* keeps whatever the agent wrote.
+- def `review_brief` — Run the read-only brief review at *base_sha* and return its addendum.
 
 ### `lithos_loom.plugins.story_develop.check_artifacts`
 - def `collect_check_artifacts` — Rescue a check's artifacts dir from its doomed tree export (#283).
@@ -218,7 +229,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `build_result_payload` — Map a :class:`DevelopResult` onto the result.json contract.
 - def `layer_run_settings` — The layers above :func:`resolve_project_settings`, in the daemon's order.
 - def `story_config_overrides` — The :class:`DevelopConfig` fields a story's resolved settings PIN.
-- def `fetch_task_metadata` — ``(title, metadata)`` of *task_id* from Lithos at *url* (raises on a missing task or an unreachable server — an on-demand run asked for a story must not silently proceed without it).
+- def `fetch_task` — The full record of *task_id* from Lithos at *url* (raises on a missing task or an unreachable server — an on-demand run asked for a story must not silently proceed without it).
+- def `fetch_task_metadata` — ``(title, metadata)`` of *task_id* — :func:`fetch_task`, narrowed.
 
 ### `lithos_loom.plugins.story_develop.develop`
 - class `BlockingCheckOutcome` — A blocking raw-exit gate check (repo-parity / a per-check command override) that produced no ledger finding — captured so a final-round failure is named in the run result instead of only living in the round's output artifact (#273).

@@ -800,6 +800,50 @@ lithos-loom develop converge-push <run-id|pr-number>
 
 Host-only (`git` + `gh` credentials + Lithos); not part of the hermetic `make check`.
 
+### 4.15e `lithos-loom develop brief-review` — draft a story's brief-review addendum (604fb936)
+
+```
+lithos-loom develop brief-review <story>
+    [--base REF] [--delta-from REF] [--brief-file PATH] [--repo PATH]
+    [--timeout SECONDS] [--config config.toml]
+```
+
+Runs the **brief review** on demand: one read-only agent turn, in a container,
+checks the story's brief against the tree a coder would start from and writes an
+**addendum** of scope cuts (`S#`), facts (`F#`, describing the code) and decisions
+(`D#`, prescribing, each with a `Basis:` line) (CONTEXT.md). It **prints** the
+rendered addendum and **writes nothing to Lithos**: no gate, no record, no
+description change. See [`docs/cli/brief-review.md`](cli/brief-review.md).
+
+- **What it resolves is what dispatch resolves.**
+  - The checkout is the story's project (`[projects.<slug>].repo`, or `--repo`).
+  - The coder's engine, model and effort run the review (the story's `develop_*`
+    settings, then the host's `default_models`).
+  - The base is `origin/main` fetched now, the sha a coder's worktree is cut at,
+    unless `--base` names a commit.
+- **Inputs reach the agent as files** under the read-only artifacts mount, never as
+  prompt text:
+  - the brief (`--brief-file` replaces the description);
+  - the story's `metadata.prd` / `metadata.prd_sections`;
+  - the first-parent history since the story's `created_at`.
+- **`--delta-from REF`** is the recheck. The brief, with its approved addendum, was
+  reviewed at REF; the reviewer gets the commits and changed files from REF to the
+  base and reports only what they change, or `No change`.
+- **The draft is validated:**
+  - ids are well formed, unique and in the section their letter names;
+  - every decision and scope cut has a `Basis:` line.
+
+  A draft that fails gets **one** correction turn in the same session.
+- **Exit codes:**
+  - **0:** the addendum is on stdout, with a count line and the cost on stderr.
+  - **1:** degraded (a failed turn, no file, or a draft still invalid after the
+    correction). The note is on stderr, and the agent's raw text, if any, is on
+    stdout.
+  - **2:** refused before any agent ran (an unknown story, an unmapped project, a
+    ref that is not a commit).
+
+Host-only (docker + the sandbox image + Lithos); not part of the hermetic `make check`.
+
 ### 4.16 `lithos-loom eval review` — review-correctness eval harness (#183)
 
 ```

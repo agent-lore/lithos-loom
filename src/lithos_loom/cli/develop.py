@@ -151,6 +151,13 @@ from lithos_loom.cli.resume import resume_command  # noqa: E402
 
 develop_app.command("resume")(resume_command)
 
+# `develop brief-review` (604fb936): draft a story's brief-review addendum —
+# the read-only pass dispatch runs before a coder starts — and print it.
+# Writes nothing to Lithos. Impl in `cli/brief_review.py`.
+from lithos_loom.cli.brief_review import brief_review_command  # noqa: E402
+
+develop_app.command("brief-review")(brief_review_command)
+
 _FORMAT_TEXT = "text"
 _FORMAT_JSON = "json"
 # Active-agent label when docker is unavailable: we can't tell which (if any)

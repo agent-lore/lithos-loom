@@ -24,6 +24,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._github_tag_migration` | S | 1 | 1 |
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
+| `lithos_loom.cli.brief_review` | S | 0 | 1 |
 | `lithos_loom.cli.converge` | L | 0 | 3 |
 | `lithos_loom.cli.converge_push` | L | 0 | 2 |
 | `lithos_loom.cli.deliver` | L | 0 | 1 |
@@ -163,6 +164,9 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `collect_resolved_lines` — Fetch every resolved task for ``slug`` and render its archive line.
 - def `build_done_content` — Render the full done-file body from ``lines``.
 - def `render_dry_run` — Format the ``--dry-run`` preview, framed with NO-CHANGES banners.
+
+### `lithos_loom.cli.brief_review`
+- def `brief_review_command` — Draft a story's brief-review addendum and print it (writes nothing).
 
 ### `lithos_loom.cli.converge`
 - def `converge_command` — Converge an existing PR to review-green (panel + gate), then push.
