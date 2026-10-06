@@ -28,6 +28,7 @@ from lithos_loom.plugins.story_develop.brief_review import (
     ITEM_UNCHANGED,
     MODE_FULL,
     OUTCOME_APPROVED,
+    OUTCOME_FAILED,
     OUTCOME_PENDING,
     RECORD_KEY,
     draft_entry,
@@ -218,11 +219,38 @@ async def test_a_gate_whose_fences_were_edited_away_fails_closed() -> None:
 async def test_a_gate_still_open_is_not_an_approval() -> None:
     client = _client()
     await _held(client)
-    writes_before = len(client.calls)
 
     outcome = await _apply(client)
 
     assert not outcome.applied and outcome.refused is None
+    story = await _get(client, STORY)
+    assert story.description == BRIEF  # nothing appended
+    assert story.metadata[RECORD_KEY][-1]["outcome"] == OUTCOME_PENDING
+
+
+async def test_a_dispatch_with_no_approval_to_apply_drops_a_stale_hold() -> None:
+    # A failed review the operator skipped: the hold is the run's slot now.
+    client = _client()
+    await _held(client)
+    story = await _get(client, STORY)
+    failed = dict(story.metadata[RECORD_KEY][-1], outcome=OUTCOME_FAILED)
+    await client.task_update(task_id=STORY, metadata={RECORD_KEY: [failed]})
+
+    outcome = await _apply(client)
+
+    assert not outcome.applied and outcome.refused is None
+    assert outcome.payload is not None
+    assert HOLD_KEY not in outcome.payload["metadata"]
+    assert HOLD_KEY not in (await _get(client, STORY)).metadata
+
+
+async def test_a_story_with_no_hold_and_nothing_to_apply_is_not_written() -> None:
+    client = _client()
+    writes_before = len(client.calls)
+
+    outcome = await _apply(client)
+
+    assert outcome.payload is None
     assert not [c for c in client.calls[writes_before:] if c.method == "task_update"]
 
 

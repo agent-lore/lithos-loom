@@ -511,6 +511,8 @@ class RouteRunner:
         # an approved addendum — appended HERE, on every origin, before the
         # escalation is cleared and task.json is written (readiness flipped the
         # moment the gate completed, so no other point sees every dispatch).
+        # With none to apply, a reservation the story still carries becomes
+        # this run's here too.
         try:
             approval = await apply_brief_approval(
                 self.lithos,
@@ -524,8 +526,8 @@ class RouteRunner:
             # approved one would make the next approval ambiguous. Free the
             # story; its re-check asks again.
             logger.exception(
-                "RouteRunner %s: could not read %s's brief-review approval; "
-                "releasing it to retry",
+                "RouteRunner %s: could not settle %s's brief-review approval "
+                "or reservation; releasing it to retry",
                 self.route.name,
                 task_id,
             )
@@ -541,7 +543,7 @@ class RouteRunner:
                 task_id, approval.refused, payload=payload, run_id=approval.run_id
             )
             return
-        if approval.applied and approval.payload is not None:
+        if approval.payload is not None:
             payload = approval.payload
         # b91177d2: a story carrying a needs-human gate id that has just passed
         # the readiness check has had its gate resolved — clear the provenance

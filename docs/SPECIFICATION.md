@@ -147,10 +147,12 @@ Each child runs its own EventBus instance. There is no inter-child IPC; all thre
 - **It fails closed.**
   - Fences edited away, or a story that keeps changing under the write: a fresh `brief_review` gate with the operator's text inside new fences. The refused gate is recorded `superseded_gates` on the entry, so it is never read again.
   - An unreadable approval: the claim is released for a retry.
-  - A gate still open, cancelled, or belonging to another pass is not an approval: nothing is written, and the next dispatch reviews again.
+  - A gate still open, cancelled, or belonging to another pass is not an approval: nothing is appended or settled, and the next dispatch reviews again.
+  - A dispatch with no approval to apply drops a hold the story still carries; the run holds the slot now. This is how a failed review the operator skipped (`develop_brief_review: false`, then complete) gives up its reservation, since no phase runs to clear it. A phase that holds the story again sets the flag again.
 - **The reserved slot.** A story at its brief-review gate keeps its project's admission slot.
   - `brief_review_hold` counts against `max_open_delivered_prs` (not the total, which is a backstop on open PRs) for every asker but its holder.
   - The holder is admitted against it (verdict `reserved`) ahead of the release order. Otherwise a deferred sibling would outrank it and then be refused by its hold.
+  - The reservation is room under the limit only. At `max_open_delivered_prs_total` the holder is refused `total_cap` like any other story; once the cap has room, the wake nudges it ahead of the free places, because its own hold fills the limit's count.
   - The flag is an admission input only, never a dispatch guard: the gate guards dispatch, so it is not a Loom-private delivered marker.
   - A brief-review gate's creation wakes nobody. A held story that ends (cancelled or completed) wakes its project.
 - **Abandoning** is cancelling the *story*, never the gate.

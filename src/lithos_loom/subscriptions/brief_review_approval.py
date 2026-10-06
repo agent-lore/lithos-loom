@@ -22,12 +22,21 @@ Applying it is ONE optimistic-lock write to the story:
 
 The payload is then re-read, so ``task.json`` carries the addendum.
 
+Every dispatch passes here, so this is also where a reservation becomes the
+run when there is no approval to apply: a story still flagged with no
+completed draft to append — a failed review the operator chose to skip
+(``develop_brief_review: false``, then complete), where no phase runs to
+clear it — has the flag dropped before it runs. Otherwise the stale hold
+would outlive the delivery and keep the project's slot. A phase that holds
+the story again sets it again.
+
 It fails CLOSED. A completed gate whose fences were edited away, or a story
 that keeps changing under the write, yields a refusal the runner raises as a
 fresh ``brief_review`` gate (the operator's text inside new fences, to trim)
 instead of a dispatch from an unapproved or half-read brief. A gate still
 open, cancelled, or belonging to another pass is not an approval at all:
-nothing is written, and the plugin's phase reviews the brief again.
+nothing is appended or settled, and the plugin's phase reviews the brief
+again.
 """
 
 from __future__ import annotations
@@ -68,7 +77,9 @@ __all__ = ["ApprovalOutcome", "apply_brief_approval"]
 class ApprovalOutcome:
     """*applied*: the approved text is on the story and *payload* is its
     fresh read, to dispatch with. *refused*: the approval could not be
-    applied — escalate it, do not run. Neither: no approval to apply."""
+    applied — escalate it, do not run. Neither: no approval to apply —
+    *payload*, when set, is the dispatch payload with a stale reservation
+    dropped (see the module doc)."""
 
     applied: bool = False
     payload: Mapping[str, Any] | None = None
@@ -90,14 +101,16 @@ async def apply_brief_approval(
     is read, to skip every round trip for a story with no pending review."""
     entry = latest_entry(payload.get("metadata") or {})
     if entry is None or entry.get("outcome") != OUTCOME_PENDING:
-        return ApprovalOutcome()
+        return await _unreserve(lithos, task_id, payload, agent=agent, route=route)
     run_id = entry.get("run_id")
     if not isinstance(run_id, str) or not run_id:
-        return ApprovalOutcome()
+        return await _unreserve(lithos, task_id, payload, agent=agent, route=route)
     skip = {g for g in entry.get("superseded_gates") or () if isinstance(g, str)}
     gate = await _approved_gate(lithos, task_id, run_id, skip)
     if gate is None:
-        return ApprovalOutcome(run_id=run_id)
+        return await _unreserve(
+            lithos, task_id, payload, agent=agent, route=route, run_id=run_id
+        )
     block = brief_review_block(gate.description)
     if block is None:
         await _supersede(lithos, task_id, run_id, gate.id, agent=agent, route=route)
@@ -181,6 +194,33 @@ async def apply_brief_approval(
             run_id=run_id,
         )
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def _unreserve(
+    lithos: Any,
+    task_id: str,
+    payload: Mapping[str, Any],
+    *,
+    agent: str,
+    route: str,
+    run_id: str | None = None,
+) -> ApprovalOutcome:
+    """No approval to apply, and the dispatch proceeds: drop a reservation
+    the story still carries — the run holds the slot now (see the module
+    doc). A failed write raises: the caller releases the story to retry,
+    rather than run with a hold that would outlive it."""
+    metadata = payload.get("metadata") or {}
+    if not metadata.get(HOLD_KEY):
+        return ApprovalOutcome(run_id=run_id)
+    await lithos.task_update(task_id=task_id, agent=agent, metadata={HOLD_KEY: None})
+    logger.info(
+        "route %s: %s dispatches with no brief-review approval to apply; its "
+        "slot reservation is now the run's",
+        route,
+        task_id,
+    )
+    kept = {k: v for k, v in metadata.items() if k != HOLD_KEY}
+    return ApprovalOutcome(payload={**payload, "metadata": kept}, run_id=run_id)
 
 
 async def _approved_gate(

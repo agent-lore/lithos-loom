@@ -314,25 +314,36 @@ def brief_review_gate_description(
             f"**The review could not produce a draft:** {note}",
             "",
             "**What to do:**",
-            "- Complete this gate → loom dispatches the story again, and the "
-            "review runs again first.",
-            "- To dispatch without a review: set `develop_brief_review: false` "
-            "in the story's metadata, then complete this gate.",
+            (
+                "- Complete this gate → loom dispatches the story again, and "
+                "the review runs again first."
+            ),
+            (
+                "- To dispatch without a review: set `develop_brief_review: "
+                "false` in the story's metadata, then complete this gate."
+            ),
             "- Cancel the *story* (never this gate) → abandon it.",
         ]
         return "\n".join(lines)
     lines += [
         "",
         "**What to do:**",
-        "- Read the draft below. Edit it if you need to — delete an item to "
-        "cut it, rewrite one to change it — through the Lithos MCP "
-        "(`lithos_task_update` on this gate's description), keeping both "
-        "`####` headings.",
-        "- Then complete this gate → loom appends the text between the "
-        "headings to the story's description **verbatim** and dispatches the "
-        "story. Delete everything between them to dispatch with no addendum.",
-        "- Cancel the *story* (never this gate) → abandon it. A cancelled gate "
-        "can never be satisfied.",
+        (
+            "- Read the draft below. Edit it if you need to — delete an item "
+            "to cut it, rewrite one to change it — through the Lithos MCP "
+            "(`lithos_task_update` on this gate's description), keeping both "
+            "`####` headings."
+        ),
+        (
+            "- Then complete this gate → loom appends the text between the "
+            "headings to the story's description **verbatim** and dispatches "
+            "the story. Delete everything between them to dispatch with no "
+            "addendum."
+        ),
+        (
+            "- Cancel the *story* (never this gate) → abandon it. A cancelled "
+            "gate can never be satisfied."
+        ),
         "",
         BRIEF_REVIEW_FENCE_OPEN,
         "",

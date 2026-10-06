@@ -192,17 +192,16 @@ async def run_phase(
     )
     counts = _counts(addendum)
     if mode == MODE_DELTA and not addendum.items:
-        # A recheck that found nothing: the brief stands at the new base.
-        await _record(
+        # A recheck that found nothing: the brief stands at the new base — as
+        # the write found it (an operator edit during the pass is theirs).
+        description = await _record(
             client,
             story,
             _entry(run_id, mode, start_sha, addendum, when, OUTCOME_NO_CHANGE),
             hold=False,
             run_id=run_id,
         )
-        return PhaseOutcome(
-            proceed=True, start_sha=start_sha, description=story.description or ""
-        )
+        return PhaseOutcome(proceed=True, start_sha=start_sha, description=description)
     if mode == MODE_DELTA and not addendum.decisions and not addendum.scope_cuts:
         # Facts describe the code; they change no decision the operator made.
         description = await _record(

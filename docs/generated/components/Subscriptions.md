@@ -35,7 +35,7 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 | `lithos_loom.subscriptions.admission` | L | 2 | 0 |
 | `lithos_loom.subscriptions.admission_count` | S | 1 | 5 |
 | `lithos_loom.subscriptions.admission_waker` | S | 1 | 0 |
-| `lithos_loom.subscriptions.brief_review_approval` | S | 1 | 1 |
+| `lithos_loom.subscriptions.brief_review_approval` | M | 1 | 1 |
 | `lithos_loom.subscriptions.conflict_resolve_dispatch` | M | 2 | 1 |
 | `lithos_loom.subscriptions.conflict_resolve_outcome` | S | 0 | 9 |
 | `lithos_loom.subscriptions.conflict_resolve_record` | S | 1 | 1 |
@@ -169,7 +169,7 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 - class `AdmissionWaker` — One subscriber per route-runner child: when a ``pr`` gate closes or a loom ``human`` gate escalates one, ask :meth:`Admission.wake` to republish that project's held stories — in release order — so the runner re-asks admission now rather than after the re-check backoff. A nudge only — the sleeper is the fallback, and admission itself enforces the order at every ask. A story's own terminal event is the other thing it carries: :meth:`Admission.discard` releases the scheduler's memory of it (PR #398 review), so that memory is bounded by the open stories.
 
 ### `lithos_loom.subscriptions.brief_review_approval`
-- class `ApprovalOutcome` — *applied*: the approved text is on the story and *payload* is its fresh read, to dispatch with. *refused*: the approval could not be applied — escalate it, do not run. Neither: no approval to apply.
+- class `ApprovalOutcome` — *applied*: the approved text is on the story and *payload* is its fresh read, to dispatch with. *refused*: the approval could not be applied — escalate it, do not run. Neither: no approval to apply — *payload*, when set, is the dispatch payload with a stale reservation dropped (see the module doc).
 - def `apply_brief_approval` — Apply the story's approved brief-review addendum, if it has one (see the module doc). *payload* is the dispatch payload; only its metadata is read, to skip every round trip for a story with no pending review.
 
 ### `lithos_loom.subscriptions.conflict_resolve_dispatch`

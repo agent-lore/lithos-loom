@@ -1786,6 +1786,49 @@ async def test_a_reservation_counts_against_the_limit_not_the_total() -> None:
     assert verdict.admitted
 
 
+async def test_a_reservation_is_no_room_under_the_total_cap() -> None:
+    # The hold reserves the per-project limit's slot only. The total cap is a
+    # backstop on everything delivered or running, and the holder asks under
+    # it like any other story (review #449 F2: limit 0, total 1).
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=0, total=1)
+    held = await _held_for_review(client)
+    other = await _story(client, "other")
+    assert (await adm.admit(route=_ROUTE, task_id=other, project=_PROJECT)).admitted
+
+    verdict = await adm.admit(route=_ROUTE, task_id=held, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.reason == "total_cap"
+
+
+async def test_a_holder_refused_at_the_total_cap_is_woken_first_when_it_frees() -> None:
+    # Its own hold fills the limit's count, so the free count alone gives the
+    # bucket no slot and would nudge nobody; the holder is entitled to its
+    # reservation as soon as the cap has room — ahead of a sibling that asked
+    # first.
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, total=1, bus=bus)
+    _story_id, gate = await _delivered(client, number=1)
+    held = await _held_for_review(client)
+    sibling = await _story(client, "sibling")
+    assert (
+        await adm.admit(route=_ROUTE, task_id=sibling, project=_PROJECT)
+    ).reason == "total_cap"
+    assert (
+        await adm.admit(route=_ROUTE, task_id=held, project=_PROJECT)
+    ).reason == "total_cap"
+    _nudged(probe)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    assert _nudged(probe) == [held]
+    verdict = await adm.admit(route=_ROUTE, task_id=held, project=_PROJECT)
+    assert verdict.admitted and verdict.reason == "reserved"
+
+
 async def test_a_held_story_that_is_cancelled_frees_its_slot() -> None:
     client = FakeLithosClient(agent_id=_AGENT)
     adm = _admission(client, limit=1)

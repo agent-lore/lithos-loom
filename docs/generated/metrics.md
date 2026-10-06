@@ -45,19 +45,19 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | GitHub | 5 | 2623 | 1987 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 3 |
 | LithosClient | 2 | 2283 | 1918 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 293 | 245 | 2 | 1 | 0.33 | 7 (`lithos_loom.notifications.build_notifier`) | 0 |
-| Plugins | 60 | 25110 | 20035 | 3 | 5 | 0.62 | 102 (`lithos_loom.plugins.story_develop.__main__.main`) | 64 |
+| Plugins | 60 | 25109 | 20033 | 3 | 5 | 0.62 | 102 (`lithos_loom.plugins.story_develop.__main__.main`) | 64 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
 | Runners | 8 | 1943 | 1564 | 5 | 1 | 0.17 | 12 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 1 |
 | Sources | 7 | 3122 | 2348 | 1 | 8 | 0.89 | 21 (`lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist`) | 6 |
 | State | 2 | 524 | 439 | 3 | 0 | 0.00 | 8 (`lithos_loom.cursor_store.CursorStore._load`) | 0 |
-| Subscriptions | 56 | 18637 | 15183 | 4 | 12 | 0.75 | 60 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 42 |
+| Subscriptions | 56 | 18694 | 15230 | 4 | 12 | 0.75 | 60 (`lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider`) | 43 |
 | Supervisor | 1 | 329 | 270 | 1 | 1 | 0.50 | 15 (`lithos_loom.supervisor.Supervisor._wait_for_shutdown_or_crash`) | 2 |
-| Tasks | 4 | 1530 | 1178 | 4 | 3 | 0.43 | 26 (`lithos_loom.gates.human_gate_brief`) | 4 |
+| Tasks | 4 | 1541 | 1189 | 4 | 3 | 0.43 | 26 (`lithos_loom.gates.human_gate_brief`) | 4 |
 
 ## Size
 
-- Modules: **211**, lines: **82244**, SLOC: **66498**
+- Modules: **211**, lines: **82311**, SLOC: **66554**
 - Largest module: `lithos_loom.cli.develop` (2047 lines)
 - Modules over 800 lines: **15**
   - `lithos_loom.cli._deliver_lithos`
@@ -78,7 +78,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **2091**, cyclomatic > 10: **210**
+- Functions: **2092**, cyclomatic > 10: **211**
 
 Top 10 most complex functions:
 
@@ -145,4 +145,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.52** (124665 test lines / 82244 source lines)
+- Test-to-source line ratio: **1.52** (124809 test lines / 82311 source lines)

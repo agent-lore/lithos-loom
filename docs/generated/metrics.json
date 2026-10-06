@@ -87,7 +87,7 @@
         "max_function": "lithos_loom.cursor_store.CursorStore._load"
       },
       "Subscriptions": {
-        "functions_over_10": 42,
+        "functions_over_10": 43,
         "max_complexity": 60,
         "max_function": "lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider"
       },
@@ -102,7 +102,7 @@
         "max_function": "lithos_loom.gates.human_gate_brief"
       }
     },
-    "functions_over_10": 210,
+    "functions_over_10": 211,
     "top_functions": [
       {
         "complexity": 102,
@@ -145,7 +145,7 @@
         "qualname": "lithos_loom.plugins.story_develop.__main__._daemon_main"
       }
     ],
-    "total_functions": 2091
+    "total_functions": 2092
   },
   "domain": {
     "associations": 2,
@@ -458,10 +458,10 @@
         "functions": 613,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1208,
-        "lines": 25110,
+        "lines": 25109,
         "modules": 60,
         "public_symbols": 401,
-        "sloc": 20035
+        "sloc": 20033
       },
       "ProjectContext": {
         "classes": 0,
@@ -515,13 +515,13 @@
       },
       "Subscriptions": {
         "classes": 48,
-        "functions": 468,
+        "functions": 469,
         "largest_module": "lithos_loom.subscriptions.route_runner",
-        "largest_module_lines": 1278,
-        "lines": 18637,
+        "largest_module_lines": 1280,
+        "lines": 18694,
         "modules": 56,
         "public_symbols": 178,
-        "sloc": 15183
+        "sloc": 15230
       },
       "Supervisor": {
         "classes": 3,
@@ -537,11 +537,11 @@
         "classes": 6,
         "functions": 34,
         "largest_module": "lithos_loom.gates",
-        "largest_module_lines": 922,
-        "lines": 1530,
+        "largest_module_lines": 933,
+        "lines": 1541,
         "modules": 4,
         "public_symbols": 28,
-        "sloc": 1178
+        "sloc": 1189
       }
     },
     "max_module": "lithos_loom.cli.develop",
@@ -563,13 +563,13 @@
       "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 82244,
+    "total_lines": 82311,
     "total_modules": 211,
-    "total_sloc": 66498
+    "total_sloc": 66554
   },
   "tests": {
     "ratio": 1.52,
-    "src_lines": 82244,
-    "test_lines": 124665
+    "src_lines": 82311,
+    "test_lines": 124809
   }
 }

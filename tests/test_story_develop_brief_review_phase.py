@@ -244,6 +244,39 @@ async def test_a_moved_base_with_nothing_new_records_it_and_proceeds(
     assert stored.metadata[RECORD_KEY][-1]["base_sha"] == S2
 
 
+async def test_a_no_change_recheck_dispatches_the_brief_as_edited_meanwhile(
+    tmp_path: Path,
+) -> None:
+    # The pass takes minutes; an operator editing the brief meanwhile is the
+    # realistic source of the record write's version conflict. The record is
+    # retried on the fresh read, and the coder must get that read's brief —
+    # not the text the phase started from (review #449 F3).
+    review = _Review("## No change\nNothing merged touches this brief.\n")
+    story = _story(
+        brief_review=[{"run_id": "r0", "outcome": OUTCOME_APPROVED, "base_sha": S1}]
+    )
+    inner = FakeLithosClient(tasks=(story,))
+    edited = BRIEF + " Cover the empty state too."
+
+    class Racy:
+        raced = False
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(inner, name)
+
+        async def task_update(self, **kwargs: Any) -> Any:
+            if not Racy.raced and "expected_updated_at" in kwargs:
+                Racy.raced = True
+                await inner.task_update(task_id=STORY, description=edited, agent="dave")
+            return await inner.task_update(**kwargs)
+
+    outcome, stored = await _run(tmp_path, story, review, Racy())
+
+    assert stored.description == edited
+    assert stored.metadata[RECORD_KEY][-1]["outcome"] == OUTCOME_NO_CHANGE
+    assert outcome.proceed and outcome.description == edited
+
+
 async def test_a_moved_base_with_a_decision_is_held_again(tmp_path: Path) -> None:
     review = _Review(_WITH_DECISION)
     story = _story(

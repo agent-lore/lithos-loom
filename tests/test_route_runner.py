@@ -4259,14 +4259,16 @@ def _brief_runner(
     return runner, bus
 
 
-async def _held_story(fake: Any, tmp_path: Path) -> str:
+async def _held_story(fake: Any, tmp_path: Path, *, failed: bool = False) -> str:
     """Dispatch a story whose plugin run holds it for brief review — the
     plugin's own writes (pending record + hold flag) and its result — and
-    return the brief-review gate the runner raised from that result."""
+    return the brief-review gate the runner raised from that result. *failed*:
+    the pass degraded (a ``failed`` record, a draft-less gate)."""
     from lithos_loom.gates import STORY_HUMAN_GATE_ID_KEY
     from lithos_loom.plugins.story_develop.brief_review import (
         HOLD_KEY,
         MODE_FULL,
+        OUTCOME_FAILED,
         OUTCOME_PENDING,
         RECORD_KEY,
         draft_entry,
@@ -4287,10 +4289,13 @@ async def _held_story(fake: Any, tmp_path: Path) -> str:
             run_id="held1",
             mode=MODE_FULL,
             base_sha="a" * 40,
-            addendum=parse_addendum(_DRAFT),
+            addendum=None if failed else parse_addendum(_DRAFT),
             drafted_at=datetime(2026, 10, 5, 20, tzinfo=UTC),
-            outcome=OUTCOME_PENDING,
+            outcome=OUTCOME_FAILED if failed else OUTCOME_PENDING,
+            note="the pass timed out" if failed else None,
         )
+        brief: dict[str, Any] = {"base_sha": "a" * 40, "mode": MODE_FULL}
+        brief.update({"note": "the pass timed out"} if failed else {"addendum": _DRAFT})
         await fake.task_update(
             task_id="story-1", metadata={RECORD_KEY: [entry], HOLD_KEY: True}
         )
@@ -4304,7 +4309,7 @@ async def _held_story(fake: Any, tmp_path: Path) -> str:
             "escalation": {
                 "reason": "brief_review",
                 "summary": "brief review at aaaaaaaaaaaa: 1 fact, 1 decision",
-                "brief": {"base_sha": "a" * 40, "mode": MODE_FULL, "addendum": _DRAFT},
+                "brief": brief,
             },
         }
 
@@ -4363,6 +4368,41 @@ async def test_an_approved_brief_review_dispatches_with_the_addendum(
     assert story.metadata[RECORD_KEY][-1]["outcome"] == OUTCOME_APPROVED
     assert HOLD_KEY not in story.metadata
     assert "needs_human_gate_id" not in story.metadata
+
+
+async def test_a_failed_review_the_operator_skips_frees_its_reservation(
+    tmp_path: Path,
+) -> None:
+    # A degraded pass holds the story with a `failed` record, and its gate
+    # offers the skip: `develop_brief_review: false`, then complete. With the
+    # knob off the phase never runs, so the dispatch itself turns the
+    # reservation into the run — or the stale hold outlives the delivery and
+    # keeps the project's slot (review #449 F1).
+    from lithos_loom.plugins.story_develop.brief_review import HOLD_KEY
+    from lithos_loom.subscriptions.admission_count import held_for_review
+
+    fake = FakeLithosClient()
+    gate_id = await _held_story(fake, tmp_path, failed=True)
+    await fake.task_update(task_id="story-1", metadata={"develop_brief_review": False})
+    await fake.task_complete(task_id=gate_id, agent="dave")
+    seen: dict[str, Any] = {}
+
+    async def develops(*, task_json_path: Path, **kwargs: Any) -> dict[str, Any]:
+        seen["task"] = json.loads(task_json_path.read_text())["task"]
+        story = await fake.task_get(task_id="story-1")
+        seen["held"] = story is not None and HOLD_KEY in story.metadata
+        return {
+            "schema_version": 1,
+            "task_id": "story-1",
+            "status": "succeeded",
+            "exit_code": 0,
+        }
+
+    await _dispatch_again(fake, tmp_path, develops)
+
+    assert seen["held"] is False  # the run holds the slot now, not the flag
+    assert HOLD_KEY not in seen["task"]["metadata"]
+    assert await held_for_review(fake, "loom") == frozenset()
 
 
 async def test_a_refused_approval_raises_a_fresh_gate_and_runs_nothing(

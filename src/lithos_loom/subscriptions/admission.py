@@ -425,18 +425,20 @@ class Admission:
             limits, project, bucket, own=asker, ordering=bool(others)
         )
         facts = (len(room.gates), room.escalated, limits, room.urls, room.running)
+        if room.at_cap:
+            # before the reservation: a hold reserves the limit's slot, never
+            # room under the total backstop
+            self._defer(bucket, route, task_id, left=left)
+            await self._notify_held(
+                task_id, bucket, room.gates, limits, room.escalated, room.running
+            )
+            return AdmissionVerdict(False, "total_cap", *facts)
         if task_id in room.holders:
             # 604fb936: the story's own brief-review reservation IS its slot —
             # admitted ahead of the release order, or a deferred sibling would
             # outrank it, be refused by the very hold, and the two livelock.
             self._admit(bucket, route, task_id, left=left)
             return AdmissionVerdict(True, "reserved", *facts)
-        if room.at_cap:
-            self._defer(bucket, route, task_id, left=left)
-            await self._notify_held(
-                task_id, bucket, room.gates, limits, room.escalated, room.running
-            )
-            return AdmissionVerdict(False, "total_cap", *facts)
         if room.free == 0:
             self._defer(bucket, route, task_id, left=left)
             self._held_notified.discard(bucket)  # under the cap: re-arm
@@ -532,11 +534,19 @@ class Admission:
     async def _wake_locked(self, bucket: str) -> int:
         if not self._deferred.get(bucket):
             return 0
-        free = await self._free_now(bucket)
-        if free == 0:
+        free, holders = await self._free_now(bucket)
+        if free == 0 and not holders:
             return 0  # nothing to give: a nudge would only be a refusal
         order = await self._release_order(bucket, asker=None)
-        entitled = order if free is None else order[:free]
+        if free is None:
+            entitled = order
+        else:
+            # 604fb936: a holder refused at the total cap is owed its own
+            # reservation once the cap has room — its hold already fills the
+            # limit's count, so the free places would never reach it
+            entitled = [w for w in order if w[0][1] in holders] + [
+                w for w in order if w[0][1] not in holders
+            ][:free]
         nudged = await self._nudge_all(entitled, asker=None, unanswered=True)
         if not nudged and self._deferred.get(bucket):
             logger.warning(
@@ -548,15 +558,17 @@ class Admission:
             )
         return nudged
 
-    async def _free_now(self, bucket: str) -> int | None:
+    async def _free_now(self, bucket: str) -> tuple[int | None, frozenset[str]]:
         """How many stories the bucket could admit right now, or ``None``
         when that cannot be known (unlimited, or a read failed — then every
-        held story is nudged and each ask decides for itself)."""
+        held story is nudged and each ask decides for itself) — and which of
+        its waiting stories hold a brief-review reservation, admissible
+        beyond that count (none at the total cap)."""
         project = bucket or None
         try:
             limits = await limits_for(self._lithos, project, self._defaults)
             if limits is None or (limits.limit == 0 and limits.total == 0):
-                return None
+                return None, frozenset()
             room = await self._headroom(
                 limits, project, bucket, own=None, ordering=True
             )
@@ -568,8 +580,11 @@ class Admission:
                 bucket,
                 exc,
             )
-            return None
-        return 0 if room.at_cap else room.free
+            return None, frozenset()
+        if room.at_cap:
+            return 0, frozenset()
+        waiting = {s for _route, s in self._deferred.get(bucket, ())}
+        return room.free, room.holders & waiting
 
     async def _release_order(
         self, bucket: str, *, asker: tuple[str, str] | None

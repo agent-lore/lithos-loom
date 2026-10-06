@@ -85,8 +85,9 @@ dialogue-based** cycle.
   is the operator's to approve).
 - **brief-review hold** / **reserved slot** — a story held for its brief review keeps its
   project's admission slot: the flat flag `metadata.brief_review_hold` counts against
-  `max_open_delivered_prs` for everyone but its holder, who is admitted against it (`reserved`).
-  An admission input, not a dispatch guard — the gate guards dispatch.
+  `max_open_delivered_prs` for everyone but its holder, who is admitted against it (`reserved`)
+  under the total cap. An admission input, not a dispatch guard — the gate guards dispatch; the
+  dispatch drops the flag, since the run holds the slot from then on.
 - **approval** (brief review) — completing the `brief_review` gate; the dispatch path then
   appends the text between the gate description's two `####` fences to the story verbatim and
   records each item's outcome (unchanged / edited / cut / added).
