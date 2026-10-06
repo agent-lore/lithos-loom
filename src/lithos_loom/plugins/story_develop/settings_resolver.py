@@ -68,6 +68,9 @@ class ScalarSettings:
     test_command: str | None = None
     test_gate: bool | None = None
     copilot_review: bool | None = None
+    # 604fb936: hold a PRD slice at dispatch for a brief review the operator
+    # approves (develop_brief_review). None = unset at both layers = off.
+    brief_review: bool | None = None
     review_profile_project: str | None = None
     # The per-task ``develop_review_profile`` name, parsed like the project
     # one; the task > project > host precedence runs in
@@ -476,6 +479,17 @@ def resolve_scalar_settings(
         frictions,
         rejected,
     )
+    # 604fb936: the brief-review dial, appended last so the pinned friction
+    # order is unchanged.
+    brief_review = _resolve_project_then_task(
+        _ProjectThenTaskField(
+            "brief_review", "develop_brief_review", parse_bool_setting
+        ),
+        meta,
+        task_metadata,
+        frictions,
+        rejected,
+    )
     if generated_paths and not regenerate_command:
         frictions.append(
             "develop_generated_paths: declared without develop_regenerate_command "
@@ -503,5 +517,6 @@ def resolve_scalar_settings(
         regenerate_command=regenerate_command,
         copilot_review=copilot_review,
         review_scope=review_scope,
+        brief_review=brief_review,
         rejected_keys=tuple(dict.fromkeys(rejected)),
     )

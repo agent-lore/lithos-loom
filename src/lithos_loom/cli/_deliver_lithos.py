@@ -55,6 +55,7 @@ from typing import Any
 
 from lithos_loom.errors import LithosClientError, LithosLoomError
 from lithos_loom.gates import (
+    BRIEF_REVIEW_REASON,
     STORY_GATE_ID_KEY,
     STORY_HUMAN_GATE_ID_KEY,
     WAITS_ON_GATE,
@@ -295,7 +296,16 @@ class StoryState:
         candidates: list[HumanGateRef] = []
         retained: list[str] = []
         for gate in self.human_gates:
-            if gate.route in allowed:
+            if gate.reason == BRIEF_REVIEW_REASON:
+                # 604fb936: the operator's approval of an addendum, not a
+                # stopped run's escalation — no delivered branch answers it.
+                retained.append(
+                    gate.describe(
+                        "a brief-review gate — approve it (complete it) or "
+                        "cancel the story; a delivery does not answer it"
+                    )
+                )
+            elif gate.route in allowed:
                 candidates.append(gate)
             else:
                 retained.append(

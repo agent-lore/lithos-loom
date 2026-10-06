@@ -133,6 +133,22 @@ pointed at the old plan (P4).
    there is no dead scaffolding pointing at a superseded PRD — the same
    subtraction US2 did for `story-implement` and `story-review-human`.
 
+5. **P5 — Brief review at dispatch** (task 604fb936, phase 1; 10cc6310,
+   phase 2). As the operator, I want each PRD slice checked against the exact
+   commit its coder will start from — and an addendum of facts, decisions and
+   scope cuts put in front of me — before its coder starts, so that a brief
+   written before its predecessors merged is corrected against the code they
+   left, not discovered stale in review. Added 2026-10-05 from the lens T3 hand
+   pilot (W1, W4–W8): the addenda caught defects that would have shipped and
+   twice changed scope materially. Phase 1 holds every reviewed slice behind a
+   loom `brief_review` gate whose description carries the draft; completing it
+   appends the operator's text verbatim, a held slice keeps its project's
+   admission slot, a moved base gets a recheck (facts only → appended without a
+   gate), and each item's outcome is recorded. Phase 2 lets a facts-only
+   addendum skip the gate once phase 1's records show that is safe. This keeps
+   decision 1's line: the review is drafted by loom, but approving it is the
+   operator's (SPEC §2.2 *Brief review at dispatch*).
+
 ## Decisions
 
 1. **PRD authoring and review are interactive, not loom plugins**

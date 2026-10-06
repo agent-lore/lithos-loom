@@ -2698,3 +2698,140 @@ def test_a_task_review_scope_survives_a_degraded_project_read(fake_client) -> No
     settings = resolve_project_settings("http://x", {"project": "loom", **scope})
     assert settings.context_read_failed is True
     assert settings.review_scope == "Single operator."
+
+
+# ── brief review at dispatch (604fb936) ────────────────────────────────────────
+
+
+def _brief_args(
+    tmp_git_repo: Path, tmp_path: Path, **metadata: Any
+) -> tuple[list[str], Path]:
+    task_json = _write_task_json(
+        tmp_path / "task.json",
+        {
+            "id": "t-1",
+            "title": "Add a flag",
+            "description": "Body.",
+            "metadata": {"project": "loom", "prd": "docs/prd/x.md", **metadata},
+        },
+    )
+    result_file = tmp_path / "result.json"
+    return [
+        "--repo",
+        str(tmp_git_repo),
+        "--task-json",
+        str(task_json),
+        "--work-dir",
+        str(tmp_path / "work"),
+        "--result-file",
+        str(result_file),
+    ], result_file
+
+
+def _stub_phase(monkeypatch, captured: dict, outcome: Any) -> None:
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+
+    def fake_phase(url, config, ctx, **kwargs):
+        captured["phase"] = {"ctx": ctx, "run_id": config.run_id}
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(main_mod, "run_brief_review_phase", fake_phase)
+
+
+def test_daemon_brief_review_held_ends_the_run_with_its_escalation(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.brief_review_phase import PhaseOutcome
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {"settings": ProjectDevelopSettings(brief_review=True)}
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    escalation = {
+        "reason": "brief_review",
+        "summary": "brief review at aaaaaaaaaaaa: 2 facts, 1 decision — approve",
+        "brief": {"base_sha": "a" * 40, "mode": "full", "addendum": "**Brief…"},
+    }
+    _stub_phase(
+        monkeypatch, captured, PhaseOutcome(proceed=False, escalation=escalation)
+    )
+    argv, result_file = _brief_args(tmp_git_repo, tmp_path)
+
+    assert main_mod.main(argv) == EXIT_FAILED
+
+    payload = json.loads(result_file.read_text())
+    validate_result_schema(payload)
+    assert payload["status"] == "failed"
+    assert payload["escalation"] == escalation
+    assert payload["run_id"] == captured["phase"]["run_id"]  # the gate's run
+    assert payload["error"]["category"] == "input"
+    assert "config" not in captured  # no coder ran
+
+
+def test_daemon_brief_review_proceed_cuts_at_the_reviewed_commit(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.brief_review_phase import PhaseOutcome
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {"settings": ProjectDevelopSettings(brief_review=True)}
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    appended = "Body.\n\n**Recheck against `bbbbbbbbbbbb` (2026-10-05)** — facts."
+    _stub_phase(
+        monkeypatch,
+        captured,
+        PhaseOutcome(proceed=True, start_sha="b" * 40, description=appended),
+    )
+    argv, _ = _brief_args(tmp_git_repo, tmp_path)
+
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+
+    config = captured["config"]
+    assert config.start_sha == "b" * 40
+    assert config.description == f"Add a flag\n\n{appended}"
+
+
+@pytest.mark.parametrize(
+    ("enabled", "metadata"),
+    [(False, {}), (None, {}), (True, {"prd": ""})],
+)
+def test_daemon_brief_review_off_or_without_a_prd_never_runs(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, enabled, metadata
+) -> None:
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {
+        "settings": ProjectDevelopSettings(brief_review=enabled)
+    }
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    _stub_phase(monkeypatch, captured, AssertionError("the phase must not run"))
+    argv, _ = _brief_args(tmp_git_repo, tmp_path, **metadata)
+
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert "phase" not in captured
+    assert captured["config"].start_sha is None
+
+
+def test_daemon_brief_review_failure_is_the_run_s_failure_not_a_dispatch(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {"settings": ProjectDevelopSettings(brief_review=True)}
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    _stub_phase(monkeypatch, captured, RuntimeError("Lithos unreachable"))
+    argv, result_file = _brief_args(tmp_git_repo, tmp_path)
+
+    assert main_mod.main(argv) == EXIT_FAILED
+
+    payload = json.loads(result_file.read_text())
+    validate_result_schema(payload)
+    assert payload["status"] == "failed"
+    assert "brief review" in payload["error"]["message"]
+    assert "Lithos unreachable" in payload["error"]["message"]
+    assert "config" not in captured

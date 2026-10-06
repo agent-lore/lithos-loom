@@ -17,6 +17,7 @@ from typing import Any
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import GATE_TYPE_HUMAN, RAISED_BY_LOOM, waiter_of
+from lithos_loom.plugins.story_develop.brief_review import HOLD_KEY
 from lithos_loom.subscriptions._project_settings import (
     project_count,
     read_project_metadata,
@@ -69,6 +70,19 @@ async def open_gates(lithos: Any, gate_type: str, project: str | None) -> list[A
     if project:
         return list(gates)
     return [g for g in gates if project_of(g.metadata) is None]
+
+
+async def held_for_review(lithos: Any, project: str | None) -> frozenset[str]:
+    """The bucket's open stories holding a brief-review reservation
+    (604fb936): held at dispatch until the operator approves their addendum,
+    each keeps its project's slot. One exact read — the flag is a constant
+    — narrowed to projectless stories for the projectless bucket, as
+    :func:`open_gates` does."""
+    match: dict[str, Any] = {HOLD_KEY: True}
+    if project:
+        match["project"] = project
+    tasks = await lithos.task_list(status="open", metadata_match=match)
+    return frozenset(t.id for t in tasks if project or project_of(t.metadata) is None)
 
 
 async def limits_for(

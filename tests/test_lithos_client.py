@@ -801,6 +801,48 @@ async def test_task_update_omits_unset_fields() -> None:
     )
 
 
+async def test_task_update_sends_expected_updated_at_as_the_iso_stamp() -> None:
+    # 604fb936: the brief-review approval rewrites a description from a read,
+    # so it guards the write with Lithos's optimistic lock. Lithos compares
+    # the token byte for byte with its own `datetime.isoformat()` stamp.
+    client, session = _client_with_session(_content({"success": True}))
+    stamp = datetime(2026, 10, 5, 19, 14, 53, 852554, tzinfo=UTC)
+    await client.task_update(
+        task_id="t-1", description="new", expected_updated_at=stamp
+    )
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["expected_updated_at"] == "2026-10-05T19:14:53.852554+00:00"
+    await client.task_update(
+        task_id="t-1", description="new", expected_updated_at="2026-10-05T19:14:53Z"
+    )
+    args = session.call_tool.await_args.kwargs["arguments"]
+    assert args["expected_updated_at"] == "2026-10-05T19:14:53Z"
+
+
+async def test_task_update_without_a_token_sends_none() -> None:
+    client, session = _client_with_session(_content({"success": True}))
+    await client.task_update(task_id="t-1", description="new")
+    assert "expected_updated_at" not in session.call_tool.await_args.kwargs["arguments"]
+
+
+async def test_task_update_version_conflict_raises_its_code() -> None:
+    client, _ = _client_with_session(
+        _content(
+            {
+                "status": "error",
+                "code": "version_conflict",
+                "message": "task was modified",
+                "current_updated_at": "2026-10-05T20:00:00+00:00",
+            }
+        )
+    )
+    with pytest.raises(LithosClientError) as raised:
+        await client.task_update(
+            task_id="t-1", description="new", expected_updated_at="stale"
+        )
+    assert raised.value.code == "version_conflict"
+
+
 async def test_task_update_rejects_empty_call() -> None:
     """Lithos requires at least one of title/description/tags/metadata
     (post-#290 adds metadata to the at-least-one list)."""

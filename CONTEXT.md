@@ -80,7 +80,17 @@ dialogue-based** cycle.
 - **brief review** — the read-only pass that checks a story's brief against the exact
   tree its coder will start from, before the coder starts (604fb936, from the lens T3 hand
   pilot of 2026-10-05). Its answer is an **addendum**. `lithos-loom develop brief-review`
-  runs it on demand and writes nothing; holding a dispatch for it is phase 1's second half.
+  runs it on demand and writes nothing. With `develop_brief_review` on, dispatch runs it before
+  the coder starts and **holds** the story behind a `brief_review` gate (phase 1: every review
+  is the operator's to approve).
+- **brief-review hold** / **reserved slot** — a story held for its brief review keeps its
+  project's admission slot: the flat flag `metadata.brief_review_hold` counts against
+  `max_open_delivered_prs` for everyone but its holder, who is admitted against it (`reserved`)
+  under the total cap. An admission input, not a dispatch guard — the gate guards dispatch; the
+  dispatch drops the flag, since the run holds the slot from then on.
+- **approval** (brief review) — completing the `brief_review` gate; the dispatch path then
+  appends the text between the gate description's two `####` fences to the story verbatim and
+  records each item's outcome (unchanged / edited / cut / added).
 - **addendum** — a brief review's answer, appended to the story's description once the
   operator approves it. Three kinds of item: **scope cuts** (`S#`, proposals to drop part of
   the brief), **facts** (`F#`, they *describe* the code at the base and never say what to

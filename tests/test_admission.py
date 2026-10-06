@@ -164,9 +164,16 @@ async def test_under_the_limit_admits_and_reads_only_the_projects_pr_gates() -> 
 
     assert verdict.admitted and verdict.reason == "admitted"
     assert verdict.open_gates == 0
-    (call,) = client.calls_to("task_list")
-    assert call["status"] == "open" and call["task_type"] == "gate"
-    assert call["metadata_match"] == {"gate_type": "pr", "project": _PROJECT}
+    # two reads, both scoped to the project: its open pr gates, and its
+    # stories holding a brief-review reservation (604fb936)
+    gates_call, holds_call = client.calls_to("task_list")
+    assert gates_call["status"] == "open" and gates_call["task_type"] == "gate"
+    assert gates_call["metadata_match"] == {"gate_type": "pr", "project": _PROJECT}
+    assert holds_call["status"] == "open"
+    assert holds_call["metadata_match"] == {
+        "brief_review_hold": True,
+        "project": _PROJECT,
+    }
 
 
 async def test_at_the_limit_refuses_and_remembers_the_story() -> None:
@@ -1722,3 +1729,194 @@ async def test_a_waiter_read_that_fails_keeps_its_gate_counted() -> None:
 
     assert not verdict.admitted and verdict.reason == "limit"
     assert verdict.open_gates == 1
+
+
+# ── the brief-review reservation (604fb936) ────────────────────────────────
+#
+# A story held for its brief review has no PR yet, but it keeps its project's
+# slot: the operator reviews one slice at a time, and a sibling admitted into
+# the gap would start from a base the held slice is about to move. The flag
+# counts against `max_open_delivered_prs` for everyone but its holder, who is
+# admitted against it (`reserved`) — ahead of the release order, or a deferred
+# sibling would outrank it, be refused by its hold, and the two would livelock.
+
+
+async def _held_for_review(client: FakeLithosClient, title: str = "held") -> str:
+    from lithos_loom.plugins.story_develop.brief_review import HOLD_KEY
+
+    story = await _story(client, title)
+    await client.task_update(task_id=story, metadata={HOLD_KEY: True})
+    return story
+
+
+async def test_a_story_held_for_brief_review_keeps_its_projects_slot() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=1)
+    await _held_for_review(client)
+    other = await _story(client, "other")
+
+    verdict = await adm.admit(route=_ROUTE, task_id=other, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.reason == "limit"
+
+
+async def test_the_holder_is_admitted_against_its_own_reservation() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=1)
+    held = await _held_for_review(client)
+    # a sibling asked first and was refused by the hold: it is ahead in order
+    sibling = await _story(client, "sibling")
+    assert not (
+        await adm.admit(route=_ROUTE, task_id=sibling, project=_PROJECT)
+    ).admitted
+
+    verdict = await adm.admit(route=_ROUTE, task_id=held, project=_PROJECT)
+
+    assert verdict.admitted and verdict.reason == "reserved"
+
+
+async def test_a_reservation_counts_against_the_limit_not_the_total() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=0, total=1)  # no per-project limit
+    await _held_for_review(client)
+    other = await _story(client, "other")
+
+    verdict = await adm.admit(route=_ROUTE, task_id=other, project=_PROJECT)
+
+    assert verdict.admitted
+
+
+async def test_a_reservation_is_no_room_under_the_total_cap() -> None:
+    # The hold reserves the per-project limit's slot only. The total cap is a
+    # backstop on everything delivered or running, and the holder asks under
+    # it like any other story (review #449 F2: limit 0, total 1).
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=0, total=1)
+    held = await _held_for_review(client)
+    other = await _story(client, "other")
+    assert (await adm.admit(route=_ROUTE, task_id=other, project=_PROJECT)).admitted
+
+    verdict = await adm.admit(route=_ROUTE, task_id=held, project=_PROJECT)
+
+    assert not verdict.admitted and verdict.reason == "total_cap"
+
+
+async def test_a_holder_refused_at_the_total_cap_is_woken_first_when_it_frees() -> None:
+    # Its own hold fills the limit's count, so the free count alone gives the
+    # bucket no slot and would nudge nobody; the holder is entitled to its
+    # reservation as soon as the cap has room — ahead of a sibling that asked
+    # first.
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    probe = _probe(bus)
+    adm = _admission(client, limit=1, total=1, bus=bus)
+    _story_id, gate = await _delivered(client, number=1)
+    held = await _held_for_review(client)
+    sibling = await _story(client, "sibling")
+    assert (
+        await adm.admit(route=_ROUTE, task_id=sibling, project=_PROJECT)
+    ).reason == "total_cap"
+    assert (
+        await adm.admit(route=_ROUTE, task_id=held, project=_PROJECT)
+    ).reason == "total_cap"
+    _nudged(probe)
+    await client.task_complete(task_id=gate, agent=_AGENT)
+
+    await adm.wake(_PROJECT)
+
+    assert _nudged(probe) == [held]
+    verdict = await adm.admit(route=_ROUTE, task_id=held, project=_PROJECT)
+    assert verdict.admitted and verdict.reason == "reserved"
+
+
+async def test_a_held_story_that_is_cancelled_frees_its_slot() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=1)
+    held = await _held_for_review(client)
+    await client.task_cancel(task_id=held, agent="dave", reason="abandoned")
+    other = await _story(client, "other")
+
+    verdict = await adm.admit(route=_ROUTE, task_id=other, project=_PROJECT)
+
+    assert verdict.admitted
+
+
+async def test_another_projects_reservation_does_not_count() -> None:
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=1)
+    await _held_for_review(client)
+    elsewhere = await _story(client, "elsewhere", project="influx")
+
+    verdict = await adm.admit(route=_ROUTE, task_id=elsewhere, project="influx")
+
+    assert verdict.admitted
+
+
+async def test_a_brief_review_gate_wakes_nobody() -> None:
+    # An escalation gate on a DELIVERED story frees a slot (its PR stops
+    # counting); a brief-review gate holds an undelivered story whose
+    # reservation keeps the slot — so its creation must not wake the bucket.
+    from lithos_loom.gates import BRIEF_REVIEW_REASON
+
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    adm = _admission(client, limit=1, bus=bus)
+    held = await _held_for_review(client)
+    woken: list[str | None] = []
+
+    async def spy_wake(project: str | None) -> int:
+        woken.append(project)
+        return 0
+
+    adm.wake = spy_wake  # type: ignore[method-assign]
+    waker = AdmissionWaker(bus=bus, admission=adm)
+
+    gate = await create_human_gate(
+        client,
+        story_id=held,
+        story_title="held",
+        project=_PROJECT,
+        agent=_AGENT,
+        route="story-develop",
+        reason=BRIEF_REVIEW_REASON,
+        summary="brief review at aaaaaaaaaaaa: 1 fact",
+        brief={"base_sha": "a" * 40, "mode": "full", "addendum": "- **F1. x.** y"},
+    )
+    await bus.publish(_gate_event(client, gate, type_="lithos.task.created"))
+    await _run_for(waker)
+
+    assert woken == []
+
+
+async def test_a_held_story_that_ends_wakes_its_project() -> None:
+    from lithos_loom.plugins.story_develop.brief_review import HOLD_KEY
+
+    client = FakeLithosClient(agent_id=_AGENT)
+    bus = EventBus()
+    adm = _admission(client, limit=1, bus=bus)
+    held = await _held_for_review(client)
+    waiting = await _story(client, "waiting")
+    assert not (
+        await adm.admit(route=_ROUTE, task_id=waiting, project=_PROJECT)
+    ).admitted
+    probe = _probe(bus)
+    waker = AdmissionWaker(bus=bus, admission=adm)
+
+    await client.task_cancel(task_id=held, agent="dave", reason="abandoned")
+    await bus.publish(
+        Event(
+            type="lithos.task.cancelled",
+            timestamp=datetime.now(UTC),
+            payload={
+                "id": held,
+                "status": "cancelled",
+                "tags": ["trigger:story-develop"],
+                "metadata": {"project": _PROJECT, HOLD_KEY: True},
+                "task_type": "task",
+            },
+            origin="live",
+        )
+    )
+    await _run_for(waker)
+
+    assert _nudged(probe) == [waiting]

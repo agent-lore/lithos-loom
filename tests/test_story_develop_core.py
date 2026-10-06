@@ -389,6 +389,42 @@ def test_run_dir_names_its_owner_before_the_worktree_is_built(
     assert identity is not None and identity.pid == os.getpid()
 
 
+def test_a_start_sha_cuts_the_coder_at_exactly_that_commit(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    """604fb936: the brief review checked ONE commit; the coder must start
+    there, never at a base tip that moved after the review fetched it."""
+    import dataclasses
+    import subprocess
+
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=config.repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    config = dataclasses.replace(config, start_sha=sha)
+    seen: dict[str, str] = {}
+    real = develop_mod.worktree.create_on_branch
+
+    def spy(repo, start_point, name, *, parent=None):
+        seen["start"] = start_point
+        return real(repo, start_point, name, parent=parent)
+
+    def moving_base(*args, **kwargs):
+        raise AssertionError("cut at the base tip instead of the reviewed commit")
+
+    monkeypatch.setattr(develop_mod.worktree, "create_on_branch", spy)
+    monkeypatch.setattr(develop_mod.worktree, "create", moving_base)
+    _install_fakes(monkeypatch, config, reviews=[{"text": _LGTM}])
+
+    result = develop_mod.develop(config)
+
+    assert result.status == "approved"
+    assert seen["start"] == sha
+
+
 def test_approved_in_round_one_on_lgtm(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:

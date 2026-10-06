@@ -450,16 +450,22 @@ def develop(
     # the friction to the task; that call is then a cache hit.
     sandbox_facts.prime(config.image)
 
-    wt = (
-        entry.worktree_factory(config)
-        if entry is not None
-        else worktree.create(
+    if entry is not None:
+        wt = entry.worktree_factory(config)
+    elif config.start_sha:  # the commit the brief review checked (604fb936)
+        wt = worktree.create_on_branch(
+            config.repo,
+            config.start_sha,
+            config.description,
+            parent=config.worktree_parent,
+        )
+    else:
+        wt = worktree.create(
             config.repo,
             config.base_branch,
             config.description,
             parent=config.worktree_parent,
         )
-    )
     branch = wt.name
     # converge diffs/reviews against the PR merge-base, not the worktree HEAD
     # (which, entered at the PR head, would show an empty diff). Either way the

@@ -367,6 +367,7 @@ class FakeLithosClient:
         description: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        expected_updated_at: datetime | str | None = None,
     ) -> datetime | None:
         self._record(
             "task_update",
@@ -376,10 +377,25 @@ class FakeLithosClient:
             description=description,
             tags=tags,
             metadata=metadata,
+            expected_updated_at=expected_updated_at,
         )
         existing = self._tasks.get(task_id)
         if existing is None:
             return None
+        if expected_updated_at is not None:
+            # Lithos's optimistic lock: the token is compared byte for byte
+            # with the stored stamp; a stale one writes nothing.
+            token = (
+                expected_updated_at.isoformat()
+                if isinstance(expected_updated_at, datetime)
+                else expected_updated_at
+            )
+            current = existing.updated_at.isoformat() if existing.updated_at else ""
+            if token != current:
+                raise LithosClientError(
+                    "version_conflict",
+                    f"task {task_id} was modified since {token} (now {current})",
+                )
         changes: dict[str, Any] = {}
         if title is not None:
             changes["title"] = title

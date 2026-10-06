@@ -94,6 +94,29 @@ async def test_task_update_metadata_none_value_deletes_the_key() -> None:
     assert stored is not None and stored.metadata == {"b": 2, "c": 3}
 
 
+async def test_task_update_honours_expected_updated_at() -> None:
+    # Lithos's optimistic lock: a stale token writes nothing and raises
+    # `version_conflict`; the current one writes and moves the stamp on.
+    client = FakeLithosClient(tasks=(make_task("t1", description="old"),))
+    first = await client.task_update(task_id="t1", metadata={"seen": 1})
+    assert first is not None
+    with pytest.raises(LithosClientError) as raised:
+        await client.task_update(
+            task_id="t1",
+            description="lost",
+            expected_updated_at="2026-01-01T00:00:00+00:00",  # before `first`
+        )
+    assert raised.value.code == "version_conflict"
+    stored = await client.task_get(task_id="t1")
+    assert stored is not None and stored.description == "old"
+    second = await client.task_update(
+        task_id="t1", description="kept", expected_updated_at=first
+    )
+    stored = await client.task_get(task_id="t1")
+    assert stored is not None and stored.description == "kept"
+    assert second is not None and second > first
+
+
 async def test_task_update_missing_is_noop() -> None:
     client = FakeLithosClient()
     await client.task_update(task_id="missing", title="x")  # no raise

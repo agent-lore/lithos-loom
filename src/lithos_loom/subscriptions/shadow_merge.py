@@ -17,7 +17,7 @@ actually did. It decides nothing and spends no tokens.
 * :data:`SHADOW_KEY` — the shadow record, url-scoped like every other
   dispatcher record (a replacement PR on the same gate starts fresh).
   Written by the reconcile sweep alone (the ADR 0011 §3 single-writer
-  rule, for the same reason: ``task_update`` has no compare-and-swap).
+  rule, for the same reason as the reconciliation state).
 
 **Would-merge**, on one head: the gate's reconciliation state is
 ``ready_to_merge``, a panel approval covers that head, and no external

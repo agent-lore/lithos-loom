@@ -21,9 +21,9 @@ dispatcher has run, on a re-read of the gate. A closed / deleted PR writes
 its state in the same marker write as its merge marker
 (:func:`closed_state_marker`).
 
-**One writer** (ADR 0011 §3): only the reconcile sweep writes these keys —
-``lithos_task_update`` has no compare-and-swap, so a second writer could
-lose a transition. The CLI, Lens and any webhook read; they never write.
+**One writer** (ADR 0011 §3): only the reconcile sweep writes these keys,
+so no transition can be lost to another writer and the writes need no
+compare-and-swap. The CLI, Lens and any webhook read; they never write.
 
 **Precedence.** The states are ranked by what the operator must do first:
 ``needs_human`` (automation stopped: an escalation gate exists, the PR was

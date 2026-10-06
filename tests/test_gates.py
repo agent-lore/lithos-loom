@@ -11,12 +11,15 @@ import pytest
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import (
+    BRIEF_REVIEW_REASON,
+    ESCALATION_REASONS,
     ESCALATION_SUMMARY_MAX_CHARS,
     GATE_TYPE_PR,
     NEEDS_HUMAN_TAG,
     WAITS_ON_GATE,
     HumanGateSpec,
     PrGateSpec,
+    brief_review_block,
     create_human_gate,
     create_human_gate_best_effort,
     create_pr_gate,
@@ -319,6 +322,104 @@ async def test_create_human_gate_shape_is_triageable_from_the_list() -> None:
     assert "loom/us42" in gate.description
     assert "Complete this gate" in gate.description
     assert "Cancel the *story*" in gate.description
+
+
+# ── the brief-review gate (604fb936) ───────────────────────────────────────
+
+_DRAFT = """\
+**Brief review against `abc123def456` (2026-10-05)** — checked against the tree.
+
+**Facts** (the code at `abc123def456` — no judgment involved)
+
+- **F1. The funnel classifies a raise.** `write_funnel.py:412`.
+
+**Decisions**
+
+- **D1. Let `perform` answer a refusal.** It returns a `WriteProblem`.
+  - Basis: F1."""
+
+
+def _brief_review_brief(**extra: object) -> dict[str, object]:
+    brief: dict[str, object] = {
+        "base_sha": "abc123def456" + "0" * 28,
+        "mode": "full",
+        "counts": {"scope_cut": 0, "fact": 1, "decision": 1},
+        "addendum": _DRAFT,
+    }
+    brief.update(extra)
+    return brief
+
+
+async def test_a_brief_review_gate_carries_the_draft_between_its_fences() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    story = await _story(client)
+
+    gate_id = await _raise(
+        client,
+        story,
+        reason=BRIEF_REVIEW_REASON,
+        summary="brief review: 1 fact, 1 decision against abc123def456",
+        brief=_brief_review_brief(),
+    )
+
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None and gate.description is not None
+    assert gate.title == "Brief review: US42"
+    # the operator edits the draft in place: it is what the approval reads
+    assert brief_review_block(gate.description) == _DRAFT
+    assert "complete this gate" in gate.description
+    assert "never this gate" in gate.description
+    # the draft lives in the description only; the metadata keeps the facts
+    brief = gate.metadata["run_brief"]
+    assert "addendum" not in brief
+    assert brief["base_sha"].startswith("abc123def456")
+    assert gate.metadata["escalation_reason"] == BRIEF_REVIEW_REASON
+
+
+async def test_a_degraded_brief_review_gate_says_why_and_has_no_fences() -> None:
+    # A pass that produced no draft: the gate explains, and there is nothing
+    # an approval could append — completing it re-runs the review.
+    client = FakeLithosClient(agent_id="a1")
+    story = await _story(client)
+    brief = _brief_review_brief(note="the brief-review turn failed (attempt 1)")
+    del brief["addendum"]
+
+    gate_id = await _raise(
+        client,
+        story,
+        reason=BRIEF_REVIEW_REASON,
+        summary="brief review could not run",
+        brief=brief,
+    )
+
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None and gate.description is not None
+    assert "the brief-review turn failed (attempt 1)" in gate.description
+    assert brief_review_block(gate.description) is None
+    assert "develop_brief_review" in gate.description  # the way to skip it
+
+
+def test_brief_review_block_reads_only_a_well_fenced_draft() -> None:
+    open_fence, close_fence = (
+        "#### Addendum — appended to the story verbatim when you complete this gate",
+        "#### End of addendum",
+    )
+    body = "- **F1. x.** y"
+    assert (
+        brief_review_block(f"intro\n\n{open_fence}\n\n{body}\n\n{close_fence}\n")
+        == body
+    )
+    # the operator cut everything: dispatch with no addendum
+    assert brief_review_block(f"{open_fence}\n\n{close_fence}") == ""
+    assert brief_review_block(f"{open_fence}\n{body}") is None  # no close
+    assert brief_review_block(f"{body}\n{close_fence}") is None  # no open
+    assert brief_review_block(f"{close_fence}\n{body}\n{open_fence}") is None
+    assert brief_review_block(None) is None
+
+
+def test_brief_review_is_an_escalation_reason() -> None:
+    assert BRIEF_REVIEW_REASON == "brief_review"
+    assert BRIEF_REVIEW_REASON in ESCALATION_REASONS
 
 
 async def test_create_human_gate_blocks_the_story() -> None:

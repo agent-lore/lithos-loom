@@ -44,6 +44,9 @@ from lithos_loom.lithos_client import Task, TaskClient
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "BRIEF_REVIEW_FENCE_CLOSE",
+    "BRIEF_REVIEW_FENCE_OPEN",
+    "BRIEF_REVIEW_REASON",
     "ESCALATION_REASONS",
     "ESCALATION_SUMMARY_MAX_CHARS",
     "ROUTE_CONFLICT_RESOLVE",
@@ -57,6 +60,8 @@ __all__ = [
     "STORY_HUMAN_GATE_ID_KEY",
     "WAITS_ON_GATE",
     "GateWriter",
+    "brief_review_block",
+    "brief_review_gate_description",
     "HumanGateSpec",
     "PrGateSpec",
     "create_human_gate",
@@ -232,6 +237,10 @@ ESCALATION_REASONS: frozenset[str] = frozenset(
         # github-watcher: the S5b external-remediation budget ran out on a PR
         # that is still not converged (PRD S5b: exhaustion → human gate)
         "remediation_exhausted",
+        # story-develop (604fb936): a story held at dispatch for the operator
+        # to approve its brief-review addendum — the gate's description IS
+        # the draft (BRIEF_REVIEW_FENCE_*), not a stopped run's brief
+        "brief_review",
         "unknown",
     }
 )
@@ -241,6 +250,108 @@ Closed on purpose: operator queries (``metadata_match``), the ``gates`` CLI
 and lens badges key on it, so a caller passing anything else fails at the
 call site (``ValueError``) rather than landing a mystery on the board.
 """
+
+BRIEF_REVIEW_REASON = "brief_review"
+# The two headings a brief-review gate's description fences its draft with.
+# The operator edits the text between them (through the Lithos MCP — Lens
+# renders the description but does not edit it) and completes the gate; the
+# dispatch path then appends exactly that text to the story. Markdown
+# headings rather than HTML comments: Lens escapes raw HTML, so a comment
+# fence would show as text — a heading reads as structure and survives.
+BRIEF_REVIEW_FENCE_OPEN = (
+    "#### Addendum — appended to the story verbatim when you complete this gate"
+)
+BRIEF_REVIEW_FENCE_CLOSE = "#### End of addendum"
+
+
+def brief_review_block(description: str | None) -> str | None:
+    """The text between a brief-review gate's two fences, stripped — ``""``
+    when the operator cut everything — or ``None`` when either fence is
+    missing or they are out of order (the approval then fails closed rather
+    than guess which part of an edited description is the addendum)."""
+    if not description:
+        return None
+    lines = description.splitlines()
+    try:
+        start = lines.index(BRIEF_REVIEW_FENCE_OPEN)
+        end = lines.index(BRIEF_REVIEW_FENCE_CLOSE, start + 1)
+    except ValueError:
+        return None
+    return "\n".join(lines[start + 1 : end]).strip()
+
+
+def brief_review_gate_description(
+    *,
+    story_title: str,
+    story_id: str,
+    summary: str,
+    run_id: str | None,
+    brief: Mapping[str, Any],
+) -> str:
+    """A brief-review gate's description: what was checked, how to approve
+    it, and — between :data:`BRIEF_REVIEW_FENCE_OPEN` and
+    :data:`BRIEF_REVIEW_FENCE_CLOSE` — the draft addendum itself.
+
+    A draft-less brief (the pass degraded: ``note`` but no ``addendum``)
+    gets no fences — there is nothing to approve — and says how to retry or
+    skip, so an approval can never append a guess.
+    """
+    base = str(brief.get("base_sha") or "")
+    mode = str(brief.get("mode") or "full")
+    run = f", run `{run_id}`" if run_id else ""
+    lines = [
+        f"Loom checked the brief of **{story_title}** (`{story_id}`{run}) "
+        f"against the tree its coder will start from (`{base[:12]}`, {mode} "
+        "review) before dispatch.",
+        "",
+        f"**Summary:** {summary}",
+    ]
+    addendum = brief.get("addendum")
+    if not isinstance(addendum, str):
+        note = brief.get("note") or "the review produced no draft"
+        lines += [
+            "",
+            f"**The review could not produce a draft:** {note}",
+            "",
+            "**What to do:**",
+            (
+                "- Complete this gate → loom dispatches the story again, and "
+                "the review runs again first."
+            ),
+            (
+                "- To dispatch without a review: set `develop_brief_review: "
+                "false` in the story's metadata, then complete this gate."
+            ),
+            "- Cancel the *story* (never this gate) → abandon it.",
+        ]
+        return "\n".join(lines)
+    lines += [
+        "",
+        "**What to do:**",
+        (
+            "- Read the draft below. Edit it if you need to — delete an item "
+            "to cut it, rewrite one to change it — through the Lithos MCP "
+            "(`lithos_task_update` on this gate's description), keeping both "
+            "`####` headings."
+        ),
+        (
+            "- Then complete this gate → loom appends the text between the "
+            "headings to the story's description **verbatim** and dispatches "
+            "the story. Delete everything between them to dispatch with no "
+            "addendum."
+        ),
+        (
+            "- Cancel the *story* (never this gate) → abandon it. A cancelled "
+            "gate can never be satisfied."
+        ),
+        "",
+        BRIEF_REVIEW_FENCE_OPEN,
+        "",
+        addendum.strip(),
+        "",
+        BRIEF_REVIEW_FENCE_CLOSE,
+    ]
+    return "\n".join(lines)
 
 
 class GateWriter(Protocol):
@@ -670,28 +781,50 @@ async def create_human_gate(
         metadata["project"] = project
     if run_id:
         metadata["run_id"] = run_id
+    brief_review = reason == BRIEF_REVIEW_REASON
     if brief:
-        metadata["run_brief"] = dict(brief)
+        # A brief-review draft lives in the description, where the operator
+        # edits it; the metadata keeps only the facts about it.
+        metadata["run_brief"] = (
+            {k: v for k, v in brief.items() if k != "addendum"}
+            if brief_review
+            else dict(brief)
+        )
     tags = [NEEDS_HUMAN_TAG]
     if project:
         tags.insert(0, f"project:{project}")
+    if description is None:
+        description = (
+            brief_review_gate_description(
+                story_title=story_title,
+                story_id=story_id,
+                summary=summary_line,
+                run_id=run_id,
+                brief=brief or {},
+            )
+            if brief_review
+            else human_gate_brief(
+                story_title=story_title,
+                story_id=story_id,
+                reason=reason,
+                summary=summary_line,
+                run_id=run_id,
+                brief=brief,
+                actions=actions,
+            )
+        )
     return await _create_gate_with_edge(
         client,
         story_id=story_id,
-        title=f"Needs human: {story_title}",
+        title=(
+            f"Brief review: {story_title}"
+            if brief_review
+            else f"Needs human: {story_title}"
+        ),
         metadata=metadata,
         agent=agent,
         tags=tags,
-        description=description
-        or human_gate_brief(
-            story_title=story_title,
-            story_id=story_id,
-            reason=reason,
-            summary=summary_line,
-            run_id=run_id,
-            brief=brief,
-            actions=actions,
-        ),
+        description=description,
     )
 
 
