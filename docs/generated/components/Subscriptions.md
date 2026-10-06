@@ -374,6 +374,7 @@ Event-subscription handlers and route-runner projection; remediation_lifecycle o
 - [ADR 0008 — story-develop's PR access runs through the typed GitHubClient, gh CLI kept only for local-checkout conveniences](../../adr/0008-story-develop-pr-access-seam.md)
 - [ADR 0009 — On-demand PR review-convergence loop (`develop converge`)](../../adr/0009-converge-pr-loop.md)
 - [ADR 0010 — Aggregate repo-parity gate check (`make check`)](../../adr/0010-aggregate-repo-parity-check.md)
+- [ADR 0011 — PR-maintenance invariants: one engine, one writer, state in Lithos, additive-only pushes](../../adr/0011-pr-maintenance-invariants.md)
 - [ADR 0012 — Serial-admission release order: priority, then first-held order; the choice lives in `Admission`](../../adr/0012-admission-release-order.md)
 
 [← all generated docs](../README.md)

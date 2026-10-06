@@ -32,7 +32,7 @@ about *this* plan, and answering them inconsistently later would be expensive:
    append-only history and cannot answer it. Loom logs are invisible to the
    operator and to Lens.
 3. **What stops two writers racing that state?** Lithos offers no optimistic
-   concurrency on task updates.
+   concurrency on task updates. (No longer true. See *Update (2026-10-06)*.)
 4. **What may an automated path do to a delivered branch?** The operator is the
    reviewer of these PRs and may be mid-read.
 
@@ -91,7 +91,8 @@ second tool needs it.
 
 `lithos_task_update` takes no `expected_version` — unlike `lithos_write` for
 notes, which does. There is no compare-and-swap, so two writers can lose an
-update on the same key even under the per-key merge.
+update on the same key even under the per-key merge. (Lithos has since added
+one; the decision stands. See *Update (2026-10-06)*.)
 
 One reconciler owns a gate's state. Other triggers — webhooks, CLI commands, a
 second daemon — **enqueue**; they do not write.
@@ -171,9 +172,39 @@ and interpreted, and every consumer would have to implement the same fold.
 **Adding `expected_version` to `lithos_task_update`.** The principled fix for
 concurrency, and the right one if a second independent writer ever appears.
 Deferred: it is an upstream change with its own review cycle, and single-writer
-discipline is sufficient while loom is the only actor.
+discipline is sufficient while loom is the only actor. (Lithos has since shipped
+it as `expected_updated_at`. See *Update (2026-10-06)*.)
 
 **Auto-rebase with `--force-with-lease`.** Would produce cleaner history than
 merge commits. Rejected under decision 4 — it rewrites a branch the operator may
 be mid-review on, and the lease protects against *races*, not against surprising
 a human reader.
+
+## Update (2026-10-06, 604fb936): Lithos task updates now have compare-and-swap
+
+§3's premise no longer holds. Lithos
+[agent-lore/lithos#419](https://github.com/agent-lore/lithos/pull/419) (task
+6dbc3b80, merged 2026-09-13) added optimistic locking to `lithos_task_update`.
+It is named `expected_updated_at`, not the `expected_version` this ADR expected.
+- The caller passes the exact `updated_at` stamp from a prior read, compared
+  byte for byte.
+- If the task has changed since, nothing is written. The error is
+  `version_conflict`, carrying `current_updated_at`.
+- The same change made `add_tags` / `remove_tags` atomic set operations.
+
+**The decision stands.** A gate's reconciliation state still has one writer, the
+reconcile sweep. It does not pass the token, and with one writer it needs none.
+The `metadata.shadow_merge` record follows the same rule (SPEC §2.2).
+
+What changed is the fallback. The upstream fix §3 named now exists. If a real
+second writer of reconciliation state appears, revisit this decision using the
+compare-and-swap; it is no longer missing, so there is nothing to work around.
+
+**Loom's first use is where the writers really are independent:** brief review
+at dispatch (#449).
+- It appends to a *story's* description and settles the story's
+  `metadata.brief_review` record. The operator may be editing that same story
+  through MCP or Lens at the time.
+- Those writes pass `expected_updated_at`. On `version_conflict` they re-read and
+  retry once, and a second conflict fails closed: the approval comes back as a
+  fresh gate, and the plugin's record write ends the run as a failure.
