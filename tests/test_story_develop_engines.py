@@ -110,83 +110,82 @@ def test_codex_capabilities() -> None:
 
 
 def test_claude_cli_argv_first_turn_uses_session_id() -> None:
-    argv = ClaudeEngine().cli_argv(prompt="do it", session_id="sid-1")
+    argv = ClaudeEngine().cli_argv(session_id="sid-1")
     assert argv[0] == "claude"
     assert argv[argv.index("--session-id") + 1] == "sid-1"
     assert "-p" in argv and "--dangerously-skip-permissions" in argv
     assert argv[argv.index("--output-format") + 1] == "json"
-    assert argv[-1] == "do it"  # prompt is a single trailing argv element
+    # no positional prompt: `claude -p` reads it from stdin (lens #132)
+    assert argv[-2:] == ["--output-format", "json"]
 
 
 def test_claude_cli_argv_resume_uses_resume_flag() -> None:
-    argv = ClaudeEngine().cli_argv(prompt="p", session_id="sid-1", resume=True)
+    argv = ClaudeEngine().cli_argv(session_id="sid-1", resume=True)
     assert "--resume" in argv and "--session-id" not in argv
     assert argv[argv.index("--resume") + 1] == "sid-1"
 
 
 def test_claude_cli_argv_model_and_effort() -> None:
-    argv = ClaudeEngine().cli_argv(
-        prompt="p", session_id="s", model="opus", effort="xhigh"
-    )
+    argv = ClaudeEngine().cli_argv(session_id="s", model="opus", effort="xhigh")
     assert argv[argv.index("--model") + 1] == "opus"
     assert argv[argv.index("--effort") + 1] == "xhigh"
 
 
 def test_claude_cli_argv_omits_model_and_effort_when_none() -> None:
-    argv = ClaudeEngine().cli_argv(prompt="p", session_id="s")
+    argv = ClaudeEngine().cli_argv(session_id="s")
     assert "--model" not in argv and "--effort" not in argv
 
 
 def test_claude_cli_argv_session_id_none_omits_session_flags() -> None:
     # The bare host-side invocation (the eval judge, E5): no container, no
     # session — so neither --session-id nor --resume is emitted.
-    argv = ClaudeEngine().cli_argv(prompt="p", session_id=None)
+    argv = ClaudeEngine().cli_argv(session_id=None)
     assert "--session-id" not in argv and "--resume" not in argv
-    assert argv[0] == "claude" and argv[-1] == "p"
+    assert argv[0] == "claude" and argv[-1] == "json"
 
 
 def test_codex_cli_argv_first_turn_omits_supplied_handle() -> None:
-    argv = CodexEngine().cli_argv(prompt="do it", session_id="unused-uuid")
+    argv = CodexEngine().cli_argv(session_id="unused-uuid")
     # `codex exec` (no `resume`); codex mints the thread_id itself on turn 1, so
     # the supplied session_id is NOT in the argv.
     assert argv[0] == "codex" and argv[1] == "exec"
     assert "resume" not in argv and "unused-uuid" not in argv
     assert "--json" in argv and "--dangerously-bypass-approvals-and-sandbox" in argv
-    assert argv[-1] == "do it"
+    assert argv[-1] == "-"  # read the prompt from stdin
 
 
 def test_codex_cli_argv_resume_passes_thread_id_positionally() -> None:
-    argv = CodexEngine().cli_argv(prompt="p", session_id="thread-7", resume=True)
+    argv = CodexEngine().cli_argv(session_id="thread-7", resume=True)
     idx = argv.index("resume")
     assert argv[idx - 1] == "exec"  # `codex exec resume <thread_id>`
     assert argv[idx + 1] == "thread-7"
-    assert argv[-1] == "p"
+    assert argv[-1] == "-"
 
 
 def test_codex_cli_argv_model_flag_and_effort_config_override() -> None:
     # codex has no --effort flag; the canonical level rides on the generic
     # `-c key=value` config override as `model_reasoning_effort`.
-    argv = CodexEngine().cli_argv(prompt="p", session_id="s", model="o3", effort="high")
+    argv = CodexEngine().cli_argv(session_id="s", model="o3", effort="high")
     assert argv[argv.index("-m") + 1] == "o3"
     assert "--effort" not in argv
     assert argv[argv.index("-c") + 1] == "model_reasoning_effort=high"
-    assert argv[-1] == "p"  # the override precedes the positional prompt
+    assert argv[-1] == "-"  # the override precedes the stdin marker
 
 
 def test_codex_cli_argv_effort_max_coerces_to_xhigh() -> None:
     # Claude's canonical ladder tops out at `max`; codex's at `xhigh`.
-    argv = CodexEngine().cli_argv(prompt="p", session_id="s", effort="max")
+    argv = CodexEngine().cli_argv(session_id="s", effort="max")
     assert argv[argv.index("-c") + 1] == "model_reasoning_effort=xhigh"
 
 
 @pytest.mark.parametrize("level", ["low", "medium", "high", "xhigh"])
 def test_codex_cli_argv_effort_levels_pass_through(level: str) -> None:
-    argv = CodexEngine().cli_argv(prompt="p", session_id="s", effort=level)
+    argv = CodexEngine().cli_argv(session_id="s", effort=level)
     assert argv[argv.index("-c") + 1] == f"model_reasoning_effort={level}"
 
 
 def test_codex_cli_argv_omits_effort_override_when_none() -> None:
-    argv = CodexEngine().cli_argv(prompt="p", session_id="s")
+    argv = CodexEngine().cli_argv(session_id="s")
     assert not any("model_reasoning_effort" in o for o in _codex_overrides(argv))
 
 
@@ -213,28 +212,24 @@ def test_codex_runs_on_the_loom_provider_with_a_short_stream_idle_timeout(
     # the 60-minute turn limit. The built-in `openai` provider cannot be
     # overridden, so every turn (first and resume alike) runs on a loom-defined
     # provider with a 90 s idle timeout.
-    argv = CodexEngine().cli_argv(
-        prompt="p", session_id="t-1", resume=resume, effort="high"
-    )
+    argv = CodexEngine().cli_argv(session_id="t-1", resume=resume, effort="high")
     overrides = _codex_overrides(argv)
     assert overrides[0] == "model_reasoning_effort=high"
     assert overrides[1:] == _LOOM_PROVIDER_OVERRIDES
-    assert argv[-1] == "p"  # every override precedes the positional prompt
+    assert argv[-1] == "-"  # every override precedes the stdin marker
 
 
 def test_codex_provider_leaves_the_endpoint_to_the_auth_mode() -> None:
     # No base_url: with requires_openai_auth codex picks the endpoint from the
     # auth mode (ChatGPT sign-in -> chatgpt.com/backend-api, verified with
     # codex-cli 0.159.3), so an API-key login is not pointed at the wrong host.
-    argv = CodexEngine().cli_argv(prompt="p", session_id=None)
+    argv = CodexEngine().cli_argv(session_id=None)
     assert not any("base_url" in o for o in _codex_overrides(argv))
     assert _codex_overrides(argv) == _LOOM_PROVIDER_OVERRIDES
 
 
 def test_codex_cli_argv_effort_survives_resume() -> None:
-    argv = CodexEngine().cli_argv(
-        prompt="p", session_id="t-1", resume=True, effort="high"
-    )
+    argv = CodexEngine().cli_argv(session_id="t-1", resume=True, effort="high")
     assert argv[argv.index("-c") + 1] == "model_reasoning_effort=high"
     assert argv[argv.index("resume") + 1] == "t-1"
 
@@ -245,7 +240,7 @@ def test_codex_engine_supports_effort() -> None:
 
 def test_codex_cli_argv_session_id_none_is_plain_exec() -> None:
     # A bare host-side invocation is never a resume — degrades to plain `exec`.
-    argv = CodexEngine().cli_argv(prompt="p", session_id=None, resume=False)
+    argv = CodexEngine().cli_argv(session_id=None, resume=False)
     assert argv[:2] == ["codex", "exec"]
     assert "resume" not in argv
 
@@ -254,26 +249,27 @@ def test_cli_argv_resume_without_handle_degrades_to_fresh_both_engines() -> None
     # session_id=None means "no handle" — you cannot resume nothing, so resume is
     # moot and both engines emit a FRESH invocation (no None leaks into the argv).
     # This is the intended, symmetric behaviour, not a caller error to reject.
-    codex = CodexEngine().cli_argv(prompt="p", session_id=None, resume=True)
+    codex = CodexEngine().cli_argv(session_id=None, resume=True)
     assert (
         codex[:2] == ["codex", "exec"] and "resume" not in codex and None not in codex
     )
-    claude = ClaudeEngine().cli_argv(prompt="p", session_id=None, resume=True)
+    claude = ClaudeEngine().cli_argv(session_id=None, resume=True)
     assert "--resume" not in claude and "--session-id" not in claude
 
 
 @pytest.mark.parametrize("tool", ["claude", "codex"])
 def test_build_exec_argv_wraps_cli_argv_in_docker_exec(tool: str) -> None:
     engine = get_engine(tool)
-    argv = engine.build_exec_argv(name="cont", prompt="p", session_id="s")
-    assert argv[:5] == ["docker", "exec", "-w", "/workspace", "cont"]
+    argv = engine.build_exec_argv(name="cont", session_id="s")
+    # `-i`: the prompt is the exec's stdin (lens #132)
+    assert argv[:6] == ["docker", "exec", "-i", "-w", "/workspace", "cont"]
     # everything after the wrapper is exactly the bare CLI argv.
-    assert argv[5:] == engine.cli_argv(prompt="p", session_id="s")
+    assert argv[6:] == engine.cli_argv(session_id="s")
 
 
 def test_build_exec_argv_honours_custom_workdir() -> None:
     argv = ClaudeEngine().build_exec_argv(
-        name="c", prompt="p", session_id="s", workdir="/elsewhere"
+        name="c", session_id="s", workdir="/elsewhere"
     )
     assert argv[argv.index("-w") + 1] == "/elsewhere"
 

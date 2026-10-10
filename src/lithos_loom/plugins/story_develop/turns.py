@@ -21,7 +21,13 @@ from dataclasses import dataclass
 from . import containers
 from .engines import _TIMEOUT_EXIT, Engine, TurnResult
 
-__all__ = ["TurnAttempt", "TurnResult", "run_turn"]
+__all__ = ["LAUNCH_FAILED", "TurnAttempt", "TurnResult", "run_turn"]
+
+# What a turn whose exec could not even spawn says on stderr — the spawn
+# class's wording (`limits.classify_failure`); 126 is the shell's "cannot
+# execute", set here ourselves like the timeout's 124.
+LAUNCH_FAILED = "agent launch failed"
+_LAUNCH_FAILED_EXIT = 126
 
 
 @dataclass(frozen=True)
@@ -71,14 +77,29 @@ def run_turn(
     """
     exec_cmd = engine.build_exec_argv(
         name=container,
-        prompt=prompt,
         session_id=session_id,
         resume=resume,
         model=model,
         effort=effort,
     )
     try:
-        proc = containers.exec_turn(exec_cmd, timeout=timeout)
+        proc = containers.exec_turn(exec_cmd, prompt=prompt, timeout=timeout)
+    except OSError as exc:
+        # The exec never started (lens #132: E2BIG spawning `docker`), so no
+        # agent ran and the container was never reached — a host failure,
+        # never a verdict. A failed turn in the spawn class, not a traceback
+        # out of the run: the reactions retry once, then end the run
+        # `infra_failed`, which the watcher refunds.
+        return TurnResult(
+            exit_code=_LAUNCH_FAILED_EXIT,
+            succeeded=False,
+            completed=False,
+            session_id=session_id,
+            result_text="",
+            cost_usd=0.0,
+            raw=None,
+            stderr=f"{LAUNCH_FAILED}: {type(exc).__name__}: {exc}",
+        )
     except subprocess.TimeoutExpired:
         return TurnResult(
             exit_code=_TIMEOUT_EXIT,

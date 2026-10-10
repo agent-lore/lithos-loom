@@ -156,9 +156,17 @@ def _run_host_agent(
             f"(expected {engines.supported_tools_phrase()})"
         )
     engine = engines.get_engine(tool)
-    cmd = engine.cli_argv(prompt=prompt, model=model)
+    cmd = engine.cli_argv(model=model)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # the prompt is the CLI's stdin, never an argv element (lens #132)
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+        )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         raise JudgeUnavailable(f"{type(exc).__name__}: {exc}") from exc
     result = engine.parse_turn(

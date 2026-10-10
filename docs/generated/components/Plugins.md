@@ -201,7 +201,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `container_name` — Stable, unique-per-run container name, e.g. ``loom-develop-ab12cd34-coder``.
 - def `build_run_command` — Build the ``docker run`` argv for a long-lived idle agent container.
 - def `start_container` — Run ``docker run -d`` and return the container id (stdout).
-- def `exec_turn` — Run ``docker exec`` for one turn with stdin closed (no 3s stdin wait).
+- def `exec_turn` — Run ``docker exec -i`` for one turn with *prompt* as its stdin.
 - def `resync_auth_files` — Write the host's CURRENT auth files into the container's bind-mounted inodes, in place — only where the mount is demonstrably a STALE inode (#403).
 - def `container_running` — Whether the container is running NOW (#412) — ``False`` when stopped or gone (a docker daemon restart removes ``--rm`` containers outright), and DELIBERATELY also when the daemon is unreachable (``docker inspect`` fails with "Cannot connect to the Docker daemon"): mid-restart the container will not survive, and "not running" is what keeps the retry on the infra path. ``None`` only when the probe itself could not run (docker hung past the cap, or absent from PATH). Never raises: it runs on a turn's failure path, where a second failure must not mask the first.
 - def `stop_container` — Force-remove the container; never raises (teardown must be best-effort). Capped (#407): teardown now runs on the SIGTERM path inside the supervisor's grace, and a wedged docker must not eat the whole window.

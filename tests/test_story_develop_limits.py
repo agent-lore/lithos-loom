@@ -253,6 +253,10 @@ def test_transient_wordings(text: str) -> None:
         "Error response from daemon: No such container: x",
         "OCI runtime exec failed: exec failed: unable to start container process",
         "fatal error: out of memory",
+        # lens #132: the turn site's line for an exec that never spawned
+        "agent launch failed: OSError: [Errno 7] Argument list too long: 'docker'",
+        "agent launch failed: FileNotFoundError: [Errno 2] No such file or "
+        "directory: 'docker'",
     ],
 )
 def test_spawn_and_memory_wordings(stderr: str) -> None:

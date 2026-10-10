@@ -19,7 +19,6 @@ def _exec_cmd(
     *,
     name: str,
     tool: str,
-    prompt: str,
     session_id: str,
     resume: bool = False,
     model: str | None = None,
@@ -30,7 +29,6 @@ def _exec_cmd(
     # tool->engine pick local to the tests that pin that argv.
     return engines.get_engine(tool).build_exec_argv(
         name=name,
-        prompt=prompt,
         session_id=session_id,
         resume=resume,
         model=model,
@@ -141,62 +139,59 @@ def test_run_command_no_auth_files() -> None:
 
 
 def test_exec_command_first_turn_uses_session_id() -> None:
-    cmd = _exec_cmd(name="c", tool="claude", prompt="do it", session_id="sid-1")
-    assert cmd[:5] == ["docker", "exec", "-w", "/workspace", "c"]
+    cmd = _exec_cmd(name="c", tool="claude", session_id="sid-1")
+    assert cmd[:6] == ["docker", "exec", "-i", "-w", "/workspace", "c"]
     assert "claude" in cmd
     assert cmd[cmd.index("--session-id") + 1] == "sid-1"
     assert "-p" in cmd and "--dangerously-skip-permissions" in cmd
     assert cmd[cmd.index("--output-format") + 1] == "json"
-    assert cmd[-1] == "do it"  # prompt passed as a single argv element
+    # no positional prompt: it rides on stdin (`-i`), never in argv (lens #132)
+    assert cmd[-2:] == ["--output-format", "json"]
 
 
 def test_exec_command_resume_uses_resume_flag() -> None:
-    cmd = _exec_cmd(
-        name="c", tool="claude", prompt="p", session_id="sid-1", resume=True
-    )
+    cmd = _exec_cmd(name="c", tool="claude", session_id="sid-1", resume=True)
     assert "--resume" in cmd and "--session-id" not in cmd
     assert cmd[cmd.index("--resume") + 1] == "sid-1"
 
 
 def test_exec_command_adds_model_flag_when_given() -> None:
-    cmd = _exec_cmd(name="c", tool="claude", prompt="p", session_id="s", model="opus")
+    cmd = _exec_cmd(name="c", tool="claude", session_id="s", model="opus")
     assert cmd[cmd.index("--model") + 1] == "opus"
 
 
 def test_exec_command_passes_model_on_resume_too() -> None:
-    cmd = _exec_cmd(
-        name="c", tool="claude", prompt="p", session_id="s", resume=True, model="opus"
-    )
+    cmd = _exec_cmd(name="c", tool="claude", session_id="s", resume=True, model="opus")
     assert "--resume" in cmd
     assert cmd[cmd.index("--model") + 1] == "opus"
 
 
 def test_exec_command_omits_model_flag_when_none() -> None:
-    cmd = _exec_cmd(name="c", tool="claude", prompt="p", session_id="s")
+    cmd = _exec_cmd(name="c", tool="claude", session_id="s")
     assert "--model" not in cmd
 
 
 def test_exec_command_adds_effort_flag_when_given() -> None:
-    cmd = _exec_cmd(name="c", tool="claude", prompt="p", session_id="s", effort="xhigh")
+    cmd = _exec_cmd(name="c", tool="claude", session_id="s", effort="xhigh")
     assert cmd[cmd.index("--effort") + 1] == "xhigh"
 
 
 def test_exec_command_omits_effort_flag_when_none() -> None:
-    cmd = _exec_cmd(name="c", tool="claude", prompt="p", session_id="s")
+    cmd = _exec_cmd(name="c", tool="claude", session_id="s")
     assert "--effort" not in cmd
 
 
 def test_exec_command_rejects_unknown_tool() -> None:
     with pytest.raises(ValueError):
-        _exec_cmd(name="c", tool="opencode", prompt="p", session_id="s")
+        _exec_cmd(name="c", tool="opencode", session_id="s")
 
 
 # ── codex (#94) ────────────────────────────────────────────────────────
 
 
 def test_exec_command_codex_first_turn() -> None:
-    cmd = _exec_cmd(name="c", tool="codex", prompt="do it", session_id="unused-uuid")
-    assert cmd[:5] == ["docker", "exec", "-w", "/workspace", "c"]
+    cmd = _exec_cmd(name="c", tool="codex", session_id="unused-uuid")
+    assert cmd[:6] == ["docker", "exec", "-i", "-w", "/workspace", "c"]
     # `codex exec` (no `resume`); the supplied session_id is NOT in the argv —
     # codex mints the thread_id itself on turn 1.
     assert cmd[cmd.index("codex") + 1] == "exec"
@@ -204,25 +199,21 @@ def test_exec_command_codex_first_turn() -> None:
     assert "unused-uuid" not in cmd
     assert "--json" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
-    assert cmd[-1] == "do it"
+    assert cmd[-1] == "-"  # read the prompt from stdin
 
 
 def test_exec_command_codex_resume_passes_thread_id() -> None:
-    cmd = _exec_cmd(
-        name="c", tool="codex", prompt="p", session_id="thread-7", resume=True
-    )
+    cmd = _exec_cmd(name="c", tool="codex", session_id="thread-7", resume=True)
     # `codex exec resume <thread_id>` — handle is positional, right after resume.
     idx = cmd.index("resume")
     assert cmd[idx - 1] == "exec"
     assert cmd[idx + 1] == "thread-7"
     assert "--json" in cmd
-    assert cmd[-1] == "p"
+    assert cmd[-1] == "-"
 
 
 def test_exec_command_codex_model_flag_and_effort_config_override() -> None:
-    cmd = _exec_cmd(
-        name="c", tool="codex", prompt="p", session_id="s", model="o3", effort="high"
-    )
+    cmd = _exec_cmd(name="c", tool="codex", session_id="s", model="o3", effort="high")
     assert cmd[cmd.index("-m") + 1] == "o3"
     # codex has no --effort flag; the level rides on its config override.
     assert "--effort" not in cmd

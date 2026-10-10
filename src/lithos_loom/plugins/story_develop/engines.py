@@ -92,11 +92,13 @@ class Engine(Protocol):
     def auth_files(self, config: DevelopConfig) -> list[str]: ...
     def skills_dir(self, config: DevelopConfig) -> Path | None: ...
 
-    # turn execution
+    # turn execution — the prompt is never an argv element: Linux caps ONE argv
+    # string at MAX_ARG_STRLEN (128 KiB), and a converge prompt carrying a
+    # large PR's diff failed to spawn `docker` with E2BIG (lens #132). Both
+    # argvs make the tool read it from stdin; the caller feeds it there.
     def cli_argv(
         self,
         *,
-        prompt: str,
         session_id: str | None = None,
         resume: bool = False,
         model: str | None = None,
@@ -106,7 +108,6 @@ class Engine(Protocol):
         self,
         *,
         name: str,
-        prompt: str,
         session_id: str,
         resume: bool = False,
         workdir: str = WORKSPACE_MOUNT,
@@ -144,7 +145,6 @@ class _BaseEngine:
     def cli_argv(
         self,
         *,
-        prompt: str,
         session_id: str | None = None,
         resume: bool = False,
         model: str | None = None,
@@ -166,7 +166,6 @@ class _BaseEngine:
         self,
         *,
         name: str,
-        prompt: str,
         session_id: str,
         resume: bool = False,
         workdir: str = WORKSPACE_MOUNT,
@@ -177,16 +176,17 @@ class _BaseEngine:
 
         ``build_exec_argv`` supplies the container; :meth:`cli_argv` is the tool
         invocation, reusable host-side (no docker) by passing ``session_id=None``
-        (the eval judge does this in E5).
+        (the eval judge does this in E5). ``-i`` forwards the exec's stdin, which
+        carries the prompt (:func:`~.containers.exec_turn`).
         """
         return [
             "docker",
             "exec",
+            "-i",
             "-w",
             workdir,
             name,
             *self.cli_argv(
-                prompt=prompt,
                 session_id=session_id,
                 resume=resume,
                 model=model,
@@ -218,7 +218,6 @@ class ClaudeEngine(_BaseEngine):
     def cli_argv(
         self,
         *,
-        prompt: str,
         session_id: str | None = None,
         resume: bool = False,
         model: str | None = None,
@@ -232,12 +231,12 @@ class ClaudeEngine(_BaseEngine):
             argv += ["--model", model]
         if effort:
             argv += ["--effort", effort]
+        # No positional prompt: `-p` reads it from stdin.
         argv += [
             "-p",
             "--dangerously-skip-permissions",
             "--output-format",
             "json",
-            prompt,
         ]
         return argv
 
@@ -369,7 +368,6 @@ class CodexEngine(_BaseEngine):
     def cli_argv(
         self,
         *,
-        prompt: str,
         session_id: str | None = None,
         resume: bool = False,
         model: str | None = None,
@@ -400,7 +398,9 @@ class CodexEngine(_BaseEngine):
             argv += ["-c", f"model_reasoning_effort={_CODEX_REASONING_EFFORT[effort]}"]
         for override in _CODEX_PROVIDER_OVERRIDES:
             argv += ["-c", override]
-        argv += [prompt]
+        # `-` = read the prompt from stdin (`exec` and `exec resume` alike,
+        # verified against codex-cli 0.160.0 / 0.162.0)
+        argv += ["-"]
         return argv
 
     def parse_turn(
