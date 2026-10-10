@@ -54,7 +54,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from .turns import TurnResult
+from .turns import LAUNCH_FAILED, TurnResult
 
 
 class FailureClass(StrEnum):
@@ -163,6 +163,8 @@ _OOM_OR_SPAWN_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"cannot connect to the docker daemon|is the docker daemon running",
         re.IGNORECASE,
     ),
+    # lens #132: the turn site's own line for an exec that never spawned
+    re.compile(re.escape(LAUNCH_FAILED)),
 )
 
 

@@ -331,6 +331,7 @@ def test_run_host_agent_claude_builds_engine_argv_and_parses(
 
     def fake_run(cmd, *args, **kwargs):
         calls["cmd"] = cmd
+        calls["input"] = kwargs.get("input")
         return subprocess.CompletedProcess(cmd, 0, stdout=_CLAUDE_SUCCESS, stderr="")
 
     monkeypatch.setattr(judge_mod.subprocess, "run", fake_run)
@@ -338,9 +339,9 @@ def test_run_host_agent_claude_builds_engine_argv_and_parses(
 
     # The migration's whole point: the argv is the Engine's bare host-side argv,
     # not a hard-coded per-tool branch in the judge.
-    assert calls["cmd"] == engines.get_engine("claude").cli_argv(
-        prompt="judge this", model="opus"
-    )
+    assert calls["cmd"] == engines.get_engine("claude").cli_argv(model="opus")
+    # the prompt is the CLI's stdin, never an argv element (lens #132)
+    assert calls["input"] == "judge this"
     # ...and the subprocess output is parsed via Engine.parse_turn.
     assert turn.text == "OK"
     assert turn.anomaly == ""
@@ -353,14 +354,14 @@ def test_run_host_agent_codex_builds_engine_argv_and_parses(
 
     def fake_run(cmd, *args, **kwargs):
         calls["cmd"] = cmd
+        calls["input"] = kwargs.get("input")
         return subprocess.CompletedProcess(cmd, 0, stdout=_CODEX_SUCCESS, stderr="")
 
     monkeypatch.setattr(judge_mod.subprocess, "run", fake_run)
     turn = _run_host_agent("codex", "judge this", model=None, timeout=30)
 
-    assert calls["cmd"] == engines.get_engine("codex").cli_argv(
-        prompt="judge this", model=None
-    )
+    assert calls["cmd"] == engines.get_engine("codex").cli_argv(model=None)
+    assert calls["input"] == "judge this"
     assert turn.text == "Done the work."
 
 

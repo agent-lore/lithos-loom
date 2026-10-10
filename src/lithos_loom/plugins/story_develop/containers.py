@@ -165,14 +165,21 @@ def start_container(run_cmd: Sequence[str]) -> str:
 
 
 def exec_turn(
-    exec_cmd: Sequence[str], *, timeout: int
+    exec_cmd: Sequence[str], *, prompt: str, timeout: int
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``docker exec`` for one turn with stdin closed (no 3s stdin wait)."""
+    """Run ``docker exec -i`` for one turn with *prompt* as its stdin.
+
+    The prompt is never an argv element (lens #132: one argv string is capped
+    at 128 KiB). Stdin is written whole and closed, so the CLI reads to EOF
+    and never waits on an open stdin. UTF-8 explicitly: prompts carry
+    non-ASCII text whatever the daemon's locale.
+    """
     return subprocess.run(
         list(exec_cmd),
-        stdin=subprocess.DEVNULL,
+        input=prompt,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=timeout,
     )
 

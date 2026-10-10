@@ -41,11 +41,11 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | Doctor | 1 | 474 | 393 | 1 | 3 | 0.75 | 21 (`lithos_loom.doctor.run_task_graph_checks`) | 1 |
 | Entrypoint | 2 | 767 | 619 | 0 | 10 | 1.00 | 30 (`lithos_loom.main._print_dry_run_report`) | 2 |
 | Errors | 1 | 46 | 28 | 11 | 0 | 0.00 | 1 (`lithos_loom.errors.LithosClientError.__init__`) | 0 |
-| Evals | 23 | 6743 | 5641 | 2 | 2 | 0.50 | 29 (`lithos_loom.evals.review.case.load_case`) | 24 |
+| Evals | 23 | 6751 | 5648 | 2 | 2 | 0.50 | 29 (`lithos_loom.evals.review.case.load_case`) | 24 |
 | GitHub | 5 | 2623 | 1987 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 3 |
 | LithosClient | 2 | 2283 | 1918 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 293 | 245 | 2 | 1 | 0.33 | 7 (`lithos_loom.notifications.build_notifier`) | 0 |
-| Plugins | 60 | 25109 | 20033 | 3 | 5 | 0.62 | 102 (`lithos_loom.plugins.story_develop.__main__.main`) | 64 |
+| Plugins | 60 | 25139 | 20046 | 3 | 5 | 0.62 | 102 (`lithos_loom.plugins.story_develop.__main__.main`) | 64 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
 | Runners | 8 | 1943 | 1564 | 5 | 1 | 0.17 | 12 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 1 |
@@ -57,7 +57,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **211**, lines: **82311**, SLOC: **66554**
+- Modules: **211**, lines: **82349**, SLOC: **66574**
 - Largest module: `lithos_loom.cli.develop` (2047 lines)
 - Modules over 800 lines: **15**
   - `lithos_loom.cli._deliver_lithos`
@@ -145,4 +145,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.52** (124809 test lines / 82311 source lines)
+- Test-to-source line ratio: **1.52** (124931 test lines / 82349 source lines)

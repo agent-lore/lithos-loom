@@ -577,3 +577,47 @@ def test_mixed_class_exhaustion_keeps_the_auth_outcome_on_the_auth_class(
     att = _run(_config(tmp_path), services, _FakeEngine(True), budget=PauseBudget(600))
     assert att.escalation is not None and "auth_failed" in att.escalation
     assert "re-synced from the host" in att.host_action
+
+
+def test_an_agent_that_cannot_launch_escalates_through_the_real_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """lens #132, end to end through the real ``turns.run_turn``: an exec the
+    host cannot spawn retries once, then escalates (the run ends
+    ``infra_failed`` and the watcher refunds the remediation round) — never a
+    traceback out of the run."""
+    import errno
+
+    from lithos_loom.plugins.story_develop import containers, turns
+
+    def e2big(*a: object, **k: object) -> object:
+        raise OSError(errno.E2BIG, "Argument list too long", "docker")
+
+    monkeypatch.setattr(containers, "exec_turn", e2big)
+    sleeps: list[float] = []
+    services = Services(
+        run_turn=turns.run_turn,
+        sleep=lambda seconds: sleeps.append(seconds),
+        start_container=lambda cmd: "cid",
+        stop_container=lambda name: None,
+        run_check_set=lambda *a, **k: None,
+    )
+    att = turn_with_reactions(
+        _config(tmp_path),
+        PauseBudget(600),
+        services=services,
+        agent="coder",
+        container="c",
+        config_dir=tmp_path,
+        prompt="do it",
+        session_id="sess-1",
+        resume=False,
+        round_no=1,
+        timeout=60,
+        engine=engines.ClaudeEngine(),  # the real argv builder
+    )
+    assert att.escalation is not None
+    assert "oom_or_spawn" in att.escalation
+    assert "Argument list too long" in att.escalation
+    assert "docker" in att.host_action
+    assert sleeps == [10.0]

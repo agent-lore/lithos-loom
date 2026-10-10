@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from lithos_loom.plugins.story_develop.engines import ClaudeEngine, CodexEngine
 
 _SUCCESS = json.dumps(
@@ -319,3 +321,87 @@ def test_a_timed_out_turn_never_probes(monkeypatch) -> None:
         container="c", prompt="p", engine=ClaudeEngine(), session_id="s", timeout=1
     )
     assert result.timed_out is True and result.container_running is None
+
+
+# --- lens #132: the prompt rides on stdin, never in argv ----------------------
+
+# Linux caps ONE argv string at MAX_ARG_STRLEN (32 pages = 128 KiB) whatever
+# ARG_MAX says; a converge prompt carrying a 198 KB PR diff failed to spawn
+# `docker` with E2BIG.
+_MAX_ARG_STRLEN = 128 * 1024
+
+
+@pytest.mark.parametrize("tool", ["claude", "codex"])
+@pytest.mark.parametrize("resume", [False, True])
+def test_a_prompt_past_the_argv_limit_reaches_the_exec_on_stdin(
+    monkeypatch, tool: str, resume: bool
+) -> None:
+    from lithos_loom.plugins.story_develop import containers, engines, turns
+
+    seen: dict = {}
+
+    def fake_exec(cmd, *, prompt, timeout):
+        seen.update(cmd=cmd, prompt=prompt)
+        return _completed(0, "", "")
+
+    monkeypatch.setattr(containers, "exec_turn", fake_exec)
+    monkeypatch.setattr(containers, "container_running", lambda name: True)
+    big = "x" * (4 * _MAX_ARG_STRLEN)
+    turns.run_turn(
+        container="c",
+        prompt=big,
+        engine=engines.get_engine(tool),
+        session_id="s",
+        resume=resume,
+    )
+    assert seen["prompt"] == big
+    assert max(len(a.encode()) for a in seen["cmd"]) < 1024
+    assert seen["cmd"][:3] == ["docker", "exec", "-i"]
+
+
+def test_exec_turn_feeds_the_prompt_to_a_real_process_stdin() -> None:
+    """A real child (no docker): every byte arrives, past the argv cap, and
+    non-ASCII text survives the pipe."""
+    import sys
+
+    from lithos_loom.plugins.story_develop import containers
+
+    big = "brief — é\n" * (2 * _MAX_ARG_STRLEN // 10)
+    proc = containers.exec_turn(
+        [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+        prompt=big,
+        timeout=60,
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == big
+
+
+def test_an_exec_that_cannot_launch_is_a_failed_spawn_turn_not_a_crash(
+    monkeypatch,
+) -> None:
+    """lens #132: the OSError escaped converge as a traceback, so the run left
+    no result and the watcher spent the round. A launch failure is the host's,
+    never a verdict: a failed turn in the spawn class, whose reaction retries
+    once and then ends the run ``infra_failed`` (refunded)."""
+    import errno
+
+    from lithos_loom.plugins.story_develop import containers, limits, turns
+
+    def e2big(*a, **k):
+        raise OSError(errno.E2BIG, "Argument list too long", "docker")
+
+    def probe(name: str):
+        raise AssertionError("probed a container the exec never reached")
+
+    monkeypatch.setattr(containers, "exec_turn", e2big)
+    monkeypatch.setattr(containers, "container_running", probe)
+    result = turns.run_turn(
+        container="c", prompt="p", engine=ClaudeEngine(), session_id="s"
+    )
+    assert result.succeeded is False and result.completed is False
+    assert result.timed_out is False
+    assert "Argument list too long" in result.stderr
+    cls = limits.classify_failure(result)
+    assert cls is limits.FailureClass.OOM_OR_SPAWN
+    assert limits.reaction_for(cls).escalate is True
+    assert "Argument list too long" in limits.failure_summary(result)
