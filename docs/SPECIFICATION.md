@@ -23,8 +23,8 @@ Status: Aligned with Implementation
 2. **Real-time co-editing.** File-based, poll-driven; latency target is ≤500ms end-to-end for projection + push.
 3. **Replacing Lithos as the source of truth.** Lithos owns the corpus and the task lifecycle. The vault is a projection plus a write surface for specific edits.
 4. **Cross-host coordination.** The vault host is the only host running `obsidian-sync`; other hosts run headless route-runners. Loom does not coordinate across hosts via shared state.
-5. **Reopening a completed task.** Lithos exposes no `task_reopen` primitive. Untick (`[x] → [ ]`) posts a `[ReopenRequested]` finding instead.
-6. **Plugin bodies for PRD decomposition, story implementation, story review.** Scaffolding exists in `src/lithos_loom/plugins/`; the implemented surface stops at the orchestration spine plus the Obsidian bridge. Generating PRDs, reviewing diffs, and brain-driven decisions are not implemented today.
+5. **Reopening a completed task.** Loom does not reopen tasks itself (it never calls `lithos_task_reopen`). An untick in the vault (`[x] → [ ]`) or a reopened linked GitHub issue posts a `[ReopenRequested]` finding on the task instead, leaving the reopen to the operator.
+6. **Plugin body for PRD decomposition.** `prd-decompose` is a stub under `src/lithos_loom/plugins/prd_decompose/` whose entry point raises `NotImplementedError`. The implemented plugin surface is `story-develop` (implement → review → PR, §5.5) on top of the orchestration spine and the Obsidian bridge. Generating PRDs and brain-driven decisions are not implemented today.
 
 ### 1.3 Compatibility Policy (Pre-1.0)
 
@@ -396,6 +396,13 @@ reconcile_interval_minutes = 60
 # interval the child scans Lithos for open + recently-resolved tasks
 # carrying metadata.github_issue_url and replays each through the push
 # handler. Set to 0 to disable the sweep.
+pr_merge_poll_enabled = true
+# Whether the reconcile sweep also resolves `pr` gates on merge (Epic H):
+# a merged PR completes the blocked story then the gate; a closed-
+# unmerged / deleted PR supersedes the gate with a loom `human` gate on
+# the story ([DeliveredPRClosed] + [NeedsHuman]) that keeps polling the PR
+# so a reopen-and-merge still resolves it. Set false to run the watcher
+# for issue sync only. external_reviews_enabled rides this same pass.
 external_reviews_enabled = true
 external_remediation_budget = 2
 merge_gate_enabled = true
@@ -438,6 +445,16 @@ conflict_resolve_enabled = true
 # operator_github_login (#113): GitHub user to notify on PR delivery —
 # requested as a reviewer, or assigned to the PR when they authored it.
 operator_github_login = "your-github-login"
+# default_review_profile (#139): the host-wide Review Profile used when
+# neither the task (metadata.develop_review_profile) nor the project-
+# context doc (develop_review_profile) sets one — the lowest layer of the
+# profile precedence (§5.5). Default: unset → the built-in `standard`.
+# unknown_profile is the host policy for an explicit-but-unknown name:
+# "halt" (default) fails the run closed with a blocking [Friction];
+# "strongest" falls back to the strongest configured profile + friction
+# (never weaker).
+default_review_profile = "standard"
+unknown_profile        = "halt"                                # or "strongest"
 
 [story_develop.default_models]
 claude = "opus"
@@ -1386,7 +1403,7 @@ Loom posts findings with stable prefixes so operators (and `lithos-lens`) can gr
 | Prefix | Posted by | Meaning |
 |---|---|---|
 | `[Friction]` | any subscription | Persistent failure of a side effect (retry exhausted) OR a notable operator-visible event (e.g. note-push conflict). |
-| `[ReopenRequested]` | `obsidian-status-transition` and `github-issue-sync` | An operator unticked a completed task (Obsidian) OR reopened a closed GH issue linked to a terminal Lithos task. Lithos has no reopen primitive, so this signals the intent. |
+| `[ReopenRequested]` | `obsidian-status-transition` and `github-issue-sync` | An operator unticked a completed task (Obsidian) OR reopened a closed GH issue linked to a terminal Lithos task. Loom does not reopen tasks itself (never calls `lithos_task_reopen`), so this finding signals the intent for the operator (§1.2). |
 | `[NeedsHuman]` | route-runner (b91177d2); github-watcher (external remediation exhausted, PRD S5b; conflict unresolved, PRD S5; a delivered PR closed unmerged / deleted, 04c2448b) | A run ended without delivering — plugin `failed` (any story-develop stop), contract violation, timeout, unknown status, or resume budget exhausted — and a loom `human` gate now blocks the story. Posted on the story: `[NeedsHuman] route <r>: <reason> — <summary>; run <id>, <n> round(s), $<cost>, branch <b>, worktree <path>; gate <id> — complete it to re-dispatch (edit the story first if the brief must change), cancel the story to abandon`, with any push-sink problems appended as `[Friction] …`. The claim was released. Whenever the brief names a branch, the finding, the gate's brief and both push sinks share one copy-pasteable sentence naming the third choice — `lithos-loom develop deliver <run>` (add `--converge` to re-review under a revised acceptance) — rendered only for a `run_id` that is a plain handle, since it is published as a command to paste. |
 | `[DevelopResult]` | story-develop plugin | The run's own outcome, posted on the story by the plugin (`[DevelopResult] <STATUS>: <message>` — rounds, cost, branch, PR when delivered) alongside its `develop_*` metadata patch (§5.5). Once per run; the runner's `[NeedsHuman]` / `[BlockerFailed]` follows when the run did not deliver. |
 | `[ReviewDispute]` | story-develop plugin | A review dispute deadlocked — coder and reviewer disagree on a finding past the dispute guard — and the run stopped `disputed`; human arbitration is needed (§5.5). Posted on the story once per run. |
@@ -1430,8 +1447,8 @@ CLI commands use a unified exit code convention:
 
 ### 9.2 Runtime Failures
 
-- **`plugin <pid> did not honour SIGTERM within 5.0s; sent SIGKILL`** (route-runner WARNING): the plugin exceeded `max_runtime_seconds` and didn't shut down. The claim is released and `[BlockerFailed]` is posted.
-- **`plugin contract violation: did not write <path>`** (route-runner WARNING): the plugin exited but no `result.json` exists. `[BlockerFailed]` posted; claim released.
+- **`plugin <pid> did not honour SIGTERM within 5.0s; sent SIGKILL`** (route-runner WARNING): the plugin exceeded `max_runtime_seconds` and didn't shut down. The runner raises a needs-human gate on the story (`escalation_reason=timeout`, the retained work dir as the brief), posts `[NeedsHuman] route <name>: timeout — plugin exceeded max runtime: …` and releases the claim (§2.2, §5.3). `[BlockerFailed]` appears only if the gate itself could not be raised.
+- **`plugin contract violation: plugin did not write result file at <path> (exit code <n>)`** (route-runner): the plugin exited but no `result.json` exists (a malformed one reads the same way: `… is not valid JSON`). The runner raises a needs-human gate on the story (`escalation_reason=contract_violation`), posts `[NeedsHuman] route <name>: contract_violation — …` and releases the claim (§2.2, §5.3). `[BlockerFailed]` appears only if the gate itself could not be raised.
 - **`note-push conflict for doc=<id>`** (note-push `[Friction]`): operator and Lithos both edited the doc; the operator's body is preserved at `_lithos/conflicts/<slug>.<file>.<ts>.md`, canonical was pulled to the original path.
 - **`obsidian-projection: skipped <slug>: no project-context doc in Lithos`** (doctor): TOML registers a slug Lithos doesn't know. Either create the doc in Lithos or remove the TOML stanza.
 
@@ -1487,7 +1504,7 @@ The following are absent from the current surface. Some are explicit non-goals; 
 - **Hot-reload of TOML config.** Operator restarts the daemon.
 - **Persistent event log.** Restart relies on source re-authority + subscriber idempotency.
 - **Containerised daemon.** Loom runs as a host process; Lithos and adjacent services may run in docker.
-- **Other planned work** (`prd-generate`, agent-driven reviews, brain, `merge-stories`, A2A endpoint, GitHub issue watcher, multi-host PRD-affinity, docker sandbox, cost tracking). See `docs/prd/` for PRDs.
+- **Other planned work** (`prd-generate`, brain, `merge-stories`, A2A endpoint, multi-host PRD-affinity, cost tracking). See `docs/prd/` for PRDs. (The GitHub issue watcher — `[github_watcher]`, §3.1 — and the hardened docker sandbox story-develop runs each agent in — §5.5 — are shipped and no longer belong here.)
 
 ---
 

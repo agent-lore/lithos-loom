@@ -262,7 +262,10 @@ tags = ["trigger:story-develop"]
 # failed, or task-archive isn't configured).
 #
 # Projection filter knobs (operator-level):
-#   include_blocked — project tasks whose metadata.depends_on is set
+#   include_blocked — project tasks Lithos reports as blocked (one
+#                     lithos_task_blocked sweep per projection: open
+#                     `blocks` predecessors and gates; Lithos rejects
+#                     metadata.depends_on, so nothing is read from it)
 #                     (default true; opt-out for a tighter daily view)
 #   exclude_tags    — list of tags that suppress projection when present
 #                     on a task (e.g. ["debug:trace", "internal"])
