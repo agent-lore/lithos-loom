@@ -34,13 +34,15 @@ It is the orchestration layer that connects Lithos to coding agents — replacin
 uv sync
 ```
 
-This installs the package in editable mode plus the dev dependencies. `lithos-loom` becomes available on the venv's PATH.
+This installs the package in editable mode plus the dev dependencies. `lithos-loom` becomes available on the venv's PATH (`uv run lithos-loom …`).
 
-For end-user install once published:
+To put a `lithos-loom` binary on your own PATH (`~/.local/bin/`), install the tool from the checkout — the package is not published to PyPI:
 
 ```bash
-uv tool install lithos-loom
+uv tool install .            # from the repo root; add --editable to track the checkout
 ```
+
+Once it is published, `uv tool install lithos-loom` will do the same without a checkout.
 
 ### CLI on PATH for the Templater macros
 
@@ -53,7 +55,7 @@ require("child_process").execSync("which lithos-loom").toString()
 
 If that errors, either:
 
-- Install via `uv tool install lithos-loom` (puts the binary in `~/.local/bin/`, typically in the launcher PATH on Linux; on macOS use `launchctl setenv PATH ...` or symlink into `/usr/local/bin/`).
+- Install via `uv tool install .` from the checkout (puts the binary in `~/.local/bin/`, typically in the launcher PATH on Linux; on macOS use `launchctl setenv PATH ...` or symlink into `/usr/local/bin/`).
 - Or hardcode the absolute path in the macro's `execFileSync` call (see [`docs/macros/README.md`](docs/macros/README.md)).
 
 ## Quick start
@@ -137,10 +139,12 @@ Lithos and Influx run as docker services because they're services — long-lived
 | Command | Purpose |
 |---------|---------|
 | `lithos-loom run` | Start the daemon: supervisor + per-domain children. |
+| `lithos-loom drain [--timeout S]` | Ask the running daemon to finish its in-flight runs, then exit (SIGUSR1 via the pidfile). |
 | `lithos-loom doctor` | Verify the vault is writable and Lithos has the required surface. |
 | `lithos-loom validate-config` | Typecheck the TOML, list configured projects / routes / subscriptions. |
 | `lithos-loom validate-config --dry-run` | Also poll Lithos and print which routes / subscriptions would fire for each open task. |
 | `lithos-loom config --show` | Print the merged effective config. |
+| `lithos-loom gates [--shadow]` | Read-only inventory of every open gate and each gate's waiter health. |
 | `lithos-loom task create --project X --title Y …` | Create a Lithos task and emit its projected line. Used by the capture macro. |
 | `lithos-loom project list [--source lithos\|toml] [--format text\|json]` | List projects with status overlay. |
 | `lithos-loom project create --title T [--slug S] …` | Create a new Lithos project-context doc. Used by the `create-project` macro. |
@@ -150,6 +154,21 @@ Lithos and Influx run as docker services because they're services — long-lived
 | `lithos-loom project enable-github <slug>` / `disable-github <slug>` | Toggle GH issue watching for a project (preserves the repo list). |
 | `lithos-loom project migrate-github-tags [--dry-run]` | One-shot migration of legacy tag-based github config to metadata. |
 | `lithos-loom obsidian-sync show [--format text\|json]` | Print the resolved `[obsidian_sync]` block. Used by the capture macro. |
+| `lithos-loom develop list` | List inspectable story-develop runs (in-flight + finished). |
+| `lithos-loom develop attach <key>` | Follow a live run until it reaches a terminal state. |
+| `lithos-loom develop dump <key>` | Print the assembled conversation log for a run. |
+| `lithos-loom develop prune` | Remove the on-disk run-state dirs of finished runs. |
+| `lithos-loom develop resume <run>` | Continue a run that died mid-loop, on its own branch. See [`docs/cli/resume.md`](docs/cli/resume.md). |
+| `lithos-loom develop review …` | Run the reviewer panel + deterministic gate against an existing PR / ref range / branch — no coder, no fix loop. See [`docs/cli/review.md`](docs/cli/review.md). |
+| `lithos-loom develop converge …` | Converge an existing PR to review-green (panel + gate, then a coder fix loop on the PR branch). See [`docs/cli/converge.md`](docs/cli/converge.md). |
+| `lithos-loom develop merge-gate …` | Trial-merge a PR into its current base and run the check-set on the result. See [`docs/cli/merge-gate.md`](docs/cli/merge-gate.md). |
+| `lithos-loom develop deliver <run>` | Push a stopped run's branch, open its PR, and swap the story's gate. See [`docs/cli/deliver.md`](docs/cli/deliver.md). |
+| `lithos-loom develop converge-push <run>` | Report an exhausted converge run's unpushed rounds, and push them on request. See [`docs/cli/converge-push.md`](docs/cli/converge-push.md). |
+| `lithos-loom develop brief-review <story>` | Draft a story's brief-review addendum and print it (dry run). See [`docs/cli/brief-review.md`](docs/cli/brief-review.md). |
+| `lithos-loom eval review …` | Measure the reviewer panel's catch-rate on the seeded-defect benchmark (not part of `make check`). |
+| `lithos-loom eval rescore <report-dir>` | Re-score a retained eval report dir — judge calls only, no reviewer runs. |
+| `lithos-loom eval triage …` | Measure triage on batches of findings with known verdicts (PRD S8). |
+| `lithos-loom eval resolve …` | Measure S5 conflict resolution on real conflicting merges (PRD S8). |
 
 Full CLI reference (every flag, every exit code) is in [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) §4.
 
