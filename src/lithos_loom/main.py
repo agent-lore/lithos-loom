@@ -29,8 +29,11 @@ import typer
 
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.cli import develop_app, obsidian_sync_app, project_app, task_app
-from lithos_loom.cli._deliver_facts import sanitize_for_terminal
-from lithos_loom.cli.brief_reviews import brief_reviews_output, collect_brief_reviews
+from lithos_loom.cli.brief_reviews import (
+    brief_reviews_output,
+    collect_brief_reviews,
+    line_safe,
+)
 from lithos_loom.cli.drain import drain_daemon
 from lithos_loom.cli.gates import collect_gate_rows, render_report
 from lithos_loom.cli.gates_shadow import (
@@ -486,9 +489,7 @@ def _listing_or_exit[T](cfg: LoomConfig, what: str, coro: Coroutine[Any, Any, T]
         )
         raise typer.Exit(1) from exc
     except LithosClientError as exc:
-        typer.echo(
-            sanitize_for_terminal(f"lithos-loom: {what} failed: {exc}"), err=True
-        )
+        typer.echo(line_safe(f"lithos-loom: {what} failed: {exc}"), err=True)
         raise typer.Exit(1) from exc
 
 

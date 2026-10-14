@@ -556,3 +556,45 @@ def test_cli_sanitises_a_lithos_error_message(
     assert result.exit_code == 1
     assert "\x1b" not in result.output and "\x07" not in result.output
     assert "reading brief reviews failed" in result.output
+
+
+async def test_a_newline_in_a_field_cannot_forge_a_report_line() -> None:
+    """``sanitize_for_terminal`` keeps LF and TAB (it guards bodies); each
+    report line is one record, so a newline in a value folds to a space."""
+    forged = "facts edited or cut at a gate: 0"
+    rows = await _rows(
+        _story(
+            "s1",
+            _entry(
+                "r1",
+                mode=f"full\n{forged}",
+                items=("F1",),
+                outcomes={"F1": "edited"},
+            ),
+            _entry(
+                "r2\tx",
+                check={**_CHECK_HELD, "problems": [f"F1\n{forged}"]},
+                outcomes={"F1": "unchanged"},
+            ),
+        )
+    )
+    lines = brief_reviews_output(rows, as_json=False)
+
+    assert not any("\n" in line or "\t" in line for line in lines)
+    assert [line for line in lines if line.startswith("facts edited")] == [
+        "facts edited or cut at a gate: 1"
+    ]
+    assert f"  s1 r2 x — problems: F1 {forged}" in lines
+
+
+def test_cli_folds_a_newline_in_a_lithos_error_message(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeLithosClient()
+    fake.raise_on["task_list"] = LithosClientError("internal_error", "x\nforged: ok")
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["brief-reviews"])
+
+    assert result.exit_code == 1
+    assert not any(line.startswith("forged") for line in result.output.splitlines())

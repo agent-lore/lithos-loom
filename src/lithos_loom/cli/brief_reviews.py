@@ -49,6 +49,7 @@ __all__ = [
     "brief_reviews_output",
     "collect_brief_reviews",
     "false_holds",
+    "line_safe",
     "render_brief_reviews",
 ]
 
@@ -187,7 +188,16 @@ def brief_reviews_output(rows: list[dict[str, Any]], *, as_json: bool) -> list[s
     and this is the screen the auto-facts dial is decided on (pure)."""
     if as_json:
         return [json.dumps(rows, indent=2)]
-    return [sanitize_for_terminal(line) for line in render_brief_reviews(rows)]
+    return [line_safe(line) for line in render_brief_reviews(rows)]
+
+
+def line_safe(text: str) -> str:
+    """:func:`sanitize_for_terminal`, plus the LF and TAB it deliberately
+    keeps (it guards multi-line bodies). Every report line is one record built
+    from metadata values, so a newline in one would print a forged line —
+    a second ``facts edited or cut`` verdict, say; here they fold to spaces,
+    as ``develop``'s ``_line_safe`` does."""
+    return sanitize_for_terminal(text).replace("\n", " ").replace("\t", " ")
 
 
 def render_brief_reviews(rows: list[dict[str, Any]]) -> list[str]:

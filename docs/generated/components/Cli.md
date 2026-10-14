@@ -25,7 +25,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 | `lithos_loom.cli._project_import_bulk` | M | 4 | 9 |
 | `lithos_loom.cli._regenerate_done` | S | 0 | 3 |
 | `lithos_loom.cli.brief_review` | S | 0 | 1 |
-| `lithos_loom.cli.brief_reviews` | M | 0 | 4 |
+| `lithos_loom.cli.brief_reviews` | M | 0 | 5 |
 | `lithos_loom.cli.converge` | L | 0 | 3 |
 | `lithos_loom.cli.converge_push` | L | 0 | 2 |
 | `lithos_loom.cli.deliver` | L | 0 | 1 |
@@ -173,6 +173,7 @@ Typer command implementations (task, project, develop, review, obsidian-sync, �
 - def `collect_brief_reviews` — One row per recorded entry: the entry as :func:`records_of` returns it, every key passed through, plus ``story_id`` and ``project`` (``—`` for a story with none). Entries drafted before *since* (or with no readable ``drafted_at`` when *since* is given) are dropped. Ordered by story id, then record order. Read-only.
 - def `false_holds` — ``(held, false)``: the approved entries whose facts-only draft the check held, and those of them the operator approved with every item ``unchanged`` — the check held facts the operator agreed were facts. An entry with no ``check`` is in neither (pure).
 - def `brief_reviews_output` — What the command prints: the rows as one JSON array (one object per entry; ``json.dumps`` escapes every control byte), or the text report with terminal control bytes stripped — the record is written by Lithos clients, and this is the screen the auto-facts dial is decided on (pure).
+- def `line_safe` — :func:`sanitize_for_terminal`, plus the LF and TAB it deliberately keeps (it guards multi-line bodies). Every report line is one record built from metadata values, so a newline in one would print a forged line — a second ``facts edited or cut`` verdict, say; here they fold to spaces, as ``develop``'s ``_line_safe`` does.
 - def `render_brief_reviews` — The text report: entries by outcome, approval edits, auto-applied entries, check false holds (pure).
 
 ### `lithos_loom.cli.converge`

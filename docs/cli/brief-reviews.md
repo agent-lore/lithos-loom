@@ -81,7 +81,8 @@ no check: 0 entries (drafted before phase 2, or failed) — outside the false-ho
 An entry whose `items` is not a list (a hand-edited record) is read as having
 no drafted items and is named on a closing `malformed items (not a list)` line;
 the rest of the report is unaffected. The record is written by Lithos clients,
-so the text report strips terminal control bytes before printing.
+so the text report strips terminal control bytes before printing, and folds a
+newline or tab inside a value to a space so it cannot forge a line.
 
 The report has no cost section: entries record no cost. A held pass's cost is
 on the human gate it raised (`run_brief.cost_usd`); a pass that skipped its
