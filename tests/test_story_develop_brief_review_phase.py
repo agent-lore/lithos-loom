@@ -545,3 +545,21 @@ async def test_too_many_facts_to_list_are_held_and_say_so(tmp_path: Path) -> Non
     assert not outcome.proceed
     assert "held: too many facts to list" in outcome.escalation["summary"]
     assert stored.metadata[HOLD_KEY] is True
+
+
+async def test_the_records_the_phase_writes_list_its_appended_facts(
+    tmp_path: Path,
+) -> None:
+    # The PR body's section verifies each block against its record: the
+    # digests the pass drafted must match the text it appended, rendered.
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    outcome, stored = await _run(
+        tmp_path, _story(), _Review(_FACTS_ONLY), auto_facts=True
+    )
+
+    section = brief_review_section(outcome.records, stored.description)
+    assert "F13. W7 added no refusal hook." in section
+    assert "not found" not in section

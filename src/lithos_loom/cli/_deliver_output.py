@@ -47,6 +47,8 @@ from lithos_loom.cli._deliver_repo import (
     remote_state,
 )
 from lithos_loom.plugins.story_develop import run_outcome
+from lithos_loom.plugins.story_develop.brief_review import records_of
+from lithos_loom.plugins.story_develop.brief_review_auto import brief_review_section
 
 __all__ = [
     "MANUAL_DELIVERY",
@@ -191,6 +193,9 @@ def delivery_finding(
 _BLOCK_WIDTH = 72
 _BLOCK_MAX_LINES = 8
 _BLOCK_MARKER = "| "
+# The `## Brief review` section is already bounded (its own budget), so the
+# preview shows it whole: this only backstops the wrap.
+_SECTION_PREVIEW_LINES = 2_000
 
 
 def quoted_block(
@@ -343,6 +348,14 @@ def echo_plan(
             # here is the last check before it is world-readable for good.
             echo("          it quotes the coder's handoff summary, as published:")
             for line in quoted_block(facts.coder_summary):
+                echo(f"            {_BLOCK_MARKER}{line}")
+        # The body's `## Brief review`, rendered by the function the body
+        # uses: the addenda the operator is about to publish, whole (the
+        # section is bounded by its own budget, so no line cap here).
+        section = brief_review_section(records_of(story.metadata), story.task_text)
+        if section:
+            echo("          it lists the story's brief-review addenda, as published:")
+            for line in quoted_block(section, limit=_SECTION_PREVIEW_LINES):
                 echo(f"            {_BLOCK_MARKER}{line}")
     if no_gate:
         echo("  3 gate: skipped (--no-gate) — the PR would be UNMONITORED")

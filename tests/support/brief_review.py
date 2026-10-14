@@ -7,13 +7,15 @@ run, a resumed run, a hand delivery) share one story and one expectation.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from lithos_loom.plugins.story_develop.brief_review import (
     MODE_FULL,
     OUTCOME_APPROVED,
+    draft_entry,
+    item_outcomes,
     parse_addendum,
     render_addendum,
 )
@@ -31,13 +33,16 @@ def approved_addendum() -> tuple[str, dict[str, Any], tuple[str, ...]]:
     text = render_addendum(
         addendum, base_sha=APPROVED_BASE, on=date(2026, 10, 14), mode=MODE_FULL
     )
-    entry = {
-        "run_id": "r0",
-        "mode": MODE_FULL,
-        "base_sha": APPROVED_BASE,
-        "outcome": OUTCOME_APPROVED,
-        "items": [],
-        "gate_id": "g-1",
-    }
+    # as the pass drafts it and the approval settles it (nothing edited)
+    entry = draft_entry(
+        run_id="r0",
+        mode=MODE_FULL,
+        base_sha=APPROVED_BASE,
+        addendum=addendum,
+        drafted_at=datetime(2026, 10, 14, tzinfo=UTC),
+        outcome=OUTCOME_APPROVED,
+    )
+    entry["gate_id"] = "g-1"
+    entry["outcomes"] = item_outcomes(entry, addendum)
     listed = tuple(f"{item.id}. {item_heading(item)}" for item in addendum.items)
     return text, entry, listed

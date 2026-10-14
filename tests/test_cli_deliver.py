@@ -2429,6 +2429,41 @@ def test_a_hand_delivery_lists_every_appended_addendum(
         assert f"\n{line}\n" in brief
 
 
+def test_a_dry_run_prints_the_brief_review_section_it_would_publish(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    # D5: the dry run shows the section the opened PR's body would carry.
+    from tests.support.brief_review import APPROVED_BASE, approved_addendum
+
+    text, entry, listed = approved_addendum()
+    seeded = asyncio.run(lithos.task_get(task_id=_STORY))
+    assert seeded is not None
+    lithos.add_task(
+        make_task(
+            _STORY,
+            title=seeded.title,
+            description=f"{seeded.description}\n\n{text}",
+            metadata={**seeded.metadata, "brief_review": [entry]},
+        )
+    )
+
+    result = _invoke(_RUN, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "brief-review addenda, as published" in result.output
+    assert "## Brief review" in result.output
+    assert f"`{APPROVED_BASE[:12]}`" in result.output
+    # the preview wraps long lines behind its quote marker; unwrapped, every
+    # item the body lists is on the screen
+    shown = " ".join(
+        line.strip().removeprefix("| ") for line in result.output.splitlines()
+    )
+    for line in listed:
+        assert line in shown
+    assert lithos.mutating_calls == []
+    assert gh["created"] == []
+
+
 def test_a_hand_delivery_without_an_addendum_has_no_brief_review(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:

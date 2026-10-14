@@ -183,6 +183,30 @@ async def test_the_operator_s_edits_are_what_is_appended_and_recorded() -> None:
     assert entry["operator_note"] == "cut F2; D1 the other way"
 
 
+async def test_an_applied_approval_is_what_the_pr_body_lists() -> None:
+    # The PR body's `## Brief review` verifies each block against its record:
+    # the operator's edited approval, as appended, must still match it.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    client = _client()
+    gate_id = await _held(client)
+    await _edit_gate(client, gate_id, "- **F2. Two.** `b.py:2`.\n", "")
+    await _edit_gate(client, gate_id, "this way.", "that way.")
+    await client.task_complete(task_id=gate_id, agent="dave")
+
+    outcome = await _apply(client)
+
+    story = await _get(client, STORY)
+    section = brief_review_section(
+        records_of(story.metadata), outcome.payload["description"]
+    )
+    assert "\nF1. One.\nD1. Do it.\n" in section
+    assert "F2." not in section and "not found" not in section
+
+
 async def test_an_emptied_draft_dispatches_with_nothing_appended() -> None:
     client = _client()
     gate_id = await _held(client)
