@@ -2461,6 +2461,63 @@ def test_daemon_mode_resume_pointer_enters_the_loop_on_the_branch(
     assert state["resumed_from"]["run_id"] == "dead"
 
 
+def test_daemon_mode_resumed_run_delivers_every_appended_addendum(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A resumed run runs no brief-review phase, yet its PR lists the approved
+    addendum the story carries — from the dispatch payload's records and the
+    description, the same section a fresh run's delivery renders."""
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop import checkpoint
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+    from lithos_loom.runner import git
+    from tests.support.brief_review import approved_addendum
+
+    text, entry, listed = approved_addendum()
+    captured: dict[str, Any] = {"settings": ProjectDevelopSettings(brief_review=True)}
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    _stub_phase(monkeypatch, captured, AssertionError("a resume runs no phase"))
+    dead = tmp_path / "work" / "dead"
+    (dead / "handoff").mkdir(parents=True)
+    base = git.commit_sha(tmp_git_repo)
+    (tmp_git_repo / "round.txt").write_text("round 2\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "round 2"],
+        cwd=tmp_git_repo,
+        check=True,
+        capture_output=True,
+    )
+    checkpoint.record_round_checkpoint(
+        dead,
+        round_no=2,
+        branch="story-dead",
+        head_sha=git.commit_sha(tmp_git_repo),
+        base_sha=base,
+        repo=str(tmp_git_repo),
+        cost_usd=1.0,
+    )
+    argv, _ = _brief_args(tmp_git_repo, tmp_path, brief_review=[entry])
+    task_json = Path(argv[argv.index("--task-json") + 1])
+    envelope = json.loads(task_json.read_text())
+    envelope["task"]["description"] = f"Body.\n\n{text}"
+    envelope["resume"] = {"run_dir": str(dead), "reason": "infra"}
+    task_json.write_text(json.dumps(envelope))
+
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+
+    config = captured["config"]
+    assert "phase" not in captured
+    assert config.brief_records == (entry,)
+    section = brief_review_section(config.brief_records, config.description)
+    assert "outcome `approved`" in section
+    for line in listed:
+        assert f"\n{line}\n" in section
+
+
 def test_daemon_mode_unusable_resume_pointer_develops_from_scratch(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -2813,14 +2870,22 @@ def test_daemon_brief_review_auto_facts_dial_reaches_the_phase(
 
     assert main_mod.main(argv) == EXIT_SUCCEEDED
     assert captured["phase"]["auto_facts"] is expected
-    assert captured["config"].brief_facts == ()
+    assert captured["config"].brief_records == ()
 
 
-def test_daemon_brief_review_auto_appended_facts_reach_the_config(
+_APPROVED_AT_A = {
+    "run_id": "r0",
+    "mode": "full",
+    "base_sha": "a" * 40,
+    "outcome": "approved",
+}
+
+
+def test_daemon_brief_review_records_the_phase_wrote_reach_the_config(
     tmp_git_repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    # Phase 2: the PR body lists the facts appended without a gate, so the
-    # phase's headings ride on the config to delivery.
+    # The PR body lists every appended addendum from the story's records: the
+    # phase's own (it may have just appended one) win over the payload's.
     from lithos_loom.plugins.story_develop import __main__ as main_mod
     from lithos_loom.plugins.story_develop.brief_review_phase import PhaseOutcome
     from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
@@ -2831,18 +2896,39 @@ def test_daemon_brief_review_auto_appended_facts_reach_the_config(
         )
     }
     _stub_daemon_run(monkeypatch, tmp_path, captured)
-    facts = ("F13. W7 added no refusal hook.",)
+    written = (
+        _APPROVED_AT_A,
+        {"run_id": "r1", "mode": "delta", "base_sha": "b" * 40, "outcome": "x"},
+    )
     _stub_phase(
         monkeypatch,
         captured,
         PhaseOutcome(
-            proceed=True, start_sha="b" * 40, description="Body.", auto_facts=facts
+            proceed=True, start_sha="b" * 40, description="Body.", records=written
         ),
     )
-    argv, _ = _brief_args(tmp_git_repo, tmp_path)
+    argv, _ = _brief_args(tmp_git_repo, tmp_path, brief_review=[_APPROVED_AT_A])
 
     assert main_mod.main(argv) == EXIT_SUCCEEDED
-    assert captured["config"].brief_facts == facts
+    assert captured["config"].brief_records == written
+
+
+def test_daemon_brief_review_records_come_from_the_payload_without_a_phase(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    # A phase that read no story (a mirrored issue) returns no records: the
+    # dispatch payload's — the story as re-read after its approval — stand.
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.brief_review_phase import PhaseOutcome
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {"settings": ProjectDevelopSettings(brief_review=True)}
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    _stub_phase(monkeypatch, captured, PhaseOutcome(proceed=True))
+    argv, _ = _brief_args(tmp_git_repo, tmp_path, brief_review=[_APPROVED_AT_A])
+
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].brief_records == (_APPROVED_AT_A,)
 
 
 @pytest.mark.parametrize(

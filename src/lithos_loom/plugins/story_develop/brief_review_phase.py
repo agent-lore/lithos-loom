@@ -71,7 +71,6 @@ from .brief_review import (
 from .brief_review_auto import (
     AutoFactsVerdict,
     check_auto_facts,
-    fact_headings,
     fact_problems,
 )
 from .config import DevelopConfig
@@ -112,9 +111,10 @@ class PhaseOutcome:
     description: str | None = None
     escalation: dict[str, Any] | None = None
     frictions: tuple[str, ...] = ()
-    # The appended facts' ``"F13. <heading>"`` lines when this pass skipped
-    # its gate — the PR body lists them (``## What`` is capped).
-    auto_facts: tuple[str, ...] = ()
+    # The story's ``metadata.brief_review`` entries as this phase last read
+    # or wrote them — the PR body lists every appended addendum from them
+    # (``## What`` is capped). Empty when the phase read no story.
+    records: tuple[dict[str, Any], ...] = ()
 
 
 async def run_phase(
@@ -153,7 +153,10 @@ async def run_phase(
     plan, prior_base = plan_review(metadata, start_sha)
     if plan == PLAN_PROCEED:
         return PhaseOutcome(
-            proceed=True, start_sha=start_sha, description=story.description or ""
+            proceed=True,
+            start_sha=start_sha,
+            description=story.description or "",
+            records=tuple(records_of(metadata)),
         )
     mode = MODE_DELTA if plan == PLAN_DELTA else MODE_FULL
     result = review(
@@ -221,7 +224,7 @@ async def run_phase(
         # Nothing to add: the brief stands at this base — as the write found
         # it (an operator edit during the pass is theirs). Only a reasoned
         # ``No change`` parses to no items.
-        description = await _record(
+        description, records = await _record(
             client,
             story,
             _entry(run_id, mode, start_sha, addendum, when, OUTCOME_NO_CHANGE, verdict),
@@ -235,10 +238,12 @@ async def run_phase(
                 f"[BriefReview] brief review at {start_sha[:12]}: no change — "
                 f'"{publish_line(addendum.no_change or "")}" ({_DIAL})',
             )
-        return PhaseOutcome(proceed=True, start_sha=start_sha, description=description)
+        return PhaseOutcome(
+            proceed=True, start_sha=start_sha, description=description, records=records
+        )
     if may_skip and verdict.passed:
         # Facts describe the code; they change no decision the operator made.
-        description = await _record(
+        description, records = await _record(
             client,
             story,
             _entry(
@@ -265,7 +270,7 @@ async def run_phase(
             proceed=True,
             start_sha=start_sha,
             description=description,
-            auto_facts=fact_headings(addendum),
+            records=records,
         )
 
     await _record(
@@ -348,19 +353,20 @@ async def _record(
     hold: bool,
     run_id: str,
     append: str | None = None,
-) -> str:
+) -> tuple[str, tuple[dict[str, Any], ...]]:
     """Write *entry* onto the story's records — with the hold flag set or
     cleared, and *append* added to the description — in ONE write guarded by
     the story's ``updated_at``. A concurrent edit is re-read and retried
     once (the records and the description are recomputed from the fresh
     read, so the other writer's change survives). Returns the description
-    now on the story."""
+    and the records now on the story."""
     for attempt in (1, 2):
         description = story.description or ""
         if append is not None:
             description = f"{description.rstrip()}\n\n{append.strip()}\n"
+        records = (*records_of(story.metadata or {}), entry)
         metadata: dict[str, Any] = {
-            RECORD_KEY: [*records_of(story.metadata or {}), entry],
+            RECORD_KEY: list(records),
             HOLD_KEY: True if hold else None,
         }
         if hold:
@@ -374,7 +380,7 @@ async def _record(
                 description=description if append is not None else None,
                 expected_updated_at=story.updated_at,
             )
-            return description
+            return description, records
         except LithosClientError as exc:
             if exc.code != "version_conflict" or attempt == 2:
                 raise

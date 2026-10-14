@@ -49,6 +49,7 @@ from lithos_loom.runner.signals import bind_lifetime_to_parent, install_sigterm_
 
 from ...plugin_runner import write_result_atomically
 from . import check_runner, engines, run_outcome, sandbox_facts
+from .brief_review import records_of
 from .brief_review_phase import run_brief_review_phase
 from .check_set import CheckState
 from .config import (
@@ -627,6 +628,10 @@ def _daemon_main(args: argparse.Namespace) -> int:
     # the story's text as it now reads (a facts-only recheck may have been
     # appended) — or holds the story behind a brief-review gate the runner
     # raises from this run's escalation. A resumed run continues its branch.
+    # Every appended addendum reaches the PR body (``## Brief review``) from
+    # the story's records — the dispatch payload's, unless the phase below
+    # read or wrote newer ones. A resumed run has no phase, and lists them too.
+    brief_records = tuple(records_of(ctx.metadata))
     prd = ctx.metadata.get("prd")
     if entry is None and settings.brief_review and isinstance(prd, str) and prd.strip():
         try:
@@ -672,8 +677,9 @@ def _daemon_main(args: argparse.Namespace) -> int:
         if phase.description is not None:
             reviewed = replace(ctx, description=phase.description)
             config = replace(config, description=reviewed.task_text)
-        if phase.auto_facts:
-            config = replace(config, brief_facts=phase.auto_facts)
+        if phase.records:
+            brief_records = phase.records
+    config = replace(config, brief_records=brief_records)
 
     try:
         result = develop(
@@ -816,6 +822,7 @@ def main(argv: list[str] | None = None) -> int:
 
     description = args.description
     github_issue_url: str | None = None
+    brief_records: tuple[dict[str, Any], ...] = ()
     # Review Profile task-layer value (#139): the explicit --review-profile flag,
     # else (for a --task-id run) the task's develop_review_profile metadata.
     review_profile_task: str | None = args.review_profile
@@ -826,6 +833,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         description = ctx.task_text
+        brief_records = tuple(records_of(ctx.metadata))
         # explicit flag > task metadata > (effective fallback to description)
         acceptance_criteria = acceptance_criteria or ctx.acceptance_criteria
         raw_issue = ctx.metadata.get("github_issue_url")
@@ -1017,6 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
     config = DevelopConfig(
         repo=repo,
         description=description,
+        brief_records=brief_records,
         work_dir=work_dir,
         acceptance_criteria=acceptance_criteria,
         coder=args.coder,

@@ -34,6 +34,8 @@ from typing import Any, NamedTuple
 
 from lithos_loom.cli._deliver_lithos import StoryState
 from lithos_loom.plugins.story_develop import run_outcome
+from lithos_loom.plugins.story_develop.brief_review import records_of
+from lithos_loom.plugins.story_develop.brief_review_auto import brief_review_section
 from lithos_loom.plugins.story_develop.handoff import (
     MAX_HANDOFF_BYTES,
     read_regular_file,
@@ -623,4 +625,6 @@ def pr_body(
         # fenced, never inline: the handoff is written by the coder agent into
         # a RW mount, and a PR description is live markup (sec review f-006)
         provenance_quote=facts.coder_summary,
+        # the same section a run's own delivery renders, from the live story
+        brief_review=brief_review_section(records_of(story.metadata), story.task_text),
     )

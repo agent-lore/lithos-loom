@@ -21,7 +21,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.agent_session` | M | 1 | 5 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.brief_review` | L | 4 | 10 |
-| `lithos_loom.plugins.story_develop.brief_review_auto` | M | 1 | 6 |
+| `lithos_loom.plugins.story_develop.brief_review_auto` | M | 1 | 7 |
 | `lithos_loom.plugins.story_develop.brief_review_phase` | M | 1 | 2 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
@@ -121,6 +121,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `check_auto_facts` — The structural check over *addendum* — run on every pass, so every drafted record carries it, whether or not the dial lets it skip a gate.
 - def `fact_headings` — Each fact as ``"F13. W7 added no refusal hook."`` — its id and heading (the first line, for a fact whose heading cannot be read).
 - def `pr_section` — The PR body's ``## Brief review`` section for facts appended without a gate: loom's own heading and line, then *headings* fenced (the agent wrote them). ``""`` when there are none. ``## What`` is capped, and appended facts are its tail — the first text cut — so they are listed here too.
+- def `brief_review_section` — The PR body's ``## Brief review`` section for every addendum appended to the story — each *records* entry (``metadata.brief_review``, oldest first) that is ``approved`` or ``auto_appended`` — or ``""`` for none. One renderer for both deliveries: a run (and a resumed one) and ``lithos-loom develop deliver``.
 - def `describe_verdict` — One line saying what the dispatch would do with this verdict. *counts* is the pass's ``{"scope_cut", "fact", "decision"}`` tally; *mode* full or delta (a recheck is governed by the check whatever the dial says).
 
 ### `lithos_loom.plugins.story_develop.brief_review_phase`

@@ -81,7 +81,10 @@ partial first pass finishes the job and changes nothing else.
    a PR is opened through the same `pr_delivery` seam story-develop uses on
    approval, onto `--base` or the repo's default branch. The body is the
    generated one — what / acceptance criteria / review / `Closes #N` for an
-   issue-linked story — plus a **`## Provenance`** section naming the run, its
+   issue-linked story, and a **`## Brief review`** section listing every
+   addendum the brief review appended to the story (rendered from the live
+   story's records and description, as a run's own delivery renders it;
+   SPEC §2.2) — plus a **`## Provenance`** section naming the run, its
    stop *classification*, the branch, and the coder's final handoff summary.
    The *what* and *acceptance criteria* sections are **fenced, bounded and
    defanged** exactly like the handoff quote (below): for a mirrored story they

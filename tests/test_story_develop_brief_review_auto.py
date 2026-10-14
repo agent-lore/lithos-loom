@@ -26,6 +26,7 @@ from lithos_loom.plugins.story_develop.brief_review_auto import (
     HEADING_MARKERS,
     MAX_LISTED_FACTS,
     AutoFactsVerdict,
+    brief_review_section,
     check_auto_facts,
     describe_verdict,
     fact_headings,
@@ -455,3 +456,156 @@ def test_the_structure_rule_is_linear_on_hostile_input(text: str) -> None:
     started = time.perf_counter()
     fact_problems(_fact(text))
     assert time.perf_counter() - started < 1.0
+
+
+# ── every appended addendum in the PR body (run and hand delivery) ───────────
+
+_A = "a" * 40
+_B = "b" * 40
+_RECHECK_A = (
+    f"**Recheck against `{_A[:12]}` (2026-10-14)** — the base moved.\n\n"
+    f"**Facts** (the code at `{_A[:12]}` — no judgment involved)\n\n"
+    "- **F13. W7 added no refusal hook.** `src/w.py:536`.\n"
+)
+_APPROVED_B = (
+    f"**Brief review against `{_B[:12]}` (2026-10-14)** — checked.\n\n"
+    "**Scope cuts** — they replace the matching parts of the brief:\n\n"
+    "- **S1. No datalist.** Typed ids only.\n  - Basis: F1.\n\n"
+    "**Facts** (the code at …)\n\n"
+    "- **F1. The router exists.** `src/r.py:4`.\n\n"
+    "**Decisions**\n\n"
+    "- **D1. A task-less entry point.** Add `submit_create`.\n  - Basis: F1.\n"
+)
+
+
+def _entry(outcome: str, base: str, mode: str = "full", **extra: object) -> dict:
+    return {"run_id": "r", "mode": mode, "base_sha": base, "outcome": outcome, **extra}
+
+
+def test_the_section_lists_every_approved_item_from_the_description() -> None:
+    description = f"Add a flag\n\nThe brief.\n\n{_APPROVED_B}"
+
+    section = brief_review_section([_entry("approved", _B)], description)
+
+    assert section.startswith("## Brief review\n")
+    assert f"against `{_B[:12]}`** (mode `full`, outcome `approved`)" in section
+    for listed in ("S1. No datalist.", "F1. The router exists.", "D1. A task-less"):
+        assert f"\n{listed}" in section
+    # the item ids and headings are the agent's / operator's text: fenced
+    assert section.rstrip().endswith("```")
+
+
+def test_the_section_lists_each_appended_addendum_in_record_order() -> None:
+    records = [
+        _entry("approved", _B),
+        _entry("pending", _A),
+        _entry("failed", _A),
+        _entry("no_change", _A),
+        _entry("auto_appended", _A, mode="delta", check={"passed": True}),
+    ]
+    description = f"T\n\nBrief.\n\n{_APPROVED_B}\n\n{_RECHECK_A}"
+
+    section = brief_review_section(records, description)
+
+    first, second = section.split("**Recheck against")
+    assert "D1. A task-less" in first and "F13." not in first
+    assert "F13. W7 added no refusal hook." in second and "D1." not in second
+    assert "outcome `auto_appended`" in second
+    # phase 2's note survives for a fact pass the structural check passed
+    assert "without a gate (facts only, structural check passed)" in second
+    for unlisted in ("pending", "failed", "no_change"):
+        assert f"outcome `{unlisted}`" not in section
+
+
+def test_an_older_recheck_without_a_check_says_how_it_was_appended() -> None:
+    section = brief_review_section(
+        [_entry("auto_appended", _A, mode="delta")], f"T\n\n{_RECHECK_A}"
+    )
+
+    assert "without a gate, as a facts-only recheck" in section
+    assert "structural check passed" not in section
+
+
+def test_an_entry_whose_block_is_gone_is_named_never_filled_from_the_record() -> None:
+    entry = _entry("approved", _B, items=[{"id": "D9", "kind": "decision"}])
+
+    section = brief_review_section([entry], "T\n\nThe brief, edited since.")
+
+    assert f"`{_B[:12]}`" in section and "outcome `approved`" in section
+    assert "not found in the description" in section
+    assert "D9" not in section and "```" not in section
+
+
+def test_entries_sharing_a_header_pair_with_blocks_in_order() -> None:
+    again = _RECHECK_A.replace("F13. W7 added no refusal hook.", "F14. Second.")
+    records = [
+        _entry("auto_appended", _A, mode="delta"),
+        _entry("auto_appended", _A, mode="delta"),
+    ]
+
+    section = brief_review_section(records, f"T\n\n{_RECHECK_A}\n\n{again}")
+
+    first, second = section.split("**Recheck against")[1:]
+    assert "F13." in first and "F14." not in first
+    assert "F14. Second." in second and "F13." not in second
+
+
+def test_the_mode_must_match_the_header_too() -> None:
+    # a full review's entry is not the recheck at the same base
+    section = brief_review_section([_entry("approved", _A)], f"T\n\n{_RECHECK_A}")
+
+    assert "not found in the description" in section
+
+
+def test_no_appended_addendum_is_no_section() -> None:
+    assert brief_review_section([], "T\n\nBody.") == ""
+    pending = [_entry("pending", _A), _entry("no_change", _B)]
+    assert brief_review_section(pending, f"T\n\n{_RECHECK_A}") == ""
+
+
+def test_each_addendum_s_listing_is_capped_and_counted_never_cut() -> None:
+    # correctness f-001, per addendum: past MAX_LISTED_FACTS the items are
+    # counted on loom's line; the fenced list is never truncated.
+    items = "\n".join(
+        f"- **F{i}. {'<' * 400}** `src/r.py:{i}`"
+        for i in range(1, MAX_LISTED_FACTS + 4)
+    )
+    block = f"**Recheck against `{_A[:12]}` (2026-10-14)** — moved.\n\n**Facts**\n\n"
+    records = [_entry("approved", _B), _entry("auto_appended", _A, mode="delta")]
+
+    section = brief_review_section(records, f"T\n\n{_APPROVED_B}\n\n{block}{items}\n")
+
+    assert "(truncated" not in section
+    assert section.endswith("…and 3 more items.")
+    assert f"\nF{MAX_LISTED_FACTS}. " in section
+    assert f"\nF{MAX_LISTED_FACTS + 1}. " not in section
+    assert "D1. A task-less" in section  # the other addendum is whole
+
+
+def test_a_record_s_base_and_mode_reach_loom_s_line_only_when_well_formed() -> None:
+    entry = _entry("approved", "`Closes #1`", mode="<img src=x>")
+
+    section = brief_review_section([entry], f"T\n\n{_APPROVED_B}")
+
+    assert "Closes #1" not in section and "<img" not in section
+    assert "an unrecorded base" in section and "mode `unknown`" in section
+
+
+def test_the_header_search_is_linear_on_hostile_input() -> None:
+    started = time.perf_counter()
+    brief_review_section(
+        [_entry("approved", _A)], (" " * 100000 + "**Recheck against `") * 20
+    )
+    assert time.perf_counter() - started < 1.0
+
+
+def test_the_pilot_s_largest_approved_addendum_is_listed_whole() -> None:
+    from tests.support.brief_review import approved_addendum
+
+    text, entry, listed = approved_addendum()
+
+    section = brief_review_section([entry], f"Add a flag\n\nBody.\n\n{text}")
+
+    assert len(listed) == 35
+    for line in listed:
+        assert f"\n{line}\n" in section

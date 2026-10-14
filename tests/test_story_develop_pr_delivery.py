@@ -20,7 +20,10 @@ import pytest
 
 from lithos_loom.github_client import GitHubError, GitHubTransportError
 from lithos_loom.plugins.story_develop import pr_delivery, run_outcome
-from lithos_loom.plugins.story_develop.brief_review_auto import pr_section
+from lithos_loom.plugins.story_develop.brief_review_auto import (
+    brief_review_section,
+    pr_section,
+)
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.develop import DevelopResult, ReviewOutcome
 from lithos_loom.plugins.story_develop.pr_delivery import (
@@ -41,6 +44,7 @@ from lithos_loom.plugins.story_develop.publish_text import (
     fence_untrusted,
     publish_title,
 )
+from tests.support.brief_review import approved_addendum
 
 # --- pure builders --------------------------------------------------------------
 
@@ -610,17 +614,39 @@ def test_a_fact_cut_from_an_oversized_what_is_still_listed() -> None:
     assert "F13. W7 added no refusal hook." in body[body.index("## Brief review") :]
 
 
-def test_deliver_lists_the_config_s_brief_facts_in_the_body(
+def test_deliver_lists_an_approved_addendum_that_overflows_what(
     monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
 ) -> None:
-    facts = replace(config, brief_facts=("F13. W7 added no refusal hook.",))
-    state = _install(monkeypatch, facts)
-    wt = _make_wt(facts)
+    # The approved addendum is the tail of `## What`, which the cap cuts:
+    # every one of its ids and headings is listed under `## Brief review`.
+    text, entry, listed = approved_addendum()
+    story = replace(
+        config, description=f"Add a flag\n\nBody.\n\n{text}", brief_records=(entry,)
+    )
+    state = _install(monkeypatch, story)
+    wt = _make_wt(story)
 
-    deliver(facts, _result(facts, wt))
+    deliver(story, _result(story, wt))
 
     body = state["pr_kwargs"]["body"]
-    assert "## Brief review" in body and "F13. W7 added no refusal hook." in body
+    what = body[: body.index("## Brief review")]
+    assert "(truncated" in what and listed[-1] not in what
+    brief = body[body.index("## Brief review") : body.index("## Review\n")]
+    assert "outcome `approved`" in brief
+    for line in listed:
+        assert f"\n{line}\n" in brief
+    assert brief.strip() == brief_review_section((entry,), story.description)
+
+
+def test_deliver_adds_no_section_without_records(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    state = _install(monkeypatch, config)
+    wt = _make_wt(config)
+
+    deliver(config, _result(config, wt))
+
+    assert "## Brief review" not in state["pr_kwargs"]["body"]
 
 
 def test_reply_body_variants() -> None:

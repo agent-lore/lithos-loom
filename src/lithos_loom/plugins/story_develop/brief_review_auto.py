@@ -33,10 +33,20 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
-from .brief_review import KIND_FACT, MODE_DELTA, MODE_FULL, Addendum, BriefItem
+from .brief_review import (
+    KIND_FACT,
+    MODE_DELTA,
+    MODE_FULL,
+    OUTCOME_APPROVED,
+    OUTCOME_AUTO_APPENDED,
+    Addendum,
+    BriefItem,
+    parse_addendum,
+)
 from .publish_text import fence_untrusted, publish_line
 
 __all__ = [
@@ -44,6 +54,7 @@ __all__ = [
     "HEADING_MARKERS",
     "MAX_LISTED_FACTS",
     "AutoFactsVerdict",
+    "brief_review_section",
     "check_auto_facts",
     "describe_verdict",
     "fact_headings",
@@ -102,6 +113,21 @@ _LISTED_LINE_CHARS = 128
 # defang_markup grows text at most 4x (`<` → `&lt;`), so the listing's fence
 # can never cut a line within the two caps above.
 _LISTING_LIMIT = MAX_LISTED_FACTS * (_LISTED_LINE_CHARS + 1) * 5
+# The record outcomes whose text was appended to the description: the ones
+# the PR body's ``## Brief review`` lists (pending, failed and no-change
+# entries appended nothing).
+_APPENDED = (OUTCOME_APPROVED, OUTCOME_AUTO_APPENDED)
+# How ``render_addendum``'s header names each mode — what finds an entry's
+# block in the description, with the base's first 12 hex digits.
+_MODE_TITLE: dict[str, str] = {MODE_FULL: "Brief review", MODE_DELTA: "Recheck"}
+# A rendered addendum's header line. Linear: a fixed prefix, then a bounded
+# hex run. An operator-edited block keeps it unless they edited it away.
+_ADDENDUM_HEADER_RE = re.compile(
+    r"^[ \t]*(?:\*\*)?(?P<title>brief review|recheck) against `(?P<base>[0-9a-f]{12})`",
+    re.IGNORECASE | re.MULTILINE,
+)
+_BASE_SHA_RE = re.compile(r"[0-9a-f]{12,64}")
+_AUTO_NOTE = "without a gate (facts only, structural check passed)"
 # A citation longer than this is not a path anyone writes; refusing it before
 # the match keeps _PATH_RE's backtracking bounded.
 _MAX_PATH_CHARS = 512
@@ -281,10 +307,11 @@ def check_auto_facts(addendum: Addendum) -> AutoFactsVerdict:
 def fact_headings(addendum: Addendum) -> tuple[str, ...]:
     """Each fact as ``"F13. W7 added no refusal hook."`` — its id and heading
     (the first line, for a fact whose heading cannot be read)."""
-    return tuple(
-        f"{item.id}. {item_heading(item) or item.text.splitlines()[0]}"
-        for item in addendum.facts
-    )
+    return tuple(_listed(item) for item in addendum.facts)
+
+
+def _listed(item: BriefItem) -> str:
+    return f"{item.id}. {item_heading(item) or item.text.splitlines()[0]}"
 
 
 def pr_section(headings: tuple[str, ...]) -> str:
@@ -300,23 +327,125 @@ def pr_section(headings: tuple[str, ...]) -> str:
     silently."""
     if not headings:
         return ""
+    parts = [
+        "## Brief review",
+        "",
+        f"These facts were appended to the story's description at dispatch "
+        f"{_AUTO_NOTE}. Their full text ends *What*, unless that section was "
+        "truncated, and is always on the Lithos story.",
+        *_listing(headings, noun="facts"),
+    ]
+    return "\n".join(parts)
+
+
+def brief_review_section(records: Sequence[Mapping[str, Any]], description: str) -> str:
+    """The PR body's ``## Brief review`` section for every addendum appended
+    to the story — each *records* entry (``metadata.brief_review``, oldest
+    first) that is ``approved`` or ``auto_appended`` — or ``""`` for none.
+    One renderer for both deliveries: a run (and a resumed one) and
+    ``lithos-loom develop deliver``.
+
+    A record keeps item digests, not text, so each entry's items are read
+    from its block in *description* — the text ``## What`` renders: the
+    block opens at the header ``render_addendum`` wrote (the mode's title and
+    ``base_sha[:12]``; entries sharing one pair with headers in order) and
+    runs to the next such header or the end. Every item, of every kind, is
+    listed as ``<id>. <heading>``. An entry whose block is not there (its
+    header edited away, an emptied approval, a later edit) is named on loom's
+    line as not found — never filled in from the record's draft.
+
+    Loom's own lines (mode, base, outcome) are never cut; each listing is
+    capped as :func:`pr_section`'s is, its overflow counted, not dropped."""
+    entries = [e for e in records if e.get("outcome") in _APPENDED]
+    if not entries:
+        return ""
+    blocks = _addendum_blocks(description)
+    parts = [
+        "## Brief review",
+        "",
+        "The brief review appended these addenda to the story's description, "
+        "oldest first; each is listed by item id and heading. Their full text "
+        "ends *What*, unless that section was truncated, and is always on the "
+        "Lithos story.",
+    ]
+    for entry in entries:
+        line, key = _entry_line(entry)
+        found = blocks.get(key) if key else None
+        block = found.pop(0) if found else None
+        if block is None:
+            parts += [
+                "",
+                f"{line}. Its text was not found in the description (its "
+                "header was edited, the approval appended nothing, or the "
+                "description changed since), so its items are not listed.",
+            ]
+            continue
+        headings = tuple(_listed(item) for item in parse_addendum(block).items)
+        if not headings:
+            parts += ["", f"{line}. No item could be read from its text."]
+            continue
+        parts += ["", f"{line}.", *_listing(headings, noun="items")]
+    return "\n".join(parts)
+
+
+def _addendum_blocks(description: str) -> dict[tuple[str, str], list[str]]:
+    """Each rendered addendum in *description*, keyed by its header's
+    ``(title, base)`` in order of appearance: from its header to the next
+    one, or the end."""
+    headers = list(_ADDENDUM_HEADER_RE.finditer(description))
+    blocks: dict[tuple[str, str], list[str]] = {}
+    if not headers:
+        return blocks
+    ends = [h.start() for h in headers[1:]] + [len(description)]
+    for header, end in zip(headers, ends, strict=True):
+        key = (header.group("title").lower(), header.group("base").lower())
+        blocks.setdefault(key, []).append(description[header.start() : end])
+    return blocks
+
+
+def _entry_line(entry: Mapping[str, Any]) -> tuple[str, tuple[str, str] | None]:
+    """Loom's line for *entry* — its mode, base and outcome, only as far as
+    they are well formed — and the ``(title, base)`` its block's header
+    carries (``None``: no header could be its)."""
+    mode = entry.get("mode")
+    title = _MODE_TITLE.get(mode) if isinstance(mode, str) else None
+    raw_base = entry.get("base_sha")
+    base = (
+        raw_base[:12].lower()
+        if isinstance(raw_base, str) and _BASE_SHA_RE.fullmatch(raw_base.lower())
+        else None
+    )
+    line = (
+        f"**{title or 'Addendum'} against "
+        f"{f'`{base}`' if base else 'an unrecorded base'}** "
+        f"(mode `{mode if title else 'unknown'}`, outcome `{entry['outcome']}`): "
+        + _appended_how(entry)
+    )
+    return line, ((title.lower(), base) if title and base else None)
+
+
+def _appended_how(entry: Mapping[str, Any]) -> str:
+    """How *entry*'s addendum reached the description, in loom's words."""
+    if entry.get("outcome") == OUTCOME_APPROVED:
+        return "approved by the operator at its brief-review gate"
+    check = entry.get("check")
+    if isinstance(check, Mapping) and check.get("passed") is True:
+        return f"appended at dispatch {_AUTO_NOTE}"
+    return "appended at dispatch without a gate, as a facts-only recheck"
+
+
+def _listing(headings: tuple[str, ...], *, noun: str) -> list[str]:
+    """*headings* fenced, one capped line each, under a fence limit those caps
+    cannot reach — so the list is never cut short — with any past
+    :data:`MAX_LISTED_FACTS` counted on loom's own line after it."""
     listed = [
         publish_line(heading, limit=_LISTED_LINE_CHARS)
         for heading in headings[:MAX_LISTED_FACTS]
     ]
-    parts = [
-        "## Brief review",
-        "",
-        "These facts were appended to the story's description at dispatch "
-        "without a gate (facts only, structural check passed). Their full "
-        "text ends *What*, unless that section was truncated, and is always "
-        "on the Lithos story.",
-        "",
-        fence_untrusted("\n".join(listed), limit=_LISTING_LIMIT),
-    ]
+    parts = ["", fence_untrusted("\n".join(listed), limit=_LISTING_LIMIT)]
     if len(headings) > len(listed):
-        parts += ["", f"…and {len(headings) - len(listed)} more facts."]
-    return "\n".join(parts)
+        parts += ["", f"…and {len(headings) - len(listed)} more {noun}."]
+    return parts
 
 
 def describe_verdict(

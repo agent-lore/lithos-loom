@@ -2393,6 +2393,49 @@ def test_the_pr_body_carries_the_coders_final_handoff_summary(
     assert "- none" not in body  # only the Summary section
 
 
+def test_a_hand_delivery_lists_every_appended_addendum(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    """The story's approved addendum overflows `## What`: the hand-delivered
+    body lists it under `## Brief review`, rendered by the run's own renderer
+    from the live story."""
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+    from tests.support.brief_review import approved_addendum
+
+    text, entry, listed = approved_addendum()
+    seeded = asyncio.run(lithos.task_get(task_id=_STORY))
+    assert seeded is not None
+    description = f"{seeded.description}\n\n{text}"
+    lithos.add_task(
+        make_task(
+            _STORY,
+            title=seeded.title,
+            description=description,
+            metadata={**seeded.metadata, "brief_review": [entry]},
+        )
+    )
+
+    assert _invoke(_RUN).exit_code == 0
+    body = gh["created"][0]["body"]
+    what = body[: body.index("## Brief review")]
+    assert "(truncated" in what and listed[-1] not in what
+    brief = body[body.index("## Brief review") : body.index("## Review\n")]
+    assert brief.strip() == brief_review_section(
+        [entry], f"{seeded.title}\n\n{description}"
+    )
+    for line in listed:
+        assert f"\n{line}\n" in brief
+
+
+def test_a_hand_delivery_without_an_addendum_has_no_brief_review(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    assert _invoke(_RUN).exit_code == 0
+    assert "## Brief review" not in gh["created"][0]["body"]
+
+
 def test_unknown_rounds_and_cost_are_not_asserted_as_zero(
     host, lithos: FakeLithosClient, repo: Path, gh: dict
 ) -> None:
