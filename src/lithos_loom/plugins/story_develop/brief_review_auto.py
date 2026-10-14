@@ -56,6 +56,7 @@ __all__ = [
     "CITATION_EXTENSIONS",
     "HEADING_MARKERS",
     "MAX_LISTED_FACTS",
+    "SECTION_BUDGET",
     "AutoFactsVerdict",
     "brief_review_section",
     "check_auto_facts",
@@ -123,23 +124,31 @@ _APPENDED = (OUTCOME_APPROVED, OUTCOME_AUTO_APPENDED)
 # How ``render_addendum``'s header names each mode — what finds an entry's
 # block in the description, with the base's first 12 hex digits.
 _MODE_TITLE: dict[str, str] = {MODE_FULL: "Brief review", MODE_DELTA: "Recheck"}
-# A rendered addendum's header: at column 0, opening a paragraph, outside
-# any fenced block (an item may quote one in an example). Linear: a fixed
-# prefix, then a bounded hex run. An operator-edited block keeps it unless
-# they edited it away.
+# A rendered addendum's header: at column 0, opening a paragraph. Linear: a
+# fixed prefix, then a bounded hex run. An operator-edited block keeps it
+# unless they edited it away. Such a line inside an addendum (an item quoting
+# one) or before it (anything the description says) is only a CANDIDATE
+# boundary: the record check decides which text is the addendum.
 _ADDENDUM_HEADER_RE = re.compile(
     r"(?:\*\*)?(?P<title>brief review|recheck) against `(?P<base>[0-9a-f]{12})`",
     re.IGNORECASE,
 )
-# A fence line, behind any indent or blockquote: the run that opens or
-# closes it (a close is the same character, at least as long).
-_FENCE_LINE_RE = re.compile(r"[ \t>]*(?P<run>`{3,}|~{3,})")
-# The whole ``## Brief review`` section's size: one worst-case listing
-# always fits, and with ``## What``, ``## Acceptance criteria`` and a
-# provenance quote at MAX_SECTION_CHARS each the body stays well under
-# GitHub's 65536-character limit. Older addenda past it are counted, not
-# listed — a body over the limit would fail every delivery of the story.
-_SECTION_BUDGET = _LISTING_LIMIT + 2_000
+# How many candidate blocks under one header are tried (newest first), and
+# how many later candidate boundaries one block may run past — bounds on the
+# parses one entry costs, far above what an appended addendum needs.
+_MAX_CANDIDATES = 8
+_MAX_EXTENSIONS = 8
+# The whole ``## Brief review`` section's size, loom's own lines included:
+# one worst-case listing always fits, and with ``## What``, ``## Acceptance
+# criteria`` and a provenance quote at MAX_SECTION_CHARS each the body stays
+# well under GitHub's 65536-character limit — a body over it would fail every
+# delivery of the story. Every addendum's note is kept; past the budget the
+# older addenda's items are counted on their note, not listed.
+SECTION_BUDGET = _LISTING_LIMIT + 2_000
+_BUDGET_REASON = (
+    ", not listed here to keep this PR body within GitHub's size limit "
+    "(see the Lithos story)"
+)
 _BASE_SHA_RE = re.compile(r"[0-9a-f]{12,64}")
 _AUTO_NOTE = "without a gate (facts only, structural check passed)"
 # A citation longer than this is not a path anyone writes; refusing it before
@@ -360,34 +369,23 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
     ``lithos-loom develop deliver``.
 
     A record keeps item digests, not text, so each entry's items are read
-    from its block in *description* — the text ``## What`` renders: the
-    block opens at the header ``render_addendum`` wrote (the mode's title and
-    ``base_sha[:12]``; entries sharing one pair with headers in order) and
-    runs to the next such header or the end, and its items must be the ones
+    from its block in *description* — the text ``## What`` renders — found
+    by :func:`_find_blocks`: the text under the header ``render_addendum``
+    wrote (the mode's title and ``base_sha[:12]``) whose items are the ones
     the record vouches for. Every item, of every kind, is listed as
-    ``<id>. <heading>``. An entry whose block is not there (its header edited
-    away, an emptied approval, a later edit) is named on loom's line as not
-    found — never filled in from the record's draft.
+    ``<id>. <heading>``. An entry with no such text (its header edited away,
+    an emptied approval, a later edit) is named on loom's line as not found —
+    never filled in from the record's draft.
 
-    Loom's own lines (mode, base, outcome) are never cut; each listing is
-    capped as :func:`pr_section`'s is, its overflow counted, not dropped. The
-    section keeps within :data:`_SECTION_BUDGET`: the newest addenda that
-    fit are listed, and the earlier ones counted on loom's line."""
+    Every entry keeps its note (mode, base, outcome). Each listing is capped
+    as :func:`pr_section`'s is, its overflow counted on loom's line, never
+    dropped; and the section keeps within :data:`SECTION_BUDGET` — the
+    newest addenda's items are listed first, and an older addendum's items
+    that do not fit are counted on its own line."""
     entries = [e for e in records if e.get("outcome") in _APPENDED]
     if not entries:
         return ""
-    blocks = _addendum_blocks(description)
-    # Paired in record order (blocks in order of appearance), then the
-    # newest that fit the budget are listed, the rest counted.
-    chunks = [_entry_chunk(entry, blocks) for entry in entries]
-    listed: list[list[str]] = []
-    spent = 0
-    for chunk in reversed(chunks):
-        size = sum(len(line) + 1 for line in chunk)
-        if listed and spent + size > _SECTION_BUDGET:
-            break
-        listed.append(chunk)
-        spent += size
+    found = _find_blocks(entries, description)
     parts = [
         "## Brief review",
         "",
@@ -396,47 +394,122 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
         "ends *What*, unless that section was truncated, and is always on the "
         "Lithos story.",
     ]
-    if len(chunks) > len(listed):
-        earlier = len(chunks) - len(listed)
-        parts += [
-            "",
-            f"…and {earlier} earlier {'addendum' if earlier == 1 else 'addenda'} "
-            "not listed here, to keep this PR body within GitHub's size limit; "
-            "see the Lithos story.",
-        ]
-    for chunk in reversed(listed):
-        parts += chunk
+    notes: list[str] = []
+    headings: list[tuple[str, ...]] = []
+    for entry, addendum in zip(entries, found, strict=True):
+        line, _ = _entry_line(entry)
+        listed = tuple(_listed(item) for item in addendum.items) if addendum else ()
+        headings.append(listed)
+        if addendum is None:
+            notes.append(
+                f"{line}. Its text was not found in the description as its "
+                "record describes it (its header was edited, the approval "
+                "appended nothing, or the description changed since), so its "
+                "items are not listed."
+            )
+        elif not listed:
+            empty = " (a *No change* answer)" if addendum.no_change is not None else ""
+            notes.append(f"{line}. Its text holds no items{empty}.")
+        else:
+            notes.append(f"{line}.")
+    # Every note is kept, and every listing's overflow line is reserved; the
+    # rest of the budget lists items, newest addenda first.
+    shown = [0] * len(entries)
+    floors = [_size(_budgeted(listed, 0)) for listed in headings]
+    remaining = (
+        SECTION_BUDGET - _size([*parts, *(f"\n{n}" for n in notes)]) - sum(floors)
+    )
+    for index in reversed(range(len(entries))):
+        shown[index] = _fit(headings[index], floors[index], remaining)
+        remaining -= _size(_budgeted(headings[index], shown[index])) - floors[index]
+    for note, listed, count in zip(notes, headings, shown, strict=True):
+        parts += ["", note, *_budgeted(listed, count)]
     return "\n".join(parts)
 
 
-def _entry_chunk(
-    entry: Mapping[str, Any], blocks: dict[tuple[str, str], list[str]]
-) -> list[str]:
-    """*entry*'s lines in the section: loom's line, then its items fenced.
-    Its block is the first unpaired one under its header whose items are the
-    ones the record vouches for (:func:`_matches_record`) — a block that is
-    not (a later edit, or a header someone else wrote into the description)
-    is skipped, so it can neither stand in for the addendum nor hide it."""
-    line, key = _entry_line(entry)
-    candidates = blocks.get(key, []) if key else []
-    for index, block in enumerate(candidates):
-        items = parse_addendum(block).items
-        if items and _matches_record(entry, items):
-            del candidates[index]
-            headings = tuple(_listed(item) for item in items)
-            return ["", f"{line}.", *_listing(headings, noun="items")]
-    return [
-        "",
-        f"{line}. Its text was not found in the description as its record "
-        "describes it (its header was edited, the approval appended nothing, "
-        "or the description changed since), so its items are not listed.",
-    ]
+def _budgeted(listed: tuple[str, ...], count: int) -> list[str]:
+    """*listed*'s listing with *count* shown — the rest counted, saying the
+    budget left them out when the cap did not."""
+    capped = count < min(len(listed), MAX_LISTED_FACTS)
+    reason = _BUDGET_REASON if capped else ""
+    return _listing(listed, noun="items", shown=count, reason=reason)
+
+
+def _fit(listed: tuple[str, ...], floor: int, remaining: int) -> int:
+    """How many of *listed* fit in *remaining* beyond its reserved *floor*:
+    the whole listing, else the most lines that fit — below the cap the size
+    grows with the count (the same overflow line), so it is bisected."""
+    count = min(len(listed), MAX_LISTED_FACTS)
+    if not count or _size(_budgeted(listed, count)) - floor <= remaining:
+        return count
+    low, high = 0, count - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _size(_budgeted(listed, middle)) - floor <= remaining:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def _size(lines: Sequence[str]) -> int:
+    return sum(len(line) + 1 for line in lines)
+
+
+def _find_blocks(
+    entries: Sequence[Mapping[str, Any]], description: str
+) -> list[Addendum | None]:
+    """Each entry's addendum in *description*, or ``None`` when no text there
+    is the one its record vouches for (:func:`_matches_record`).
+
+    Candidate blocks open at a header line under the entry's ``(title,
+    base)``. The appenders only append, so the newest entry pairs with the
+    LAST matching candidate, and the next-newest with the one before it —
+    pairing in order of appearance, with text earlier in the description
+    (anything the story said before its addenda) tried last. A candidate runs
+    to the next header line; when that text is not the recorded addendum, it
+    is extended past the next one, and so on — so a header an item quotes, in
+    a fence or not, ends nothing. A text no record vouches for can stand in
+    for no addendum."""
+    starts: list[tuple[int, tuple[str, str]]] = []
+    after_blank = True
+    offset = 0
+    for line in description.splitlines(keepends=True):
+        if after_blank and (header := _ADDENDUM_HEADER_RE.match(line)):
+            starts.append(
+                (offset, (header.group("title").lower(), header.group("base").lower()))
+            )
+        after_blank = not line.strip()
+        offset += len(line)
+    bounds = [at for at, _ in starts] + [len(description)]
+    taken: set[int] = set()
+    found: list[Addendum | None] = [None] * len(entries)
+    for index in reversed(range(len(entries))):
+        _, key = _entry_line(entries[index])
+        candidates = [
+            i for i, (_, k) in enumerate(starts) if k == key and i not in taken
+        ]
+        for i in reversed(candidates[-_MAX_CANDIDATES:]):
+            ends = bounds[i + 1 : i + 1 + _MAX_EXTENSIONS]
+            if ends[-1] != len(description):
+                ends.append(len(description))
+            for end in ends:
+                addendum = parse_addendum(description[starts[i][0] : end])
+                if _matches_record(entries[index], addendum.items):
+                    found[index] = addendum
+                    taken.add(i)
+                    break
+            if found[index] is not None:
+                break
+    return found
 
 
 def _matches_record(entry: Mapping[str, Any], items: tuple[BriefItem, ...]) -> bool:
     """Whether *items* are the addendum *entry* records: an auto-appended
     pass's ids and digests exactly; an approval's kept ids (every id its
-    ``outcomes`` does not mark cut), with each ``unchanged`` one's digest."""
+    ``outcomes`` does not mark cut — none, for an approved *No change*), with
+    each ``unchanged`` one's digest. An ``edited`` or ``added`` item's text
+    has no recorded digest to check."""
     ids = [item.id for item in items]
     if len(set(ids)) != len(ids):
         return False
@@ -446,8 +519,10 @@ def _matches_record(entry: Mapping[str, Any], items: tuple[BriefItem, ...]) -> b
         if isinstance(item, Mapping) and isinstance(item.get("id"), str)
     }
     if entry.get("outcome") == OUTCOME_AUTO_APPENDED:
-        return set(ids) == set(recorded) and all(
-            item_digest(item.text) == recorded[item.id] for item in items
+        return (
+            bool(ids)
+            and set(ids) == set(recorded)
+            and all(item_digest(item.text) == recorded[item.id] for item in items)
         )
     outcomes = entry.get("outcomes")
     if not isinstance(outcomes, Mapping):
@@ -458,34 +533,6 @@ def _matches_record(entry: Mapping[str, Any], items: tuple[BriefItem, ...]) -> b
         for item in items
         if outcomes.get(item.id) == ITEM_UNCHANGED
     )
-
-
-def _addendum_blocks(description: str) -> dict[tuple[str, str], list[str]]:
-    """Each rendered addendum in *description*, keyed by its header's
-    ``(title, base)`` in order of appearance: from its header to the next
-    one, or the end. A header counts only at column 0, opening a paragraph,
-    outside a fenced block — so an item's quoted example is not a boundary."""
-    starts: list[tuple[int, tuple[str, str]]] = []
-    fence: str | None = None
-    after_blank = True
-    offset = 0
-    for line in description.splitlines(keepends=True):
-        run = _FENCE_LINE_RE.match(line)
-        if fence is not None:
-            if run is not None and run.group("run").startswith(fence):
-                fence = None
-        elif run is not None:
-            fence = run.group("run")
-        elif after_blank and (header := _ADDENDUM_HEADER_RE.match(line)):
-            key = (header.group("title").lower(), header.group("base").lower())
-            starts.append((offset, key))
-        after_blank = not line.strip()
-        offset += len(line)
-    blocks: dict[tuple[str, str], list[str]] = {}
-    ends = [at for at, _ in starts[1:]] + [len(description)]
-    for (at, key), end in zip(starts, ends, strict=False):
-        blocks.setdefault(key, []).append(description[at:end])
-    return blocks
 
 
 def _entry_line(entry: Mapping[str, Any]) -> tuple[str, tuple[str, str] | None]:
@@ -519,17 +566,26 @@ def _appended_how(entry: Mapping[str, Any]) -> str:
     return "appended at dispatch without a gate, as a facts-only recheck"
 
 
-def _listing(headings: tuple[str, ...], *, noun: str) -> list[str]:
-    """*headings* fenced, one capped line each, under a fence limit those caps
-    cannot reach — so the list is never cut short — with any past
-    :data:`MAX_LISTED_FACTS` counted on loom's own line after it."""
+def _listing(
+    headings: tuple[str, ...],
+    *,
+    noun: str,
+    shown: int = MAX_LISTED_FACTS,
+    reason: str = "",
+) -> list[str]:
+    """The first *shown* (at most :data:`MAX_LISTED_FACTS`) *headings*
+    fenced, one capped line each, under a fence limit those caps cannot
+    reach — so the list is never cut short — with the rest counted on loom's
+    own line after it (*reason* says why, when it is not the cap)."""
     listed = [
         publish_line(heading, limit=_LISTED_LINE_CHARS)
-        for heading in headings[:MAX_LISTED_FACTS]
+        for heading in headings[: min(shown, MAX_LISTED_FACTS)]
     ]
-    parts = ["", fence_untrusted("\n".join(listed), limit=_LISTING_LIMIT)]
+    parts = (
+        ["", fence_untrusted("\n".join(listed), limit=_LISTING_LIMIT)] if listed else []
+    )
     if len(headings) > len(listed):
-        parts += ["", f"…and {len(headings) - len(listed)} more {noun}."]
+        parts += ["", f"…and {len(headings) - len(listed)} more {noun}{reason}."]
     return parts
 
 
