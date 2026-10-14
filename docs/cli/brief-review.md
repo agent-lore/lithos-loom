@@ -110,7 +110,7 @@ check only if its bold heading has no prescriptive word (`must, should, shall,
 needs to, has to, goes in, go in, put, use, add, create, move, rename, split,
 extract, make`) and no look-alike letters, it cites a backticked repository path
 (`src/pkg/file.py:123`, `docs/x.md`), it carries no `Basis:` or `Proposed:`
-line, and its body holds no nested bold-id item, heading or section name. An
+line, and its body holds no other item's id, heading, table, HTML or section name. An
 addendum of more than 40 facts is held as well.
 
 | The draft | stderr |

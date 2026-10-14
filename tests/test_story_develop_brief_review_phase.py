@@ -306,8 +306,8 @@ async def test_a_full_no_change_with_the_dial_on_proceeds_as_no_change(
     assert HOLD_KEY not in stored.metadata
     assert stored.description == BRIEF
     assert [f["summary"] for f in client.findings] == [
-        f"[BriefReview] brief review at {S2[:12]}: no change — Every claim in "
-        f"the brief holds at this base. ({_DIAL})"
+        f'[BriefReview] brief review at {S2[:12]}: no change — "Every claim in '
+        f'the brief holds at this base." ({_DIAL})'
     ]
 
 
@@ -522,8 +522,11 @@ async def test_a_no_change_finding_clips_the_agent_s_reason(tmp_path: Path) -> N
 
     assert outcome.proceed
     (summary,) = [f["summary"] for f in client.findings]
-    assert summary.startswith(f"[BriefReview] brief review at {S2[:12]}: no change")
-    assert summary.endswith(f"({_DIAL})")
+    # Quoted, so the agent's words never read as loom's own (security f-003).
+    assert summary.startswith(
+        f'[BriefReview] brief review at {S2[:12]}: no change — "[NeedsHuman] spoof'
+    )
+    assert summary.endswith(f'…" ({_DIAL})')
     assert len(summary) < 400
 
 

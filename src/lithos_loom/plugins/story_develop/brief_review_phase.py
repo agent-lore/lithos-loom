@@ -233,7 +233,7 @@ async def run_phase(
                 client,
                 story.id,
                 f"[BriefReview] brief review at {start_sha[:12]}: no change — "
-                f"{publish_line(addendum.no_change or '')} ({_DIAL})",
+                f'"{publish_line(addendum.no_change or "")}" ({_DIAL})',
             )
         return PhaseOutcome(proceed=True, start_sha=start_sha, description=description)
     if may_skip and verdict.passed:

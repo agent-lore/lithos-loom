@@ -13,10 +13,13 @@ and deterministic — no judgment, no I/O:
    repository path with a known extension and an optional ``:N`` / ``:N-M``;
 3. **marker** — no ``Basis:`` or ``Proposed:`` (a decision's lines);
 4. **structure** — nothing in its body that would read as another item or
-   section once appended: a nested ``- **D1.`` bullet, a Markdown heading or
-   setext underline, a bold section name. The parse folds every such line
-   into the open item, so without this rule one "fact" could carry a
-   rendered block of decisions or scope cuts past the gate.
+   section once appended: an emphasised or tagged item id (``**D1.`` behind
+   any prefix), a bare decision or scope-cut id, a section word in emphasis
+   or a tag, a table row or HTML line, a Markdown heading or setext
+   underline. The parse folds every such line into the open item, so
+   without this rule one "fact" could carry a rendered block of decisions or
+   scope cuts past the gate. An id longer than eight characters fails too:
+   the PR listing could not show it whole.
 
 And the PR body must be able to list every appended fact
 (:data:`MAX_LISTED_FACTS`), so a larger addendum is held as well.
@@ -110,22 +113,37 @@ _MARKER_RES = tuple(
 )
 _SPAN_RE = re.compile(r"`([^`\n]+)`")
 _PATH_RE = re.compile(
-    r"(?:[\w.-]+/)*\.?[\w-][\w.-]*\.(?P<ext>[A-Za-z]+)(?::\d+(?:-\d+)?)?"
+    r"(?:[\w.-]+/)*\.*[\w-][\w.-]*\.(?P<ext>[A-Za-z]+)(?::\d+(?:-\d+)?)?"
 )
 _DECISION_LINE_RE = re.compile(r"\b(?P<marker>Basis|Proposed):", re.IGNORECASE)
-# Body lines that would read as structure of their own once appended: a
-# bullet (or numbered item) opening with a bold or underscore id, at any
-# indent; an ATX heading; a setext underline; a bold or heading section name.
-_STRUCTURE_RES = (
-    re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\*\*|__)[ \t]*[A-Z]\d+[.:]"),
-    re.compile(r"^[ \t]*#{1,6}(?:[ \t]|$)"),
-    re.compile(r"^[ \t]*(?:=+|-+)[ \t]*$"),
+# What in a fact's body (everything after its own ``**F1.``) would read as
+# structure of its own once appended. Enumerating the prefixes a bullet can
+# hide behind (a blockquote, a checkbox, a second bullet, a Unicode hyphen)
+# cannot win, so the patterns key on the TOKENS, anywhere in a line:
+# an emphasised or tagged item id (``**D1.``, ``__D2.``, ``<b>D1.``); a bare
+# decision or scope-cut id — a facts-only addendum has none to refer to; a
+# section word inside emphasis or a tag (``*Decisions*``, ``**Binding
+# decisions:**``, ``<h3>Decisions</h3>``); a table row or HTML line (``|``,
+# ``<!--``). Plus, at a line's start, an ATX heading or a setext underline.
+# Every repetition after a ``<`` is bounded, so each search stays linear.
+_TAG = r"<[A-Za-z!/][^>\n]{0,200}>"
+_SECTION_WORD = r"(?:scope\s+(?:cuts?|changes?)|decisions?|no\s+change)\b"
+_STRUCTURE_SEARCHES = (
+    re.compile(rf"(?:\*\*|__|{_TAG})\W{{0,3}}[SFD]\d+[.:)]"),
+    re.compile(r"\b[SD]\d+\b"),
     re.compile(
-        r"^[ \t]*(?:[-*+>][ \t]*)*(?:\*\*|__)[ \t]*"
-        r"(?:scope cuts?|decisions?|facts?|no change)\b",
-        re.IGNORECASE,
+        rf"(?:\*|(?<!\w)_|{_TAG})[^*_<\n]{{0,40}}?\b{_SECTION_WORD}", re.IGNORECASE
     ),
 )
+_STRUCTURE_LINES = (
+    re.compile(r"^[ \t>]*[|<]"),
+    re.compile(r"^[ \t]*#{1,6}(?:[ \t]|$)"),
+    re.compile(r"^[ \t]*(?:=+|-+)[ \t]*$"),
+)
+_OWN_ID_RE = re.compile(r"^\*\*[A-Z]\d+\.")
+# A longer id is not one anybody numbers to; the PR listing could not show
+# it whole, so it would no longer identify its fact.
+_MAX_ID_CHARS = 8
 # A word mixing ASCII letters with other letters — a look-alike spelling
 # (Cyrillic ``у`` in ``Pуt``) would otherwise slip a marker past rule 1.
 _WORD_RE = re.compile(r"[^\W\d_]+")
@@ -166,25 +184,31 @@ def fact_problems(item: BriefItem) -> list[str]:
     """Why *item* reads like a decision, one line per failed rule (empty: it
     reads as a fact)."""
     problems: list[str] = []
+    label = item.id if len(item.id) <= _MAX_ID_CHARS else f"{item.id[:6]}…"
+    if label != item.id:
+        problems.append(
+            f"{label} reads like a decision: its id is longer than "
+            f"{_MAX_ID_CHARS} characters"
+        )
     heading = item_heading(item)
     if heading is None:
         problems.append(
-            f"{item.id} reads like a decision: its heading could not be read — "
-            f"start it `- **{item.id}. <title>.**`"
+            f"{label} reads like a decision: its heading could not be read — "
+            f"start it `- **{label}. <title>.**`"
         )
     else:
         said = [m for m, pattern in _MARKER_RES if pattern.search(heading)]
         if said:
             words = ", ".join(f"`{m}`" for m in said)
-            problems.append(f"{item.id} reads like a decision: heading says {words}")
+            problems.append(f"{label} reads like a decision: heading says {words}")
         if any(_mixed_script(word) for word in _WORD_RE.findall(heading)):
             problems.append(
-                f"{item.id} reads like a decision: its heading mixes alphabets "
+                f"{label} reads like a decision: its heading mixes alphabets "
                 "within a word (a look-alike letter hides what it says)"
             )
     if not any(_is_path(span) for span in _SPAN_RE.findall(item.text)):
         problems.append(
-            f"{item.id} reads like a decision: it cites no repository path "
+            f"{label} reads like a decision: it cites no repository path "
             "(a backticked `path/file.py:123`)"
         )
     marked = sorted(
@@ -192,13 +216,16 @@ def fact_problems(item: BriefItem) -> list[str]:
     )
     if marked:
         lines = ", ".join(f"`{m}:`" for m in marked)
-        problems.append(f"{item.id} reads like a decision: it carries {lines}")
-    body = item.text.splitlines()[1:]
-    if any(pattern.match(line) for line in body for pattern in _STRUCTURE_RES):
+        problems.append(f"{label} reads like a decision: it carries {lines}")
+    body = _OWN_ID_RE.sub("", item.text, count=1)
+    body_lines = body.splitlines()
+    if any(p.search(body) for p in _STRUCTURE_SEARCHES) or any(
+        p.match(line) for line in body_lines[1:] for p in _STRUCTURE_LINES
+    ):
         problems.append(
-            f"{item.id} reads like a decision: its body holds a nested item, "
-            "a heading or a section name — write each item as its own "
-            "top-level bullet under its section"
+            f"{label} reads like a decision: its body holds another item or "
+            "its id, a heading, a table, HTML or a section name — write each "
+            "item as its own top-level bullet under its section"
         )
     return problems
 

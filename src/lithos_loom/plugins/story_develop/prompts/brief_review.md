@@ -59,9 +59,10 @@ treated as a decision, and the story is held for the operator:
   extract or make;
 - it never carries a `Basis:` or `Proposed:` line. Those belong to
   decisions;
-- its nested lines are plain detail. A nested bold-id bullet
-  (`- **D1. …**`), a heading or a section name inside a fact is held. Write
-  every item as its own top-level bullet under its own section.
+- its nested lines are plain detail. Inside a fact, a bold or tagged item
+  id (`**D1.`), a bare decision or scope-cut id (`D11`, `S3`), a heading, a
+  table, HTML or an emphasised section name is held. Write every item as its
+  own top-level bullet under its own section.
 
 ### Decisions: `D#`
 
