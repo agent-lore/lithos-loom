@@ -368,10 +368,10 @@
         "functions": 322,
         "largest_module": "lithos_loom.cli.develop",
         "largest_module_lines": 2047,
-        "lines": 14617,
+        "lines": 14622,
         "modules": 28,
         "public_symbols": 164,
-        "sloc": 12121
+        "sloc": 12124
       },
       "Config": {
         "classes": 11,
@@ -564,13 +564,13 @@
       "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 83264,
+    "total_lines": 83269,
     "total_modules": 213,
-    "total_sloc": 67339
+    "total_sloc": 67342
   },
   "tests": {
     "ratio": 1.52,
-    "src_lines": 83264,
-    "test_lines": 126516
+    "src_lines": 83269,
+    "test_lines": 126535
   }
 }
