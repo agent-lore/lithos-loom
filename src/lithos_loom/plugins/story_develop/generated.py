@@ -296,9 +296,11 @@ def post_commit_regenerate(
     *,
     run_container: RunContainer = test_gate.run_gate_container,
 ) -> Callable[[Path, int], PostCommitOutcome] | None:
-    """The round's post-commit pass for a loop that composes trees (the S5
-    resolve mode): after the coder's commit (and the auto-format pass), run
-    the generator on HEAD and commit what it moved as its own commit —
+    """The round's post-commit pass for every converge loop (born in the S5
+    resolve mode, which composes trees; set once in converge's shared loop
+    tail since #456, when a ``--from-github`` round shipped generated drift
+    the gate could not see): after the coder's commit (and the auto-format
+    pass), run the generator on HEAD and commit what it moved as its own commit —
     ``story-develop r<n>: regenerate`` — so the gate and the panel judge a
     tree whose generated output is the generator's, whatever the coder ran.
     ``None`` when the project declares no policy.

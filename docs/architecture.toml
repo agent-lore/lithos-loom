@@ -90,7 +90,12 @@ Foundation  = ["Bus", "Config", "Errors", "LithosClient", "GitHub", "Tasks", "No
 cross_component_edges  = 72   # 71->72: M1 (664d84c4) — `gates --shadow` (Cli) reports its agreement rate with the eval harness's Wilson interval, imported from evals.review.stats (Evals) rather than copied; moving it to a new Foundation module would cost two edges, not one; same tier (Core -> Core), direction: sideways; 65->68: b91177d2 notifications.py (Notifications) imported by Subscriptions + Children, and importing GitHub; 68->70: #407 slice 2a — the daemon entry (main) imports Runners for the boot-time orphan-container reap (the one place that runs before any child), and the develop CLI imports Runners for the SIGTERM-as-SystemExit install shared with the plugin entry (both run subprocess lifecycles the daemon terminates); direction: down; 70->71: #431 — the watcher's dispatchers publish a crashed child's last output line into a story's finding, so Subscriptions imports publish_text (Plugins) for the ONE neutraliser every publisher shares rather than copying its character class; same tier (Core -> Core), direction: sideways
 component_cycles       = 1    # Render <-> Subscriptions; goal: 0
 module_cycles          = 1    # agent_session <-> panel <-> rounds SCC; goal: 0
-modules_over_800_lines = 16 # 15->16: 10cc6310 (brief review, phase 2) — pr_delivery.py 791->801:
+modules_over_800_lines = 17 # 16->17: #456 — converge.py 798->807: _loop_and_deliver, the tail every
+                               # converge mode shares, now sets the PRD S4 regenerate pass once
+                               # (four lines plus the why) instead of one mode wiring it. Moving the
+                               # shared tail out of converge.py to shed nine lines would separate the
+                               # three modes from the loop they hand off to; the count moves.
+                               # 15->16: 10cc6310 (brief review, phase 2) — pr_delivery.py 791->801:
                                # build_pr_body gains the `brief_review` section argument and
                                # deliver() passes pr_section(config.brief_facts). The PR body's
                                # sections are composed in one place, so the new section is placed

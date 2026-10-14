@@ -543,7 +543,6 @@ def _resolve_conflicts(
         pre_commit_guard=markers_guard(
             intake.paths, head_sha=change.head_sha, base_sha=intake.base_sha
         ),
-        post_commit_pass=post_commit_regenerate(config),  # PRD S4, after formatting
         review_context=render_review_context(
             intake.paths,
             head_sha=change.head_sha,
@@ -608,7 +607,17 @@ def _loop_and_deliver(
     ``intake_cost_usd`` slot either way (the budget carry treats them
     identically). ``external_epilogue``, when set, computes the per-injected-
     finding dispositions once the loop has run.
+
+    Under the project's generated-paths policy every mode gets the PRD S4
+    post-commit regenerate pass here, once (#456): only resolve mode carried
+    it, and a ``--from-github`` round pushed the intake's ``docs/generated/``
+    — GREEN in the gate, which regenerates inside its own export, red in the
+    repo's drift CI. ``None`` without a policy.
     """
+    if entry.post_commit_pass is None:
+        entry = dataclasses.replace(
+            entry, post_commit_pass=post_commit_regenerate(config)
+        )
     # Carry the pre-loop spend into the loop budget so --max-cost bounds the
     # WHOLE command, not just the loop. The callers' exhaustion checks
     # guarantee the remainder is > 0 here.
