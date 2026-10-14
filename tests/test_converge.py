@@ -1789,3 +1789,58 @@ def test_no_push_leaves_no_push_record(
 
     assert result.status == "converged" and result.pushed is False
     assert run_outcome.converge_pushed_sha(config.run_dir) is None
+
+
+# ── #456: every converge loop runs the regenerate pass ──────────────────────
+# A watcher-dispatched `converge --from-github` on loom #455 fixed one external
+# finding, moved 24 counted lines and pushed a tree whose docs/generated/ were
+# the intake's: only the resolve-mode entry wired `post_commit_regenerate`, so
+# the external and local-panel loops shipped generated drift the repo's CI
+# rejected while the gate (which regenerates inside its export) read GREEN.
+# The pass belongs to the loop every mode shares, under the project's policy.
+
+
+def _policy(config: DevelopConfig) -> DevelopConfig:
+    return dataclasses.replace(
+        config, generated_paths=("docs/generated",), regenerate_command="make gen"
+    )
+
+
+def test_local_mode_wires_the_regenerate_pass_under_a_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True)
+
+    converge_pr(_policy(_config(tmp_path)), _change(), no_push=True)
+    assert captured["entry"].post_commit_pass is not None
+
+    # without a policy: no pass (nothing declares what to regenerate)
+    converge_pr(_config(tmp_path), _change(), no_push=True)
+    assert captured["entry"].post_commit_pass is None
+
+
+def test_external_mode_wires_the_regenerate_pass_under_a_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = _install(monkeypatch, blocking=True)
+    _install_triage(monkeypatch, captured, proceed=("f-001",))
+    config = _policy(_config(tmp_path))
+    config.handoff_dir.mkdir(parents=True, exist_ok=True)
+    from lithos_loom.plugins.story_develop import handoff as handoff_mod
+
+    (config.handoff_dir / handoff_mod.coder_handoff_name(2)).write_text(
+        "## Status: LGTM\n## Summary\nf-001: guarded.\n"
+        "## External findings\n- f-001: FIXED — guarded the handle\n",
+        encoding="utf-8",
+    )
+
+    result = converge_pr(
+        config, _change(), external_findings=(_ext_finding(7),), no_push=True
+    )
+    assert result.status == "converged"
+    assert captured["entry"].post_commit_pass is not None
+
+    converge_pr(
+        _config(tmp_path), _change(), external_findings=(_ext_finding(7),), no_push=True
+    )
+    assert captured["entry"].post_commit_pass is None

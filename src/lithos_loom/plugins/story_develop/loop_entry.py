@@ -81,9 +81,11 @@ class LoopEntry:
     coder_init_extra: Mapping[str, str] = field(default_factory=dict)
     pre_commit_guard: Callable[[Path], str | None] | None = None
     # PRD S4: a pass run after every round commit (and the auto-format pass),
-    # ``(worktree, round_no) -> PostCommitOutcome`` — resolve mode regenerates
-    # the project's generated paths deterministically and commits the result,
-    # so the gate + panel never judge a hand-merged or stale generated file;
+    # ``(worktree, round_no) -> PostCommitOutcome`` — every converge loop
+    # regenerates the project's generated paths deterministically and commits
+    # the result (set once in converge's shared loop tail, #456; an entry may
+    # carry its own), so the gate + panel never judge a hand-merged or stale
+    # generated file;
     # its verdict rides with the commit as a required check row, and a pass
     # that cannot run ends the round ``infra_failed`` (fail closed).
     post_commit_pass: Callable[[Path, int], PostCommitOutcome] | None = None

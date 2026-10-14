@@ -509,8 +509,8 @@ def commit_phase(ctx: RoundContext, round_no: int) -> CycleExit | None:
         )
         if format_sha is not None:
             new_commit = format_sha
-        # PRD S4: the entry's post-commit pass (resolve mode regenerates the
-        # project's generated paths) runs AFTER formatting — the generator's
+        # PRD S4: the entry's post-commit pass (every converge loop regenerates
+        # the project's generated paths, #456) runs AFTER formatting — the generator's
         # output counts what the formatter moved — and its commit supersedes
         # the round's like the format commit does. It fails CLOSED (PR #388
         # review): its verdict is a required check row (fast_gate_phase joins
