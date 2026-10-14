@@ -49,6 +49,17 @@ to put it, or which option to take. Once it does, it is a decision.
 - Not a fact, but a decision dressed as one: "The cancel routes go in a new
   module." That chooses a structure.
 
+Loom checks every fact structurally. A fact that fails any of these rules is
+treated as a decision, and the story is held for the operator:
+- it cites at least one repository path in backticks, with its extension
+  and optionally a line (`src/pkg/module.py:123`, `docs/guide.md`). A dotted
+  name such as `module.Class` is not a path;
+- its bold heading describes. It never says must, should, shall, needs to,
+  has to, goes in, go in, put, use, add, create, move, rename, split,
+  extract or make;
+- it never carries a `Basis:` or `Proposed:` line. Those belong to
+  decisions.
+
 ### Decisions: `D#`
 
 A decision is anything that **prescribes**:

@@ -262,3 +262,73 @@ def test_a_degraded_review_exits_1_with_its_note_and_the_raw_text(
     assert result.exit_code == 1
     assert "did not validate" in _plain(result.stderr)
     assert "- **D1. No basis.** do it" in result.stdout
+
+
+def _answer(env: dict[str, Any], draft: str) -> None:
+    env["result"] = BriefReviewResult(
+        addendum=parse_addendum(draft),
+        base_sha=env["head"],
+        mode=MODE_FULL,
+        prior_base=None,
+        cost_usd=0.42,
+        raw=draft,
+    )
+
+
+def test_a_draft_with_a_decision_prints_that_it_would_hold(
+    env: dict[str, Any],
+) -> None:
+    # Phase 2 (10cc6310): the structural check's verdict follows the draft.
+    result = _invoke("24ad5f91", "--base", "HEAD")
+
+    assert result.exit_code == 0, result.output
+    assert "auto-facts check: not facts only (1 decision): would hold" in _plain(
+        result.stderr
+    )
+    assert "auto-facts" not in result.stdout  # the draft stays clean to pipe
+
+
+def test_a_facts_only_draft_that_passes_prints_that_it_would_skip(
+    env: dict[str, Any],
+) -> None:
+    _answer(env, "## Facts\n\n- **F1. The funnel has no hook.** `src/f.py:12`.\n")
+
+    result = _invoke("24ad5f91", "--base", "HEAD")
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "auto-facts check: would skip the gate with "
+        "develop_brief_review_auto_facts on" in _plain(result.stderr)
+    )
+
+
+def test_a_facts_only_draft_that_fails_prints_the_problem(
+    env: dict[str, Any],
+) -> None:
+    _answer(env, "## Facts\n\n- **F3. Put the routes in a module.** `routes.py:1`.\n")
+
+    result = _invoke("24ad5f91", "--base", "HEAD")
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "auto-facts check: would hold: F3 reads like a decision: heading says `put`"
+        in _plain(result.stderr)
+    )
+
+
+def test_a_no_change_answer_and_a_delta_run_print_their_own_verdicts(
+    env: dict[str, Any],
+) -> None:
+    _answer(env, "## No change\nEvery claim holds.\n")
+    full = _invoke("24ad5f91", "--base", "HEAD")
+    delta = _invoke("24ad5f91", "--base", "HEAD", "--delta-from", "HEAD~1")
+
+    assert "auto-facts check: no change — would skip the gate with " in _plain(
+        full.stderr
+    )
+    assert "auto-facts check: no change — would proceed without a gate" in _plain(
+        delta.stderr
+    )
+    _answer(env, "## Facts\n\n- **F1. The funnel has no hook.** `src/f.py:12`.\n")
+    passed = _invoke("24ad5f91", "--base", "HEAD", "--delta-from", "HEAD~1")
+    assert "auto-facts check: would append without a gate" in _plain(passed.stderr)

@@ -20,6 +20,7 @@ import pytest
 
 from lithos_loom.github_client import GitHubError, GitHubTransportError
 from lithos_loom.plugins.story_develop import pr_delivery, run_outcome
+from lithos_loom.plugins.story_develop.brief_review_auto import pr_section
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.develop import DevelopResult, ReviewOutcome
 from lithos_loom.plugins.story_develop.pr_delivery import (
@@ -561,6 +562,65 @@ def test_an_oversized_story_description_is_bounded() -> None:
     assert len(body) < MAX_SECTION_CHARS + 2000
     assert "(truncated" in body  # never silently misrepresented
     assert "Closes #7" in _outside_fences(body)
+
+
+def _brief_body(description: str, section: str) -> str:
+    return build_pr_body(
+        description=description,
+        acceptance_criteria="1. works",
+        reviews_summary="[cq]=LGTM",
+        rounds=1,
+        gate_verdict=None,
+        cost_usd=0.5,
+        task_id=None,
+        brief_review=section,
+    )
+
+
+def test_the_brief_review_section_sits_between_the_criteria_and_review() -> None:
+    # Phase 2 (10cc6310): facts appended at dispatch without a gate get their
+    # own section — the agent's headings fenced, loom's line live.
+    section = pr_section(("F13. W7 added no refusal hook. Closes #1",))
+
+    body = _brief_body("Add a flag", section)
+
+    assert section in body
+    criteria = body.index("## Acceptance criteria")
+    brief = body.index("## Brief review")
+    assert criteria < brief < body.index("## Review\n")
+    assert "Closes #1" not in _outside_fences(body)
+    assert "F13. W7 added no refusal hook." in body
+
+
+def test_no_brief_review_section_without_auto_appended_facts() -> None:
+    assert "## Brief review" not in _brief_body("Add a flag", "")
+    assert "## Brief review" not in _brief_body("Add a flag", pr_section(()))
+
+
+def test_a_fact_cut_from_an_oversized_what_is_still_listed() -> None:
+    # `## What` is capped at MAX_SECTION_CHARS and the appended addendum is
+    # its tail — the first text the cap cuts.
+    tail = "- **F13. W7 added no refusal hook.** `write_funnel.py:536`."
+    description = "Body. " * (MAX_SECTION_CHARS // 6 + 100) + "\n\n" + tail
+
+    body = _brief_body(description, pr_section(("F13. W7 added no refusal hook.",)))
+
+    what = body[: body.index("## Acceptance criteria")]
+    assert "(truncated" in what and "F13." not in what
+    assert "F13. W7 added no refusal hook." in body[body.index("## Brief review") :]
+
+
+def test_deliver_lists_the_config_s_brief_facts_in_the_body(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    facts = replace(config, brief_facts=("F13. W7 added no refusal hook.",))
+    state = _install(monkeypatch, facts)
+    wt = _make_wt(facts)
+
+    deliver(facts, _result(facts, wt))
+
+    body = state["pr_kwargs"]["body"]
+    assert "## Brief review" in body and "F13. W7 added no refusal hook." in body
 
 
 def test_reply_body_variants() -> None:

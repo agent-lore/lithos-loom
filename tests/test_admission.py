@@ -1852,6 +1852,64 @@ async def test_another_projects_reservation_does_not_count() -> None:
     assert verdict.admitted
 
 
+async def test_a_story_whose_facts_were_auto_appended_holds_no_slot(
+    tmp_path: Any,
+) -> None:
+    # Phase 2 (10cc6310): a facts-only pass that skips its gate writes the
+    # hold flag CLEARED, so the story reserves nothing — it is dispatching.
+    from lithos_loom.plugins.story_develop.brief_review import (
+        HOLD_KEY,
+        RECORD_KEY,
+        BriefReviewResult,
+        parse_addendum,
+    )
+    from lithos_loom.plugins.story_develop.brief_review_phase import run_phase
+    from lithos_loom.plugins.story_develop.config import DevelopConfig
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+
+    client = FakeLithosClient(agent_id=_AGENT)
+    adm = _admission(client, limit=1)
+    story = await _story(client, "auto")
+    draft = "## Facts\n\n- **F1. The funnel has no hook.** `src/f.py:12`.\n"
+
+    def review(config, inputs, *, base_sha, mode, prior_base, timeout):
+        return BriefReviewResult(
+            addendum=parse_addendum(draft),
+            base_sha=base_sha,
+            mode=mode,
+            prior_base=prior_base,
+            cost_usd=0.0,
+        )
+
+    outcome = await run_phase(
+        client,
+        DevelopConfig(
+            repo=tmp_path / "repo", description="auto", work_dir=tmp_path / "w"
+        ),
+        TaskContext(
+            task_id=story,
+            title="auto",
+            description="",
+            acceptance_criteria=None,
+            metadata={"project": _PROJECT, "prd": "docs/prd/x.md"},
+        ),
+        start_sha="a" * 40,
+        review=review,
+        auto_facts=True,
+    )
+    assert outcome.proceed
+    task = await client.task_get(task_id=story)
+    assert task is not None and task.metadata[RECORD_KEY][-1]["outcome"] == (
+        "auto_appended"
+    )
+    assert not task.metadata.get(HOLD_KEY)
+    other = await _story(client, "other")
+
+    verdict = await adm.admit(route=_ROUTE, task_id=other, project=_PROJECT)
+
+    assert verdict.admitted
+
+
 async def test_a_brief_review_gate_wakes_nobody() -> None:
     # An escalation gate on a DELIVERED story frees a slot (its PR stops
     # counting); a brief-review gate holds an undelivered story whose

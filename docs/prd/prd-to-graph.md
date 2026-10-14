@@ -144,8 +144,12 @@ pointed at the old plan (P4).
    loom `brief_review` gate whose description carries the draft; completing it
    appends the operator's text verbatim, a held slice keeps its project's
    admission slot, a moved base gets a recheck (facts only → appended without a
-   gate), and each item's outcome is recorded. Phase 2 lets a facts-only
-   addendum skip the gate once phase 1's records show that is safe. This keeps
+   gate), and each item's outcome is recorded. Phase 2 (shipped behind
+   `develop_brief_review_auto_facts`, off by default) lets an addendum skip the
+   gate when it answers `No change`, or holds only facts that a deterministic
+   structural check agrees are facts (a descriptive heading, a cited
+   repository path, no `Basis:` / `Proposed:`); any doubt holds it. The check
+   also governs the recheck. This keeps
    decision 1's line: the review is drafted by loom, but approving it is the
    operator's (SPEC §2.2 *Brief review at dispatch*).
 

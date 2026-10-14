@@ -294,7 +294,9 @@ def brief_review_gate_description(
 
     A draft-less brief (the pass degraded: ``note`` but no ``addendum``)
     gets no fences — there is nothing to approve — and says how to retry or
-    skip, so an approval can never append a guess.
+    skip, so an approval can never append a guess. A facts-only draft the
+    structural check held (``brief["check"]``) names the facts that read
+    like decisions above the fences.
     """
     base = str(brief.get("base_sha") or "")
     mode = str(brief.get("mode") or "full")
@@ -325,6 +327,19 @@ def brief_review_gate_description(
             "- Cancel the *story* (never this gate) → abandon it.",
         ]
         return "\n".join(lines)
+    check = brief.get("check")
+    problems = check.get("problems") if isinstance(check, Mapping) else None
+    if isinstance(check, Mapping) and check.get("facts_only") is True and problems:
+        # Phase 2: the pass labelled every item a fact, but the structural
+        # check disagreed — say which, so the operator knows why it is held.
+        lines += [
+            "",
+            "**Why it is held:** the draft holds only facts, but the "
+            "structural check read these as decisions — relabel or rewrite "
+            "them, then complete the gate:",
+            "",
+            *(f"- {problem}" for problem in problems if isinstance(problem, str)),
+        ]
     lines += [
         "",
         "**What to do:**",

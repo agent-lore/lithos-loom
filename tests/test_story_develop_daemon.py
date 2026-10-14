@@ -2732,7 +2732,7 @@ def _stub_phase(monkeypatch, captured: dict, outcome: Any) -> None:
     from lithos_loom.plugins.story_develop import __main__ as main_mod
 
     def fake_phase(url, config, ctx, **kwargs):
-        captured["phase"] = {"ctx": ctx, "run_id": config.run_id}
+        captured["phase"] = {"ctx": ctx, "run_id": config.run_id, **kwargs}
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -2792,6 +2792,57 @@ def test_daemon_brief_review_proceed_cuts_at_the_reviewed_commit(
     config = captured["config"]
     assert config.start_sha == "b" * 40
     assert config.description == f"Add a flag\n\n{appended}"
+
+
+@pytest.mark.parametrize(("dial", "expected"), [(True, True), (None, False)])
+def test_daemon_brief_review_auto_facts_dial_reaches_the_phase(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch, dial, expected
+) -> None:
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.brief_review_phase import PhaseOutcome
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {
+        "settings": ProjectDevelopSettings(
+            brief_review=True, brief_review_auto_facts=dial
+        )
+    }
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    _stub_phase(monkeypatch, captured, PhaseOutcome(proceed=True))
+    argv, _ = _brief_args(tmp_git_repo, tmp_path)
+
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["phase"]["auto_facts"] is expected
+    assert captured["config"].brief_facts == ()
+
+
+def test_daemon_brief_review_auto_appended_facts_reach_the_config(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    # Phase 2: the PR body lists the facts appended without a gate, so the
+    # phase's headings ride on the config to delivery.
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.brief_review_phase import PhaseOutcome
+    from lithos_loom.plugins.story_develop.daemon_io import ProjectDevelopSettings
+
+    captured: dict[str, Any] = {
+        "settings": ProjectDevelopSettings(
+            brief_review=True, brief_review_auto_facts=True
+        )
+    }
+    _stub_daemon_run(monkeypatch, tmp_path, captured)
+    facts = ("F13. W7 added no refusal hook.",)
+    _stub_phase(
+        monkeypatch,
+        captured,
+        PhaseOutcome(
+            proceed=True, start_sha="b" * 40, description="Body.", auto_facts=facts
+        ),
+    )
+    argv, _ = _brief_args(tmp_git_repo, tmp_path)
+
+    assert main_mod.main(argv) == EXIT_SUCCEEDED
+    assert captured["config"].brief_facts == facts
 
 
 @pytest.mark.parametrize(

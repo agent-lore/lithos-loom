@@ -630,7 +630,12 @@ def _daemon_main(args: argparse.Namespace) -> int:
     prd = ctx.metadata.get("prd")
     if entry is None and settings.brief_review and isinstance(prd, str) and prd.strip():
         try:
-            phase = run_brief_review_phase(args.lithos_url, config, ctx)
+            phase = run_brief_review_phase(
+                args.lithos_url,
+                config,
+                ctx,
+                auto_facts=bool(settings.brief_review_auto_facts),
+            )
         except Exception as exc:
             logging.getLogger(__name__).exception("brief review phase failed")
             return _fail_payload("lithos", f"brief review could not run: {exc}", 1)
@@ -667,6 +672,8 @@ def _daemon_main(args: argparse.Namespace) -> int:
         if phase.description is not None:
             reviewed = replace(ctx, description=phase.description)
             config = replace(config, description=reviewed.task_text)
+        if phase.auto_facts:
+            config = replace(config, brief_facts=phase.auto_facts)
 
     try:
         result = develop(

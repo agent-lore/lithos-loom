@@ -81,8 +81,19 @@ dialogue-based** cycle.
   tree its coder will start from, before the coder starts (604fb936, from the lens T3 hand
   pilot of 2026-10-05). Its answer is an **addendum**. `lithos-loom develop brief-review`
   runs it on demand and writes nothing. With `develop_brief_review` on, dispatch runs it before
-  the coder starts and **holds** the story behind a `brief_review` gate (phase 1: every review
-  is the operator's to approve).
+  the coder starts and **holds** the story behind a `brief_review` gate. Phase 1: every full
+  review is the operator's to approve. Phase 2: with **auto-facts** on, a full review whose
+  answer is `No change`, or only facts that pass the **structural check**, skips the gate.
+- **auto-facts** — the `develop_brief_review_auto_facts` dial (off by default, effective only
+  with `develop_brief_review` on): a full brief review holding only facts that pass the
+  structural check is appended to the story without a gate (recorded `auto_appended`,
+  `mode: full`), and a reasoned `No change` proceeds. A recheck is governed by the check
+  whatever the dial says.
+- **structural check** — the deterministic second opinion on a brief review's FACT items
+  (`brief_review_auto.py`): a fact passes only if its heading has no prescriptive word
+  (must, should, put, use, add, make, …), it cites a backticked repository path, and it carries
+  no `Basis:` / `Proposed:` line. A fact that fails reads as a decision, and the story is held.
+  Its verdict is recorded as `check` on every brief-review entry with a draft.
 - **brief-review hold** / **reserved slot** — a story held for its brief review keeps its
   project's admission slot: the flat flag `metadata.brief_review_hold` counts against
   `max_open_delivered_prs` for everyone but its holder, who is admitted against it (`reserved`)
@@ -96,7 +107,8 @@ dialogue-based** cycle.
   the brief), **facts** (`F#`, they *describe* the code at the base and never say what to
   build) and **decisions** (`D#`, anything that prescribes, chooses or changes scope; each
   ends with a `Basis:` line). In doubt, an item is a decision. A **recheck** (delta mode)
-  reports only what the commits since an approved review's base change.
+  reports only what the commits since an approved review's base change; facts only that pass
+  the structural check are appended without a gate.
 
 ## PR maintenance
 

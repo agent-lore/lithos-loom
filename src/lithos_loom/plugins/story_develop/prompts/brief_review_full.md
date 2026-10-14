@@ -12,3 +12,8 @@ predecessor renamed, moved or added something this brief builds on.
 
 Write a decision wherever the brief leaves a choice open that the code now
 settles, or that the coding agent would otherwise have to guess.
+
+With the auto-facts dial on, an addendum that holds only facts may be
+appended without the operator seeing it first. A decision labelled as a
+fact would therefore skip their review, so: **when in doubt, it is a
+decision.**

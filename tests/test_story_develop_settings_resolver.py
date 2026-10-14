@@ -506,6 +506,66 @@ def test_bad_brief_review_frictions_and_stays_off() -> None:
     assert len(frictions) == 1 and "develop_brief_review" in frictions[0]
 
 
+# ── develop_brief_review_auto_facts (phase 2, 10cc6310) ─────────────────────
+
+_AUTO = "develop_brief_review_auto_facts"
+_AUTO_OFF = "develop_brief_review_auto_facts: develop_brief_review is off; ignoring"
+
+
+def test_brief_review_auto_facts_defaults_unset() -> None:
+    settings, frictions = _resolve({"develop_brief_review": True})
+    assert settings.brief_review_auto_facts is None  # off: every pass is held
+    assert frictions == ()
+
+
+def test_brief_review_auto_facts_project_layer_and_task_override() -> None:
+    on = {"develop_brief_review": True, _AUTO: True}
+    settings, frictions = _resolve(on)
+    assert settings.brief_review_auto_facts is True and frictions == ()
+
+    settings, frictions = _resolve(on, {_AUTO: False})
+    assert settings.brief_review_auto_facts is False and frictions == ()
+
+    settings, frictions = _resolve({"develop_brief_review": True}, {_AUTO: True})
+    assert settings.brief_review_auto_facts is True and frictions == ()
+
+
+def test_brief_review_auto_facts_without_brief_review_is_dropped() -> None:
+    settings, frictions = _resolve({_AUTO: True})
+    assert settings.brief_review_auto_facts is None
+    assert frictions == (_AUTO_OFF,)
+    assert settings.rejected_keys == (_AUTO,)
+    # ...and a story that opts out of the review drops the dial with it
+    settings, frictions = _resolve(
+        {"develop_brief_review": True, _AUTO: True}, {"develop_brief_review": False}
+    )
+    assert settings.brief_review is False
+    assert settings.brief_review_auto_facts is None
+    assert frictions == (_AUTO_OFF,)
+
+
+def test_an_explicit_false_auto_facts_without_brief_review_is_silent() -> None:
+    settings, frictions = _resolve({_AUTO: False})
+    assert settings.brief_review_auto_facts is False and frictions == ()
+    assert settings.rejected_keys == ()
+
+
+def test_bad_brief_review_auto_facts_frictions_and_stays_off() -> None:
+    settings, frictions = _resolve({"develop_brief_review": True, _AUTO: "sure"})
+    assert settings.brief_review_auto_facts is None
+    assert len(frictions) == 1 and _AUTO in frictions[0]
+    assert settings.rejected_keys == (_AUTO,)
+
+
+def test_the_auto_facts_pair_friction_follows_the_generated_paths_one() -> None:
+    _, frictions = _resolve(
+        {"develop_generated_paths": ["docs/generated"], _AUTO: True}
+    )
+    assert len(frictions) == 2
+    assert frictions[0].startswith("develop_generated_paths:")
+    assert frictions[1] == _AUTO_OFF
+
+
 # ── PR #360 re-review 3: the resolver records WHICH keys it rejected ─────────
 
 
@@ -522,7 +582,10 @@ def test_rejected_keys_are_recorded_structurally_at_both_layers() -> None:
             "develop_review_profile": 5,
             "develop_block_on_red": True,  # inert legacy key: breadcrumb, no rejection
         },
-        {"develop_check_states": {"lint": "bogus"}},
+        {
+            "develop_check_states": {"lint": "bogus"},
+            "develop_brief_review_auto_facts": "maybe",
+        },
         frictions,
     )
     assert scalars.rejected_keys == (
@@ -530,6 +593,7 @@ def test_rejected_keys_are_recorded_structurally_at_both_layers() -> None:
         "develop_max_rounds",
         "develop_review_profile",
         "develop_check_states",  # the task layer's, bare key
+        "develop_brief_review_auto_facts",
     )
     # the breadcrumb is still posted — it names gate keys, and is not one
     assert any("develop_block_on_red" in f for f in frictions)
