@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Coroutine, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +29,7 @@ import typer
 
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.cli import develop_app, obsidian_sync_app, project_app, task_app
+from lithos_loom.cli.brief_reviews import brief_reviews_output, collect_brief_reviews
 from lithos_loom.cli.drain import drain_daemon
 from lithos_loom.cli.gates import collect_gate_rows, render_report
 from lithos_loom.cli.gates_shadow import (
@@ -435,8 +436,47 @@ def gates(
     """
     window = _shadow_window(shadow, since, project)
     cfg = _load_or_exit(config)
+    for line in _listing_or_exit(
+        cfg, "listing gates", _gates_lines_async(cfg, shadow, window, project)
+    ):
+        typer.echo(line)
+
+
+@app.command("brief-reviews")
+def brief_reviews(
+    config: Path | None = typer.Option(
+        None, "--config", "-c", help="Explicit TOML config path."
+    ),
+    project: str | None = typer.Option(
+        None, "--project", help="Only this project's stories (metadata.project)."
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="Only entries drafted since <N>d or YYYY-MM-DD (UTC)."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="One JSON row per entry."),
+) -> None:
+    """Report the stories' brief-review records (read-only; SPEC §4.4b).
+
+    Exit codes: `0` on a report; `1` if the config can't load or Lithos is
+    unreachable; `2` on a bad flag."""
+    window = _shadow_window(True, since, project)
+    cfg = _load_or_exit(config)
+
+    async def _rows() -> list[dict[str, Any]]:
+        async with LithosClient(
+            cfg.orchestrator.lithos_url, agent_id=cfg.orchestrator.agent_id
+        ) as client:
+            return await collect_brief_reviews(client, project=project, since=window)
+
+    rows = _listing_or_exit(cfg, "reading brief reviews", _rows())
+    for line in brief_reviews_output(rows, as_json=as_json):
+        typer.echo(line)
+
+
+def _listing_or_exit[T](cfg: LoomConfig, what: str, coro: Coroutine[Any, Any, T]) -> T:
+    """Run a read-only listing; exit 1 when Lithos is unreachable or errors."""
     try:
-        lines = asyncio.run(_gates_lines_async(cfg, shadow, window, project))
+        return asyncio.run(coro)
     except (OSError, ExceptionGroup) as exc:
         # LithosClient.__aenter__ surfaces a connect failure as a plain OSError
         # or, when it happens inside a task group, an ExceptionGroup wrapping
@@ -451,10 +491,8 @@ def gates(
         )
         raise typer.Exit(1) from exc
     except LithosClientError as exc:
-        typer.echo(f"lithos-loom: listing gates failed: {exc}", err=True)
+        typer.echo(f"lithos-loom: {what} failed: {exc}", err=True)
         raise typer.Exit(1) from exc
-    for line in lines:
-        typer.echo(line)
 
 
 def _shadow_window(

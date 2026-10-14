@@ -12,7 +12,7 @@ Typer CLI app entry and `python -m` bootstrap (`lithos-loom = lithos_loom.main:a
 | Module | Size | Classes | Functions |
 |---|---|---:|---:|
 | `lithos_loom.__main__` | XS | 0 | 0 |
-| `lithos_loom.main` | L | 0 | 6 |
+| `lithos_loom.main` | L | 0 | 7 |
 
 ## Public API
 
@@ -23,6 +23,7 @@ Typer CLI app entry and `python -m` bootstrap (`lithos-loom = lithos_loom.main:a
 - def `validate_config` — Typecheck the TOML; with ``--dry-run`` also simulate routing.
 - def `show_config` — Inspect the loaded configuration.
 - def `gates` — List open gates and each gate's waiter health (read-only).
+- def `brief_reviews` — Report the stories' brief-review records (read-only; SPEC §4.4b).
 
 ## Dependencies
 
