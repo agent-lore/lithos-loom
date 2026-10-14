@@ -30,6 +30,7 @@ from lithos_loom.github_models import (
 )
 
 from . import run_outcome
+from .brief_review_auto import pr_section
 from .github_access import github_call, repo_name_with_owner
 from .publish_text import fence_untrusted, publish_title
 
@@ -109,6 +110,7 @@ def build_pr_body(
     issue_closes: str = "",
     provenance: Sequence[str] = (),
     provenance_quote: str = "",
+    brief_review: str = "",
 ) -> str:
     """The generated PR body: provenance + verdicts, not the whole log.
 
@@ -138,6 +140,11 @@ def build_pr_body(
     already says), one section for a branch delivered by hand afterwards
     (``lithos-loom develop deliver``: the run id and why that run stopped).
     One body builder, so a hand delivery's PR reads like every other.
+
+    *brief_review* is a pre-fenced ``## Brief review`` section
+    (:func:`~.brief_review_auto.pr_section`): the facts the brief review
+    appended without a gate, listed apart because they are the tail of
+    *description* — the first text its cap cuts.
     """
     parts = ["## What", "", fence_untrusted(description), ""]
     if issue_closes:
@@ -145,6 +152,8 @@ def build_pr_body(
     if acceptance_criteria:
         criteria = fence_untrusted(acceptance_criteria)
         parts += ["## Acceptance criteria", "", criteria, ""]
+    if brief_review:
+        parts += [brief_review, ""]
     parts += [
         "## Review",
         "",
@@ -686,6 +695,7 @@ def deliver(
         cost_usd=result.total_cost_usd,
         task_id=task_id,
         issue_closes=closes_line(github_issue_url, repo),
+        brief_review=pr_section(config.brief_facts),
     )
     pr_url = create_pr(
         wt, branch=result.branch, base=config.base_branch, title=title, body=body

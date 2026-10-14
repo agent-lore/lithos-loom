@@ -1,4 +1,4 @@
-"""Brief review at dispatch (604fb936), phase 1: the plugin's half.
+"""Brief review at dispatch (604fb936): the plugin's half.
 
 With ``develop_brief_review`` on, a story that carries ``metadata.prd`` — a
 PRD slice, whose brief was written before the code it builds on — is checked
@@ -7,13 +7,20 @@ The story's records (``metadata.brief_review``, :func:`brief_review.plan_review`
 decide what happens:
 
 * **never reviewed** (or the last pass is pending or failed) → a full pass,
-  and the story is **held**;
+  and the story is **held** — unless ``develop_brief_review_auto_facts`` is
+  on (phase 2) and the pass answers *no change* (recorded, proceed) or
+  holds only facts that pass the structural check
+  (:mod:`brief_review_auto`): appended like a facts-only recheck, with a
+  ``[BriefReview]`` finding, and the story proceeds with it;
 * **approved at this base** → proceed;
 * **approved at another base** → a delta pass over the commits between:
-  *no change* is recorded and the story proceeds; a *facts-only* recheck is
-  appended to the description (optimistic lock) with a ``[BriefReview]``
-  finding and the story proceeds with it; *any decision or scope cut* holds
-  the story again.
+  *no change* is recorded and the story proceeds; a *facts-only* recheck
+  that passes the structural check is appended to the description
+  (optimistic lock) with a ``[BriefReview]`` finding and the story proceeds
+  with it; *any decision or scope cut*, or a fact the check reads as a
+  decision, holds the story again.
+
+Every drafted entry carries the check's verdict as ``check``.
 
 Held means: the record entry is written ``pending`` (or ``failed``, for a
 pass that produced no draft — no path dispatches an unreviewed brief), the
@@ -61,8 +68,15 @@ from .brief_review import (
     render_addendum,
     review_brief,
 )
+from .brief_review_auto import (
+    AutoFactsVerdict,
+    check_auto_facts,
+    fact_headings,
+    fact_problems,
+)
 from .config import DevelopConfig
 from .lithos_io import AGENT_ID, TaskContext, explicit_acceptance_criteria
+from .publish_text import publish_line
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +92,8 @@ __all__ = [
 HELD_STATUS = "held_for_brief_review"
 # The issue mirror's link on a story (``subscriptions/_github_issue_sync.py``).
 _GITHUB_ISSUE_KEY = "github_issue_url"
+# The dial a full pass names when it skips its gate.
+_DIAL = "develop_brief_review_auto_facts"
 # The escalation summary's ceiling (the gate truncates past it anyway).
 _SUMMARY_MAX = 200
 
@@ -96,6 +112,9 @@ class PhaseOutcome:
     description: str | None = None
     escalation: dict[str, Any] | None = None
     frictions: tuple[str, ...] = ()
+    # The appended facts' ``"F13. <heading>"`` lines when this pass skipped
+    # its gate — the PR body lists them (``## What`` is capped).
+    auto_facts: tuple[str, ...] = ()
 
 
 async def run_phase(
@@ -107,13 +126,16 @@ async def run_phase(
     review: ReviewFn = review_brief,
     now: datetime | None = None,
     timeout: int = 1800,
+    auto_facts: bool = False,
 ) -> PhaseOutcome:
     """Run the brief-review phase for *ctx*'s story before its coder starts
     at *start_sha* (see the module doc). The caller has already decided the
     phase applies (the knob is on, the story carries ``metadata.prd``, the
-    run is not a resume). Raises ``LookupError`` for a story Lithos cannot
-    find, and lets a Lithos write failure propagate — the caller reports
-    either as the run's failure, never as a dispatch."""
+    run is not a resume). *auto_facts* (``develop_brief_review_auto_facts``)
+    lets a full pass skip its gate as a recheck does. Raises ``LookupError``
+    for a story Lithos cannot find, and lets a Lithos write failure
+    propagate — the caller reports either as the run's failure, never as a
+    dispatch."""
     issue = ctx.metadata.get(_GITHUB_ISSUE_KEY)
     if isinstance(issue, str) and issue:
         return PhaseOutcome(
@@ -191,47 +213,65 @@ async def run_phase(
         addendum, base_sha=start_sha, on=when.date(), mode=mode, prior_base=prior_base
     )
     counts = _counts(addendum)
-    if mode == MODE_DELTA and not addendum.items:
-        # A recheck that found nothing: the brief stands at the new base — as
-        # the write found it (an operator edit during the pass is theirs).
+    # Phase 2: the structural check runs on every pass, so every drafted
+    # entry carries its verdict — a later operator correction can be counted.
+    verdict = check_auto_facts(addendum)
+    may_skip = mode == MODE_DELTA or auto_facts
+    if may_skip and not addendum.items:
+        # Nothing to add: the brief stands at this base — as the write found
+        # it (an operator edit during the pass is theirs). Only a reasoned
+        # ``No change`` parses to no items.
         description = await _record(
             client,
             story,
-            _entry(run_id, mode, start_sha, addendum, when, OUTCOME_NO_CHANGE),
+            _entry(run_id, mode, start_sha, addendum, when, OUTCOME_NO_CHANGE, verdict),
             hold=False,
             run_id=run_id,
         )
+        if mode == MODE_FULL:
+            await _note(
+                client,
+                story.id,
+                f"[BriefReview] brief review at {start_sha[:12]}: no change — "
+                f'"{publish_line(addendum.no_change or "")}" ({_DIAL})',
+            )
         return PhaseOutcome(proceed=True, start_sha=start_sha, description=description)
-    if mode == MODE_DELTA and not addendum.decisions and not addendum.scope_cuts:
+    if may_skip and verdict.passed:
         # Facts describe the code; they change no decision the operator made.
         description = await _record(
             client,
             story,
-            _entry(run_id, mode, start_sha, addendum, when, OUTCOME_AUTO_APPENDED),
+            _entry(
+                run_id, mode, start_sha, addendum, when, OUTCOME_AUTO_APPENDED, verdict
+            ),
             hold=False,
             run_id=run_id,
             append=rendered,
         )
-        try:
-            await client.finding_post(
-                task_id=story.id,
-                summary=(
-                    f"[BriefReview] recheck at {start_sha[:12]} (from "
-                    f"{(prior_base or '')[:12]}): {counts}, appended to the "
-                    "description without a gate — facts only"
-                ),
-                agent=AGENT_ID,
+        if mode == MODE_DELTA:
+            summary = (
+                f"[BriefReview] recheck at {start_sha[:12]} (from "
+                f"{(prior_base or '')[:12]}): {counts}, appended to the "
+                "description without a gate — facts only"
             )
-        except Exception:  # noqa: BLE001 — the append landed; the note is extra
-            logger.exception(
-                "brief review: [BriefReview] finding for %s failed", story.id
+        else:
+            summary = (
+                f"[BriefReview] brief review at {start_sha[:12]}: {counts}, "
+                "appended to the description without a gate — facts only, "
+                f"structural check passed ({_DIAL})"
             )
-        return PhaseOutcome(proceed=True, start_sha=start_sha, description=description)
+        await _note(client, story.id, summary)
+        return PhaseOutcome(
+            proceed=True,
+            start_sha=start_sha,
+            description=description,
+            auto_facts=fact_headings(addendum),
+        )
 
     await _record(
         client,
         story,
-        _entry(run_id, mode, start_sha, addendum, when, OUTCOME_PENDING),
+        _entry(run_id, mode, start_sha, addendum, when, OUTCOME_PENDING, verdict),
         hold=True,
         run_id=run_id,
     )
@@ -245,21 +285,38 @@ async def run_phase(
         },
         "cost_usd": round(result.cost_usd, 2),
         "addendum": rendered,
+        "check": verdict.as_record(),
     }
     if prior_base:
         brief["prior_base"] = prior_base
     what = "recheck" if mode == MODE_DELTA else "brief review"
+    why = ""
+    if verdict.facts_only and verdict.problems:
+        flagged = sum(1 for item in addendum.facts if fact_problems(item))
+        why = (
+            f" — held: {_n(flagged, 'fact')} read like decisions"
+            if flagged
+            else " — held: too many facts to list in the PR body"
+        )
     return PhaseOutcome(
         proceed=False,
         escalation={
             "reason": "brief_review",
             "summary": _clip(
-                f"{what} at {start_sha[:12]}: {counts} — approve or edit the "
-                "draft on this gate"
+                f"{what} at {start_sha[:12]}: {counts}{why} — approve or edit "
+                "the draft on this gate"
             ),
             "brief": brief,
         },
     )
+
+
+async def _note(client: Any, story_id: str, summary: str) -> None:
+    """Post the ``[BriefReview]`` finding for a pass that skipped its gate."""
+    try:
+        await client.finding_post(task_id=story_id, summary=summary, agent=AGENT_ID)
+    except Exception:  # noqa: BLE001 — the record landed; the note is extra
+        logger.exception("brief review: [BriefReview] finding for %s failed", story_id)
 
 
 def _entry(
@@ -269,8 +326,9 @@ def _entry(
     addendum: Addendum,
     when: datetime,
     outcome: str,
+    verdict: AutoFactsVerdict,
 ) -> dict[str, Any]:
-    return draft_entry(
+    entry = draft_entry(
         run_id=run_id,
         mode=mode,
         base_sha=base_sha,
@@ -278,6 +336,8 @@ def _entry(
         drafted_at=when,
         outcome=outcome,
     )
+    entry["check"] = verdict.as_record()
+    return entry
 
 
 async def _record(
@@ -376,6 +436,7 @@ def run_brief_review_phase(
     ctx: TaskContext,
     *,
     timeout: int = 1800,
+    auto_facts: bool = False,
 ) -> PhaseOutcome:
     """The daemon's entry: resolve the base the coder would be cut at (the
     same fetch :func:`worktree.create` makes) ONCE, then run the phase
@@ -384,5 +445,12 @@ def run_brief_review_phase(
     start_sha = worktree.current_base_ref(config.repo, config.base_branch)
     client = _PerCallClient(url)
     return asyncio.run(
-        run_phase(client, config, ctx, start_sha=start_sha, timeout=timeout)
+        run_phase(
+            client,
+            config,
+            ctx,
+            start_sha=start_sha,
+            timeout=timeout,
+            auto_facts=auto_facts,
+        )
     )

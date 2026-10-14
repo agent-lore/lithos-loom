@@ -577,6 +577,10 @@ class DevelopConfig:
     # so a base that moves between the review and the cut cannot slip past
     # it. None = the base tip, as before.
     start_sha: str | None = None
+    # Phase 2 (10cc6310): the ``"F13. <heading>"`` lines of facts the brief
+    # review appended without a gate on THIS run — the PR body lists them
+    # under ``## Brief review`` (``## What`` is capped). Empty otherwise.
+    brief_facts: tuple[str, ...] = ()
     # Single-reviewer convenience fields (the T2-era surface; still the
     # default path). T6: `reviewers` holds full multi-reviewer specs and,
     # when non-empty, takes precedence — see `effective_reviewers`.

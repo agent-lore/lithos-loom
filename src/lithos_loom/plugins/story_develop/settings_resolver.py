@@ -71,6 +71,10 @@ class ScalarSettings:
     # 604fb936: hold a PRD slice at dispatch for a brief review the operator
     # approves (develop_brief_review). None = unset at both layers = off.
     brief_review: bool | None = None
+    # Phase 2 (10cc6310): let a facts-only addendum that passes the
+    # structural check skip the gate (develop_brief_review_auto_facts).
+    # Effective only with brief_review on; None = unset = off.
+    brief_review_auto_facts: bool | None = None
     review_profile_project: str | None = None
     # The per-task ``develop_review_profile`` name, parsed like the project
     # one; the task > project > host precedence runs in
@@ -490,6 +494,19 @@ def resolve_scalar_settings(
         frictions,
         rejected,
     )
+    # Phase 2 (10cc6310): the auto-facts dial, right after the dial it
+    # depends on; its pair rule appends after the generated-paths one.
+    brief_review_auto_facts = _resolve_project_then_task(
+        _ProjectThenTaskField(
+            "brief_review_auto_facts",
+            "develop_brief_review_auto_facts",
+            parse_bool_setting,
+        ),
+        meta,
+        task_metadata,
+        frictions,
+        rejected,
+    )
     if generated_paths and not regenerate_command:
         frictions.append(
             "develop_generated_paths: declared without develop_regenerate_command "
@@ -497,6 +514,12 @@ def resolve_scalar_settings(
         )
         rejected.append("develop_generated_paths")
         generated_paths = ()
+    if brief_review_auto_facts is True and brief_review is not True:
+        frictions.append(
+            "develop_brief_review_auto_facts: develop_brief_review is off; ignoring"
+        )
+        rejected.append("develop_brief_review_auto_facts")
+        brief_review_auto_facts = None
     return ScalarSettings(
         coder=coder,
         coder_model=coder_model,
@@ -518,5 +541,6 @@ def resolve_scalar_settings(
         copilot_review=copilot_review,
         review_scope=review_scope,
         brief_review=brief_review,
+        brief_review_auto_facts=brief_review_auto_facts,
         rejected_keys=tuple(dict.fromkeys(rejected)),
     )

@@ -29,9 +29,10 @@ addendum to approve. It caught:
 It also changed scope materially twice (W7, W8).
 
 This command is that check, automated: one read-only agent turn. Phase 1 of task
-604fb936 then holds a dispatch for the operator's approval of the addendum. This
-command is the half that runs on its own: use it to try the pass on a project
-before switching that on.
+604fb936 then holds a dispatch for the operator's approval of the addendum, and
+phase 2 (`develop_brief_review_auto_facts`) lets a facts-only addendum that
+passes a structural check skip that gate. This command is the half that runs on
+its own: use it to try the pass on a project before switching either on.
 
 ## The addendum
 
@@ -101,9 +102,31 @@ The agent's file is checked:
 A draft that fails gets **one** correction turn in the same session, told every
 problem.
 
+### The auto-facts verdict
+
+After the draft, stderr carries the **structural check**'s verdict: what a
+dispatch would do with this addendum (SPEC §2.2, phase 2). A fact passes the
+check only if its bold heading has no prescriptive word (`must, should, shall,
+needs to, has to, goes in, go in, put, use, add, create, move, rename, split,
+extract, make`) and no look-alike letters, it cites a backticked repository path
+(`src/pkg/file.py:123`, `docs/x.md`), it carries no `Basis:` or `Proposed:`
+line, and its body holds no other item's id, heading, table, HTML or section name. An
+addendum of more than 40 facts is held as well.
+
+| The draft | stderr |
+|---|---|
+| facts only, every fact passes | `auto-facts check: would skip the gate with develop_brief_review_auto_facts on` |
+| facts only, one fails | `auto-facts check: would hold: F3 reads like a decision: heading says `must`` |
+| any decision or scope cut | `auto-facts check: not facts only (1 decision): would hold` |
+| `No change` | `auto-facts check: no change — would skip the gate with develop_brief_review_auto_facts on` |
+
+With `--delta-from`, a passing recheck prints `would append without a gate`
+and `No change` prints `no change — would proceed without a gate`: the check
+governs a recheck whatever the dial says.
+
 | Exit | Meaning | stdout | stderr |
 |---|---|---|---|
-| 0 | addendum drafted | the rendered addendum | counts and cost |
+| 0 | addendum drafted | the rendered addendum | counts, cost and the auto-facts verdict |
 | 1 | degraded: failed turn, no file, still invalid after the correction, or a runtime failure (docker unavailable, a turn that raised) | the agent's raw text, if any | the note |
 | 2 | refused before any agent ran: unknown story, unmapped project, a ref that is not a commit | — | the reason |
 

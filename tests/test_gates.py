@@ -11,6 +11,7 @@ import pytest
 
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import (
+    BRIEF_REVIEW_FENCE_OPEN,
     BRIEF_REVIEW_REASON,
     ESCALATION_REASONS,
     ESCALATION_SUMMARY_MAX_CHARS,
@@ -374,6 +375,52 @@ async def test_a_brief_review_gate_carries_the_draft_between_its_fences() -> Non
     assert "addendum" not in brief
     assert brief["base_sha"].startswith("abc123def456")
     assert gate.metadata["escalation_reason"] == BRIEF_REVIEW_REASON
+
+
+async def test_a_held_facts_only_gate_names_the_facts_that_read_like_decisions() -> (
+    None
+):
+    # Phase 2 (10cc6310): the pass labelled every item a fact, the structural
+    # check disagreed — the operator is told which, and why.
+    client = FakeLithosClient(agent_id="a1")
+    story = await _story(client)
+    problem = "F1 reads like a decision: heading says `put`"
+    check = {"facts_only": True, "passed": False, "problems": [problem]}
+
+    gate_id = await _raise(
+        client,
+        story,
+        reason=BRIEF_REVIEW_REASON,
+        summary="brief review: 1 fact — held: 1 fact read like decisions",
+        brief=_brief_review_brief(check=check),
+    )
+
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None and gate.description is not None
+    why = gate.description.index("**Why it is held:**")
+    assert why < gate.description.index(BRIEF_REVIEW_FENCE_OPEN)
+    assert f"- {problem}" in gate.description
+    assert brief_review_block(gate.description) == _DRAFT  # still approvable
+    assert gate.metadata["run_brief"]["check"] == check
+
+
+async def test_a_gate_held_for_a_decision_carries_no_why_line() -> None:
+    client = FakeLithosClient(agent_id="a1")
+    story = await _story(client)
+    check = {"facts_only": False, "passed": False, "problems": ["F1 x"]}
+
+    gate_id = await _raise(
+        client,
+        story,
+        reason=BRIEF_REVIEW_REASON,
+        summary="brief review: 1 fact, 1 decision",
+        brief=_brief_review_brief(check=check),
+    )
+
+    gate = await client.task_get(task_id=gate_id)
+    assert gate is not None and gate.description is not None
+    assert "Why it is held" not in gate.description
+    assert gate.metadata["run_brief"]["check"] == check
 
 
 async def test_a_degraded_brief_review_gate_says_why_and_has_no_fences() -> None:

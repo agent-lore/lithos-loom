@@ -12,6 +12,9 @@ What the phase does is decided by the story's records (``plan_review``):
 | delta: no change | record it, proceed |
 | delta: facts only | append (CAS), ``[BriefReview]`` finding, proceed |
 | delta: any decision | **held** |
+| full, auto-facts on: no change | record it, ``[BriefReview]`` finding, proceed |
+| full, auto-facts on: facts pass the check | append, finding, proceed |
+| any fact the structural check reads as a decision | **held** |
 
 Held means the run ends with a ``brief_review`` escalation, the story keeps
 its admission slot (``brief_review_hold``), and the runner raises the gate.
@@ -130,7 +133,12 @@ class _Review:
 
 
 async def _run(
-    tmp_path: Path, story: Any, review: _Review, client: Any = None
+    tmp_path: Path,
+    story: Any,
+    review: _Review,
+    client: Any = None,
+    *,
+    auto_facts: bool = False,
 ) -> tuple[Any, Any]:
     client = client or FakeLithosClient(tasks=(story,))
     outcome = await run_phase(
@@ -140,6 +148,7 @@ async def _run(
         start_sha=S2,
         review=review,
         now=NOW,
+        auto_facts=auto_facts,
     )
     return outcome, await client.task_get(task_id=STORY)
 
@@ -176,7 +185,8 @@ async def test_a_never_reviewed_story_is_reviewed_in_full_and_held(
 
 
 async def test_a_full_review_that_finds_nothing_is_still_held(tmp_path: Path) -> None:
-    # Phase 1: every full review is the operator's to approve.
+    # Phase 1: with the auto-facts dial off, every full review is the
+    # operator's to approve.
     review = _Review("## No change\nEvery claim in the brief holds at this base.\n")
 
     outcome, stored = await _run(tmp_path, _story(), review)
@@ -184,6 +194,139 @@ async def test_a_full_review_that_finds_nothing_is_still_held(tmp_path: Path) ->
     assert not outcome.proceed
     assert "No change: Every claim" in outcome.escalation["brief"]["addendum"]
     assert stored.metadata[RECORD_KEY][-1]["outcome"] == OUTCOME_PENDING
+
+
+# --- phase 2 (10cc6310): develop_brief_review_auto_facts --------------------
+
+_DIAL = "develop_brief_review_auto_facts"
+_PRESCRIPTIVE = """\
+## Facts
+
+- **F1. Put the cancel routes in a new module.** `routes.py:1`
+- **F2. The router exists.** `src/router.py:4`
+"""
+
+
+async def test_a_facts_only_full_pass_with_the_dial_on_skips_the_gate(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient(tasks=(_story(),))
+
+    outcome, stored = await _run(
+        tmp_path, _story(), _Review(_FACTS_ONLY), client, auto_facts=True
+    )
+
+    assert outcome.proceed and outcome.start_sha == S2
+    assert stored.description.startswith(BRIEF + "\n\n**Brief review against")
+    assert stored.description.rstrip().endswith(
+        "- **F13. W7 added no refusal hook.** `write_funnel.py:536`."
+    )
+    assert outcome.description == stored.description
+    assert outcome.auto_facts == ("F13. W7 added no refusal hook.",)
+    entry = stored.metadata[RECORD_KEY][-1]
+    assert entry["outcome"] == OUTCOME_AUTO_APPENDED and entry["mode"] == MODE_FULL
+    assert entry["check"] == {"facts_only": True, "passed": True, "problems": []}
+    assert HOLD_KEY not in stored.metadata
+    assert "develop_status" not in stored.metadata
+    assert [f["summary"] for f in client.findings] == [
+        f"[BriefReview] brief review at {S2[:12]}: 1 fact, appended to the "
+        "description without a gate — facts only, structural check passed "
+        f"({_DIAL})"
+    ]
+
+
+async def test_one_decision_holds_even_with_the_dial_on(tmp_path: Path) -> None:
+    outcome, stored = await _run(
+        tmp_path, _story(), _Review(_WITH_DECISION), auto_facts=True
+    )
+
+    assert not outcome.proceed and outcome.auto_facts == ()
+    assert outcome.escalation["brief"]["check"]["facts_only"] is False
+    assert "read like decisions" not in outcome.escalation["summary"]
+    assert stored.metadata[RECORD_KEY][-1]["outcome"] == OUTCOME_PENDING
+    assert stored.metadata[HOLD_KEY] is True
+    assert stored.description == BRIEF
+
+
+async def test_one_scope_cut_holds_even_with_the_dial_on(tmp_path: Path) -> None:
+    cut = "\n## Scope cuts\n\n- **S1. Drop the cache.**\n  - Basis: F13.\n"
+    draft = _FACTS_ONLY + cut
+
+    outcome, stored = await _run(tmp_path, _story(), _Review(draft), auto_facts=True)
+
+    assert not outcome.proceed
+    assert stored.metadata[HOLD_KEY] is True
+
+
+async def test_a_fact_that_prescribes_is_held_and_named(tmp_path: Path) -> None:
+    client = FakeLithosClient(tasks=(_story(),))
+
+    outcome, stored = await _run(
+        tmp_path, _story(), _Review(_PRESCRIPTIVE), client, auto_facts=True
+    )
+
+    assert not outcome.proceed
+    check = outcome.escalation["brief"]["check"]
+    assert check["facts_only"] is True and check["passed"] is False
+    assert check["problems"] == ["F1 reads like a decision: heading says `put`"]
+    assert "held: 1 fact read like decisions" in outcome.escalation["summary"]
+    assert stored.metadata[RECORD_KEY][-1]["outcome"] == OUTCOME_PENDING
+    assert stored.metadata[RECORD_KEY][-1]["check"] == check
+    assert stored.metadata[HOLD_KEY] is True
+    assert stored.description == BRIEF
+    assert client.findings == []
+
+
+async def test_with_the_dial_off_a_facts_only_pass_is_held_and_still_checked(
+    tmp_path: Path,
+) -> None:
+    outcome, stored = await _run(tmp_path, _story(), _Review(_FACTS_ONLY))
+
+    assert not outcome.proceed
+    entry = stored.metadata[RECORD_KEY][-1]
+    assert entry["outcome"] == OUTCOME_PENDING
+    assert entry["check"] == {"facts_only": True, "passed": True, "problems": []}
+    assert outcome.escalation["brief"]["check"]["passed"] is True
+    assert stored.metadata[HOLD_KEY] is True
+
+
+async def test_a_full_no_change_with_the_dial_on_proceeds_as_no_change(
+    tmp_path: Path,
+) -> None:
+    client = FakeLithosClient(tasks=(_story(),))
+    review = _Review("## No change\nEvery claim in the brief holds at this base.\n")
+
+    outcome, stored = await _run(tmp_path, _story(), review, client, auto_facts=True)
+
+    assert outcome.proceed and outcome.start_sha == S2
+    assert outcome.description == BRIEF and outcome.auto_facts == ()
+    entry = stored.metadata[RECORD_KEY][-1]
+    assert entry["outcome"] == OUTCOME_NO_CHANGE and entry["mode"] == MODE_FULL
+    assert entry["check"]["facts_only"] is False
+    assert HOLD_KEY not in stored.metadata
+    assert stored.description == BRIEF
+    assert [f["summary"] for f in client.findings] == [
+        f'[BriefReview] brief review at {S2[:12]}: no change — "Every claim in '
+        f'the brief holds at this base." ({_DIAL})'
+    ]
+
+
+async def test_a_facts_only_recheck_that_fails_the_check_is_held(
+    tmp_path: Path,
+) -> None:
+    # The check now governs phase 1's delta path too — a tightening.
+    story = _story(
+        brief_review=[{"run_id": "r0", "outcome": OUTCOME_APPROVED, "base_sha": S1}]
+    )
+
+    outcome, stored = await _run(tmp_path, story, _Review(_PRESCRIPTIVE))
+
+    assert not outcome.proceed
+    assert outcome.escalation["summary"].startswith(f"recheck at {S2[:12]}")
+    assert "read like decisions" in outcome.escalation["summary"]
+    assert stored.metadata[RECORD_KEY][-1]["outcome"] == OUTCOME_PENDING
+    assert stored.metadata[HOLD_KEY] is True
+    assert stored.description == BRIEF
 
 
 async def test_an_approved_review_at_this_base_proceeds_without_a_pass(
@@ -221,6 +364,8 @@ async def test_a_moved_base_with_a_facts_only_recheck_appends_and_proceeds(
     assert outcome.description == stored.description  # the coder gets it too
     entries = stored.metadata[RECORD_KEY]
     assert [e["outcome"] for e in entries] == [OUTCOME_APPROVED, OUTCOME_AUTO_APPENDED]
+    assert entries[-1]["check"]["passed"] is True
+    assert outcome.auto_facts == ("F13. W7 added no refusal hook.",)
     assert HOLD_KEY not in stored.metadata
     assert any(
         f["summary"].startswith("[BriefReview]") and "1 fact" in f["summary"]
@@ -365,3 +510,36 @@ async def test_a_story_lithos_cannot_find_raises(tmp_path: Path) -> None:
 
 def test_the_phase_writes_with_the_plugin_agent_id() -> None:
     assert phase_mod.AGENT_ID == "lithos-loom-story-develop"
+
+
+async def test_a_no_change_finding_clips_the_agent_s_reason(tmp_path: Path) -> None:
+    # security f-003: the reason is the agent's text; the finding is bounded.
+    client = FakeLithosClient(tasks=(_story(),))
+    reason = "[NeedsHuman] spoof " + "x" * 5000
+    review = _Review(f"## No change\n{reason}\n")
+
+    outcome, _ = await _run(tmp_path, _story(), review, client, auto_facts=True)
+
+    assert outcome.proceed
+    (summary,) = [f["summary"] for f in client.findings]
+    # Quoted, so the agent's words never read as loom's own (security f-003).
+    assert summary.startswith(
+        f'[BriefReview] brief review at {S2[:12]}: no change — "[NeedsHuman] spoof'
+    )
+    assert summary.endswith(f'…" ({_DIAL})')
+    assert len(summary) < 400
+
+
+async def test_too_many_facts_to_list_are_held_and_say_so(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop.brief_review_auto import MAX_LISTED_FACTS
+
+    draft = "## Facts\n\n" + "".join(
+        f"- **F{i}. The router has a handler.** `src/router.py:{i}`\n"
+        for i in range(1, MAX_LISTED_FACTS + 2)
+    )
+
+    outcome, stored = await _run(tmp_path, _story(), _Review(draft), auto_facts=True)
+
+    assert not outcome.proceed
+    assert "held: too many facts to list" in outcome.escalation["summary"]
+    assert stored.metadata[HOLD_KEY] is True

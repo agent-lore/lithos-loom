@@ -6,7 +6,9 @@ and prints the addendum it would hold the story for. It writes **nothing** to
 Lithos: no gate, no record, no description change. It is how an operator
 tries the pass on a project before switching it on, and how the pass was
 compared against the lens T3 pilot's hand-written addenda (``--brief-file``
-re-runs a brief without the addendum already appended to it).
+re-runs a brief without the addendum already appended to it). After the
+draft it prints the structural check's verdict: whether dispatch would skip
+the gate with ``develop_brief_review_auto_facts`` on, or hold, and why.
 
 What it resolves is what dispatch resolves: the story's project checkout
 (``[projects.<slug>].repo``), its develop settings (the coder's engine,
@@ -36,6 +38,10 @@ from lithos_loom.plugins.story_develop.brief_review import (
     BriefInputs,
     render_addendum,
     review_brief,
+)
+from lithos_loom.plugins.story_develop.brief_review_auto import (
+    check_auto_facts,
+    describe_verdict,
 )
 from lithos_loom.plugins.story_develop.config import DevelopConfig
 from lithos_loom.plugins.story_develop.daemon_io import fetch_task
@@ -170,6 +176,18 @@ def brief_review_command(
         f"${result.cost_usd:.2f}. Nothing was written to Lithos.",
         err=True,
         fg=typer.colors.GREEN,
+    )
+    typer.echo(
+        describe_verdict(
+            check_auto_facts(addendum),
+            counts={
+                "scope_cut": len(addendum.scope_cuts),
+                "fact": len(addendum.facts),
+                "decision": len(addendum.decisions),
+            },
+            mode=mode,
+        ),
+        err=True,
     )
 
 
