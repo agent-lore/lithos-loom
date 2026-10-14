@@ -288,7 +288,12 @@ def _check_label(row: Mapping[str, Any]) -> str:
     shape = "facts-only" if check.get("facts_only") is True else "not facts-only"
     if check.get("passed") is True:
         return f"{shape}, passed"
-    return f"{shape}, held: {_problems(check)}"
+    # Not "held": a full `No change` pass records passed false with no
+    # problems and still skips its gate. Whether it held is the outcome's.
+    problems = _problems(check)
+    if problems == _NO_VALUE:
+        return f"{shape}, not passed"
+    return f"{shape}, not passed: {problems}"
 
 
 def _problems(check: Mapping[str, Any]) -> str:

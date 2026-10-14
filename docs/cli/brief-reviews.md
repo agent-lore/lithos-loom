@@ -69,7 +69,9 @@ no check: 0 entries (drafted before phase 2, or failed) — outside the false-ho
   `mode: full`. A full pass reaches those outcomes only with the dial on;
   entries record no dial, so this is read from the mode. A delta recheck
   skips its gate whatever the dial says, so it is counted on the heading
-  only.
+  only. The `CHECK` column reads `passed` or `not passed` (with any
+  `problems`), never "held": a full `No change` pass records the check as
+  not facts-only and not passed, yet skipped its gate.
 - **Check false holds** — of the `approved` entries the check held as a
   facts-only draft (`check.facts_only` true, `check.passed` false), those the
   operator approved with every item `unchanged`. Each is listed with the

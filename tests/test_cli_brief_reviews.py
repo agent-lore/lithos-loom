@@ -27,6 +27,7 @@ from lithos_loom.cli.brief_reviews import (
 from lithos_loom.errors import LithosClientError
 from lithos_loom.lithos_client import Task
 from lithos_loom.main import app
+from lithos_loom.plugins.story_develop.brief_review_auto import AutoFactsVerdict
 from tests.support import FakeLithosClient, make_task
 
 runner = CliRunner()
@@ -198,6 +199,24 @@ async def test_an_auto_appended_full_entry_is_listed_as_auto_applied() -> None:
     assert not any("r-delta" in line for line in lines)
     delta = next(line.split() for line in lines if line.split()[:2] == ["k2", "delta"])
     assert delta[2:5] == ["0", "0", "1"]  # pending, approved, auto_appended
+
+
+async def test_an_auto_applied_no_change_entry_is_not_labelled_held() -> None:
+    # the check the phase records on a full `No change` pass: not facts-only,
+    # so not passed, with no problems — and the pass skipped its gate
+    no_change = AutoFactsVerdict(facts_only=False).as_record()
+    rows = await _rows(
+        _story(
+            "s1",
+            _entry("r-quiet", outcome="no_change", items=(), check=no_change),
+        )
+    )
+    lines = render_brief_reviews(rows)
+
+    row = next(line for line in lines if line.startswith("s1 "))
+    assert "r-quiet" in row and "no_change" in row
+    assert row.endswith("not facts-only, not passed")
+    assert "held" not in row
 
 
 async def test_a_held_facts_only_entry_approved_unchanged_is_a_false_hold() -> None:
