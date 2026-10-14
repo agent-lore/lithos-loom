@@ -91,8 +91,9 @@ dialogue-based** cycle.
   whatever the dial says.
 - **structural check** — the deterministic second opinion on a brief review's FACT items
   (`brief_review_auto.py`): a fact passes only if its heading has no prescriptive word
-  (must, should, put, use, add, make, …), it cites a backticked repository path, and it carries
-  no `Basis:` / `Proposed:` line. A fact that fails reads as a decision, and the story is held.
+  (must, should, put, use, add, make, …), it cites a backticked repository path, it carries
+  no `Basis:` / `Proposed:` line, and its body holds no nested item, heading or section name.
+  A fact that fails reads as a decision, and the story is held.
   Its verdict is recorded as `check` on every brief-review entry with a draft.
 - **brief-review hold** / **reserved slot** — a story held for its brief review keeps its
   project's admission slot: the flat flag `metadata.brief_review_hold` counts against

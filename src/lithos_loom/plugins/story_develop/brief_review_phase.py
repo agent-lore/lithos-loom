@@ -76,6 +76,7 @@ from .brief_review_auto import (
 )
 from .config import DevelopConfig
 from .lithos_io import AGENT_ID, TaskContext, explicit_acceptance_criteria
+from .publish_text import publish_line
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ async def run_phase(
                 client,
                 story.id,
                 f"[BriefReview] brief review at {start_sha[:12]}: no change — "
-                f"{addendum.no_change} ({_DIAL})",
+                f"{publish_line(addendum.no_change or '')} ({_DIAL})",
             )
         return PhaseOutcome(proceed=True, start_sha=start_sha, description=description)
     if may_skip and verdict.passed:
@@ -292,7 +293,11 @@ async def run_phase(
     why = ""
     if verdict.facts_only and verdict.problems:
         flagged = sum(1 for item in addendum.facts if fact_problems(item))
-        why = f" — held: {_n(flagged, 'fact')} read like decisions"
+        why = (
+            f" — held: {_n(flagged, 'fact')} read like decisions"
+            if flagged
+            else " — held: too many facts to list in the PR body"
+        )
     return PhaseOutcome(
         proceed=False,
         escalation={

@@ -58,7 +58,10 @@ treated as a decision, and the story is held for the operator:
   has to, goes in, go in, put, use, add, create, move, rename, split,
   extract or make;
 - it never carries a `Basis:` or `Proposed:` line. Those belong to
-  decisions.
+  decisions;
+- its nested lines are plain detail. A nested bold-id bullet
+  (`- **D1. …**`), a heading or a section name inside a fact is held. Write
+  every item as its own top-level bullet under its own section.
 
 ### Decisions: `D#`
 

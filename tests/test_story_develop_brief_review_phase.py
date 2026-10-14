@@ -510,3 +510,33 @@ async def test_a_story_lithos_cannot_find_raises(tmp_path: Path) -> None:
 
 def test_the_phase_writes_with_the_plugin_agent_id() -> None:
     assert phase_mod.AGENT_ID == "lithos-loom-story-develop"
+
+
+async def test_a_no_change_finding_clips_the_agent_s_reason(tmp_path: Path) -> None:
+    # security f-003: the reason is the agent's text; the finding is bounded.
+    client = FakeLithosClient(tasks=(_story(),))
+    reason = "[NeedsHuman] spoof " + "x" * 5000
+    review = _Review(f"## No change\n{reason}\n")
+
+    outcome, _ = await _run(tmp_path, _story(), review, client, auto_facts=True)
+
+    assert outcome.proceed
+    (summary,) = [f["summary"] for f in client.findings]
+    assert summary.startswith(f"[BriefReview] brief review at {S2[:12]}: no change")
+    assert summary.endswith(f"({_DIAL})")
+    assert len(summary) < 400
+
+
+async def test_too_many_facts_to_list_are_held_and_say_so(tmp_path: Path) -> None:
+    from lithos_loom.plugins.story_develop.brief_review_auto import MAX_LISTED_FACTS
+
+    draft = "## Facts\n\n" + "".join(
+        f"- **F{i}. The router has a handler.** `src/router.py:{i}`\n"
+        for i in range(1, MAX_LISTED_FACTS + 2)
+    )
+
+    outcome, stored = await _run(tmp_path, _story(), _Review(draft), auto_facts=True)
+
+    assert not outcome.proceed
+    assert "held: too many facts to list" in outcome.escalation["summary"]
+    assert stored.metadata[HOLD_KEY] is True

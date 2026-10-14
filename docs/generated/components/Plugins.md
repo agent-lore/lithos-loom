@@ -21,7 +21,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.agent_session` | M | 1 | 5 |
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.brief_review` | L | 4 | 10 |
-| `lithos_loom.plugins.story_develop.brief_review_auto` | S | 1 | 6 |
+| `lithos_loom.plugins.story_develop.brief_review_auto` | M | 1 | 6 |
 | `lithos_loom.plugins.story_develop.brief_review_phase` | M | 1 | 2 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |

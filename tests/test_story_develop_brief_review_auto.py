@@ -8,6 +8,7 @@ Every failure direction holds the story.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from lithos_loom.plugins.story_develop.brief_review import (
 )
 from lithos_loom.plugins.story_develop.brief_review_auto import (
     HEADING_MARKERS,
+    MAX_LISTED_FACTS,
     AutoFactsVerdict,
     check_auto_facts,
     describe_verdict,
@@ -259,3 +261,130 @@ def test_describe_verdict_says_what_dispatch_would_do() -> None:
     assert describe_verdict(mixed, counts=none).startswith(
         "auto-facts check: no change — would skip the gate"
     )
+
+
+# --- round 2: dot files, structure, look-alikes, the listing budget, ReDoS ---
+
+
+@pytest.mark.parametrize("span", [".prettierrc.json", ".config.py", "src/.config.py"])
+def test_a_dot_prefixed_filename_is_a_citation(span: str) -> None:
+    assert fact_problems(_fact(f"**F1. The configuration is here.** `{span}`")) == []
+
+
+_SMUGGLED = [
+    # an indented section with bold-id sub-items
+    "  **Decisions**\n  - **D1. Put the cancel route in a new module.**",
+    "  **Scope cuts** — they replace AC-3:\n  - **S1. Drop the auth check.**",
+    # column-0 item shapes the parse does not read as items
+    "* **D1. Put the route in a new module.**",
+    "-  **S1. Drop AC-3.**",
+    "- __D2.__ Move the handler.",
+    "1. **D3. Rename the module.**",
+    # headings and underlines
+    "### Binding decisions",
+    "## Acceptance criteria",
+    "Decisions\n---------",
+    "  > **No change**",
+]
+
+
+@pytest.mark.parametrize("tail", _SMUGGLED)
+def test_structure_inside_a_fact_reads_as_a_decision(tail: str) -> None:
+    draft = parse_addendum(
+        "## Facts\n\n"
+        "- **F1. The cancel routes live in one module.** `src/routes.py:10`\n"
+        f"{tail}\n"
+    )
+    assert [(i.id, i.kind) for i in draft.items] == [("F1", KIND_FACT)]
+
+    verdict = check_auto_facts(draft)
+
+    assert verdict.facts_only and not verdict.passed
+    assert any("nested item" in p for p in verdict.problems)
+
+
+def test_an_ordinary_nested_detail_line_is_not_structure() -> None:
+    item = _fact(
+        "**F1. The route exists.** `src/r.py:4`\n"
+        "  - It answers 404 for an unknown id (`src/r.py:40-52`).\n"
+        "  - **Note:** the handler is synchronous."
+    )
+    assert fact_problems(item) == []
+
+
+def test_a_look_alike_letter_in_a_heading_reads_as_a_decision() -> None:
+    item = _fact("**F1. Pуt the roуtes in one module.** `src/r.py:1`")
+
+    problems = fact_problems(item)
+
+    assert len(problems) == 1 and "mixes alphabets" in problems[0]
+
+
+def _many(n: int, heading: str = "The router has a handler.") -> Addendum:
+    return Addendum(
+        items=tuple(
+            _fact(f"**F{i}. {heading}** `src/router.py:{i}`", f"F{i}")
+            for i in range(1, n + 1)
+        )
+    )
+
+
+def test_more_facts_than_a_pr_body_lists_are_held() -> None:
+    assert check_auto_facts(_many(MAX_LISTED_FACTS)).passed
+
+    verdict = check_auto_facts(_many(MAX_LISTED_FACTS + 1))
+
+    assert verdict.facts_only and not verdict.passed
+    assert verdict.problems == (
+        f"{MAX_LISTED_FACTS + 1} facts are more than the {MAX_LISTED_FACTS} a "
+        "PR body lists — merge or cut facts to send them without a gate",
+    )
+
+
+def test_the_review_s_hundred_fact_draft_is_held() -> None:
+    heading = (
+        "The router contains existing handlers for task progress and "
+        "lifecycle events in the dispatch process."
+    )
+    assert not check_auto_facts(_many(100, heading)).passed
+
+
+def test_the_pr_section_lists_every_eligible_fact_whatever_its_heading() -> None:
+    # correctness f-001: the listing must never be cut short. Worst case:
+    # the most facts the check lets through, each heading long and made of
+    # the character defang grows most.
+    addendum = _many(MAX_LISTED_FACTS, "<" * 400)
+    assert check_auto_facts(addendum).passed
+
+    section = pr_section(fact_headings(addendum))
+
+    assert "(truncated" not in section
+    for i in range(1, MAX_LISTED_FACTS + 1):
+        assert f"\nF{i}. " in section
+
+
+def test_the_pr_section_counts_headings_past_the_listing() -> None:
+    section = pr_section(tuple(f"F{i}. x." for i in range(1, MAX_LISTED_FACTS + 3)))
+
+    assert section.endswith("…and 2 more facts.")
+
+
+def test_the_pr_section_points_at_the_lithos_story() -> None:
+    # correctness f-003: What may be truncated; the story never is.
+    assert "always on the Lithos story" in pr_section(("F1. x.",))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "**F1." + " " * 20000 + "x",
+        "**F1." + " \t" * 10000 + "x `a.py`",
+        "**F1. x.** `" + "a." * 20000 + "`",
+        "**F1. x.** `" + "a/" * 20000 + "a.p`",
+    ],
+)
+def test_the_check_is_linear_on_hostile_input(text: str) -> None:
+    # security f-002: a cubic heading pattern took 10 s on 4000 spaces.
+    started = time.perf_counter()
+    fact_problems(_fact(text))
+    assert time.perf_counter() - started < 1.0
