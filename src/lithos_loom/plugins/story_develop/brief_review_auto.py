@@ -32,6 +32,7 @@ linear in its input — the input is an agent's handoff, up to 1 MiB.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -124,15 +125,25 @@ _DECISION_LINE_RE = re.compile(r"\b(?P<marker>Basis|Proposed):", re.IGNORECASE)
 # decision or scope-cut id — a facts-only addendum has none to refer to; a
 # section word inside emphasis or a tag (``*Decisions*``, ``**Binding
 # decisions:**``, ``<h3>Decisions</h3>``); a table row or HTML line (``|``,
-# ``<!--``). Plus, at a line's start, an ATX heading or a setext underline.
-# Every repetition after a ``<`` is bounded, so each search stays linear.
+# ``<!--``); one of the sentences loom itself renders around an addendum
+# (``render_addendum``'s headers, ``_section_heading``'s texts). Plus, at a
+# line's start, an ATX heading or a setext underline. The emphasised id
+# takes ANY letter (``**Ꭰ1.``, ``**X1.``), and the body is searched NFKC-
+# normalised with combining marks removed, so a look-alike (``Ｄ1``, ``𝐃1``,
+# ``D́1``) reads as the ``D1`` it imitates. Every repetition after a ``<`` is
+# bounded, so each search stays linear.
 _TAG = r"<[A-Za-z!/][^>\n]{0,200}>"
 _SECTION_WORD = r"(?:scope\s+(?:cuts?|changes?)|decisions?|no\s+change)\b"
 _STRUCTURE_SEARCHES = (
-    re.compile(rf"(?:\*\*|__|{_TAG})\W{{0,3}}[SFD]\d+[.:)]"),
+    re.compile(rf"(?:\*\*|__|{_TAG})\W{{0,3}}[^\W\d_]\d+[.:)]"),
     re.compile(r"\b[SD]\d+\b"),
     re.compile(
         rf"(?:\*|(?<!\w)_|{_TAG})[^*_<\n]{{0,40}}?\b{_SECTION_WORD}", re.IGNORECASE
+    ),
+    re.compile(
+        r"they\s+replace\s+the\s+matching\s+parts|no\s+judgment\s+involved"
+        r"|brief\s+review\s+against|recheck\s+against|the\s+item\s+wins",
+        re.IGNORECASE,
     ),
 )
 _STRUCTURE_LINES = (
@@ -217,7 +228,7 @@ def fact_problems(item: BriefItem) -> list[str]:
     if marked:
         lines = ", ".join(f"`{m}:`" for m in marked)
         problems.append(f"{label} reads like a decision: it carries {lines}")
-    body = _OWN_ID_RE.sub("", item.text, count=1)
+    body = _normalised(_OWN_ID_RE.sub("", item.text, count=1))
     body_lines = body.splitlines()
     if any(p.search(body) for p in _STRUCTURE_SEARCHES) or any(
         p.match(line) for line in body_lines[1:] for p in _STRUCTURE_LINES
@@ -235,6 +246,13 @@ def _is_path(span: str) -> bool:
         return False
     match = _PATH_RE.fullmatch(span)
     return match is not None and match.group("ext") in CITATION_EXTENSIONS
+
+
+def _normalised(text: str) -> str:
+    """*text* NFKC-normalised, combining marks removed: compatibility and
+    decorated forms of a letter read as the letter they imitate."""
+    folded = unicodedata.normalize("NFKC", text)
+    return "".join(ch for ch in folded if unicodedata.category(ch) != "Mn")
 
 
 def _mixed_script(word: str) -> bool:
