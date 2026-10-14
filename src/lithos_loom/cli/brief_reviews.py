@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from lithos_loom.cli._deliver_facts import sanitize_for_terminal
 from lithos_loom.lithos_client import TaskClient
 from lithos_loom.plugins.story_develop.brief_review import (
     ITEM_ADDED,
@@ -149,11 +150,25 @@ def false_holds(
     return held, false
 
 
+def _item_list(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The entry's drafted items. ``records_of`` vouches only for the
+    ``outcome``, so ``items`` that is not a list reads as none (and is
+    flagged by the report), never iterated."""
+    items = row.get("items")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, Mapping)]
+
+
+def _malformed_items(row: Mapping[str, Any]) -> bool:
+    return "items" in row and not isinstance(row["items"], list)
+
+
 def _kinds(row: Mapping[str, Any]) -> dict[str, str]:
     """Each drafted item's kind letter by id, from its ``items[].kind``."""
     kinds: dict[str, str] = {}
-    for item in row.get("items") or ():
-        if isinstance(item, Mapping) and isinstance(item.get("id"), str):
+    for item in _item_list(row):
+        if isinstance(item.get("id"), str):
             letter = _KIND_LETTERS.get(_str(item.get("kind")))
             if letter:
                 kinds[item["id"]] = letter
@@ -167,10 +182,12 @@ def _kind_of(item_id: str, kinds: Mapping[str, str]) -> str:
 
 def brief_reviews_output(rows: list[dict[str, Any]], *, as_json: bool) -> list[str]:
     """What the command prints: the rows as one JSON array (one object per
-    entry), or the text report (pure)."""
+    entry; ``json.dumps`` escapes every control byte), or the text report with
+    terminal control bytes stripped — the record is written by Lithos clients,
+    and this is the screen the auto-facts dial is decided on (pure)."""
     if as_json:
         return [json.dumps(rows, indent=2)]
-    return render_brief_reviews(rows)
+    return [sanitize_for_terminal(line) for line in render_brief_reviews(rows)]
 
 
 def render_brief_reviews(rows: list[dict[str, Any]]) -> list[str]:
@@ -184,6 +201,16 @@ def render_brief_reviews(rows: list[dict[str, Any]]) -> list[str]:
     lines += ["", *_edits(rows)]
     lines += ["", *_auto_applied(rows)]
     lines += ["", *_false_hold_section(rows)]
+    malformed = [row for row in rows if _malformed_items(row)]
+    if malformed:
+        names = ", ".join(
+            f"{row['story_id']} {_str(row.get('run_id')) or _NO_VALUE}"
+            for row in malformed
+        )
+        lines += [
+            "",
+            f"malformed items (not a list): {len(malformed)} entries — {names}",
+        ]
     return lines
 
 
@@ -262,11 +289,7 @@ def _problems(check: Mapping[str, Any]) -> str:
 
 
 def _items(row: Mapping[str, Any]) -> str:
-    ids = [
-        _str(item.get("id"))
-        for item in row.get("items") or ()
-        if isinstance(item, Mapping)
-    ]
+    ids = [_str(item.get("id")) for item in _item_list(row)]
     return ",".join(i for i in ids if i) or _NO_VALUE
 
 

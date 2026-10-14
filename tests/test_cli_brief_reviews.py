@@ -487,3 +487,72 @@ def test_cli_reports_a_lithos_error(
 
     assert result.exit_code == 1
     assert "reading brief reviews failed" in result.output
+
+
+# ── untrusted metadata ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("items", [1, True, 2.5, "F1", {"id": "F1"}])
+async def test_a_malformed_items_field_is_flagged_not_a_crash(items: object) -> None:
+    """``records_of`` keeps any mapping with a string outcome, so ``items``
+    may be anything: the report names the entry and keeps the rest."""
+    rows = await _rows(
+        _story(
+            "s1",
+            {**_entry("bad", outcomes={"F1": "edited"}), "items": items},
+            {**_entry("bad-auto", outcome="auto_appended"), "items": items},
+        ),
+        _story("s2", _entry("good", outcomes={"F1": "unchanged"})),
+    )
+    lines = render_brief_reviews(rows)
+
+    assert "approval edits (2 approved entries)" in lines
+    assert "facts edited or cut at a gate: 1" in lines  # F1 by its id letter
+    auto = next(line for line in lines if "bad-auto" in line)
+    assert "auto_appended" in auto and " — " not in auto.split("auto_appended")[0]
+    assert "malformed items (not a list): 2 entries — s1 bad, s1 bad-auto" in lines
+    # the raw record is still passed through whole
+    (text,) = brief_reviews_output(rows, as_json=True)
+    assert json.loads(text)[0]["items"] == items
+
+
+async def test_the_text_report_strips_terminal_control_bytes() -> None:
+    rows = await _rows(
+        _story(
+            "s1",
+            _entry(
+                "r\x1b[2K\x1b]52;c;cGF3bmVk\x07-1",
+                outcome="auto_appended",
+                check={**_CHECK_HELD, "problems": ["F1‮: evil"]},
+            ),
+            _entry(
+                "r\x1b[1A-2",
+                check={**_CHECK_HELD, "problems": ["\x1b[2Khidden"]},
+                outcomes={"F1": "unchanged"},
+            ),
+            project="k2\x1b[31m",
+        )
+    )
+    lines = brief_reviews_output(rows, as_json=False)
+
+    assert not any("\x1b" in line or "\x07" in line for line in lines)
+    assert not any("‮" in line for line in lines)
+    assert "  s1 r[1A-2 — problems: [2Khidden" in lines
+    # --json is escaped by json.dumps, never raw
+    (text,) = brief_reviews_output(rows, as_json=True)
+    assert "\x1b" not in text
+
+
+def test_cli_sanitises_a_lithos_error_message(
+    loom_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeLithosClient()
+    # an OSC title escape: click strips CSI sequences off a non-tty, not OSC
+    fake.raise_on["task_list"] = LithosClientError("internal_error", "x\x1b]0;t\x07y")
+    _patch_client(monkeypatch, fake)
+
+    result = runner.invoke(app, ["brief-reviews"])
+
+    assert result.exit_code == 1
+    assert "\x1b" not in result.output and "\x07" not in result.output
+    assert "reading brief reviews failed" in result.output

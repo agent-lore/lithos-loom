@@ -29,6 +29,7 @@ import typer
 
 from lithos_loom.bus import Event, EventBus
 from lithos_loom.cli import develop_app, obsidian_sync_app, project_app, task_app
+from lithos_loom.cli._deliver_facts import sanitize_for_terminal
 from lithos_loom.cli.brief_reviews import brief_reviews_output, collect_brief_reviews
 from lithos_loom.cli.drain import drain_daemon
 from lithos_loom.cli.gates import collect_gate_rows, render_report
@@ -444,21 +445,15 @@ def gates(
 
 @app.command("brief-reviews")
 def brief_reviews(
-    config: Path | None = typer.Option(
-        None, "--config", "-c", help="Explicit TOML config path."
-    ),
-    project: str | None = typer.Option(
-        None, "--project", help="Only this project's stories (metadata.project)."
-    ),
+    config: Path | None = typer.Option(None, "--config", "-c", help="TOML config."),
+    project: str | None = typer.Option(None, "--project", help="Only this project."),
     since: str | None = typer.Option(
         None, "--since", help="Only entries drafted since <N>d or YYYY-MM-DD (UTC)."
     ),
     as_json: bool = typer.Option(False, "--json", help="One JSON row per entry."),
 ) -> None:
     """Report the stories' brief-review records (read-only; SPEC §4.4b).
-
-    Exit codes: `0` on a report; `1` if the config can't load or Lithos is
-    unreachable; `2` on a bad flag."""
+    Exit `0` on a report, `1` on no config or Lithos, `2` on a bad flag."""
     window = _shadow_window(True, since, project)
     cfg = _load_or_exit(config)
 
@@ -491,7 +486,9 @@ def _listing_or_exit[T](cfg: LoomConfig, what: str, coro: Coroutine[Any, Any, T]
         )
         raise typer.Exit(1) from exc
     except LithosClientError as exc:
-        typer.echo(f"lithos-loom: {what} failed: {exc}", err=True)
+        typer.echo(
+            sanitize_for_terminal(f"lithos-loom: {what} failed: {exc}"), err=True
+        )
         raise typer.Exit(1) from exc
 
 
