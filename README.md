@@ -14,6 +14,7 @@ It is the orchestration layer that connects Lithos to coding agents — replacin
 - [`docs/cli/project-import.md`](docs/cli/project-import.md) — `project import` full reference.
 - [`docs/cli/project-regenerate-done.md`](docs/cli/project-regenerate-done.md) — `project regenerate-done` full reference.
 - [`docs/cli/project-github-repos.md`](docs/cli/project-github-repos.md) — `project add-github-repo` / `remove-github-repo` / `enable-github` / `disable-github` / `migrate-github-tags` reference.
+- [`docs/cli/brief-reviews.md`](docs/cli/brief-reviews.md) — `brief-reviews` report reference.
 - [`docs/macros/README.md`](docs/macros/README.md) — Templater macro install + behaviour notes.
 - [`docs/result-schema.json`](docs/result-schema.json) — plugin `result.json` JSON Schema.
 - [`docs/prd/`](docs/prd/) — PRDs for queued work (Track 2 plugin bodies, A1–A10 roadmap, GitHub watcher, capture-macro tag parsing). Shipped PRDs are under [`docs/prd/archive/`](docs/prd/archive/).
@@ -145,6 +146,7 @@ Lithos and Influx run as docker services because they're services — long-lived
 | `lithos-loom validate-config --dry-run` | Also poll Lithos and print which routes / subscriptions would fire for each open task. |
 | `lithos-loom config --show` | Print the merged effective config. |
 | `lithos-loom gates [--shadow]` | Read-only inventory of every open gate and each gate's waiter health. |
+| `lithos-loom brief-reviews [--project S] [--since D] [--json]` | Read-only report over the stories' brief-review records: outcomes, approval edits, auto-applied entries, the check's false holds. See [`docs/cli/brief-reviews.md`](docs/cli/brief-reviews.md). |
 | `lithos-loom task create --project X --title Y …` | Create a Lithos task and emit its projected line. Used by the capture macro. |
 | `lithos-loom project list [--source lithos\|toml] [--format text\|json]` | List projects with status overlay. |
 | `lithos-loom project create --title T [--slug S] …` | Create a new Lithos project-context doc. Used by the `create-project` macro. |
