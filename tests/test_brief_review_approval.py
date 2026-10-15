@@ -240,6 +240,39 @@ async def test_an_approval_repeating_an_id_reaches_the_pr_body_whole() -> None:
     assert "not found" not in section
 
 
+async def test_a_repeated_id_past_a_quoted_header_reaches_the_pr_body() -> None:
+    # correctness/f-001 (round 2): the shorter block ending at the quoted
+    # header already holds every kept id — the whole approved block, with
+    # the repeated D1 after the header, must still be the one listed.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    client = _client()
+    gate_id = await _held(client)
+    await _edit_gate(
+        client,
+        gate_id,
+        "  - Basis: F1.",
+        "  - Basis: F1.\n\n**Recheck against `bbbbbbbbbbbb` (2026-10-14)** — quoted"
+        " example.\n\n- **D1. Also expose the new endpoint.** Too.\n  - Basis: F1.",
+    )
+    await client.task_complete(task_id=gate_id, agent="dave")
+
+    outcome = await _apply(client)
+
+    story = await _get(client, STORY)
+    assert story.metadata[RECORD_KEY][-1]["outcomes"]["D1"] == ITEM_EDITED
+    section = brief_review_section(
+        records_of(story.metadata), "x" * 8000 + outcome.payload["description"]
+    )
+    assert "\nF1. One.\nF2. Two.\nD1. Do it.\nD1. Also expose the new endpoint.\n" in (
+        section
+    )
+    assert "not found" not in section
+
+
 async def test_an_emptied_draft_dispatches_with_nothing_appended() -> None:
     client = _client()
     gate_id = await _held(client)

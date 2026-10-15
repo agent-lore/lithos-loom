@@ -100,8 +100,9 @@ def find_blocks(
     ends nothing. The appenders only append, so the newest entry pairs with
     the LAST matching candidate, and the next-newest with one before it —
     pairing in order of appearance, with text earlier in the description
-    (anything the story said before its addenda) tried last; found blocks do
-    not overlap. A text no record vouches for can stand in for no addendum.
+    (anything the story said before its addenda) tried last, and the
+    longest matching block under a header first; found blocks do not
+    overlap. A text no record vouches for can stand in for no addendum.
 
     An item opens and closes at the same lines whichever block it is parsed
     in, so the description is parsed once (:func:`_spans`) and each candidate
@@ -147,7 +148,8 @@ def _spans(
     at = 0
     for item in items:
         own = item.text.split("\n")
-        while at < len(lines) and lines[at] != f"- {own[0]}":
+        opening = f"- {own[0]}"
+        while at < len(lines) and lines[at] != opening:
             at += 1
         if at == len(lines):
             break
@@ -175,9 +177,10 @@ def _search(
     taken: Sequence[tuple[int, int]],
 ) -> Iterator[tuple[int, int]]:
     """The ``(start, end)`` lines of each block *entry*'s record could be,
-    most likely first: the newest candidate header first, ending where its
-    last item can — checked from *spans* the way :func:`matches_record`
-    checks a parse (ids, and digests where the record has them).
+    most likely first: the newest candidate header first, its longest block
+    first, ending where its last item can — checked from *spans* the way
+    :func:`matches_record` checks a parse (ids, and digests where the record
+    has them).
 
     Whether a block whose last item is ``spans[p]`` holds the recorded text
     does not depend on where it starts, past its ids all being seen
@@ -211,10 +214,13 @@ def _search(
         if unique:
             low = max(low, first + len(allowed) - 1)
             stop = min(stop, first + len(allowed))
-        at = bisect.bisect_left(last_items, low)
-        while at < len(last_items) and last_items[at] < stop:
+        # the longest block first: an approval's repeated `edited` id may sit
+        # past a header its items quote, and a shorter block already holds
+        # every kept id — only the whole block lists every copy
+        at = bisect.bisect_left(last_items, stop) - 1
+        while at >= 0 and last_items[at] >= low:
             yield start, last_ends[at]
-            at += 1
+            at -= 1
 
 
 def _scan(
@@ -301,9 +307,10 @@ def _expected(
     """What *entry*'s block must hold, as :func:`matches_record` reads it:
     the ids, the digest each checked id's (last) text has, and whether ids
     must be unique. ``None``: no block can be its."""
+    items = entry.get("items")
     recorded: dict[str, object] = {
         item["id"]: item.get("sha")
-        for item in entry.get("items") or ()
+        for item in (items if isinstance(items, list) else ())
         if isinstance(item, Mapping) and isinstance(item.get("id"), str)
     }
     if entry.get("outcome") == OUTCOME_AUTO_APPENDED:

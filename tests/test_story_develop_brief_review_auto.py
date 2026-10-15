@@ -1071,3 +1071,35 @@ def test_the_search_finds_every_block_a_full_parse_would() -> None:
             entry,
         )
     assert hits > 50
+
+
+def test_the_item_search_is_linear_behind_a_long_first_line() -> None:
+    # security/f-001 (round 2): a long item first line after many head lines.
+    size = 512_000
+    description = (
+        "x\n" * (size // 8)
+        + f"\n**Brief review against `{_B[:12]}` (2026-10-14)** — x.\n\n"
+        + "- **F1. "
+        + "a" * (size // 2)
+        + "**\n"
+    )
+    started = time.perf_counter()
+    brief_review_section([_entry("approved", _B, _APPROVED_B)], description)
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    ("outcome", "items"), [("approved", 5), ("auto_appended", True)]
+)
+def test_a_malformed_record_items_reads_as_not_found(
+    outcome: str, items: object
+) -> None:
+    # security/f-002 (round 2): `items` that is not a list is never iterated.
+    mode = "delta" if outcome == "auto_appended" else "full"
+    text = _RECHECK_A if outcome == "auto_appended" else _APPROVED_B
+    base = _A if outcome == "auto_appended" else _B
+    entry = {**_entry(outcome, base, text, mode=mode), "items": items}
+
+    section = brief_review_section([entry], f"T\n\n{text}")
+
+    assert "not found in the description" in section
