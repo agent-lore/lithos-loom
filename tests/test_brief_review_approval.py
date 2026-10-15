@@ -510,8 +510,12 @@ async def test_the_recorded_offset_finds_the_approval_in_the_task_text() -> None
 
     assert "\nD1. Preserve the rendered headers.\n" in section
     assert "not found" not in section
-    # without the offset, the bound is spent before the approval is reached
-    assert "not found" in brief_review_section(records, ctx.task_text)
+    # correctness/f-003 (round 5): the operator edits the brief before the
+    # intact approval, so the recorded offset is stale — still found
+    edited = dataclasses.replace(ctx, description="!" + description)
+    section = brief_review_section(records, edited.task_text, body_at=edited.body_at)
+    assert "\nD1. Preserve the rendered headers.\n" in section
+    assert "not found" not in section
 
 
 async def test_an_emptied_draft_dispatches_with_nothing_appended() -> None:

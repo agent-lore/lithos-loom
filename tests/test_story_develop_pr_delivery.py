@@ -666,8 +666,10 @@ def test_deliver_finds_an_approval_by_its_offset_in_the_task_text(
     assert "not found" not in brief
     for line in listed:
         assert f"\n{line}\n" in brief
-    # …which the search over the task text alone cannot do
-    assert "not found" in brief_review_section((entry,), ctx.task_text)
+    # …and a stale offset (an edit before the approval) still finds it
+    assert "not found" not in brief_review_section(
+        (entry,), ctx.task_text, body_at=ctx.body_at + 1
+    )
 
 
 def test_deliver_adds_no_section_without_records(

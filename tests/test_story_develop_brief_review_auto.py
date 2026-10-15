@@ -1418,6 +1418,62 @@ def test_text_appended_after_an_approval_cannot_crowd_it_out() -> None:
     section = brief_review_section([entry], description)
 
     assert time.perf_counter() - started < 1.0
-    assert "not found" in unplaced  # the bound held without the offset
+    # …and found without it: no window but the text has its shape
+    assert "not found" not in unplaced
     assert "not found" not in section
     assert all(f"\n{line}" in section for line in listed[:5])
+
+
+def test_an_edit_before_an_intact_approval_does_not_lose_it() -> None:
+    # correctness/f-003 (converge round 5): the approval quotes its own first
+    # line 200 times, a recheck of rows as wide follows, and the operator
+    # then edits the brief before it — the recorded offset is stale. Only a
+    # window of the text's exact shape is hashed, so the quoted copies spend
+    # nothing and the intact approval is found through the task text.
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+
+    first = f"**Brief review against `{_B[:12]}` (2026-10-15)** — check."
+    approval = (
+        f"{first}\n\n**Decisions**\n\n"
+        "- **D1. Preserve the rendered headers.** Keep them.\n  - Basis: F1.\n"
+        f"  Example{'.' * 38}\n\n" + "\n".join([first] * 200)
+    )
+    facts = "\n".join(
+        f"- **F{i:02d}. The router exposes a handler.** `src/router.py:1234`"
+        for i in range(1, 41)
+    )
+    recheck = (
+        f"**Recheck against `{_A[:12]}` (2026-10-15)** — moved.\n\n**Facts**\n\n{facts}"
+    )
+    assert validate_addendum(parse_addendum(approval), strict=False) == []
+    assert check_auto_facts(parse_addendum(recheck)).passed
+    brief = ("brief " * 1400).rstrip()
+    approved = _approve(approval, approval)
+    approved["appended"] = appended_mark(approval, at=len(brief) + 2)
+    records = [approved, _entry("auto_appended", _A, recheck, mode="delta")]
+
+    for head in (brief, brief + "!"):  # as approved, then edited
+        description = _appended(head, approval, recheck)
+        ctx = TaskContext("t", "Retain the rendered headers", description, None, {})
+
+        section = brief_review_section(records, ctx.task_text, body_at=ctx.body_at)
+
+        assert "\nD1. Preserve the rendered headers.\n" in section, head[-1]
+        assert "not found" not in section
+
+
+def test_text_crafted_to_the_recorded_shape_is_bounded() -> None:
+    # security/f-005 (converge round 5): only a window the recorded shape
+    # fits is hashed whole — length, line count, first and last line. Text
+    # crafted so every line start fits it, none the recorded text, spends the
+    # bound and the entry is not found, fast.
+    text = "h\nx\n" * 2_000 + "h"
+    entry = _approve(_APPROVED_B, _APPROVED_B)
+    entry["appended"] = {**appended_mark(text), "sha": "0" * 16}
+    description = "h\nx\n" * 200_000 + "h\n"
+
+    started = time.perf_counter()
+    found = find_blocks([entry], description)
+
+    assert time.perf_counter() - started < 1.0
+    assert found == [None]
