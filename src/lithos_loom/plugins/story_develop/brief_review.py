@@ -137,8 +137,9 @@ _ID_RE = re.compile(r"^[SFD]\d+$")
 _BASIS_RE = re.compile(
     r"^[ \t]*(?:-[ \t]*)?Basis:[ \t]*\S", re.IGNORECASE | re.MULTILINE
 )
-# The rendered no-change line: ``No change: <reason>``.
-_NO_CHANGE_LINE_RE = re.compile(r"^No change:[ \t]*(?P<reason>.*\S)", re.MULTILINE)
+# The rendered no-change line: ``No change: <reason>``. Linear: one run to
+# the line's end, stripped after (an empty reason is no reason).
+_NO_CHANGE_LINE_RE = re.compile(r"^No change:(?P<reason>[^\n]*)", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -236,9 +237,8 @@ def parse_addendum(text: str) -> Addendum:
             stray.append(line.strip())
     close()
     if no_change is None:
-        rendered = _NO_CHANGE_LINE_RE.search(text)
-        if rendered is not None:
-            no_change = rendered.group("reason").strip()
+        reasons = (m.group("reason").strip() for m in _NO_CHANGE_LINE_RE.finditer(text))
+        no_change = next((reason for reason in reasons if reason), None)
     elif no_change_lines:
         no_change = " ".join(no_change_lines)
     return Addendum(items=tuple(items), no_change=no_change, stray=tuple(stray))

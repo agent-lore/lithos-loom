@@ -17,6 +17,8 @@ import dataclasses
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import BRIEF_REVIEW_REASON, create_human_gate
 from lithos_loom.lithos_client import Task
@@ -146,6 +148,12 @@ async def test_an_approved_draft_is_appended_verbatim_and_settled() -> None:
         "F2": ITEM_UNCHANGED,
         "D1": ITEM_UNCHANGED,
     }
+    # what and where the text is (security/f-003, converge round 3): its
+    # offset in the description as stripped
+    block = _DRAFT.strip()
+    at = (story.description or "").strip().index(block)
+    assert entry["appended"]["at"] == at == len(BRIEF) + 2
+    assert entry["appended"]["chars"] == len(block)
     assert HOLD_KEY not in story.metadata  # the slot is the run's now
 
 
@@ -181,6 +189,333 @@ async def test_the_operator_s_edits_are_what_is_appended_and_recorded() -> None:
         "D2": ITEM_ADDED,
     }
     assert entry["operator_note"] == "cut F2; D1 the other way"
+
+
+async def test_an_applied_approval_is_what_the_pr_body_lists() -> None:
+    # The PR body's `## Brief review` verifies each block against its record:
+    # the operator's edited approval, as appended, must still match it.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    client = _client()
+    gate_id = await _held(client)
+    await _edit_gate(client, gate_id, "- **F2. Two.** `b.py:2`.\n", "")
+    await _edit_gate(client, gate_id, "this way.", "that way.")
+    await client.task_complete(task_id=gate_id, agent="dave")
+
+    outcome = await _apply(client)
+
+    story = await _get(client, STORY)
+    section = brief_review_section(
+        records_of(story.metadata), outcome.payload["description"]
+    )
+    assert "\nF1. One.\nD1. Do it.\n" in section
+    assert "F2." not in section and "not found" not in section
+
+
+async def test_an_approval_repeating_an_id_reaches_the_pr_body_whole() -> None:
+    # correctness/f-002 (round 3): the approval appends an operator's
+    # repeated id unvalidated, recording it `edited`; the PR body still lists
+    # the whole addendum — both copies and the unchanged items.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    client = _client()
+    gate_id = await _held(client)
+    await _edit_gate(
+        client,
+        gate_id,
+        "  - Basis: F1.",
+        "  - Basis: F1.\n- **D1. Also expose the new endpoint.** too.\n  - Basis: F1.",
+    )
+    await client.task_complete(task_id=gate_id, agent="dave")
+
+    outcome = await _apply(client)
+
+    assert outcome.applied
+    story = await _get(client, STORY)
+    assert story.metadata[RECORD_KEY][-1]["outcomes"]["D1"] == ITEM_EDITED
+    section = brief_review_section(
+        records_of(story.metadata), "x" * 8000 + outcome.payload["description"]
+    )
+    assert "\nF1. One.\nF2. Two.\nD1. Do it.\nD1. Also expose the new endpoint.\n" in (
+        section
+    )
+    assert "not found" not in section
+
+
+async def test_a_repeated_id_past_a_quoted_header_reaches_the_pr_body() -> None:
+    # correctness/f-001 (round 2): the shorter block ending at the quoted
+    # header already holds every kept id — the whole approved block, with
+    # the repeated D1 after the header, must still be the one listed.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    client = _client()
+    gate_id = await _held(client)
+    await _edit_gate(
+        client,
+        gate_id,
+        "  - Basis: F1.",
+        "  - Basis: F1.\n\n**Recheck against `bbbbbbbbbbbb` (2026-10-14)** — quoted"
+        " example.\n\n- **D1. Also expose the new endpoint.** Too.\n  - Basis: F1.",
+    )
+    await client.task_complete(task_id=gate_id, agent="dave")
+
+    outcome = await _apply(client)
+
+    story = await _get(client, STORY)
+    assert story.metadata[RECORD_KEY][-1]["outcomes"]["D1"] == ITEM_EDITED
+    section = brief_review_section(
+        records_of(story.metadata), "x" * 8000 + outcome.payload["description"]
+    )
+    assert "\nF1. One.\nF2. Two.\nD1. Do it.\nD1. Also expose the new endpoint.\n" in (
+        section
+    )
+    assert "not found" not in section
+
+
+@pytest.mark.parametrize("heading", ["", "**Decisions**\n\n"])
+async def test_a_quote_of_the_block_s_own_header_stands_in_for_no_part_of_it(
+    heading: str,
+) -> None:
+    # correctness/f-001 (rounds 3, 4): a quoted copy of the block's OWN
+    # header (same mode and base) between two copies of a repeated kept id,
+    # with or without a section heading after it: the suffix from the quote
+    # holds every kept id too, but the whole block — both D1s — is listed.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    client = _client()
+    gate_id = await _held(client)
+    await _edit_gate(client, gate_id, "- **F1. One.** `a.py:1`.\n", "")
+    await _edit_gate(client, gate_id, "- **F2. Two.** `b.py:2`.\n", "")
+    await _edit_gate(
+        client,
+        gate_id,
+        "  - Basis: F1.",
+        "  - Basis: F1.\n\n**Brief review against `aaaaaaaaaaaa` (2026-10-14)** —"
+        f" quoted example.\n\n{heading}- **D1. Also expose the new endpoint.** Too.\n"
+        "  - Basis: F1.",
+    )
+    await client.task_complete(task_id=gate_id, agent="dave")
+
+    outcome = await _apply(client)
+
+    story = await _get(client, STORY)
+    outcomes = story.metadata[RECORD_KEY][-1]["outcomes"]
+    assert outcomes == {"F1": ITEM_CUT, "F2": ITEM_CUT, "D1": ITEM_EDITED}
+    section = brief_review_section(
+        records_of(story.metadata), "x" * 8000 + outcome.payload["description"]
+    )
+    assert "\nD1. Do it.\nD1. Also expose the new endpoint.\n" in section
+    assert "not found" not in section
+
+
+_HEADER = "**Brief review against `aaaaaaaaaaaa` (2026-10-14)**"
+
+
+def _decisions(*titles: str) -> str:
+    items = "\n".join(
+        f"- **D{i}. {title}** x\n  - Basis: F1." for i, title in enumerate(titles, 1)
+    )
+    return f"{_HEADER} — checked.\n\n**Decisions**\n\n{items}"
+
+
+async def _approve_next(client: FakeLithosClient, run_id: str, draft: str, edited: str):
+    """Hold the story again under *draft* (its records kept), approve the
+    gate with the operator's *edited* text, and apply it."""
+    story = await _get(client, STORY)
+    entry = draft_entry(
+        run_id=run_id,
+        mode=MODE_FULL,
+        base_sha="a" * 40,
+        addendum=parse_addendum(draft),
+        drafted_at=datetime(2026, 10, 5, 20, 0, tzinfo=UTC),
+        outcome=OUTCOME_PENDING,
+    )
+    await client.task_update(
+        task_id=STORY,
+        metadata={
+            RECORD_KEY: [*story.metadata.get(RECORD_KEY, []), entry],
+            HOLD_KEY: True,
+        },
+    )
+    gate_id = await create_human_gate(
+        client,
+        story_id=STORY,
+        story_title="T3-W8",
+        project="lithos-lens",
+        agent="loom",
+        route="story-develop",
+        reason=BRIEF_REVIEW_REASON,
+        summary="brief review",
+        run_id=run_id,
+        brief={"base_sha": "a" * 40, "mode": MODE_FULL, "addendum": draft},
+    )
+    await _edit_gate(client, gate_id, draft, edited)
+    await client.task_complete(task_id=gate_id, agent="dave")
+    return await _apply(client)
+
+
+async def test_an_older_block_quoting_its_header_keeps_the_newer_one_whole() -> None:
+    # correctness/f-001 (round 5): an older approval quotes its own header
+    # (with a section heading) between two copies of its edited D1; a newer
+    # approval under the same header edits all of D1..D40. The approval
+    # records where each block's text is, so each lists exactly its own.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    client = _client()
+    older = _decisions("Older first.").replace(
+        "  - Basis: F1.",
+        f"  - Basis: F1.\n\n{_HEADER} — quoted.\n\n**Decisions**\n\n"
+        "- **D1. Older repeated.** y\n  - Basis: F1.",
+    )
+    await _approve_next(client, "r-old", _decisions("Drafted."), older)
+    drafts = [f"Drafted {i}." for i in range(1, 41)]
+    newer = [f"Newer decision {i}." for i in range(1, 41)]
+    outcome = await _approve_next(
+        client, "r-new", _decisions(*drafts), _decisions(*newer)
+    )
+
+    story = await _get(client, STORY)
+    records = records_of(story.metadata)
+    assert set(records[-1]["outcomes"].values()) == {ITEM_EDITED}
+    section = brief_review_section(records, "x" * 8000 + outcome.payload["description"])
+
+    first, second = section.split("(mode `full`, outcome `approved`)")[1:]
+    assert "\nD1. Older first.\nD1. Older repeated.\n" in first
+    assert "Newer" not in first and "Older" not in second
+    assert "\nD40. Newer decision 40.\n" in second
+    assert "more items" not in section and "not found" not in section
+
+
+async def test_an_example_under_the_header_in_the_brief_is_not_listed() -> None:
+    # correctness/f-003 (round 5): the brief itself holds an example under
+    # the addendum's exact header with 40 D1 items; the approved one-item
+    # addendum's own heading is what the PR lists, not the example's.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    example = _decisions(*(f"Example heading {i}." for i in range(40))).replace(
+        "- **D2.", "- **D1."
+    )
+    example = "\n".join(
+        line.replace(line[: line.index(".")], "- **D1")
+        if line.startswith("- **D")
+        else line
+        for line in example.splitlines()
+    )
+    story = make_task(
+        STORY,
+        title="T3-W8",
+        description=f"{'x' * 8000}\n\n{example}\n\nThe brief continues.",
+        metadata={"project": "lithos-lens", "prd": "docs/prd/t3.md"},
+        tags=("trigger:story-develop",),
+    )
+    client = FakeLithosClient(tasks=(story,), agent_id="loom")
+    genuine = _decisions("Genuine approved heading.")
+    outcome = await _approve_next(client, "r-1", genuine, genuine)
+
+    fresh = await _get(client, STORY)
+    assert fresh.metadata[RECORD_KEY][-1]["outcomes"] == {"D1": ITEM_UNCHANGED}
+    section = brief_review_section(
+        records_of(fresh.metadata), outcome.payload["description"]
+    )
+    assert "\nD1. Genuine approved heading.\n" in section
+    assert "Example heading" not in section and "more items" not in section
+
+
+async def test_a_legacy_approval_is_listed_by_its_record_ids() -> None:
+    # The same story, approved before approvals recorded the text they
+    # append (no `appended`): loom does not search the description for it,
+    # so the example cannot stand in — its record's ids are listed, bare.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    example = "\n".join(
+        f"- **D1. Example heading {i}.** x\n  - Basis: F1." for i in range(40)
+    )
+    story = make_task(
+        STORY,
+        title="T3-W8",
+        description=f"{'x' * 8000}\n\n{_HEADER} — e.\n\n**Decisions**\n\n"
+        f"{example}\n\nThe brief continues.",
+        metadata={"project": "lithos-lens", "prd": "docs/prd/t3.md"},
+        tags=("trigger:story-develop",),
+    )
+    client = FakeLithosClient(tasks=(story,), agent_id="loom")
+    genuine = _decisions("Genuine approved heading.")
+    outcome = await _approve_next(client, "r-1", genuine, genuine)
+
+    fresh = await _get(client, STORY)
+    records = records_of(fresh.metadata)
+    legacy = {k: v for k, v in records[-1].items() if k != "appended"}
+    section = brief_review_section([legacy], outcome.payload["description"])
+    assert section.endswith("\nD1\n```")
+    assert "before loom recorded the text it appends" in section
+    assert "Genuine" not in section and "Example" not in section
+
+
+async def test_the_recorded_offset_finds_the_approval_in_the_task_text() -> None:
+    # correctness/f-003, security/f-004 (converge round 4): the offset the
+    # approval records is the one delivery tries, in the text it searches —
+    # the task text, past a title and a description with leading space —
+    # however text appended after the approval spends the search's bound.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+    from tests.support.brief_review import crowding_tail
+
+    story = make_task(
+        STORY,
+        title="Retain the rendered headers",
+        description=f"\n  {'x' * 8400}\n\nThe brief.\n",
+        metadata={"project": "lithos-lens", "prd": "docs/prd/t3.md"},
+        tags=("trigger:story-develop",),
+    )
+    client = FakeLithosClient(tasks=(story,), agent_id="loom")
+    # pilot-sized (F11: 7.7k-13.4k characters)
+    approved = _decisions(
+        "Preserve the rendered headers.",
+        *(f"Keep rule {i} {'in place ' * 36}." for i in range(2, 41)),
+    )
+    assert len(approved) > 12_000
+    outcome = await _approve_next(client, "r-1", approved, approved)
+    assert outcome.applied
+
+    fresh = await _get(client, STORY)
+    block = approved.strip()
+    description = (fresh.description or "") + crowding_tail(block)
+    ctx = TaskContext(STORY, fresh.title, description, None, fresh.metadata)
+    records = records_of(fresh.metadata)
+    section = brief_review_section(records, ctx.task_text, body_at=ctx.body_at)
+
+    assert "\nD1. Preserve the rendered headers.\n" in section
+    assert "not found" not in section
+    # correctness/f-003 (round 5): the operator edits the brief before the
+    # intact approval, so the recorded offset is stale — still found
+    edited = dataclasses.replace(ctx, description="!" + description)
+    section = brief_review_section(records, edited.task_text, body_at=edited.body_at)
+    assert "\nD1. Preserve the rendered headers.\n" in section
+    assert "not found" not in section
 
 
 async def test_an_emptied_draft_dispatches_with_nothing_appended() -> None:

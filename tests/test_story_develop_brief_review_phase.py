@@ -222,7 +222,7 @@ async def test_a_facts_only_full_pass_with_the_dial_on_skips_the_gate(
         "- **F13. W7 added no refusal hook.** `write_funnel.py:536`."
     )
     assert outcome.description == stored.description
-    assert outcome.auto_facts == ("F13. W7 added no refusal hook.",)
+    assert outcome.records == tuple(stored.metadata[RECORD_KEY])  # as written
     entry = stored.metadata[RECORD_KEY][-1]
     assert entry["outcome"] == OUTCOME_AUTO_APPENDED and entry["mode"] == MODE_FULL
     assert entry["check"] == {"facts_only": True, "passed": True, "problems": []}
@@ -240,7 +240,7 @@ async def test_one_decision_holds_even_with_the_dial_on(tmp_path: Path) -> None:
         tmp_path, _story(), _Review(_WITH_DECISION), auto_facts=True
     )
 
-    assert not outcome.proceed and outcome.auto_facts == ()
+    assert not outcome.proceed
     assert outcome.escalation["brief"]["check"]["facts_only"] is False
     assert "read like decisions" not in outcome.escalation["summary"]
     assert stored.metadata[RECORD_KEY][-1]["outcome"] == OUTCOME_PENDING
@@ -299,7 +299,8 @@ async def test_a_full_no_change_with_the_dial_on_proceeds_as_no_change(
     outcome, stored = await _run(tmp_path, _story(), review, client, auto_facts=True)
 
     assert outcome.proceed and outcome.start_sha == S2
-    assert outcome.description == BRIEF and outcome.auto_facts == ()
+    assert outcome.description == BRIEF
+    assert outcome.records == tuple(stored.metadata[RECORD_KEY])
     entry = stored.metadata[RECORD_KEY][-1]
     assert entry["outcome"] == OUTCOME_NO_CHANGE and entry["mode"] == MODE_FULL
     assert entry["check"]["facts_only"] is False
@@ -343,6 +344,7 @@ async def test_an_approved_review_at_this_base_proceeds_without_a_pass(
     assert outcome.description == BRIEF
     assert review.calls == []
     assert stored.metadata[RECORD_KEY] == story.metadata[RECORD_KEY]
+    assert outcome.records == tuple(story.metadata[RECORD_KEY])
 
 
 async def test_a_moved_base_with_a_facts_only_recheck_appends_and_proceeds(
@@ -365,7 +367,7 @@ async def test_a_moved_base_with_a_facts_only_recheck_appends_and_proceeds(
     entries = stored.metadata[RECORD_KEY]
     assert [e["outcome"] for e in entries] == [OUTCOME_APPROVED, OUTCOME_AUTO_APPENDED]
     assert entries[-1]["check"]["passed"] is True
-    assert outcome.auto_facts == ("F13. W7 added no refusal hook.",)
+    assert outcome.records == tuple(entries)  # the PR body lists both
     assert HOLD_KEY not in stored.metadata
     assert any(
         f["summary"].startswith("[BriefReview]") and "1 fact" in f["summary"]
@@ -543,3 +545,28 @@ async def test_too_many_facts_to_list_are_held_and_say_so(tmp_path: Path) -> Non
     assert not outcome.proceed
     assert "held: too many facts to list" in outcome.escalation["summary"]
     assert stored.metadata[HOLD_KEY] is True
+
+
+async def test_the_records_the_phase_writes_list_its_appended_facts(
+    tmp_path: Path,
+) -> None:
+    # The PR body's section finds each addendum by the text its appender
+    # recorded appending: the auto path records it as the approval does,
+    # with its offset in the description as stripped.
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+    from lithos_loom.plugins.story_develop.brief_review_blocks import find_blocks
+
+    outcome, stored = await _run(
+        tmp_path, _story(), _Review(_FACTS_ONLY), auto_facts=True
+    )
+
+    mark = outcome.records[-1]["appended"]
+    body = stored.description.strip()
+    assert body[mark["at"] : mark["at"] + mark["chars"]].startswith("**Brief review")
+    assert body.endswith(body[mark["at"] :])
+    assert find_blocks(outcome.records, body) != [None]
+    section = brief_review_section(outcome.records, stored.description)
+    assert "F13. W7 added no refusal hook." in section
+    assert "not found" not in section and "listed by id" not in section

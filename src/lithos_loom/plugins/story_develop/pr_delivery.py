@@ -30,7 +30,7 @@ from lithos_loom.github_models import (
 )
 
 from . import run_outcome
-from .brief_review_auto import pr_section
+from .brief_review_auto import brief_review_section
 from .github_access import github_call, repo_name_with_owner
 from .publish_text import fence_untrusted, publish_title
 
@@ -142,8 +142,8 @@ def build_pr_body(
     One body builder, so a hand delivery's PR reads like every other.
 
     *brief_review* is a pre-fenced ``## Brief review`` section
-    (:func:`~.brief_review_auto.pr_section`): the facts the brief review
-    appended without a gate, listed apart because they are the tail of
+    (:func:`~.brief_review_auto.brief_review_section`): every addendum the
+    brief review appended, listed apart because they are the tail of
     *description* — the first text its cap cuts.
     """
     parts = ["## What", "", fence_untrusted(description), ""]
@@ -695,7 +695,11 @@ def deliver(
         cost_usd=result.total_cost_usd,
         task_id=task_id,
         issue_closes=closes_line(github_issue_url, repo),
-        brief_review=pr_section(config.brief_facts),
+        brief_review=brief_review_section(
+            config.brief_records,
+            config.description,
+            body_at=config.description_body_at,
+        ),
     )
     pr_url = create_pr(
         wt, branch=result.branch, base=config.base_branch, title=title, body=body

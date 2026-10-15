@@ -67,6 +67,12 @@ class TaskContext:
         body = (self.description or "").strip()
         return f"{self.title}\n\n{body}" if body else self.title
 
+    @property
+    def body_at(self) -> int:
+        """Where the description, stripped, starts in :attr:`task_text` — the
+        origin of a brief-review approval's recorded offset."""
+        return len(self.title) + 2 if (self.description or "").strip() else 0
+
 
 def explicit_acceptance_criteria(metadata: Mapping[str, Any]) -> str | None:
     """A story's ``metadata.acceptance_criteria`` — the explicit criteria the

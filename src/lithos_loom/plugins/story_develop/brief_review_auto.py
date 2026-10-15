@@ -33,17 +33,32 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
-from .brief_review import KIND_FACT, MODE_DELTA, MODE_FULL, Addendum, BriefItem
+from .brief_review import (
+    ITEM_ADDED,
+    ITEM_EDITED,
+    ITEM_UNCHANGED,
+    KIND_FACT,
+    MODE_DELTA,
+    MODE_FULL,
+    OUTCOME_APPROVED,
+    OUTCOME_AUTO_APPENDED,
+    Addendum,
+    BriefItem,
+)
+from .brief_review_blocks import entry_header, find_blocks
 from .publish_text import fence_untrusted, publish_line
 
 __all__ = [
     "CITATION_EXTENSIONS",
     "HEADING_MARKERS",
     "MAX_LISTED_FACTS",
+    "SECTION_BUDGET",
     "AutoFactsVerdict",
+    "brief_review_section",
     "check_auto_facts",
     "describe_verdict",
     "fact_headings",
@@ -102,6 +117,32 @@ _LISTED_LINE_CHARS = 128
 # defang_markup grows text at most 4x (`<` → `&lt;`), so the listing's fence
 # can never cut a line within the two caps above.
 _LISTING_LIMIT = MAX_LISTED_FACTS * (_LISTED_LINE_CHARS + 1) * 5
+# The record outcomes whose text was appended to the description: the ones
+# the PR body's ``## Brief review`` lists (pending, failed and no-change
+# entries appended nothing).
+_APPENDED = (OUTCOME_APPROVED, OUTCOME_AUTO_APPENDED)
+# The whole ``## Brief review`` section's size, loom's own lines included:
+# one worst-case listing always fits, and with ``## What``, ``## Acceptance
+# criteria`` and a provenance quote at MAX_SECTION_CHARS each the body stays
+# well under GitHub's 65536-character limit — a body over it would fail every
+# delivery of the story. Past the budget the older addenda's items are
+# counted on their note, and the oldest addenda on one line, not listed.
+SECTION_BUDGET = _LISTING_LIMIT + 2_000
+_BUDGET_REASON = (
+    ", not listed here to keep this PR body within GitHub's size limit "
+    "(see the Lithos story)"
+)
+_AUTO_NOTE = "without a gate (facts only, structural check passed)"
+# An entry whose appended text is not in the description is listed by the
+# ids its record keeps, without headings — never from other text, which can
+# copy the ids and headings — on loom's line, saying why.
+_KEPT = frozenset((ITEM_UNCHANGED, ITEM_EDITED, ITEM_ADDED))
+_NOT_FOUND = (
+    "Its text is not found in the description as appended (it was edited since)"
+)
+_UNMARKED = "It was appended before loom recorded the text it appends"
+_BY_ID = ", so its items are listed by id from its record, without headings."
+_NO_ITEMS = "Its record keeps no items."
 # A citation longer than this is not a path anyone writes; refusing it before
 # the match keeps _PATH_RE's backtracking bounded.
 _MAX_PATH_CHARS = 512
@@ -281,10 +322,11 @@ def check_auto_facts(addendum: Addendum) -> AutoFactsVerdict:
 def fact_headings(addendum: Addendum) -> tuple[str, ...]:
     """Each fact as ``"F13. W7 added no refusal hook."`` — its id and heading
     (the first line, for a fact whose heading cannot be read)."""
-    return tuple(
-        f"{item.id}. {item_heading(item) or item.text.splitlines()[0]}"
-        for item in addendum.facts
-    )
+    return tuple(_listed(item) for item in addendum.facts)
+
+
+def _listed(item: BriefItem) -> str:
+    return f"{item.id}. {item_heading(item) or item.text.splitlines()[0]}"
 
 
 def pr_section(headings: tuple[str, ...]) -> str:
@@ -300,23 +342,234 @@ def pr_section(headings: tuple[str, ...]) -> str:
     silently."""
     if not headings:
         return ""
-    listed = [
-        publish_line(heading, limit=_LISTED_LINE_CHARS)
-        for heading in headings[:MAX_LISTED_FACTS]
-    ]
     parts = [
         "## Brief review",
         "",
-        "These facts were appended to the story's description at dispatch "
-        "without a gate (facts only, structural check passed). Their full "
-        "text ends *What*, unless that section was truncated, and is always "
-        "on the Lithos story.",
-        "",
-        fence_untrusted("\n".join(listed), limit=_LISTING_LIMIT),
+        f"These facts were appended to the story's description at dispatch "
+        f"{_AUTO_NOTE}. Their full text ends *What*, unless that section was "
+        "truncated, and is always on the Lithos story.",
+        *_listing(headings, noun="facts"),
     ]
-    if len(headings) > len(listed):
-        parts += ["", f"…and {len(headings) - len(listed)} more facts."]
     return "\n".join(parts)
+
+
+def brief_review_section(
+    records: Sequence[Mapping[str, Any]], description: str, *, body_at: int = 0
+) -> str:
+    """The PR body's ``## Brief review`` section for every addendum appended
+    to the story — each *records* entry (``metadata.brief_review``, oldest
+    first) that is ``approved`` or ``auto_appended`` — or ``""`` for none.
+    One renderer for both deliveries: a run (and a resumed one) and
+    ``lithos-loom develop deliver``.
+
+    A record keeps item digests, not text, so each entry's items are read
+    from the text its appender recorded appending, found in *description* —
+    the text ``## What`` renders — by
+    :func:`.brief_review_blocks.find_blocks`. *body_at* is where the story's
+    description, stripped, starts in *description* (``task_text``'s
+    ``body_at``: after the title) — the origin of the recorded offset. Every
+    item, of every kind, is listed as ``<id>. <heading>``. An entry whose
+    text is not there — recorded before the appenders kept its mark, or
+    edited since — is listed by the ids its record keeps, without headings,
+    and loom's line says why: no other text is read for it.
+
+    Each listed entry has its note (mode, base, outcome), never cut. Each
+    listing is capped as :func:`pr_section`'s is, its overflow counted on
+    loom's line, never dropped; and the section keeps within
+    :data:`SECTION_BUDGET` — every addendum's note and its cheapest listing
+    are reserved first, then the newest addenda's items are listed first, an
+    older addendum's items that do not fit are counted on its own line, and
+    the oldest addenda whose notes do not fit are counted on one line. A cut
+    listing keeps each id's last copy before an earlier one (:func:`_ranked`)."""
+    entries = [e for e in records if e.get("outcome") in _APPENDED]
+    if not entries:
+        return ""
+    found = find_blocks(entries, description, body_at=body_at)
+    parts = [
+        "## Brief review",
+        "",
+        "The brief review appended these addenda to the story's description, "
+        "oldest first; each is listed by item id and heading. Their full text "
+        "ends *What*, unless that section was truncated, and is always on the "
+        "Lithos story.",
+    ]
+    notes: list[str] = []
+    headings: list[_Ranked] = []
+    for entry, addendum in zip(entries, found, strict=True):
+        line = _entry_line(entry)
+        if addendum is None:
+            listed: _Ranked = tuple(enumerate(_record_ids(entry)))
+            why = _NOT_FOUND if "appended" in entry else _UNMARKED
+            if listed:
+                notes.append(f"{line}. {why}{_BY_ID}")
+            elif why == _NOT_FOUND:
+                notes.append(f"{line}. {why}. {_NO_ITEMS}")
+            else:
+                notes.append(f"{line}. {_NO_ITEMS}")
+        else:
+            listed = _ranked(addendum.items)
+            empty = " (a *No change* answer)" if addendum.no_change is not None else ""
+            notes.append(
+                f"{line}." if listed else f"{line}. Its text holds no items{empty}."
+            )
+        headings.append(listed)
+    # Each addendum's note and its cheapest listing (the whole one, or the
+    # line counting it) are reserved, newest first; the older addenda past
+    # the budget are counted on one line of loom's. The rest of the budget
+    # lists items, newest addenda first.
+    floors = [
+        min(_size(_budgeted(listed, 0)), _size(_budgeted(listed, len(listed))))
+        for listed in headings
+    ]
+    reserved = [_size(["", n]) + f for n, f in zip(notes, floors, strict=True)]
+    budget = SECTION_BUDGET - _size(parts)
+    first = _first_kept(reserved, budget)
+    if first:
+        parts += ["", _older(len(entries))]
+        first = _first_kept(reserved, budget - _size(parts[-2:]))
+        parts[-1] = _older(first)
+    remaining = SECTION_BUDGET - _size(parts) - sum(reserved[first:])
+    shown = [0] * len(entries)
+    for index in reversed(range(first, len(entries))):
+        shown[index] = _fit(headings[index], floors[index], remaining)
+        remaining -= _size(_budgeted(headings[index], shown[index])) - floors[index]
+    for index in range(first, len(entries)):
+        parts += ["", notes[index], *_budgeted(headings[index], shown[index])]
+    return "\n".join(parts)
+
+
+def _record_ids(entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """The ids *entry*'s record keeps, in its order: an approval's every id
+    its ``outcomes`` keeps (unchanged, edited or added); an auto-appended
+    pass's items. A key or value of the wrong type is skipped — a record
+    another Lithos client wrote is never trusted."""
+    if entry.get("outcome") == OUTCOME_APPROVED:
+        outcomes = entry.get("outcomes")
+        if not isinstance(outcomes, Mapping):
+            return ()
+        return tuple(
+            item_id
+            for item_id, how in outcomes.items()
+            if isinstance(item_id, str) and isinstance(how, str) and how in _KEPT
+        )
+    items = entry.get("items")
+    return tuple(
+        item["id"]
+        for item in (items if isinstance(items, list) else ())
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+    )
+
+
+def _first_kept(reserved: Sequence[int], budget: int) -> int:
+    """The oldest addendum whose reservation, with every newer one's, fits
+    in *budget* — the newest is always kept."""
+    first = len(reserved)
+    while first and (first == len(reserved) or reserved[first - 1] <= budget):
+        first -= 1
+        budget -= reserved[first]
+    return first
+
+
+def _older(count: int) -> str:
+    """Loom's line counting the *count* oldest addenda the budget left out."""
+    noun = "addendum" if count == 1 else "addenda"
+    return f"…and {count} older {noun}{_BUDGET_REASON}."
+
+
+# An addendum's ``(position, "<id>. <heading>")`` lines, in the order they
+# are listed when not all of them can be (:func:`_ranked`).
+_Ranked = tuple[tuple[int, str], ...]
+
+
+def _ranked(items: Sequence[BriefItem]) -> _Ranked:
+    """*items*' lines, each id's last copy first — the text the approval
+    keyed its outcome on — then the earlier copies of a repeated id; each
+    group in the description's order. A listing that is cut keeps the
+    first of them, so an earlier copy never takes a last copy's line."""
+    last = {item.id: at for at, item in enumerate(items)}
+    lines = [(at, _listed(item)) for at, item in enumerate(items)]
+    return tuple(
+        sorted(lines, key=lambda line: (last[items[line[0]].id] != line[0], line[0]))
+    )
+
+
+def _budgeted(listed: _Ranked, count: int) -> list[str]:
+    """*listed*'s listing with its first *count* lines shown, in the
+    description's order — the rest counted, saying the budget left them out
+    when the cap did not."""
+    capped = count < min(len(listed), MAX_LISTED_FACTS)
+    reason = _BUDGET_REASON if capped else ""
+    count = min(count, MAX_LISTED_FACTS)
+    shown = [line for _, line in sorted(listed[:count])]
+    rest = [line for _, line in listed[count:]]
+    return _listing((*shown, *rest), noun="items", shown=count, reason=reason)
+
+
+def _fit(listed: _Ranked, floor: int, remaining: int) -> int:
+    """How many of *listed* fit in *remaining* beyond its reserved *floor*:
+    the whole listing, else the most lines that fit — below the cap the size
+    grows with the count (the same overflow line), so it is bisected."""
+    count = min(len(listed), MAX_LISTED_FACTS)
+    if not count or _size(_budgeted(listed, count)) - floor <= remaining:
+        return count
+    low, high = 0, count - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _size(_budgeted(listed, middle)) - floor <= remaining:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def _size(lines: Sequence[str]) -> int:
+    return sum(len(line) + 1 for line in lines)
+
+
+def _entry_line(entry: Mapping[str, Any]) -> str:
+    """Loom's line for *entry* — its mode, base and outcome, only as far as
+    they are well formed."""
+    title, base = entry_header(entry)
+    mode = entry.get("mode")
+    return (
+        f"**{title or 'Addendum'} against "
+        f"{f'`{base}`' if base else 'an unrecorded base'}** "
+        f"(mode `{mode if title else 'unknown'}`, outcome `{entry['outcome']}`): "
+        + _appended_how(entry)
+    )
+
+
+def _appended_how(entry: Mapping[str, Any]) -> str:
+    """How *entry*'s addendum reached the description, in loom's words."""
+    if entry.get("outcome") == OUTCOME_APPROVED:
+        return "approved by the operator at its brief-review gate"
+    check = entry.get("check")
+    if isinstance(check, Mapping) and check.get("passed") is True:
+        return f"appended at dispatch {_AUTO_NOTE}"
+    return "appended at dispatch without a gate, as a facts-only recheck"
+
+
+def _listing(
+    headings: tuple[str, ...],
+    *,
+    noun: str,
+    shown: int = MAX_LISTED_FACTS,
+    reason: str = "",
+) -> list[str]:
+    """The first *shown* (at most :data:`MAX_LISTED_FACTS`) *headings*
+    fenced, one capped line each, under a fence limit those caps cannot
+    reach — so the list is never cut short — with the rest counted on loom's
+    own line after it (*reason* says why, when it is not the cap)."""
+    listed = [
+        publish_line(heading, limit=_LISTED_LINE_CHARS)
+        for heading in headings[: min(shown, MAX_LISTED_FACTS)]
+    ]
+    parts = (
+        ["", fence_untrusted("\n".join(listed), limit=_LISTING_LIMIT)] if listed else []
+    )
+    if len(headings) > len(listed):
+        parts += ["", f"…and {len(headings) - len(listed)} more {noun}{reason}."]
+    return parts
 
 
 def describe_verdict(

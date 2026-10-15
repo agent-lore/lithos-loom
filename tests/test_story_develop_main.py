@@ -1363,3 +1363,51 @@ def test_standalone_applies_default_models(
         "claude": "test-claude-model",
         "codex": "test-codex-model",
     }
+
+
+def test_standalone_task_id_run_carries_the_story_s_brief_review_records(
+    tmp_git_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    # The standalone `--task-id` entry delivers through the same seam: its
+    # PR lists the story's appended addenda from the fetched records.
+    from lithos_loom.plugins.story_develop import __main__ as main_mod
+    from lithos_loom.plugins.story_develop.develop import DevelopResult
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+
+    entry = {"mode": "full", "base_sha": "a" * 40, "outcome": "approved"}
+    captured: dict = {}
+
+    def fake_fetch(url, task_id):
+        return TaskContext(
+            task_id=task_id,
+            title="Add a flag",
+            description="Body.",
+            acceptance_criteria=None,
+            metadata={"brief_review": [entry, "not an entry"]},
+        )
+
+    def fake_develop(config, **kw):
+        captured["config"] = config
+        return DevelopResult(
+            status="approved",
+            run_id="r1",
+            worktree=tmp_path,
+            branch="b",
+            base_sha="0" * 40,
+            commits=["c"],
+            rounds=1,
+            handoff_present=True,
+            coder_cost_usd=0.1,
+            review_cost_usd=0.1,
+            message="ok",
+        )
+
+    monkeypatch.setattr(main_mod, "fetch_task_context", fake_fetch)
+    monkeypatch.setattr(main_mod, "develop", fake_develop)
+    monkeypatch.setattr(main_mod, "post_results", lambda *a, **k: True)
+    monkeypatch.setattr(
+        main_mod, "load_review_profile_policy", lambda: (None, "halt", ())
+    )
+
+    assert main_mod.main(["--repo", str(tmp_git_repo), "--task-id", "t-9"]) == 0
+    assert captured["config"].brief_records == (entry,)

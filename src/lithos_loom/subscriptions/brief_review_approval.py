@@ -16,7 +16,9 @@ Applying it is ONE optimistic-lock write to the story:
   operator emptied it);
 * the pending record entry settled: ``approved``, ``approved_at``, the gate,
   per-item outcomes (unchanged / edited / cut / added — what phase 2 decides
-  from), and the gate's completion ``outcome`` as ``operator_note``;
+  from), the gate's completion ``outcome`` as ``operator_note``, and
+  ``appended`` — the appended text's length and digest, by which the PR
+  body's ``## Brief review`` finds exactly that text;
 * the ``brief_review_hold`` flag dropped — the dispatch now holds the slot
   as an in-flight run.
 
@@ -65,6 +67,7 @@ from ..plugins.story_develop.brief_review import (
     parse_addendum,
     records_of,
 )
+from ..plugins.story_develop.brief_review_blocks import appended_mark
 from .dispatch_guards import task_payload
 from .escalation import Escalation
 
@@ -150,6 +153,11 @@ async def apply_brief_approval(
             settled["operator_note"] = gate.outcome
         description = story.description or ""
         if block:
+            # what and where the text is — its offset in the description as
+            # stripped, the body `task_text` carries after the title: the PR
+            # body's `## Brief review` finds it by this
+            body = description.strip()
+            settled["appended"] = appended_mark(block, at=len(body) + 2 if body else 0)
             description = f"{description.rstrip()}\n\n{block}\n"
         try:
             await lithos.task_update(
