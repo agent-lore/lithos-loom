@@ -8,6 +8,7 @@ Every failure direction holds the story.
 
 from __future__ import annotations
 
+import random
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ from lithos_loom.plugins.story_develop.brief_review import (
     draft_entry,
     item_outcomes,
     parse_addendum,
+    validate_addendum,
 )
 from lithos_loom.plugins.story_develop.brief_review_auto import (
     HEADING_MARKERS,
@@ -38,6 +40,12 @@ from lithos_loom.plugins.story_develop.brief_review_auto import (
     fact_problems,
     item_heading,
     pr_section,
+)
+from lithos_loom.plugins.story_develop.brief_review_blocks import (
+    ADDENDUM_HEADER_RE,
+    MODE_TITLE,
+    find_blocks,
+    matches_record,
 )
 from lithos_loom.plugins.story_develop.pr_delivery import build_pr_body
 from lithos_loom.plugins.story_develop.publish_text import MAX_SECTION_CHARS
@@ -854,3 +862,212 @@ def test_an_edited_approval_pairs_with_its_own_block_not_a_forged_head() -> None
     assert "D1. A task-less entry point." in section
     assert "D2. Added by the operator." in section
     assert "drop the auth check" not in section and "refusal logging" not in section
+
+
+def _quoting(header: str, copies: int) -> str:
+    """An approved full review whose D1 quotes *header* *copies* times, each
+    opening a paragraph, before D2."""
+    quoted = "\n\n".join(
+        f"{header} (2026-10-14)** — sample {i}." for i in range(copies)
+    )
+    return (
+        f"**Brief review against `{_B[:12]}` (2026-10-14)** — checked.\n\n"
+        "**Decisions**\n\n"
+        f"- **D1. Render the recheck header.** For example:\n\n{quoted}\n\n"
+        "  - Basis: F1.\n"
+        "- **D2. Keep the base short.** Twelve digits.\n  - Basis: F1.\n"
+    )
+
+
+@pytest.mark.parametrize("copies", [1, 9, 40])
+def test_any_number_of_quoted_headers_ends_no_addendum(copies: int) -> None:
+    # correctness/f-001 (round 3): no cap on the boundaries a block may run
+    # past, nor on the candidates under one header — an intact approved
+    # addendum is found however many headers its items quote, with another
+    # addendum after it, and however many copies of its OWN header it quotes.
+    for header in (
+        f"**Recheck against `{_A[:12]}`",
+        f"**Brief review against `{_B[:12]}`",
+    ):
+        text = _quoting(header, copies)
+        assert validate_addendum(parse_addendum(text), strict=False) == []
+        approved = _entry("approved", _B, text)
+        assert set(approved["outcomes"]) == {"D1", "D2"}
+        recheck = _entry("auto_appended", _A, _RECHECK_A, mode="delta")
+        description = "x" * 8000 + f"\n\n{text}\n\n{_RECHECK_A}"
+
+        section = brief_review_section([approved, recheck], description)
+
+        assert "D1. Render the recheck header." in section, (header, copies)
+        assert "D2. Keep the base short." in section, (header, copies)
+        assert "F13. W7 added no refusal hook." in section
+        assert "not found" not in section
+
+
+def test_a_repeated_id_in_an_approval_lists_every_copy() -> None:
+    # correctness/f-002 (round 3): the approval accepts an id the operator
+    # repeated, keying its outcome on the id's last text; the section checks
+    # it the same way and lists both copies — and the unchanged items.
+    drafted = _APPROVED_B
+    approved = (
+        drafted + "- **D1. Also expose the new endpoint.** Too.\n  - Basis: F1.\n"
+    )
+    entry = _entry("approved", _B, drafted)
+    entry["outcomes"] = item_outcomes(entry, parse_addendum(approved))
+    assert entry["outcomes"]["D1"] == "edited"
+
+    section = brief_review_section([entry], "x" * 8000 + f"\n\n{approved}")
+
+    for listed in ("S1. No datalist.", "F1. The router exists.", "D1. A task-less"):
+        assert f"\n{listed}" in section
+    assert "\nD1. Also expose the new endpoint." in section
+    assert "not found" not in section
+    # an auto-appended pass's ids are unique: a repeat is not its text
+    auto = _entry("auto_appended", _A, _RECHECK_A, mode="delta")
+    twice = _RECHECK_A + _RECHECK_A.split("\n\n")[-1]
+    assert "not found" in brief_review_section([auto], f"T\n\n{twice}")
+
+
+def test_the_budget_holds_when_the_notes_alone_would_pass_it() -> None:
+    # correctness/f-003, security/f-002 (round 3): addenda accumulate; once
+    # their own lines would pass the budget, the oldest are counted on one
+    # line of loom's — the newest keep their notes — and the body stays
+    # under GitHub's limit.
+    count = 400
+    bases = [f"{i:012x}" + "0" * 28 for i in range(1, count + 1)]
+    blocks = [
+        f"**Brief review against `{base[:12]}` (2026-10-14)** — checked.\n\n"
+        "No change: The brief describes the tree.\n"
+        for base in bases
+    ]
+    records = [_entry("approved", b, t) for b, t in zip(bases, blocks, strict=True)]
+    for description in ("T\n\n" + "\n\n".join(blocks), "T\n\nEdited since."):
+        section = brief_review_section(records, description)
+
+        assert len(section) <= SECTION_BUDGET
+        assert f"`{bases[-1][:12]}`** (mode `full`" in section  # the newest
+        assert f"`{bases[0][:12]}`" not in section
+        kept = section.count("outcome `approved`")
+        assert f"…and {count - kept} older addenda, not listed here" in section
+        assert kept > 10
+        body = build_pr_body(
+            description="d" * (MAX_SECTION_CHARS * 3),
+            acceptance_criteria="a" * (MAX_SECTION_CHARS * 3),
+            reviews_summary="[cq]=LGTM",
+            rounds=1,
+            gate_verdict=None,
+            cost_usd=0.5,
+            task_id="t",
+            provenance=("run r",),
+            provenance_quote="q" * (MAX_SECTION_CHARS * 3),
+            brief_review=section,
+        )
+        assert len(body) < 65_536
+
+
+def test_every_note_is_kept_while_they_fit() -> None:
+    blocks = [_RECHECK_A, _APPROVED_B]
+    records = [
+        _entry("auto_appended", _A, _RECHECK_A, mode="delta"),
+        _entry("approved", _B, _APPROVED_B),
+    ]
+
+    section = brief_review_section(records, "T\n\n" + "\n\n".join(blocks))
+
+    assert "older addend" not in section
+    assert section.count("(mode `") == 2
+
+
+def test_finding_blocks_is_fast_on_hostile_input() -> None:
+    # security/f-001 (round 3): a `No change:` line of whitespace under a
+    # matching header, and many stacked headers, cost linear work.
+    header = f"**Brief review against `{_B[:12]}`** (2026-10-14)"
+    hostile = (
+        "\n\n".join([header] * 9)
+        + "\n\nNo change:"
+        + " " * 64_000
+        + "\n\n- **D1. A task-less entry point.** x\n\n"
+        + "\n\n".join([header] * 1_000)
+    )
+    started = time.perf_counter()
+    section = brief_review_section([_entry("approved", _B, _APPROVED_B)], hostile)
+    assert time.perf_counter() - started < 1.0
+    assert "not found" in section
+    started = time.perf_counter()
+    parse_addendum("No change:" + " " * 64_000)
+    assert time.perf_counter() - started < 0.1
+
+
+_PIECES = (
+    f"**Brief review against `{_B[:12]}` (2026-10-14)** — x.",
+    f"**Recheck against `{_B[:12]}` (2026-10-14)** — x.",
+    f"  **Brief review against `{_B[:12]}` (2026-10-14)** — quoted.",
+    f"**Recheck against `{_A[:12]}` (2026-10-14)** — another base.",
+    "**Facts**",
+    "**Decisions**",
+    "- **F1. One.** `a.py:1`",
+    "- **F1. One.**\r\n  more\ttext",
+    "- **F2. Two.** `b.py:2`",
+    "- **D1. Do.** it",
+    "- **D1. Again.** too",
+    "- **X9. Odd.**",
+    "  - Basis: F1.",
+    "No change: fine",
+    "text",
+    "",
+)
+
+
+def _random_text(rng: random.Random) -> str:
+    return "\n".join(rng.choice(_PIECES) for _ in range(rng.randint(1, 20))) + "\n"
+
+
+def _some_block_matches(entry: dict, description: str) -> bool:
+    """The reference: parse EVERY candidate block — each header under the
+    entry's key, to each later header or the end — and check it."""
+    lines = description.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    key = (MODE_TITLE[entry["mode"]].lower(), entry["base_sha"][:12])
+    heads = [
+        (index, (match["title"].lower(), match["base"]))
+        for index, line in enumerate(lines)
+        if (match := ADDENDUM_HEADER_RE.match(line))
+        and (index == 0 or not lines[index - 1].strip())
+    ]
+    ends = [index for index, _ in heads] + [len(lines)]
+    return any(
+        matches_record(
+            entry, parse_addendum(description[offsets[s] : offsets[e]]).items
+        )
+        for s, k in heads
+        if k == key
+        for e in ends
+        if e > s
+    )
+
+
+def test_the_search_finds_every_block_a_full_parse_would() -> None:
+    # correctness/f-001 (round 3): the search checks candidates from the
+    # spans rather than parsing each; it must miss no block that parsing
+    # every candidate would accept, and accept none it would not.
+    rng = random.Random(454)  # noqa: S311 — a reproducible fuzz, not a secret
+    hits = 0
+    for _ in range(3000):
+        draft = _random_text(rng)
+        description = _random_text(rng) + "\n" + _random_text(rng)
+        if rng.random() < 0.5:
+            description += f"\n{draft}"
+        outcome = rng.choice(["approved", "auto_appended"])
+        entry = _entry(outcome, _B, draft, mode=rng.choice(["full", "delta"]))
+        if outcome == "approved" and rng.random() < 0.5:
+            entry["outcomes"] = item_outcomes(entry, parse_addendum(_random_text(rng)))
+        expected = _some_block_matches(entry, description)
+        hits += expected
+        assert (find_blocks([entry], description)[0] is not None) is expected, (
+            draft,
+            description,
+            entry,
+        )
+    assert hits > 50

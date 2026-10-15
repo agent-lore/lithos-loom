@@ -207,6 +207,39 @@ async def test_an_applied_approval_is_what_the_pr_body_lists() -> None:
     assert "F2." not in section and "not found" not in section
 
 
+async def test_an_approval_repeating_an_id_reaches_the_pr_body_whole() -> None:
+    # correctness/f-002 (round 3): the approval appends an operator's
+    # repeated id unvalidated, recording it `edited`; the PR body still lists
+    # the whole addendum — both copies and the unchanged items.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    client = _client()
+    gate_id = await _held(client)
+    await _edit_gate(
+        client,
+        gate_id,
+        "  - Basis: F1.",
+        "  - Basis: F1.\n- **D1. Also expose the new endpoint.** too.\n  - Basis: F1.",
+    )
+    await client.task_complete(task_id=gate_id, agent="dave")
+
+    outcome = await _apply(client)
+
+    assert outcome.applied
+    story = await _get(client, STORY)
+    assert story.metadata[RECORD_KEY][-1]["outcomes"]["D1"] == ITEM_EDITED
+    section = brief_review_section(
+        records_of(story.metadata), "x" * 8000 + outcome.payload["description"]
+    )
+    assert "\nF1. One.\nF2. Two.\nD1. Do it.\nD1. Also expose the new endpoint.\n" in (
+        section
+    )
+    assert "not found" not in section
+
+
 async def test_an_emptied_draft_dispatches_with_nothing_appended() -> None:
     client = _client()
     gate_id = await _held(client)

@@ -22,6 +22,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.brief_review` | L | 4 | 10 |
 | `lithos_loom.plugins.story_develop.brief_review_auto` | M | 1 | 7 |
+| `lithos_loom.plugins.story_develop.brief_review_blocks` | M | 0 | 3 |
 | `lithos_loom.plugins.story_develop.brief_review_phase` | M | 1 | 2 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
@@ -123,6 +124,11 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `pr_section` — The PR body's ``## Brief review`` section for facts appended without a gate: loom's own heading and line, then *headings* fenced (the agent wrote them). ``""`` when there are none. ``## What`` is capped, and appended facts are its tail — the first text cut — so they are listed here too.
 - def `brief_review_section` — The PR body's ``## Brief review`` section for every addendum appended to the story — each *records* entry (``metadata.brief_review``, oldest first) that is ``approved`` or ``auto_appended`` — or ``""`` for none. One renderer for both deliveries: a run (and a resumed one) and ``lithos-loom develop deliver``.
 - def `describe_verdict` — One line saying what the dispatch would do with this verdict. *counts* is the pass's ``{"scope_cut", "fact", "decision"}`` tally; *mode* full or delta (a recheck is governed by the check whatever the dial says).
+
+### `lithos_loom.plugins.story_develop.brief_review_blocks`
+- def `entry_header` — The mode title and ``base_sha[:12]`` *entry*'s block's header carries, each only when the record's value is well formed (``None`` otherwise).
+- def `find_blocks` — Each entry's addendum in *description*, or ``None`` when no text there is the one its record vouches for (:func:`matches_record`).
+- def `matches_record` — Whether *items* are the addendum *entry* records: an auto-appended pass's ids and digests exactly; an approval's kept ids (every id its ``outcomes`` does not mark cut — none, for an approved *No change*), with each ``unchanged`` one's digest. An ``edited`` or ``added`` item's text has no recorded digest to check. The approval accepts an id the operator repeated and keys its outcome on the id's last text (:func:`item_outcomes`), so a repeated id is checked the same way — and every copy is listed.
 
 ### `lithos_loom.plugins.story_develop.brief_review_phase`
 - class `PhaseOutcome` — What the dispatch does next. *proceed*: develop, cut at *start_sha* when set (the base the review checked), with *description* as the story's text when set (it may now end with an appended recheck). Not *proceed*: end the run held, reporting *escalation*.
