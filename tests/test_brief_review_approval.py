@@ -433,6 +433,39 @@ async def test_an_example_under_the_header_in_the_brief_is_not_listed() -> None:
     assert "Example heading" not in section and "more items" not in section
 
 
+async def test_an_example_under_the_header_keeps_a_legacy_approval_s_heading() -> None:
+    # correctness/f-001 (converge): the same story, approved before approvals
+    # recorded the text they append (no `appended`): located by header, the
+    # example opens its block, and the genuine heading still has its line.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    example = "\n".join(
+        f"- **D1. Example heading {i}.** x\n  - Basis: F1." for i in range(40)
+    )
+    story = make_task(
+        STORY,
+        title="T3-W8",
+        description=f"{'x' * 8000}\n\n{_HEADER} — e.\n\n**Decisions**\n\n"
+        f"{example}\n\nThe brief continues.",
+        metadata={"project": "lithos-lens", "prd": "docs/prd/t3.md"},
+        tags=("trigger:story-develop",),
+    )
+    client = FakeLithosClient(tasks=(story,), agent_id="loom")
+    genuine = _decisions("Genuine approved heading.")
+    outcome = await _approve_next(client, "r-1", genuine, genuine)
+
+    fresh = await _get(client, STORY)
+    records = records_of(fresh.metadata)
+    legacy = {k: v for k, v in records[-1].items() if k != "appended"}
+    section = brief_review_section([legacy], outcome.payload["description"])
+    assert "\nD1. Genuine approved heading.\n" in section
+    assert "an earlier copy is listed unchecked" in section
+    assert "…and 1 more items." in section
+
+
 async def test_an_emptied_draft_dispatches_with_nothing_appended() -> None:
     client = _client()
     gate_id = await _held(client)

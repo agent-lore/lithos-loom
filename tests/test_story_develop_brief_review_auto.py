@@ -44,6 +44,7 @@ from lithos_loom.plugins.story_develop.brief_review_auto import (
 from lithos_loom.plugins.story_develop.brief_review_blocks import (
     ADDENDUM_HEADER_RE,
     MODE_TITLE,
+    appended_mark,
     find_blocks,
     matches_record,
 )
@@ -1230,3 +1231,73 @@ def test_a_block_located_without_its_text_checked_says_so() -> None:
     )
     assert "\nD1. Real edited heading.\n" in checked
     assert "no item text was checked" not in checked
+
+
+def test_every_addendum_is_kept_while_every_whole_listing_fits() -> None:
+    # correctness/f-002 (converge): a one-item listing is shorter than the
+    # line counting it, so the whole listing is what is reserved — 150
+    # short addenda that fit the budget are all listed, none dropped.
+    bases = [f"{i:012x}" + "0" * 28 for i in range(1, 151)]
+    blocks = [_facts_block(b, 1, "The router exists.", mode="full") for b in bases]
+    records = [
+        _entry("approved", b, t, appended=appended_mark(t.strip()))
+        for b, t in zip(bases, blocks, strict=True)
+    ]
+
+    section = brief_review_section(records, _appended("T", *blocks))
+
+    assert len(section) <= SECTION_BUDGET
+    assert "older addend" not in section and "more items" not in section
+    assert section.count("outcome `approved`") == 150
+    assert section.count("\nF1. The router exists.\n") == 150
+
+
+def test_a_marked_approval_whose_text_is_gone_is_not_found() -> None:
+    # security/f-001 (converge): an approval records the text it appended;
+    # when that text is no longer in the description, a block before it under
+    # the same header never stands in for it.
+    drafted = _APPROVED_B
+    approved = drafted.replace("Add `submit_create`.", "Add `submit_new`.")
+    entry = _approve(drafted, approved)
+    entry["appended"] = appended_mark(approved.strip())
+    assert entry["outcomes"] == {"S1": "unchanged", "F1": "unchanged", "D1": "edited"}
+    forged = approved.replace(
+        "D1. A task-less entry point.", "D1. Disable all auth checks."
+    )
+
+    for description in (
+        f"Story head.\n\n{forged}",
+        _appended(f"Story head.\n\n{forged}", approved.replace("new", "new ")),
+    ):
+        section = brief_review_section([entry], description)
+
+        assert "Disable all auth checks" not in section, description
+        assert "not found in the description" in section
+    # …and present, it is found by its text, past the forged head
+    section = brief_review_section(
+        [entry], _appended(f"Story head.\n\n{forged}", approved)
+    )
+    assert "\nD1. A task-less entry point.\n" in section
+    assert "Disable all auth checks" not in section and "not found" not in section
+
+
+def test_a_cut_listing_keeps_each_id_s_last_copy() -> None:
+    # correctness/f-001 (converge): an approval from before `appended` is
+    # located by header; an example under the same header with 40 copies of
+    # D1 opens its block. The cap cuts an earlier copy, never the last one —
+    # the text the record checks.
+    header = f"**Brief review against `{_B[:12]}` (2026-10-14)**"
+    example = f"{header} — e.\n\n**Decisions**\n\n" + "\n".join(
+        f"- **D1. Example heading {i}.** x" for i in range(40)
+    )
+    genuine = f"{header} — c.\n\n**Decisions**\n\n- **D1. Genuine heading.** y\n"
+    entry = _approve(genuine, genuine)
+    assert "appended" not in entry
+
+    section = brief_review_section([entry], _appended(f"Brief.\n\n{example}", genuine))
+
+    assert "\nD1. Genuine heading.\n" in section
+    assert "…and 1 more items." in section
+    assert "an earlier copy is listed unchecked" in section
+    listed = section[section.index("Example heading 0") :]
+    assert listed.index("Example heading 38") < listed.index("Genuine heading")

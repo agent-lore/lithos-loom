@@ -140,7 +140,8 @@ _NOT_CHECKED = (
 )
 _REPEATED = (
     "Its text repeats an item id: only each id's last copy is the text the "
-    "approval recorded, and an earlier copy is listed unchecked."
+    "approval recorded, and an earlier copy is listed unchecked, after "
+    "every last copy when the listing is cut."
 )
 # A citation longer than this is not a path anyone writes; refusing it before
 # the match keeps _PATH_RE's backtracking bounded.
@@ -371,9 +372,11 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
     Each listed entry has its note (mode, base, outcome), never cut. Each
     listing is capped as :func:`pr_section`'s is, its overflow counted on
     loom's line, never dropped; and the section keeps within
-    :data:`SECTION_BUDGET` — the newest addenda's items are listed first, an
+    :data:`SECTION_BUDGET` — every addendum's note and its cheapest listing
+    are reserved first, then the newest addenda's items are listed first, an
     older addendum's items that do not fit are counted on its own line, and
-    the oldest addenda whose notes do not fit are counted on one line."""
+    the oldest addenda whose notes do not fit are counted on one line. A cut
+    listing keeps each id's last copy before an earlier one (:func:`_ranked`)."""
     entries = [e for e in records if e.get("outcome") in _APPENDED]
     if not entries:
         return ""
@@ -387,11 +390,11 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
         "Lithos story.",
     ]
     notes: list[str] = []
-    headings: list[tuple[str, ...]] = []
+    headings: list[_Ranked] = []
     for entry, block in zip(entries, found, strict=True):
         line = _entry_line(entry)
         addendum = block.addendum if block else None
-        listed = tuple(_listed(item) for item in addendum.items) if addendum else ()
+        listed = _ranked(addendum.items) if addendum else ()
         headings.append(listed)
         if addendum is None:
             notes.append(
@@ -405,10 +408,14 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
             notes.append(f"{line}. Its text holds no items{empty}.")
         else:
             notes.append(f"{line}.{_unchecked(entry, block)}")
-    # Each addendum's note and overflow line are reserved, newest first; the
-    # older addenda past the budget are counted on one line of loom's. The
-    # rest of the budget lists items, newest addenda first.
-    floors = [_size(_budgeted(listed, 0)) for listed in headings]
+    # Each addendum's note and its cheapest listing (the whole one, or the
+    # line counting it) are reserved, newest first; the older addenda past
+    # the budget are counted on one line of loom's. The rest of the budget
+    # lists items, newest addenda first.
+    floors = [
+        min(_size(_budgeted(listed, 0)), _size(_budgeted(listed, len(listed))))
+        for listed in headings
+    ]
     reserved = [_size(["", n]) + f for n, f in zip(notes, floors, strict=True)]
     budget = SECTION_BUDGET - _size(parts)
     first = _first_kept(reserved, budget)
@@ -456,15 +463,37 @@ def _older(count: int) -> str:
     return f"…and {count} older {noun}{_BUDGET_REASON}."
 
 
-def _budgeted(listed: tuple[str, ...], count: int) -> list[str]:
-    """*listed*'s listing with *count* shown — the rest counted, saying the
-    budget left them out when the cap did not."""
+# An addendum's ``(position, "<id>. <heading>")`` lines, in the order they
+# are listed when not all of them can be (:func:`_ranked`).
+_Ranked = tuple[tuple[int, str], ...]
+
+
+def _ranked(items: Sequence[BriefItem]) -> _Ranked:
+    """*items*' lines, each id's last copy first — the text the record
+    checks, and the approval keyed its outcome on — then the earlier copies
+    of a repeated id; each group in the description's order. A listing that
+    is cut keeps the first of them, so an earlier copy (unchecked: text
+    before the addenda can supply it) never takes a last copy's line."""
+    last = {item.id: at for at, item in enumerate(items)}
+    lines = [(at, _listed(item)) for at, item in enumerate(items)]
+    return tuple(
+        sorted(lines, key=lambda line: (last[items[line[0]].id] != line[0], line[0]))
+    )
+
+
+def _budgeted(listed: _Ranked, count: int) -> list[str]:
+    """*listed*'s listing with its first *count* lines shown, in the
+    description's order — the rest counted, saying the budget left them out
+    when the cap did not."""
     capped = count < min(len(listed), MAX_LISTED_FACTS)
     reason = _BUDGET_REASON if capped else ""
-    return _listing(listed, noun="items", shown=count, reason=reason)
+    count = min(count, MAX_LISTED_FACTS)
+    shown = [line for _, line in sorted(listed[:count])]
+    rest = [line for _, line in listed[count:]]
+    return _listing((*shown, *rest), noun="items", shown=count, reason=reason)
 
 
-def _fit(listed: tuple[str, ...], floor: int, remaining: int) -> int:
+def _fit(listed: _Ranked, floor: int, remaining: int) -> int:
     """How many of *listed* fit in *remaining* beyond its reserved *floor*:
     the whole listing, else the most lines that fit — below the cap the size
     grows with the count (the same overflow line), so it is bisected."""

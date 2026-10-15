@@ -132,9 +132,11 @@ def find_blocks(
     An approval records the text it appended (:func:`appended_mark`), so an
     entry carrying that mark is found by it — the newest such entry first,
     at the last place that text stands — and nothing else can stand in for
-    it or cut it short. The other entries (an auto-appended pass, whose ids
-    and digests are exact; an approval from before the mark) are located by
-    header, ids and digests (:func:`matches_record`):
+    it or cut it short: when that text is not there (a later edit), the
+    entry is not found, never located by its header. The other entries (an
+    auto-appended pass, whose ids and digests are exact; an approval from
+    before the mark) are located by header, ids and digests
+    (:func:`matches_record`):
 
     A candidate block opens at a header line under the entry's ``(title,
     base)`` and ends at a later candidate header or the description's end —
@@ -185,6 +187,8 @@ def find_blocks(
         if index in blocks:
             floor = max(floor, blocks[index][1])
             continue
+        if _mark(entries[index]) is not None:
+            continue  # its recorded text is gone: nothing else stands in
         for start, head_key in heads:
             if start < floor or head_key != fit.key:
                 continue
