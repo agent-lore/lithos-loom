@@ -1326,16 +1326,18 @@ def test_a_legacy_approval_s_edited_items_are_flagged_unchecked() -> None:
 
 
 def test_finding_a_marked_text_is_bounded_on_a_hostile_tail() -> None:
-    # security/f-001 (converge round 2): short uniform lines after the
-    # approved text make every line start a candidate; the search is bounded
-    # and fails closed (not found), whether the text is there or not.
+    # security/f-001 (converge round 2), correctness/f-003 (round 3): short
+    # uniform lines after the approved text make every line start a window
+    # that ends a line; only a window opening with the text's own first line
+    # is hashed whole, so the search stays fast — and finds the text that is
+    # there, while the marks whose text is absent read as not found.
     from tests.support.brief_review import approved_addendum
 
-    text, entry, _ = approved_addendum()
+    text, entry, listed = approved_addendum()
     absent = [
         {
             **entry,
-            "appended": {"chars": entry["appended"]["chars"] + i, "sha": "0" * 16},
+            "appended": {**entry["appended"], "chars": len(text) + i, "sha": "0" * 16},
         }
         for i in range(1, 5)
     ]
@@ -1345,4 +1347,77 @@ def test_finding_a_marked_text_is_bounded_on_a_hostile_tail() -> None:
     section = brief_review_section([*absent, entry], description)
 
     assert time.perf_counter() - started < 1.0
-    assert section.count("not found in the description") == 5
+    assert section.count("not found in the description") == 4
+    assert all(f"\n{line}" in section for line in listed[:5])
+
+
+def _sample_output_story(pad: int) -> tuple[str, list[dict], str]:
+    """An approved decision quoting 200 fixed-width sample rows, then an
+    auto-appended recheck whose 40 fact rows are as wide — so a window of the
+    approval's length from almost any row ends a line."""
+    row = "  " + "2026-10-14T12:00:00Z INFO request served status=200 ok".ljust(58, ".")
+    approval = (
+        f"**Brief review against `{_B[:12]}` (2026-10-14)** — checked.\n\n"
+        "**Decisions**\n\n"
+        "- **D1. Preserve the repeated sample output.** For example:\n\n"
+        + "  "
+        + "-" * pad
+        + "\n"
+        + "\n".join([row] * 200)
+        + "\n  - Basis: F1."
+    )
+    facts = "\n".join(
+        f"- **F{i:02d}. The router exposes a handler.** `src/router.py:123`"
+        for i in range(1, 41)
+    )
+    recheck = (
+        f"**Recheck against `{_A[:12]}` (2026-10-14)** — moved.\n\n**Facts**\n\n{facts}"
+    )
+    assert check_auto_facts(parse_addendum(recheck)).passed
+    approved = _approve(approval, approval)
+    approved["appended"] = appended_mark(approval)
+    records = [approved, _entry("auto_appended", _A, recheck, mode="delta")]
+    return _appended("x" * 8400, approval, recheck), records, approval
+
+
+def test_an_intact_approval_is_found_past_a_recheck_of_rows_as_wide() -> None:
+    # correctness/f-003 (round 3): a valid approval and a valid recheck, no
+    # hostile writer — the approval's text is found, whether or not its mark
+    # recorded where it was appended.
+    for pad in (47, 48, 49):
+        description, records, approval = _sample_output_story(pad)
+        assert validate_addendum(parse_addendum(approval), strict=False) == []
+
+        section = brief_review_section(records, description)
+
+        assert "\nD1. Preserve the repeated sample output.\n" in section, pad
+        assert "not found" not in section
+    # …and by its recorded offset
+    records[0]["appended"] = appended_mark(approval, at=description.index(approval))
+    assert "\nD1. Preserve" in brief_review_section(records, description)
+
+
+def test_text_appended_after_an_approval_cannot_crowd_it_out() -> None:
+    # security/f-003 (round 3): text appended after the approval repeats its
+    # first line, spaced so every copy opens a window that ends a line — the
+    # search's bound is spent on them. The approval recorded where it was
+    # appended, so that window is tried first and the approval is found.
+    from tests.support.brief_review import approved_addendum
+
+    text, entry, listed = approved_addendum()
+    first = text.splitlines()[0]
+    spacing = next(
+        k for k in range(1500) if (len(text) + 1) % (len(first) + k + 2) == 0
+    )
+    tail = f"{first}\n{'y' * spacing}\n" * 400
+    description = _appended("T", text) + tail
+
+    unplaced = brief_review_section([entry], description)
+    entry["appended"] = appended_mark(text, at=description.index(text))
+    started = time.perf_counter()
+    section = brief_review_section([entry], description)
+
+    assert time.perf_counter() - started < 1.0
+    assert "not found" in unplaced  # the bound held without the offset
+    assert "not found" not in section
+    assert all(f"\n{line}" in section for line in listed[:5])

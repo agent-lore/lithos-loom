@@ -148,6 +148,11 @@ async def test_an_approved_draft_is_appended_verbatim_and_settled() -> None:
         "F2": ITEM_UNCHANGED,
         "D1": ITEM_UNCHANGED,
     }
+    # what and where the text is (security/f-003, converge round 3)
+    block = _DRAFT.strip()
+    at = (story.description or "").index(block)
+    assert entry["appended"]["at"] == at == len(BRIEF) + 2
+    assert entry["appended"]["chars"] == len(block)
     assert HOLD_KEY not in story.metadata  # the slot is the run's now
 
 

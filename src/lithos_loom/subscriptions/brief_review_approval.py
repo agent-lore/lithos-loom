@@ -151,11 +151,12 @@ async def apply_brief_approval(
         }
         if gate.outcome:
             settled["operator_note"] = gate.outcome
-        if block:
-            # where the text is: the PR body's `## Brief review` finds it by this
-            settled["appended"] = appended_mark(block)
         description = story.description or ""
         if block:
+            # what and where the text is: the PR body's `## Brief review`
+            # finds it by this
+            at = len(description.rstrip()) + 2
+            settled["appended"] = appended_mark(block, at=at)
             description = f"{description.rstrip()}\n\n{block}\n"
         try:
             await lithos.task_update(

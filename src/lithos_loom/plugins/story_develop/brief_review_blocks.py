@@ -62,10 +62,11 @@ ADDENDUM_HEADER_RE = re.compile(
 _BASE_SHA_RE = re.compile(r"[0-9a-f]{12,64}")
 _SHA_RE = re.compile(r"[0-9a-f]{16}")
 # How much text one marked entry's search may hash, in multiples of the
-# description's length. A real description seldom ends a window of the
-# recorded length on a line end, so its search hashes a few windows; only a
-# run of short, uniform lines makes every line start a candidate. Past the
-# bound the entry is not found — the outcome a later edit of its text has.
+# description's length. The search tries the recorded offset first, then
+# only windows opening with the text's own first line (its recorded digest)
+# — in practice its header, so a handful. Only many copies of that line
+# could reach the bound; past it the entry is not found — the outcome a
+# later edit of its text has.
 _HASH_BUDGET = 8
 
 
@@ -109,24 +110,45 @@ class Found:
     exact: bool = False
 
 
-def appended_mark(text: str) -> dict[str, object]:
+def appended_mark(text: str, *, at: int | None = None) -> dict[str, object]:
     """What an approval records of the *text* it appends — its length and a
-    digest of it exactly — so delivery finds that text, and only it."""
-    return {"chars": len(text), "sha": _text_sha(text)}
+    digest of it exactly, a digest of its first line, and *at*, the offset
+    it was appended at — so delivery finds that text, and only it, without
+    hashing every window of the description."""
+    mark: dict[str, object] = {
+        "chars": len(text),
+        "sha": _text_sha(text),
+        "head": _text_sha(text.splitlines()[0] if text else ""),
+    }
+    if at is not None:
+        mark["at"] = at
+    return mark
 
 
 def _text_sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _mark(entry: Mapping[str, Any]) -> tuple[int, str] | None:
+@dataclass(frozen=True)
+class _Mark:
+    chars: int
+    sha: str
+    head: str
+    at: int | None
+
+
+def _mark(entry: Mapping[str, Any]) -> _Mark | None:
     raw = entry.get("appended")
     if not isinstance(raw, Mapping):
         return None
-    chars, sha = raw.get("chars"), raw.get("sha")
-    if type(chars) is not int or chars <= 0 or not isinstance(sha, str):
+    chars, sha, head, at = (raw.get(k) for k in ("chars", "sha", "head", "at"))
+    if type(chars) is not int or chars <= 0:
         return None
-    return (chars, sha) if _SHA_RE.fullmatch(sha) else None
+    if not (isinstance(sha, str) and _SHA_RE.fullmatch(sha)):
+        return None
+    if not (isinstance(head, str) and _SHA_RE.fullmatch(head)):
+        return None
+    return _Mark(chars, sha, head, at if type(at) is int and at >= 0 else None)
 
 
 def find_blocks(
@@ -137,7 +159,8 @@ def find_blocks(
 
     An approval records the text it appended (:func:`appended_mark`), so an
     entry carrying that mark is found by it — the newest such entry first,
-    at the last place that text stands — and nothing else can stand in for
+    where it was appended or else the last place that text stands
+    (:func:`_marked`) — and nothing else can stand in for
     it or cut it short: when that text is not there (a later edit), the
     entry is not found, never located by its header. The other entries (an
     auto-appended pass, whose ids and digests are exact; an approval from
@@ -168,7 +191,7 @@ def find_blocks(
     for line in description.splitlines(keepends=True):
         offsets.append(offsets[-1] + len(line))
     found: list[Found | None] = [None] * len(entries)
-    blocks = _marked(entries, description, offsets)
+    blocks = _marked(entries, description, lines, offsets)
     for index, (start, end) in blocks.items():
         text = description[offsets[start] : offsets[end]]
         found[index] = Found(parse_addendum(text), exact=True)
@@ -223,20 +246,30 @@ def find_blocks(
 
 
 def _marked(
-    entries: Sequence[Mapping[str, Any]], description: str, offsets: Sequence[int]
+    entries: Sequence[Mapping[str, Any]],
+    description: str,
+    lines: Sequence[str],
+    offsets: Sequence[int],
 ) -> dict[int, tuple[int, int]]:
-    """The ``(start, end)`` lines of each marked entry's appended text: the
-    newest entry first, at the last line start where that text stands whole
-    (ending a line) outside every block already found — within
-    :data:`_HASH_BUDGET`, so the work stays linear in the description."""
+    """The ``(start, end)`` lines of each marked entry's appended text,
+    newest entry first, outside every block already found: where it was
+    appended, when it still stands there whole; else at the last line start
+    where it stands whole, ending a line. Only a window opening with the
+    text's own first line is hashed whole, within :data:`_HASH_BUDGET`, so
+    the work stays linear in the description however text appended after it
+    is shaped."""
     blocks: dict[int, tuple[int, int]] = {}
     for index in reversed(range(len(entries))):
         if (mark := _mark(entries[index])) is None:
             continue
-        chars, sha = mark
         budget = _HASH_BUDGET * len(description)
-        for start in reversed(range(len(offsets) - 1)):
-            stop = offsets[start] + chars
+        recorded = bisect.bisect_left(offsets, mark.at) if mark.at is not None else -1
+        if 0 <= recorded < len(lines) and offsets[recorded] == mark.at:
+            starts = [recorded]
+        else:
+            starts = []
+        for start in [*starts, *reversed(range(len(lines)))]:
+            stop = offsets[start] + mark.chars
             if stop > len(description) or description[stop : stop + 1] not in (
                 "",
                 "\n",
@@ -246,10 +279,12 @@ def _marked(
             end = min(bisect.bisect_right(offsets, stop), len(offsets) - 1)
             if any(start < b and end > a for a, b in blocks.values()):
                 continue
-            budget -= chars
+            if _text_sha(lines[start]) != mark.head:
+                continue
+            budget -= mark.chars
             if budget < 0:
                 break  # not found: see _HASH_BUDGET
-            if _text_sha(description[offsets[start] : stop]) == sha:
+            if _text_sha(description[offsets[start] : stop]) == mark.sha:
                 blocks[index] = (start, end)
                 break
     return blocks
