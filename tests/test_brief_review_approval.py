@@ -17,6 +17,8 @@ import dataclasses
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from lithos_loom.errors import LithosClientError
 from lithos_loom.gates import BRIEF_REVIEW_REASON, create_human_gate
 from lithos_loom.lithos_client import Task
@@ -273,11 +275,14 @@ async def test_a_repeated_id_past_a_quoted_header_reaches_the_pr_body() -> None:
     assert "not found" not in section
 
 
-async def test_a_quote_of_the_block_s_own_header_stands_in_for_no_part_of_it() -> None:
-    # correctness/f-001 (round 3): a quoted copy of the block's OWN header
-    # (same mode and base) between two copies of a repeated kept id: the
-    # suffix from the quote holds every kept id too, but the whole block —
-    # both D1s — is the one listed.
+@pytest.mark.parametrize("heading", ["", "**Decisions**\n\n"])
+async def test_a_quote_of_the_block_s_own_header_stands_in_for_no_part_of_it(
+    heading: str,
+) -> None:
+    # correctness/f-001 (rounds 3, 4): a quoted copy of the block's OWN
+    # header (same mode and base) between two copies of a repeated kept id,
+    # with or without a section heading after it: the suffix from the quote
+    # holds every kept id too, but the whole block — both D1s — is listed.
     from lithos_loom.plugins.story_develop.brief_review import records_of
     from lithos_loom.plugins.story_develop.brief_review_auto import (
         brief_review_section,
@@ -292,7 +297,7 @@ async def test_a_quote_of_the_block_s_own_header_stands_in_for_no_part_of_it() -
         gate_id,
         "  - Basis: F1.",
         "  - Basis: F1.\n\n**Brief review against `aaaaaaaaaaaa` (2026-10-14)** —"
-        " quoted example.\n\n- **D1. Also expose the new endpoint.** Too.\n"
+        f" quoted example.\n\n{heading}- **D1. Also expose the new endpoint.** Too.\n"
         "  - Basis: F1.",
     )
     await client.task_complete(task_id=gate_id, agent="dave")

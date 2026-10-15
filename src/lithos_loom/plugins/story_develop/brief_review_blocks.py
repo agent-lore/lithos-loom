@@ -97,19 +97,23 @@ def find_blocks(
     A candidate block opens at a header line under the entry's ``(title,
     base)`` and ends at a later candidate header or the description's end —
     every one is considered, so a header an item quotes, in a fence or not,
-    ends nothing. The appenders only append, so the newest entry pairs with
-    the LAST matching candidate, and the next-newest with one before it —
-    pairing in order of appearance, with text earlier in the description
-    (anything the story said before its addenda) tried last, and the
-    longest matching block under a header first; found blocks do not
-    overlap. A header that reads as a quote (:func:`_quoted`) is tried only
-    after every other, so it cannot split the block that quotes it. A text no record vouches for can stand in for no addendum.
+    ends nothing. The appenders only append, so the blocks stand in record
+    order: oldest first, each entry pairs with the EARLIEST block under its
+    header past the block the entry before it found, ending at the first end
+    its record vouches for — so a later entry is not crowded out, and a
+    header an item quotes, of its own block or another, lies inside the
+    block that quotes it. Each found block then runs on to the last end its
+    record vouches for before the next found block (or the description's
+    end), so none is cut short. A text no record vouches for can stand in
+    for no addendum; text before the addenda under an entry's header can
+    open its block, and an id it repeats is then flagged
+    (``brief_review_auto``).
 
     An item opens and closes at the same lines whichever block it is parsed
     in, so the description is parsed once (:func:`_spans`) and each candidate
-    is checked against the record from those spans; only the block that
-    passes is parsed. The work is linear per candidate header, whatever the
-    description holds."""
+    is checked against the record from those spans (:class:`_Fit`); only a
+    block that passes is parsed. The work is linear per candidate header,
+    whatever the description holds."""
     lines = description.splitlines()
     offsets = [0]
     for line in description.splitlines(keepends=True):
@@ -122,22 +126,34 @@ def find_blocks(
             heads.append((index, key))
     bounds = [index for index, _ in heads] + [len(lines)]
     spans = _spans(lines, parse_addendum(description).items, set(bounds))
-    quoted = _quoted(lines, spans, [index for index, _ in heads])
-    # newest first; a header that reads as a quote only after every other
-    order = [h for h in reversed(heads) if h[0] not in quoted] + [
-        h for h in reversed(heads) if h[0] in quoted
-    ]
-    taken: list[tuple[int, int]] = []
+
+    def parsed(index: int, start: int, end: int) -> Addendum | None:
+        addendum = parse_addendum(description[offsets[start] : offsets[end]])
+        return addendum if matches_record(entries[index], addendum.items) else None
+
+    fits = [_Fit(entry, spans, bounds) for entry in entries]
+    blocks: dict[int, tuple[int, int]] = {}
     found: list[Addendum | None] = [None] * len(entries)
-    for index in reversed(range(len(entries))):
-        title, base = entry_header(entries[index])
-        key = (title.lower(), base) if title and base else None
-        chosen = _search(entries[index], key, order, bounds, spans, taken)
-        for start, end in chosen:
-            addendum = parse_addendum(description[offsets[start] : offsets[end]])
-            if matches_record(entries[index], addendum.items):
+    floor = 0
+    for index, fit in enumerate(fits):
+        for start, head_key in heads:
+            if start < floor or head_key != fit.key:
+                continue
+            for end in fit.ends(start, len(lines), longest=False):
+                if (addendum := parsed(index, start, end)) is not None:
+                    found[index], blocks[index], floor = addendum, (start, end), end
+                    break
+            if index in blocks:
+                break
+    order = sorted(blocks, key=lambda index: blocks[index])
+    for at, index in enumerate(order):
+        start, end = blocks[index]
+        limit = blocks[order[at + 1]][0] if at + 1 < len(order) else len(lines)
+        for longer in fits[index].ends(start, limit, longest=True):
+            if longer <= end:
+                break
+            if (addendum := parsed(index, start, longer)) is not None:
                 found[index] = addendum
-                taken.append((start, end))
                 break
     return found
 
@@ -174,84 +190,66 @@ def _spans(
     return spans
 
 
-def _quoted(
-    lines: Sequence[str], spans: Sequence[_Span], heads: Sequence[int]
-) -> set[int]:
-    """The *heads* that read as a quote: inside an item's text that runs on
-    to the next item (or the end) with no section heading between — an
-    addendum's header is followed by a section heading before its items, as
-    ``render_addendum`` writes it. An operator may quote the block's own
-    header in an item; a block from that quote on can hold every kept id
-    too, so it is tried only after every header that opens a section."""
-    span_lines = [span.line for span in spans]
-    quoted: set[int] = set()
-    runs_on: dict[int, bool] = {}
-    for head in heads:
-        index = bisect.bisect_right(span_lines, head) - 1
-        if index < 0 or head >= spans[index].end:
-            continue
-        if index not in runs_on:
-            stop = span_lines[index + 1] if index + 1 < len(spans) else len(lines)
-            gap = lines[spans[index].end : stop]
-            runs_on[index] = not any(line.strip() for line in gap)
-        if runs_on[index]:
-            quoted.add(head)
-    return quoted
-
-
-def _search(
-    entry: Mapping[str, Any],
-    key: tuple[str, str] | None,
-    heads: Sequence[tuple[int, tuple[str, str]]],
-    bounds: Sequence[int],
-    spans: Sequence[_Span],
-    taken: Sequence[tuple[int, int]],
-) -> Iterator[tuple[int, int]]:
-    """The ``(start, end)`` lines of each block *entry*'s record could be,
-    most likely first: candidate *heads* in the order given, its longest block
-    first, ending where its last item can — checked from *spans* the way
-    :func:`matches_record` checks a parse (ids, and digests where the record
-    has them).
+class _Fit:
+    """Which blocks *entry*'s record vouches for, checked from *spans* the
+    way :func:`matches_record` checks a parse (ids, and digests where the
+    record has them).
 
     Whether a block whose last item is ``spans[p]`` holds the recorded text
     does not depend on where it starts, past its ids all being seen
-    (:func:`_scan`): so each candidate header is a search, not a walk."""
-    expected = _expected(entry)
-    if key is None or expected is None:
-        return
-    allowed, need, unique = expected
-    span_lines = [span.line for span in spans]
-    beyond = [len(spans)] * (len(spans) + 1)  # the next id the record lacks
-    for index in reversed(range(len(spans))):
-        beyond[index] = index if spans[index].id not in allowed else beyond[index + 1]
-    ok, least = _scan(spans, allowed, need)
-    ends: dict[int, tuple[list[int], list[int]]] = {}  # by limit
-    for start, head_key in heads:
-        if head_key != key or any(a <= start < b for a, b in taken):
-            continue
-        limit = min((a for a, _ in taken if a > start), default=bounds[-1])
-        first = bisect.bisect_left(span_lines, start)
-        if not allowed:  # an approved No change: a block with no items
-            stop = span_lines[first] if first < len(spans) else bounds[-1]
-            if (end := _last_bound(bounds, start, min(stop, limit))) is not None:
-                yield start, end
-            continue
-        if limit not in ends:
-            ends[limit] = _ends(spans, bounds, ok, need, limit)
-        last_items, last_ends = ends[limit]
-        stop = min(beyond[first], bisect.bisect_left(span_lines, limit))
+    (:func:`_scan`): so each candidate start is a search, not a walk."""
+
+    def __init__(
+        self, entry: Mapping[str, Any], spans: Sequence[_Span], bounds: Sequence[int]
+    ) -> None:
+        title, base = entry_header(entry)
+        expected = _expected(entry)
+        self.key = (title.lower(), base) if title and base and expected else None
+        self.allowed, self.need, self.unique = expected or (frozenset(), {}, False)
+        self.spans, self.bounds = spans, bounds
+        self.span_lines = [span.line for span in spans]
+        # the next item whose id the record lacks
+        self.beyond = [len(spans)] * (len(spans) + 1)
+        for index in reversed(range(len(spans))):
+            lacks = spans[index].id not in self.allowed
+            self.beyond[index] = index if lacks else self.beyond[index + 1]
+        self.ok, self.least = _scan(spans, self.allowed, self.need)
+        self.tables: dict[tuple[int, bool], tuple[list[int], list[int]]] = {}
+
+    def ends(self, start: int, limit: int, *, longest: bool) -> Iterator[int]:
+        """The ends, at most *limit*, of the blocks from *start* the record
+        can vouch for — the first one first, or the *longest*."""
+        first = bisect.bisect_left(self.span_lines, start)
+        if not self.allowed:  # an approved No change: a block with no items
+            stop = self.span_lines[first] if first < len(self.spans) else limit
+            window = self.bounds[
+                bisect.bisect_right(self.bounds, start) : bisect.bisect_right(
+                    self.bounds, min(stop, limit)
+                )
+            ]
+            yield from reversed(window) if longest else window
+            return
+        if (limit, longest) not in self.tables:
+            self.tables[limit, longest] = _ends(
+                self.spans, self.bounds, self.ok, self.need, limit, longest
+            )
+        last_items, last_ends = self.tables[limit, longest]
+        stop = min(self.beyond[first], bisect.bisect_left(self.span_lines, limit))
         # the block's ids all seen by its last item; exactly once, if unique
-        low = bisect.bisect_left(least, first)
-        if unique:
-            low = max(low, first + len(allowed) - 1)
-            stop = min(stop, first + len(allowed))
-        # the longest block first: an approval's repeated `edited` id may sit
-        # past a header its items quote, and a shorter block already holds
-        # every kept id — only the whole block lists every copy
-        at = bisect.bisect_left(last_items, stop) - 1
-        while at >= 0 and last_items[at] >= low:
-            yield start, last_ends[at]
-            at -= 1
+        low = bisect.bisect_left(self.least, first)
+        if self.unique:
+            low = max(low, first + len(self.allowed) - 1)
+            stop = min(stop, first + len(self.allowed))
+        if longest:
+            at = bisect.bisect_left(last_items, stop) - 1
+            while at >= 0 and last_items[at] >= low:
+                yield last_ends[at]
+                at -= 1
+        else:
+            at = bisect.bisect_left(last_items, low)
+            while at < len(last_items) and last_items[at] < stop:
+                yield last_ends[at]
+                at += 1
 
 
 def _scan(
@@ -288,16 +286,18 @@ def _ends(
     ok: Sequence[bool],
     need: Mapping[str, object],
     limit: int,
+    longest: bool,
 ) -> tuple[list[int], list[int]]:
-    """Each item a block ending before *limit* can end with, and where —
-    linear: the items' end windows do not overlap."""
+    """Each item a block ending before *limit* can end with, and where (its
+    first end, or *longest*) — linear: the items' end windows do not
+    overlap."""
     items: list[int] = []
     ends: list[int] = []
     for index, span in enumerate(spans):
         if span.line >= limit:
             break
         if ok[index]:
-            end = _span_end(span, index, spans, bounds, limit, need)
+            end = _span_end(span, index, spans, bounds, limit, need, longest)
             if end is not None:
                 items.append(index)
                 ends.append(end)
@@ -311,25 +311,23 @@ def _span_end(
     bounds: Sequence[int],
     limit: int,
     need: Mapping[str, object],
+    longest: bool,
 ) -> int | None:
-    """The last boundary a block whose last item is *span* can end at —
-    before the next item line and *limit* — where that item's text is the
-    recorded one (any, for an item with no recorded digest)."""
+    """The first (or *longest*: the last) boundary a block whose last item is
+    *span* can end at — before the next item line and *limit* — where that
+    item's text is the recorded one (any, for an item with no recorded
+    digest)."""
     stop = min(spans[index + 1].line if index + 1 < len(spans) else bounds[-1], limit)
     low = bisect.bisect_right(bounds, span.line)
     high = bisect.bisect_right(bounds, stop)
-    for end in reversed(bounds[low:high]):
+    window = bounds[low:high]
+    for end in reversed(window) if longest else window:
         if span.id not in need:
             return end
         digest = span.cut[end] if end < span.end else span.digest
         if digest == need[span.id]:
             return end
     return None
-
-
-def _last_bound(bounds: Sequence[int], start: int, stop: int) -> int | None:
-    at = bisect.bisect_right(bounds, stop) - 1
-    return bounds[at] if at >= 0 and bounds[at] > start else None
 
 
 def _expected(

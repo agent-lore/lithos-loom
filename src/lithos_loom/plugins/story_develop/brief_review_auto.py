@@ -130,6 +130,12 @@ _BUDGET_REASON = (
     "(see the Lithos story)"
 )
 _AUTO_NOTE = "without a gate (facts only, structural check passed)"
+# A block that repeats an id: an operator's copy, or text before the addenda
+# under the same header — the text cannot tell which, so loom says so.
+_REPEATED = (
+    "Its text repeats an item id: only each id's last copy is the text the "
+    "approval recorded, and an earlier copy is listed unchecked."
+)
 # A citation longer than this is not a path anyone writes; refusing it before
 # the match keeps _PATH_RE's backtracking bounded.
 _MAX_PATH_CHARS = 512
@@ -390,6 +396,8 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
         elif not listed:
             empty = " (a *No change* answer)" if addendum.no_change is not None else ""
             notes.append(f"{line}. Its text holds no items{empty}.")
+        elif len({item.id for item in addendum.items}) < len(listed):
+            notes.append(f"{line}. {_REPEATED}")
         else:
             notes.append(f"{line}.")
     # Each addendum's note and overflow line are reserved, newest first; the
