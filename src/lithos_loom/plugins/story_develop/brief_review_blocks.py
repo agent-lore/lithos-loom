@@ -185,10 +185,12 @@ def find_blocks(
     (:func:`matches_record`):
 
     A candidate block opens at a header line under the entry's ``(title,
-    base)`` and ends at a later candidate header or the description's end —
-    every one is considered, so a header an item quotes, in a fence or not,
-    ends nothing. The appenders only append, so the blocks stand in record
-    order: oldest first, each entry pairs with the EARLIEST block under its
+    base)`` and ends at a later candidate header, the start of a block
+    found by its mark (whatever header the operator left it), or the
+    description's end — every one is considered, so a header an item
+    quotes, in a fence or not, ends nothing. The appenders only append, so
+    the blocks stand in record order: oldest first, each entry pairs with
+    the EARLIEST block under its
     header past the block the entry before it found (and outside any found
     by its mark), ending at the first end its record vouches for — so a
     later entry is not crowded out, and a header an item quotes lies inside
@@ -219,7 +221,9 @@ def find_blocks(
         if header and (index == 0 or not lines[index - 1].strip()):
             key = (header.group("title").lower(), header.group("base").lower())
             heads.append((index, key))
-    bounds = [index for index, _ in heads] + [len(lines)]
+    # a block found by its mark ends the one before it, whatever its header
+    starts = {index for index, _ in heads} | {start for start, _ in marked}
+    bounds = sorted(starts | {len(lines)})
     spans = _spans(lines, parse_addendum(description).items, set(bounds))
 
     def parsed(index: int, start: int, end: int) -> Found | None:

@@ -1477,3 +1477,35 @@ def test_text_crafted_to_the_recorded_shape_is_bounded() -> None:
 
     assert time.perf_counter() - started < 1.0
     assert found == [None]
+
+
+@pytest.mark.parametrize("earlier", ["approved", "auto_appended"])
+def test_a_marked_approval_with_an_edited_header_bounds_the_block_before_it(
+    earlier: str,
+) -> None:
+    # external f-002 (converge round 1): an earlier addendum located by its
+    # header (a legacy approval, or an auto-appended pass) is followed by a
+    # marked approval whose operator replaced its header paragraph. The
+    # marked block is found by its text, and its start ends the earlier
+    # block — which is listed in full, not reported as not found.
+    if earlier == "approved":
+        before, entry = _APPROVED_B, _entry("approved", _B, _APPROVED_B)
+        listed = ("S1. No datalist.", "F1. The router exists.", "D1. A task-less")
+    else:
+        before = _RECHECK_A
+        entry = _entry("auto_appended", _A, _RECHECK_A, mode="delta")
+        listed = ("F13. W7 added no refusal hook.",)
+    drafted = (
+        f"**Brief review against `{_A[:12]}` (2026-10-15)** — checked.\n\n"
+        "**Decisions**\n\n- **D7. Keep the gate.** It guards.\n  - Basis: F1.\n"
+    )
+    approved = drafted.replace(drafted.split("\n")[0], "## Approved corrections")
+    marked = _approve(drafted, approved, base=_A)
+    marked["appended"] = appended_mark(approved.strip())
+    description = _appended("T\n\nBrief.", before, approved)
+
+    section = brief_review_section([entry, marked], description)
+
+    assert "not found" not in section
+    for line in (*listed, "D7. Keep the gate."):
+        assert f"\n{line}" in section
