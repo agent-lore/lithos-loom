@@ -64,7 +64,8 @@ _SHA_RE = re.compile(r"[0-9a-f]{16}")
 # How much text one marked entry's search may hash, in multiples of the
 # description's length. The search tries the recorded offset first, then
 # only windows opening with the text's own first line (its recorded digest)
-# — in practice its header, so a handful. Only many copies of that line
+# — in practice its header, so a handful. Only many copies of that line,
+# once the description before the text was edited (so the offset misses),
 # could reach the bound; past it the entry is not found — the outcome a
 # later edit of its text has.
 _HASH_BUDGET = 8
@@ -112,9 +113,10 @@ class Found:
 
 def appended_mark(text: str, *, at: int | None = None) -> dict[str, object]:
     """What an approval records of the *text* it appends — its length and a
-    digest of it exactly, a digest of its first line, and *at*, the offset
-    it was appended at — so delivery finds that text, and only it, without
-    hashing every window of the description."""
+    digest of it exactly, a digest of its first line, and *at*, its offset
+    in the description as stripped (the body ``task_text`` carries after the
+    title) — so delivery finds that text, and only it, without hashing
+    every window of the description."""
     mark: dict[str, object] = {
         "chars": len(text),
         "sha": _text_sha(text),
@@ -152,10 +154,12 @@ def _mark(entry: Mapping[str, Any]) -> _Mark | None:
 
 
 def find_blocks(
-    entries: Sequence[Mapping[str, Any]], description: str
+    entries: Sequence[Mapping[str, Any]], description: str, *, body_at: int = 0
 ) -> list[Found | None]:
     """Each entry's block in *description*, or ``None`` when no text there
-    is the one its record vouches for.
+    is the one its record vouches for. *body_at*: where the story's
+    description, stripped, starts in *description* — the origin of an
+    approval's recorded offset.
 
     An approval records the text it appended (:func:`appended_mark`), so an
     entry carrying that mark is found by it — the newest such entry first,
@@ -191,7 +195,7 @@ def find_blocks(
     for line in description.splitlines(keepends=True):
         offsets.append(offsets[-1] + len(line))
     found: list[Found | None] = [None] * len(entries)
-    blocks = _marked(entries, description, lines, offsets)
+    blocks = _marked(entries, description, lines, offsets, body_at)
     for index, (start, end) in blocks.items():
         text = description[offsets[start] : offsets[end]]
         found[index] = Found(parse_addendum(text), exact=True)
@@ -250,10 +254,13 @@ def _marked(
     description: str,
     lines: Sequence[str],
     offsets: Sequence[int],
+    body_at: int,
 ) -> dict[int, tuple[int, int]]:
     """The ``(start, end)`` lines of each marked entry's appended text,
     newest entry first, outside every block already found: where it was
-    appended, when it still stands there whole; else at the last line start
+    appended (its recorded offset from *body_at*, where the stripped
+    description starts), when it still stands there whole; else at the last
+    line start
     where it stands whole, ending a line. Only a window opening with the
     text's own first line is hashed whole, within :data:`_HASH_BUDGET`, so
     the work stays linear in the description however text appended after it
@@ -263,8 +270,9 @@ def _marked(
         if (mark := _mark(entries[index])) is None:
             continue
         budget = _HASH_BUDGET * len(description)
-        recorded = bisect.bisect_left(offsets, mark.at) if mark.at is not None else -1
-        if 0 <= recorded < len(lines) and offsets[recorded] == mark.at:
+        at = None if mark.at is None else body_at + mark.at
+        recorded = bisect.bisect_left(offsets, at) if at is not None else -1
+        if 0 <= recorded < len(lines) and offsets[recorded] == at:
             starts = [recorded]
         else:
             starts = []

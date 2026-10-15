@@ -582,6 +582,10 @@ class DevelopConfig:
     # addendum they say was appended, read from *description*, under
     # ``## Brief review`` (``## What`` is capped). Empty: no section.
     brief_records: tuple[Mapping[str, Any], ...] = ()
+    # Where the story's description, stripped, starts in *description* (the
+    # task text: title, blank line, body) — ``TaskContext.body_at``. A
+    # brief-review approval records its text's offset from there.
+    description_body_at: int = 0
     # Single-reviewer convenience fields (the T2-era surface; still the
     # default path). T6: `reviewers` holds full multi-reviewer specs and,
     # when non-empty, takes precedence — see `effective_reviewers`.

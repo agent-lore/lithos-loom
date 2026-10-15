@@ -695,7 +695,11 @@ def deliver(
         cost_usd=result.total_cost_usd,
         task_id=task_id,
         issue_closes=closes_line(github_issue_url, repo),
-        brief_review=brief_review_section(config.brief_records, config.description),
+        brief_review=brief_review_section(
+            config.brief_records,
+            config.description,
+            body_at=config.description_body_at,
+        ),
     )
     pr_url = create_pr(
         wt, branch=result.branch, base=config.base_branch, title=title, body=body

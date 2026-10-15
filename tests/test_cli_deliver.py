@@ -2429,6 +2429,34 @@ def test_a_hand_delivery_lists_every_appended_addendum(
         assert f"\n{line}\n" in brief
 
 
+def test_a_hand_delivery_finds_an_approval_by_its_offset_in_the_task_text(
+    host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
+) -> None:
+    # correctness/f-003, security/f-004 (converge round 4): the hand
+    # delivery searches the story's task text, so the approval's offset —
+    # recorded in the description as stripped — is counted from its body.
+    from tests.support.brief_review import crowded_story
+
+    seeded = asyncio.run(lithos.task_get(task_id=_STORY))
+    assert seeded is not None
+    description, entry, listed = crowded_story(f"\n {seeded.description}")
+    lithos.add_task(
+        make_task(
+            _STORY,
+            title=seeded.title,
+            description=description,
+            metadata={**seeded.metadata, "brief_review": [entry]},
+        )
+    )
+
+    assert _invoke(_RUN).exit_code == 0
+    body = gh["created"][0]["body"]
+    brief = body[body.index("## Brief review") : body.index("## Review\n")]
+    assert "not found" not in brief
+    for line in listed:
+        assert f"\n{line}\n" in brief
+
+
 def test_a_dry_run_prints_the_brief_review_section_it_would_publish(
     host, lithos: FakeLithosClient, run_dir: Path, repo: Path, gh: dict
 ) -> None:

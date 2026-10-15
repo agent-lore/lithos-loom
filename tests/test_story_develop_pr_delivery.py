@@ -44,7 +44,7 @@ from lithos_loom.plugins.story_develop.publish_text import (
     fence_untrusted,
     publish_title,
 )
-from tests.support.brief_review import approved_addendum
+from tests.support.brief_review import approved_addendum, crowded_story
 
 # --- pure builders --------------------------------------------------------------
 
@@ -636,6 +636,38 @@ def test_deliver_lists_an_approved_addendum_that_overflows_what(
     for line in listed:
         assert f"\n{line}\n" in brief
     assert brief.strip() == brief_review_section((entry,), story.description)
+
+
+def test_deliver_finds_an_approval_by_its_offset_in_the_task_text(
+    monkeypatch: pytest.MonkeyPatch, config: DevelopConfig
+) -> None:
+    # correctness/f-003, security/f-004 (converge round 4): the approval
+    # records its offset in the description as stripped; delivery searches
+    # the task text (title, blank line, body). Text after the approval spends
+    # the search's bound, so only that offset — counted from the body —
+    # finds the approval.
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+
+    description, entry, listed = crowded_story("  \nRetain the headers.\n\nBody.")
+    ctx = TaskContext("t", "Retain the rendered headers", description, None, {})
+    story = replace(
+        config,
+        description=ctx.task_text,
+        description_body_at=ctx.body_at,
+        brief_records=(entry,),
+    )
+    state = _install(monkeypatch, story)
+    wt = _make_wt(story)
+
+    deliver(story, _result(story, wt))
+
+    body = state["pr_kwargs"]["body"]
+    brief = body[body.index("## Brief review") : body.index("## Review\n")]
+    assert "not found" not in brief
+    for line in listed:
+        assert f"\n{line}\n" in brief
+    # …which the search over the task text alone cannot do
+    assert "not found" in brief_review_section((entry,), ctx.task_text)
 
 
 def test_deliver_adds_no_section_without_records(

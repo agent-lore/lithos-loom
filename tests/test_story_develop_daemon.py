@@ -2512,7 +2512,12 @@ def test_daemon_mode_resumed_run_delivers_every_appended_addendum(
     config = captured["config"]
     assert "phase" not in captured
     assert config.brief_records == (entry,)
-    section = brief_review_section(config.brief_records, config.description)
+    # the approval's offset is counted from the description's start in the
+    # task text (converge round 4)
+    assert config.description[config.description_body_at :] == f"Body.\n\n{text}"
+    section = brief_review_section(
+        config.brief_records, config.description, body_at=config.description_body_at
+    )
     assert "outcome `approved`" in section
     for line in listed:
         assert f"\n{line}\n" in section

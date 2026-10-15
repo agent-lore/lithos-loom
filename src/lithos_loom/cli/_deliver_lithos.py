@@ -487,6 +487,12 @@ class StoryState:
         body = self.description.strip()
         return f"{self.title}\n\n{body}" if body else self.title
 
+    @property
+    def body_at(self) -> int:
+        """Where the description, stripped, starts in :attr:`task_text` — the
+        origin of a brief-review approval's recorded offset."""
+        return len(self.title) + 2 if self.description.strip() else 0
+
     def delivery_marked(
         self, *, pr_url: str, run_id: str, gated: bool, swapped: bool
     ) -> bool:

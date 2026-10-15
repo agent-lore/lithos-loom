@@ -626,5 +626,7 @@ def pr_body(
         # a RW mount, and a PR description is live markup (sec review f-006)
         provenance_quote=facts.coder_summary,
         # the same section a run's own delivery renders, from the live story
-        brief_review=brief_review_section(records_of(story.metadata), story.task_text),
+        brief_review=brief_review_section(
+            records_of(story.metadata), story.task_text, body_at=story.body_at
+        ),
     )

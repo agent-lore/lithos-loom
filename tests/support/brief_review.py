@@ -49,3 +49,33 @@ def approved_addendum() -> tuple[str, dict[str, Any], tuple[str, ...]]:
     entry["appended"] = appended_mark(text)
     listed = tuple(f"{item.id}. {item_heading(item)}" for item in addendum.items)
     return text, entry, listed
+
+
+def crowding_tail(text: str, copies: int = 400) -> str:
+    """Text appended after the approved *text* that repeats its first line,
+    spaced so every copy opens a window of ``len(text)`` that ends a line —
+    enough to spend the search's bound before it reaches the approval, so
+    only the offset the approval recorded finds it."""
+    first = text.splitlines()[0]
+    # a unit: the first line, then short filler lines — a line ends every
+    # few offsets past the first line, so some short unit fits the length
+    width, lines = next(
+        (w, m)
+        for m in range(1, len(text) // 30)
+        for w in (1, 2)
+        if (rest := len(text) % (len(first) + (w + 1) * m + 1)) >= len(first)
+        and (rest - len(first)) % (w + 1) == 0
+    )
+    return (f"{first}\n" + f"{'y' * width}\n" * lines) * copies
+
+
+def crowded_story(head: str) -> tuple[str, dict[str, Any], tuple[str, ...]]:
+    """``(description, entry, listed)``: the pilot approval appended to
+    *head* exactly as ``apply_brief_approval`` appends and marks it (its
+    offset counted in the description as stripped), then a
+    :func:`crowding_tail`."""
+    text, entry, listed = approved_addendum()
+    body = head.strip()
+    entry["appended"] = appended_mark(text, at=len(body) + 2 if body else 0)
+    description = f"{head.rstrip()}\n\n{text}\n" + crowding_tail(text)
+    return description, entry, listed

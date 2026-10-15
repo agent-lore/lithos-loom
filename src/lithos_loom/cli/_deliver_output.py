@@ -352,7 +352,9 @@ def echo_plan(
         # The body's `## Brief review`, rendered by the function the body
         # uses: the addenda the operator is about to publish, whole (the
         # section is bounded by its own budget, so no line cap here).
-        section = brief_review_section(records_of(story.metadata), story.task_text)
+        section = brief_review_section(
+            records_of(story.metadata), story.task_text, body_at=story.body_at
+        )
         if section:
             echo("          it lists the story's brief-review addenda, as published:")
             for line in quoted_block(section, limit=_SECTION_PREVIEW_LINES):

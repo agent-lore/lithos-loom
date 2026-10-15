@@ -148,9 +148,10 @@ async def test_an_approved_draft_is_appended_verbatim_and_settled() -> None:
         "F2": ITEM_UNCHANGED,
         "D1": ITEM_UNCHANGED,
     }
-    # what and where the text is (security/f-003, converge round 3)
+    # what and where the text is (security/f-003, converge round 3): its
+    # offset in the description as stripped
     block = _DRAFT.strip()
-    at = (story.description or "").index(block)
+    at = (story.description or "").strip().index(block)
     assert entry["appended"]["at"] == at == len(BRIEF) + 2
     assert entry["appended"]["chars"] == len(block)
     assert HOLD_KEY not in story.metadata  # the slot is the run's now
@@ -469,6 +470,48 @@ async def test_an_example_under_the_header_keeps_a_legacy_approval_s_heading() -
     assert "\nD1. Genuine approved heading.\n" in section
     assert "an earlier copy is listed unchecked" in section
     assert "…and 1 more items." in section
+
+
+async def test_the_recorded_offset_finds_the_approval_in_the_task_text() -> None:
+    # correctness/f-003, security/f-004 (converge round 4): the offset the
+    # approval records is the one delivery tries, in the text it searches —
+    # the task text, past a title and a description with leading space —
+    # however text appended after the approval spends the search's bound.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+    from lithos_loom.plugins.story_develop.lithos_io import TaskContext
+    from tests.support.brief_review import crowding_tail
+
+    story = make_task(
+        STORY,
+        title="Retain the rendered headers",
+        description=f"\n  {'x' * 8400}\n\nThe brief.\n",
+        metadata={"project": "lithos-lens", "prd": "docs/prd/t3.md"},
+        tags=("trigger:story-develop",),
+    )
+    client = FakeLithosClient(tasks=(story,), agent_id="loom")
+    # pilot-sized (F11: 7.7k-13.4k characters)
+    approved = _decisions(
+        "Preserve the rendered headers.",
+        *(f"Keep rule {i} {'in place ' * 36}." for i in range(2, 41)),
+    )
+    assert len(approved) > 12_000
+    outcome = await _approve_next(client, "r-1", approved, approved)
+    assert outcome.applied
+
+    fresh = await _get(client, STORY)
+    block = approved.strip()
+    description = (fresh.description or "") + crowding_tail(block)
+    ctx = TaskContext(STORY, fresh.title, description, None, fresh.metadata)
+    records = records_of(fresh.metadata)
+    section = brief_review_section(records, ctx.task_text, body_at=ctx.body_at)
+
+    assert "\nD1. Preserve the rendered headers.\n" in section
+    assert "not found" not in section
+    # without the offset, the bound is spent before the approval is reached
+    assert "not found" in brief_review_section(records, ctx.task_text)
 
 
 async def test_an_emptied_draft_dispatches_with_nothing_appended() -> None:

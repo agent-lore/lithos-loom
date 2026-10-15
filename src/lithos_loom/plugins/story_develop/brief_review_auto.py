@@ -363,7 +363,9 @@ def pr_section(headings: tuple[str, ...]) -> str:
     return "\n".join(parts)
 
 
-def brief_review_section(records: Sequence[Mapping[str, Any]], description: str) -> str:
+def brief_review_section(
+    records: Sequence[Mapping[str, Any]], description: str, *, body_at: int = 0
+) -> str:
     """The PR body's ``## Brief review`` section for every addendum appended
     to the story — each *records* entry (``metadata.brief_review``, oldest
     first) that is ``approved`` or ``auto_appended`` — or ``""`` for none.
@@ -374,7 +376,10 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
     from its block in *description* — the text ``## What`` renders — found
     by :func:`.brief_review_blocks.find_blocks`: the text under the header
     ``render_addendum`` wrote (the mode's title and ``base_sha[:12]``) whose
-    items are the ones the record vouches for. Every item, of every kind, is
+    items are the ones the record vouches for. *body_at* is where the story's
+    description, stripped, starts in *description* (``task_text``'s
+    ``body_at``: after the title) — the origin of the offset an approval
+    records appending its text at. Every item, of every kind, is
     listed as ``<id>. <heading>``. An entry with no such text (its header edited away,
     an emptied approval, a later edit) is named on loom's line as not found —
     never filled in from the record's draft.
@@ -390,7 +395,7 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
     entries = [e for e in records if e.get("outcome") in _APPENDED]
     if not entries:
         return ""
-    found = find_blocks(entries, description)
+    found = find_blocks(entries, description, body_at=body_at)
     parts = [
         "## Brief review",
         "",

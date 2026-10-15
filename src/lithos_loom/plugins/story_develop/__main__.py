@@ -513,6 +513,7 @@ def _daemon_main(args: argparse.Namespace) -> int:
     route_layer: dict[str, Any] = dict(
         repo=repo,
         description=ctx.task_text,
+        description_body_at=ctx.body_at,
         work_dir=args.work_dir.expanduser().resolve(),
         acceptance_criteria=ctx.acceptance_criteria,
         max_rounds=args.max_rounds,
@@ -676,7 +677,11 @@ def _daemon_main(args: argparse.Namespace) -> int:
             config = replace(config, start_sha=phase.start_sha)
         if phase.description is not None:
             reviewed = replace(ctx, description=phase.description)
-            config = replace(config, description=reviewed.task_text)
+            config = replace(
+                config,
+                description=reviewed.task_text,
+                description_body_at=reviewed.body_at,
+            )
         if phase.records:
             brief_records = phase.records
     config = replace(config, brief_records=brief_records)
@@ -823,6 +828,7 @@ def main(argv: list[str] | None = None) -> int:
     description = args.description
     github_issue_url: str | None = None
     brief_records: tuple[dict[str, Any], ...] = ()
+    description_body_at = 0
     # Review Profile task-layer value (#139): the explicit --review-profile flag,
     # else (for a --task-id run) the task's develop_review_profile metadata.
     review_profile_task: str | None = args.review_profile
@@ -833,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         description = ctx.task_text
+        description_body_at = ctx.body_at
         brief_records = tuple(records_of(ctx.metadata))
         # explicit flag > task metadata > (effective fallback to description)
         acceptance_criteria = acceptance_criteria or ctx.acceptance_criteria
@@ -1025,6 +1032,7 @@ def main(argv: list[str] | None = None) -> int:
     config = DevelopConfig(
         repo=repo,
         description=description,
+        description_body_at=description_body_at,
         brief_records=brief_records,
         work_dir=work_dir,
         acceptance_criteria=acceptance_criteria,
