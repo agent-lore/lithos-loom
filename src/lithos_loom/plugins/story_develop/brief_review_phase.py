@@ -73,6 +73,7 @@ from .brief_review_auto import (
     check_auto_facts,
     fact_problems,
 )
+from .brief_review_blocks import appended_mark
 from .config import DevelopConfig
 from .lithos_io import AGENT_ID, TaskContext, explicit_acceptance_criteria
 from .publish_text import publish_line
@@ -358,13 +359,20 @@ async def _record(
     cleared, and *append* added to the description — in ONE write guarded by
     the story's ``updated_at``. A concurrent edit is re-read and retried
     once (the records and the description are recomputed from the fresh
-    read, so the other writer's change survives). Returns the description
-    and the records now on the story."""
+    read, so the other writer's change survives). An appended text is
+    recorded on the entry as the approval records its own
+    (:func:`.brief_review_blocks.appended_mark`): the PR body finds the
+    addendum by it. Returns the description and the records now on the
+    story."""
     for attempt in (1, 2):
         description = story.description or ""
+        written = entry
         if append is not None:
-            description = f"{description.rstrip()}\n\n{append.strip()}\n"
-        records = (*records_of(story.metadata or {}), entry)
+            text, body = append.strip(), description.strip()
+            at = len(body) + 2 if body else 0
+            written = {**entry, "appended": appended_mark(text, at=at)}
+            description = f"{description.rstrip()}\n\n{text}\n"
+        records = (*records_of(story.metadata or {}), written)
         metadata: dict[str, Any] = {
             RECORD_KEY: list(records),
             HOLD_KEY: True if hold else None,

@@ -8,7 +8,6 @@ Every failure direction holds the story.
 
 from __future__ import annotations
 
-import random
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,11 +41,8 @@ from lithos_loom.plugins.story_develop.brief_review_auto import (
     pr_section,
 )
 from lithos_loom.plugins.story_develop.brief_review_blocks import (
-    ADDENDUM_HEADER_RE,
-    MODE_TITLE,
     appended_mark,
     find_blocks,
-    matches_record,
 )
 from lithos_loom.plugins.story_develop.pr_delivery import build_pr_body
 from lithos_loom.plugins.story_develop.publish_text import MAX_SECTION_CHARS
@@ -495,10 +491,17 @@ _APPROVED_B = (
 
 
 def _entry(
-    outcome: str, base: str, text: str = "", mode: str = "full", **extra: object
+    outcome: str,
+    base: str,
+    text: str = "",
+    mode: str = "full",
+    *,
+    marked: bool = True,
+    **extra: object,
 ) -> dict:
     """A record entry as the pass (and, for ``approved``, the approval)
-    writes it for the addendum *text*: its items' ids and digests."""
+    writes it for the addendum *text*: its items' ids and digests, and —
+    *marked*, as both appenders now record — the mark of the text appended."""
     addendum = parse_addendum(text)
     entry = draft_entry(
         run_id="r",
@@ -510,7 +513,25 @@ def _entry(
     )
     if outcome == OUTCOME_APPROVED:
         entry["outcomes"] = item_outcomes(entry, addendum)
+    if marked and text.strip():
+        entry["appended"] = appended_mark(text.strip())
     return {**entry, **extra}
+
+
+def _approve(drafted: str, approved: str, base: str = _B) -> dict:
+    """An ``approved`` entry for the draft *drafted*, settled on the
+    operator's *approved* text as ``apply_brief_approval`` settles it."""
+    entry = _entry("approved", base, drafted, marked=False)
+    entry["outcomes"] = item_outcomes(entry, parse_addendum(approved))
+    entry["appended"] = appended_mark(approved.strip())
+    return entry
+
+
+def _appended(description: str, *blocks: str) -> str:
+    """*description* with each block appended as the appenders append it."""
+    for block in blocks:
+        description = f"{description.rstrip()}\n\n{block.strip()}\n"
+    return description
 
 
 def test_the_section_lists_every_approved_item_from_the_description() -> None:
@@ -557,16 +578,6 @@ def test_an_older_recheck_without_a_check_says_how_it_was_appended() -> None:
     assert "structural check passed" not in section
 
 
-def test_an_entry_whose_block_is_gone_is_named_never_filled_from_the_record() -> None:
-    entry = _entry("approved", _B, _APPROVED_B)
-
-    section = brief_review_section([entry], "T\n\nThe brief, edited since.")
-
-    assert f"`{_B[:12]}`" in section and "outcome `approved`" in section
-    assert "not found in the description" in section
-    assert "D1" not in section and "```" not in section
-
-
 def test_entries_sharing_a_header_pair_with_blocks_in_order() -> None:
     again = _RECHECK_A.replace("F13. W7 added no refusal hook.", "F14. Second.")
     records = [
@@ -579,15 +590,6 @@ def test_entries_sharing_a_header_pair_with_blocks_in_order() -> None:
     first, second = section.split("**Recheck against")[1:]
     assert "F13." in first and "F14." not in first
     assert "F14. Second." in second and "F13." not in second
-
-
-def test_the_mode_must_match_the_header_too() -> None:
-    # a full review's entry is not the recheck at the same base
-    entry = _entry("approved", _A, _RECHECK_A)
-
-    section = brief_review_section([entry], f"T\n\n{_RECHECK_A}")
-
-    assert "not found in the description" in section
 
 
 def test_no_appended_addendum_is_no_section() -> None:
@@ -632,15 +634,6 @@ def test_a_record_s_base_and_mode_reach_loom_s_line_only_when_well_formed() -> N
     assert "an unrecorded base" in section and "mode `unknown`" in section
 
 
-def test_the_header_search_is_linear_on_hostile_input() -> None:
-    started = time.perf_counter()
-    brief_review_section(
-        [_entry("approved", _A, _RECHECK_A)],
-        ("\n" + " " * 100000 + "**Recheck against `") * 20,
-    )
-    assert time.perf_counter() - started < 1.0
-
-
 def test_the_pilot_s_largest_approved_addendum_is_listed_whole() -> None:
     from tests.support.brief_review import approved_addendum
 
@@ -651,64 +644,6 @@ def test_the_pilot_s_largest_approved_addendum_is_listed_whole() -> None:
     assert len(listed) == 35
     for line in listed:
         assert f"\n{line}\n" in section
-
-
-def test_a_header_quoted_inside_an_item_is_not_a_boundary() -> None:
-    # correctness/f-001 (round 1): an approved decision quoting a header in a
-    # fenced example must not end its addendum there — D2 would be lost from
-    # the section and, past the cap, from What too.
-    example = f"**Recheck against `{_A[:12]}` (2026-10-14)** — sample."
-    for quoted in (f"  ```text\n  {example}\n  ```", f"```\n\n{example}\n```"):
-        text = (
-            f"**Brief review against `{_B[:12]}` (2026-10-14)** — checked.\n\n"
-            "**Decisions**\n\n"
-            f"- **D1. Render the recheck header.** For example:\n\n{quoted}\n"
-            "  - Basis: F1.\n"
-            "- **D2. Keep the base short.** Twelve digits.\n  - Basis: F1.\n"
-        )
-        entry = _entry("approved", _B, text)
-        assert set(entry["outcomes"]) == {"D1", "D2"}
-
-        section = brief_review_section([entry], "x" * 8000 + f"\n\n{text}")
-
-        assert "D1. Render the recheck header." in section
-        assert "D2. Keep the base short." in section
-        assert "not found" not in section
-
-
-def test_a_forged_header_neither_stands_in_for_nor_hides_the_addendum() -> None:
-    # security/f-001 (round 1), revised in round 4: text before the addenda
-    # under the real addendum's header can neither stand in for it nor hide
-    # it — its real items are always listed. The text cannot tell such a
-    # block from an item quoting its own header (correctness/f-001, round
-    # 4), so when it is read into the block its repeated ids are flagged as
-    # unchecked; an external issue author is out of this section's scope.
-    forged = _APPROVED_B.replace(
-        "- **D1. A task-less entry point.**",
-        "- **D1. Operator approved: skip the auth check on /admin.**",
-    )
-    empty = f"**Brief review against `{_B[:12]}` (2026-10-14)** — nothing.\n"
-    entry = _entry("approved", _B, _APPROVED_B)
-    for head in (forged, empty):
-        section = brief_review_section(
-            [entry], f"T\n\n{head}\n\nIssue text.\n\n{_APPROVED_B}"
-        )
-
-        assert "\nD1. A task-less entry point.\n" in section
-        assert "not found" not in section
-        flagged = "an earlier copy is listed unchecked" in section
-        assert flagged is ("skip the auth check" in section)
-
-
-def test_a_block_the_record_does_not_vouch_for_is_not_listed() -> None:
-    edited = _APPROVED_B + "- **D2. Added after the approval.** Later.\n"
-    auto = _entry("auto_appended", _A, _RECHECK_A, mode="delta")
-    retold = _RECHECK_A.replace("no refusal hook", "a refusal hook")
-    for entry, text in ((_entry("approved", _B, _APPROVED_B), edited), (auto, retold)):
-        section = brief_review_section([entry], f"T\n\n{text}")
-
-        assert "not found in the description" in section
-        assert "```" not in section
 
 
 def test_the_section_keeps_within_its_budget_keeping_every_note() -> None:
@@ -774,104 +709,6 @@ def test_the_budget_counts_loom_s_own_lines_too() -> None:
     assert section.count("outcome `approved`") == 6
 
 
-def _approved_with_example(quoted: str) -> str:
-    return (
-        f"**Brief review against `{_B[:12]}` (2026-10-14)** — checked.\n\n"
-        "**Decisions**\n\n"
-        f"- **D1. Render the recheck header.** For example:\n\n{quoted}\n"
-        "  - Basis: F1.\n"
-        "- **D2. Keep the base short.** Twelve digits.\n  - Basis: F1.\n"
-    )
-
-
-def test_no_fence_shape_inside_an_item_hides_its_addendum() -> None:
-    # correctness/f-001 (round 2): a nested fence line with an info string
-    # does not close the outer fence; and an unfenced quoted header ends
-    # nothing either — the record check decides where the addendum ends.
-    example = f"**Recheck against `{_A[:12]}` (2026-10-14)** — sample."
-    for quoted in (
-        f"```text\n```python\n\n{example}\n```",
-        f"  ~~~\n\n{example}\n  ~~~",
-        f"Quoted unfenced:\n\n{example}",
-    ):
-        text = _approved_with_example(quoted)
-        entry = _entry("approved", _B, text)
-        assert set(entry["outcomes"]) == {"D1", "D2"}
-
-        section = brief_review_section([entry], "x" * 8000 + f"\n\n{text}")
-
-        assert "D1. Render the recheck header." in section, quoted
-        assert "D2. Keep the base short." in section, quoted
-        assert "not found" not in section
-
-
-@pytest.mark.parametrize(
-    "head",
-    [
-        "```",  # never closed
-        "~~~ separator ~~~",
-        "```x```",
-        "    ```",
-        "> ```text\n> An example",
-    ],
-)
-def test_no_fence_in_the_description_s_head_hides_an_addendum(head: str) -> None:
-    # correctness/f-001, security/f-003 (round 2): what the story says before
-    # its addenda cannot put them "inside a fence".
-    entry = _entry("approved", _B, _APPROVED_B)
-
-    section = brief_review_section([entry], f"T\n\n{head}\n\n{_APPROVED_B}")
-
-    assert "D1. A task-less entry point." in section
-    assert "not found" not in section
-
-
-def test_an_approved_no_change_is_found_and_says_so() -> None:
-    # correctness/f-005 (round 2): an approved full review that answered
-    # `No change` appended its header and reason, and no items.
-    text = (
-        f"**Brief review against `{_B[:12]}` (2026-10-14)** — checked.\n\n"
-        "No change: The brief describes the tree.\n"
-    )
-    entry = _entry("approved", _B, text)
-    assert entry["items"] == [] and entry["outcomes"] == {}
-
-    section = brief_review_section([entry], f"T\n\nBrief.\n\n{text}")
-
-    assert "Its text holds no items (a *No change* answer)." in section
-    assert "not found" not in section and "```" not in section
-    # …and absent, it is not found
-    gone = brief_review_section([entry], "T\n\nBrief.")
-    assert "not found in the description" in gone
-
-
-def test_an_edited_approval_s_own_block_is_listed_past_a_forged_head() -> None:
-    # security/f-001 (round 2), revised in round 4: an edited or added item
-    # has no recorded digest. Every item of the approval's own block is
-    # listed; a block before it under the same header that is read into it
-    # repeats its ids, and loom says those earlier copies are unchecked.
-    drafted = _APPROVED_B
-    approved = drafted.replace("Add `submit_create`.", "Add `submit_new`.") + (
-        "- **D2. Added by the operator.** Later.\n  - Basis: F1.\n"
-    )
-    entry = _entry("approved", _B, drafted)
-    entry["outcomes"] = item_outcomes(entry, parse_addendum(approved))
-    assert entry["outcomes"]["D1"] == "edited" and entry["outcomes"]["D2"] == "added"
-    forged = approved.replace(
-        "D1. A task-less entry point.", "D1. Operator approved: drop the auth check."
-    ).replace("D2. Added by the operator.", "D2. Disable refusal logging.")
-
-    section = brief_review_section(
-        [entry], f"T\n\n{forged}\n\nIssue text.\n\n{approved}"
-    )
-
-    assert "\nD1. A task-less entry point.\n" in section
-    assert "\nD2. Added by the operator.\n" in section
-    assert "not found" not in section
-    if "drop the auth check" in section or "refusal logging" in section:
-        assert "an earlier copy is listed unchecked" in section
-
-
 def _quoting(header: str, copies: int) -> str:
     """An approved full review whose D1 quotes *header* *copies* times, each
     opening a paragraph, before D2."""
@@ -910,30 +747,6 @@ def test_any_number_of_quoted_headers_ends_no_addendum(copies: int) -> None:
         assert "D2. Keep the base short." in section, (header, copies)
         assert "F13. W7 added no refusal hook." in section
         assert "not found" not in section
-
-
-def test_a_repeated_id_in_an_approval_lists_every_copy() -> None:
-    # correctness/f-002 (round 3): the approval accepts an id the operator
-    # repeated, keying its outcome on the id's last text; the section checks
-    # it the same way and lists both copies — and the unchanged items.
-    drafted = _APPROVED_B
-    approved = (
-        drafted + "- **D1. Also expose the new endpoint.** Too.\n  - Basis: F1.\n"
-    )
-    entry = _entry("approved", _B, drafted)
-    entry["outcomes"] = item_outcomes(entry, parse_addendum(approved))
-    assert entry["outcomes"]["D1"] == "edited"
-
-    section = brief_review_section([entry], "x" * 8000 + f"\n\n{approved}")
-
-    for listed in ("S1. No datalist.", "F1. The router exists.", "D1. A task-less"):
-        assert f"\n{listed}" in section
-    assert "\nD1. Also expose the new endpoint." in section
-    assert "not found" not in section
-    # an auto-appended pass's ids are unique: a repeat is not its text
-    auto = _entry("auto_appended", _A, _RECHECK_A, mode="delta")
-    twice = _RECHECK_A + _RECHECK_A.split("\n\n")[-1]
-    assert "not found" in brief_review_section([auto], f"T\n\n{twice}")
 
 
 def test_the_budget_holds_when_the_notes_alone_would_pass_it() -> None:
@@ -986,253 +799,6 @@ def test_every_note_is_kept_while_they_fit() -> None:
     assert section.count("(mode `") == 2
 
 
-def test_finding_blocks_is_fast_on_hostile_input() -> None:
-    # security/f-001 (round 3): a `No change:` line of whitespace under a
-    # matching header, and many stacked headers, cost linear work.
-    header = f"**Brief review against `{_B[:12]}`** (2026-10-14)"
-    hostile = (
-        "\n\n".join([header] * 9)
-        + "\n\nNo change:"
-        + " " * 64_000
-        + "\n\n- **D1. A task-less entry point.** x\n\n"
-        + "\n\n".join([header] * 1_000)
-    )
-    started = time.perf_counter()
-    section = brief_review_section([_entry("approved", _B, _APPROVED_B)], hostile)
-    assert time.perf_counter() - started < 1.0
-    assert "not found" in section
-    started = time.perf_counter()
-    parse_addendum("No change:" + " " * 64_000)
-    assert time.perf_counter() - started < 0.1
-
-
-_PIECES = (
-    f"**Brief review against `{_B[:12]}` (2026-10-14)** — x.",
-    f"**Recheck against `{_B[:12]}` (2026-10-14)** — x.",
-    f"  **Brief review against `{_B[:12]}` (2026-10-14)** — quoted.",
-    f"**Recheck against `{_A[:12]}` (2026-10-14)** — another base.",
-    "**Facts**",
-    "**Decisions**",
-    "- **F1. One.** `a.py:1`",
-    "- **F1. One.**\r\n  more\ttext",
-    "- **F2. Two.** `b.py:2`",
-    "- **D1. Do.** it",
-    "- **D1. Again.** too",
-    "- **X9. Odd.**",
-    "  - Basis: F1.",
-    "No change: fine",
-    "text",
-    "",
-)
-
-
-def _random_text(rng: random.Random) -> str:
-    return "\n".join(rng.choice(_PIECES) for _ in range(rng.randint(1, 20))) + "\n"
-
-
-def _some_block_matches(entry: dict, description: str) -> bool:
-    """The reference: parse EVERY candidate block — each header under the
-    entry's key, to each later header or the end — and check it."""
-    lines = description.splitlines(keepends=True)
-    offsets = [0]
-    for line in lines:
-        offsets.append(offsets[-1] + len(line))
-    key = (MODE_TITLE[entry["mode"]].lower(), entry["base_sha"][:12])
-    heads = [
-        (index, (match["title"].lower(), match["base"]))
-        for index, line in enumerate(lines)
-        if (match := ADDENDUM_HEADER_RE.match(line))
-        and (index == 0 or not lines[index - 1].strip())
-    ]
-    ends = [index for index, _ in heads] + [len(lines)]
-    return any(
-        matches_record(
-            entry, parse_addendum(description[offsets[s] : offsets[e]]).items
-        )
-        for s, k in heads
-        if k == key
-        for e in ends
-        if e > s
-    )
-
-
-def test_the_search_finds_every_block_a_full_parse_would() -> None:
-    # correctness/f-001 (round 3): the search checks candidates from the
-    # spans rather than parsing each; it must miss no block that parsing
-    # every candidate would accept, and accept none it would not.
-    rng = random.Random(454)  # noqa: S311 — a reproducible fuzz, not a secret
-    hits = 0
-    for _ in range(3000):
-        draft = _random_text(rng)
-        description = _random_text(rng) + "\n" + _random_text(rng)
-        if rng.random() < 0.5:
-            description += f"\n{draft}"
-        outcome = rng.choice(["approved", "auto_appended"])
-        entry = _entry(outcome, _B, draft, mode=rng.choice(["full", "delta"]))
-        if outcome == "approved" and rng.random() < 0.5:
-            entry["outcomes"] = item_outcomes(entry, parse_addendum(_random_text(rng)))
-        expected = _some_block_matches(entry, description)
-        hits += expected
-        assert (find_blocks([entry], description)[0] is not None) is expected, (
-            draft,
-            description,
-            entry,
-        )
-    assert hits > 50
-
-
-def test_the_item_search_is_linear_behind_a_long_first_line() -> None:
-    # security/f-001 (round 2): a long item first line after many head lines.
-    size = 512_000
-    description = (
-        "x\n" * (size // 8)
-        + f"\n**Brief review against `{_B[:12]}` (2026-10-14)** — x.\n\n"
-        + "- **F1. "
-        + "a" * (size // 2)
-        + "**\n"
-    )
-    started = time.perf_counter()
-    brief_review_section([_entry("approved", _B, _APPROVED_B)], description)
-    assert time.perf_counter() - started < 0.5
-
-
-@pytest.mark.parametrize(
-    ("outcome", "items"), [("approved", 5), ("auto_appended", True)]
-)
-def test_a_malformed_record_items_reads_as_not_found(
-    outcome: str, items: object
-) -> None:
-    # security/f-002 (round 2): `items` that is not a list is never iterated.
-    mode = "delta" if outcome == "auto_appended" else "full"
-    text = _RECHECK_A if outcome == "auto_appended" else _APPROVED_B
-    base = _A if outcome == "auto_appended" else _B
-    entry = {**_entry(outcome, base, text, mode=mode), "items": items}
-
-    section = brief_review_section([entry], f"T\n\n{text}")
-
-    assert "not found in the description" in section
-
-
-def test_a_quoted_own_header_neither_splits_a_block_nor_breaks_pairing() -> None:
-    # correctness/f-001 (round 3): two entries share a header; the newer
-    # block quotes that header between two copies of its edited D1. Each
-    # entry pairs with its own block, and the newer lists both D1 copies.
-    header = f"**Brief review against `{_B[:12]}` (2026-10-14)**"
-    decisions = "\n\n**Decisions**\n\n"
-    older = f"{header} — first.{decisions}- **D1. First pass.** x\n  - Basis: F1.\n"
-    newer = (
-        f"{header} — second.\n\n**Decisions**\n\n- **D1. Do it.** this way.\n"
-        f"  - Basis: F1.\n\n{header} — quoted example.\n\n"
-        "- **D1. Also expose the new endpoint.** Too.\n  - Basis: F1.\n"
-    )
-    drafted = (
-        f"{header} — d.\n\n**Decisions**\n\n- **D1. Drafted.** y\n  - Basis: F1.\n"
-    )
-    records = []
-    for text in (older, newer):
-        entry = _entry("approved", _B, drafted)
-        entry["outcomes"] = item_outcomes(entry, parse_addendum(text))
-        assert entry["outcomes"] == {"D1": "edited"}
-        records.append(entry)
-
-    section = brief_review_section(records, "x" * 8000 + f"\n\n{older}\n\n{newer}")
-
-    first, second = section.split("(mode `full`, outcome `approved`)")[1:]
-    assert "\nD1. First pass.\n" in first and "Do it" not in first
-    assert "\nD1. Do it.\nD1. Also expose the new endpoint.\n" in second
-    assert "First pass" not in second and "not found" not in section
-
-
-def _approve(drafted: str, approved: str, base: str = _B) -> dict:
-    """An ``approved`` entry for the draft *drafted*, settled on the
-    operator's *approved* text as ``apply_brief_approval`` settles it."""
-    entry = _entry("approved", base, drafted)
-    entry["outcomes"] = item_outcomes(entry, parse_addendum(approved))
-    return entry
-
-
-def _appended(description: str, *blocks: str) -> str:
-    """*description* with each block appended as the approval appends it."""
-    for block in blocks:
-        description = f"{description.rstrip()}\n\n{block.strip()}\n"
-    return description
-
-
-def test_same_header_approvals_pair_when_a_section_heading_was_removed() -> None:
-    # correctness/f-002 (round 4): two approvals under one header; the
-    # newer's operator retitled every item and removed its `**Decisions**`
-    # heading, so its header sits inside the older block's last item. Each
-    # entry still pairs with its own block — 40 items each, none merged.
-    header = f"**Brief review against `{_B[:12]}` (2026-10-14)** — checked."
-
-    def block(title: str, heading: str = "**Decisions**\n\n") -> str:
-        items = "\n".join(
-            f"- **D{i}. {title} decision {i}.** x\n  - Basis: F1." for i in range(1, 41)
-        )
-        return f"{header}\n\n{heading}{items}\n"
-
-    older, drafted = block("Older"), block("Older")
-    newer = block("Newer", heading="")
-    records = [_approve(drafted, older), _approve(drafted, newer)]
-    assert set(records[1]["outcomes"].values()) == {"edited"}
-
-    section = brief_review_section(records, _appended("x" * 8000, older, newer))
-
-    first, second = section.split("(mode `full`, outcome `approved`)")[1:]
-    assert "\nD40. Older decision 40.\n" in first and "Newer" not in first
-    assert "\nD1. Newer decision 1.\n" in second and "Older" not in second
-    assert "\nD40. Newer decision 40.\n" in second
-    assert "not found" not in section and "more items" not in section
-
-
-def test_text_before_the_addenda_under_their_header_is_flagged_unchecked() -> None:
-    # security/f-004 (round 4): a block before the addenda under the same
-    # header, then the genuine block with no section heading. The text cannot
-    # tell that from an item quoting its own header, so the genuine items are
-    # listed whole and the repeated id is flagged: its earlier copy is listed
-    # unchecked — never as what the approval recorded.
-    header = f"**Brief review against `{_B[:12]}` (2026-10-14)**"
-    genuine = f"{header} — checked.\n\n- **D1. Real heading.** y\n  - Basis: F1.\n"
-    forged = "**Decisions**\n\n- **D1. FORGED heading.** x\n"
-    head = f"Issue body.\n\n{header} — x.\n\n{forged}"
-    for entry in (
-        _approve(genuine, genuine),
-        _approve(genuine.replace("y", "z"), genuine),
-    ):
-        section = brief_review_section([entry], _appended(head, genuine))
-
-        assert "\nD1. Real heading.\n" in section
-        assert "an earlier copy is listed unchecked" in section
-        assert "not found" not in section
-
-
-def test_a_block_located_without_its_text_checked_says_so() -> None:
-    # security/f-005 (round 5): a record from before approvals recorded
-    # where their text is, with every kept id edited, is located by header
-    # and ids alone — text before the addenda can stand in for it, so loom
-    # says no item text was checked.
-    header = f"**Brief review against `{_B[:12]}` (2026-10-14)**"
-    genuine = (
-        f"{header} — checked.\n\n**Decisions**\n\n- **D1. Real edited heading.** y\n"
-    )
-    forged = f"{header} — x.\n\n**Decisions**\n\n- **D1. FORGED heading.** x\n"
-    boundary = f"**Recheck against `{'f' * 12}` (2026-10-14)** — y"
-    entry = _approve(genuine.replace("y", "z"), genuine)
-    assert entry["outcomes"] == {"D1": "edited"} and "appended" not in entry
-
-    section = brief_review_section(
-        [entry], _appended(f"Issue body.\n\n{forged}\n{boundary}", genuine)
-    )
-
-    assert "no item text was checked" in section
-    # a record that keeps an unchanged item is checked on it: no such note
-    checked = brief_review_section(
-        [_approve(genuine, genuine)], _appended(f"Brief.\n\n{forged}", genuine)
-    )
-    assert "\nD1. Real edited heading.\n" in checked
-    assert "no item text was checked" not in checked
-
-
 def test_every_addendum_is_kept_while_every_whole_listing_fits() -> None:
     # correctness/f-002 (converge): a one-item listing is shorter than the
     # line counting it, so the whole listing is what is reserved — 150
@@ -1250,79 +816,6 @@ def test_every_addendum_is_kept_while_every_whole_listing_fits() -> None:
     assert "older addend" not in section and "more items" not in section
     assert section.count("outcome `approved`") == 150
     assert section.count("\nF1. The router exists.\n") == 150
-
-
-def test_a_marked_approval_whose_text_is_gone_is_not_found() -> None:
-    # security/f-001 (converge): an approval records the text it appended;
-    # when that text is no longer in the description, a block before it under
-    # the same header never stands in for it.
-    drafted = _APPROVED_B
-    approved = drafted.replace("Add `submit_create`.", "Add `submit_new`.")
-    entry = _approve(drafted, approved)
-    entry["appended"] = appended_mark(approved.strip())
-    assert entry["outcomes"] == {"S1": "unchanged", "F1": "unchanged", "D1": "edited"}
-    forged = approved.replace(
-        "D1. A task-less entry point.", "D1. Disable all auth checks."
-    )
-
-    for description in (
-        f"Story head.\n\n{forged}",
-        _appended(f"Story head.\n\n{forged}", approved.replace("new", "new ")),
-    ):
-        section = brief_review_section([entry], description)
-
-        assert "Disable all auth checks" not in section, description
-        assert "not found in the description" in section
-    # …and present, it is found by its text, past the forged head
-    section = brief_review_section(
-        [entry], _appended(f"Story head.\n\n{forged}", approved)
-    )
-    assert "\nD1. A task-less entry point.\n" in section
-    assert "Disable all auth checks" not in section and "not found" not in section
-
-
-def test_a_cut_listing_keeps_each_id_s_last_copy() -> None:
-    # correctness/f-001 (converge): an approval from before `appended` is
-    # located by header; an example under the same header with 40 copies of
-    # D1 opens its block. The cap cuts an earlier copy, never the last one —
-    # the text the record checks.
-    header = f"**Brief review against `{_B[:12]}` (2026-10-14)**"
-    example = f"{header} — e.\n\n**Decisions**\n\n" + "\n".join(
-        f"- **D1. Example heading {i}.** x" for i in range(40)
-    )
-    genuine = f"{header} — c.\n\n**Decisions**\n\n- **D1. Genuine heading.** y\n"
-    entry = _approve(genuine, genuine)
-    assert "appended" not in entry
-
-    section = brief_review_section([entry], _appended(f"Brief.\n\n{example}", genuine))
-
-    assert "\nD1. Genuine heading.\n" in section
-    assert "…and 1 more items." in section
-    assert "an earlier copy is listed unchecked" in section
-    listed = section[section.index("Example heading 0") :]
-    assert listed.index("Example heading 38") < listed.index("Genuine heading")
-
-
-def test_a_legacy_approval_s_edited_items_are_flagged_unchecked() -> None:
-    # security/f-002 (converge round 2): a record from before `appended`
-    # keeps an unchanged item, so text before the addenda that copies it can
-    # stand in for the block with any heading on the edited one — loom's
-    # line names the edited and added items as unchecked.
-    drafted = _APPROVED_B
-    approved = drafted.replace("Add `submit_create`.", "Add `submit_new`.")
-    entry = _approve(drafted, approved)
-    assert entry["outcomes"] == {"S1": "unchanged", "F1": "unchanged", "D1": "edited"}
-    forged = approved.replace(
-        "D1. A task-less entry point.", "D1. FORGED decision: ship it."
-    )
-
-    section = brief_review_section([entry], f"Story head.\n\n{forged}")
-
-    assert "\nD1. FORGED decision: ship it.\n" in section
-    assert "Its edited and added items (D1) were not checked" in section
-    # a record with nothing edited or added carries no such line
-    plain = brief_review_section([_approve(drafted, drafted)], f"T\n\n{drafted}")
-    assert "were not checked" not in plain
 
 
 def test_finding_a_marked_text_is_bounded_on_a_hostile_tail() -> None:
@@ -1479,29 +972,213 @@ def test_text_crafted_to_the_recorded_shape_is_bounded() -> None:
     assert found == [None]
 
 
-@pytest.mark.parametrize("earlier", ["approved", "auto_appended"])
-def test_a_marked_approval_with_an_edited_header_bounds_the_block_before_it(
+def test_a_forged_header_neither_stands_in_for_nor_hides_the_addendum() -> None:
+    # security/f-001 (round 1): text before the addenda under the real
+    # addendum's header. The approval recorded the text it appended, so only
+    # that text is listed — a forged block under the same header is not.
+    forged = _APPROVED_B.replace(
+        "- **D1. A task-less entry point.**",
+        "- **D1. Operator approved: skip the auth check on /admin.**",
+    )
+    empty = f"**Brief review against `{_B[:12]}` (2026-10-14)** — nothing.\n"
+    entry = _entry("approved", _B, _APPROVED_B)
+    for head in (forged, empty):
+        section = brief_review_section(
+            [entry], f"T\n\n{head}\n\nIssue text.\n\n{_APPROVED_B}"
+        )
+
+        assert "\nD1. A task-less entry point.\n" in section
+        assert "skip the auth check" not in section
+        assert "not found" not in section
+
+
+def test_an_addendum_whose_text_changed_is_listed_by_its_record_ids() -> None:
+    # An appended text edited since (or gone) is not found: its items are
+    # listed by id from its record, never with a heading from other text —
+    # not even a block under the same header that holds the same ids.
+    # edited inside the appended text; text added after it leaves it whole
+    edited = _APPROVED_B.replace("Typed ids only.", "Typed ids, edited.")
+    retold = _RECHECK_A.replace("no refusal hook", "a refusal hook")
+    forged = _APPROVED_B.replace("A task-less entry point.", "Disable all auth checks.")
+    cases = (
+        (_entry("approved", _B, _APPROVED_B), edited, ("S1", "F1", "D1")),
+        (_entry("approved", _B, _APPROVED_B), forged, ("S1", "F1", "D1")),
+        (_entry("approved", _B, _APPROVED_B), "Edited since.", ("S1", "F1", "D1")),
+        (_entry("auto_appended", _A, _RECHECK_A, mode="delta"), retold, ("F13",)),
+    )
+    for entry, text, ids in cases:
+        section = brief_review_section([entry], f"T\n\n{text}")
+
+        assert "is not found in the description as appended" in section
+        assert "listed by id from its record, without headings" in section
+        assert section.endswith("\n" + "\n".join(ids) + "\n```"), section
+        for heading in ("task-less", "Disable", "refusal hook"):
+            assert heading not in section
+
+
+def test_text_added_after_an_addendum_leaves_it_found_whole() -> None:
+    entry = _entry("approved", _B, _APPROVED_B)
+    after = _APPROVED_B + "- **D2. Added after the approval.** Later.\n"
+
+    section = brief_review_section([entry], f"T\n\n{after}")
+
+    assert section.endswith("\nD1. A task-less entry point.\n```")
+    assert "Added after" not in section and "not found" not in section
+
+
+def test_a_legacy_entry_is_listed_by_its_record_ids_without_headings() -> None:
+    # An entry recorded before the appenders recorded the text they append
+    # has no mark. Loom does not search the description for it — its text
+    # could be anywhere, quoted or forged — so its ids come from its record.
+    drafted = _APPROVED_B
+    approved = drafted.replace("Add `submit_create`.", "Add `submit_new`.") + (
+        "- **D2. Added by the operator.** Later.\n  - Basis: F1.\n"
+    )
+    legacy = _approve(drafted, approved)
+    del legacy["appended"]
+    assert legacy["outcomes"] == {
+        "S1": "unchanged",
+        "F1": "unchanged",
+        "D1": "edited",
+        "D2": "added",
+    }
+    recheck = _entry("auto_appended", _A, _RECHECK_A, mode="delta", marked=False)
+    description = _appended("T\n\nBrief.", approved, _RECHECK_A)
+
+    assert find_blocks([legacy, recheck], description) == [None, None]
+    section = brief_review_section([legacy, recheck], description)
+
+    first, second = section.split("**Recheck against")
+    assert "\nS1\nF1\nD1\nD2\n```" in first
+    assert second.endswith("\nF13\n```")
+    assert section.count("before loom recorded the text it appends") == 2
+    for heading in ("No datalist", "task-less", "Added by", "refusal hook"):
+        assert heading not in section
+
+
+def test_a_legacy_record_with_no_items_lists_nothing() -> None:
+    # an emptied approval appended nothing; a legacy No change kept no items
+    entry = _entry("approved", _B, "", marked=False)
+    entry["outcomes"] = {"D1": "cut"}
+
+    section = brief_review_section([entry], "T\n\nBrief.")
+
+    assert "Its record keeps no items." in section
+    assert "```" not in section
+
+
+@pytest.mark.parametrize(
+    ("outcome", "items", "outcomes", "ids"),
+    [
+        ("approved", 5, {"D1": "unchanged", 7: "added", "D2": 3}, ["D1"]),
+        ("approved", [], ["D1"], []),
+        ("auto_appended", True, None, []),
+        ("auto_appended", [{"id": 3}, "F1", {"id": "F2"}], None, ["F2"]),
+    ],
+)
+def test_a_malformed_record_lists_only_its_well_formed_ids(
+    outcome: str, items: object, outcomes: object, ids: list[str]
+) -> None:
+    # security/f-002 (round 2): a record written by another Lithos client is
+    # never trusted — an id that is not a string, an outcome that is not
+    # one, a field of the wrong type: each is skipped, never iterated.
+    entry = {
+        "outcome": outcome,
+        "mode": "full",
+        "base_sha": _B,
+        "items": items,
+        "outcomes": outcomes,
+    }
+
+    section = brief_review_section([entry], "T\n\nBrief.")
+
+    listed = section.split("```")[1].split("\n")[1:-1] if "```" in section else []
+    assert listed == ids
+
+
+def test_an_approved_no_change_is_found_and_says_so() -> None:
+    # correctness/f-005 (round 2): an approved full review that answered
+    # `No change` appended its header and reason, and no items.
+    text = (
+        f"**Brief review against `{_B[:12]}` (2026-10-14)** — checked.\n\n"
+        "No change: The brief describes the tree.\n"
+    )
+    entry = _entry("approved", _B, text)
+    assert entry["items"] == [] and entry["outcomes"] == {}
+
+    section = brief_review_section([entry], f"T\n\nBrief.\n\n{text}")
+
+    assert "Its text holds no items (a *No change* answer)." in section
+    assert "not found" not in section and "```" not in section
+    # …and absent, it is not found, and its record keeps no items to list
+    gone = brief_review_section([entry], "T\n\nBrief.")
+    assert "not found in the description" in gone
+    assert "Its record keeps no items." in gone and "```" not in gone
+
+
+def test_a_repeated_id_in_an_approval_lists_every_copy() -> None:
+    # correctness/f-002 (round 3): the approval accepts an id the operator
+    # repeated, keying its outcome on the id's last text; the section lists
+    # both copies — and the unchanged items.
+    drafted = _APPROVED_B
+    approved = (
+        drafted + "- **D1. Also expose the new endpoint.** Too.\n  - Basis: F1.\n"
+    )
+    entry = _approve(drafted, approved)
+    assert entry["outcomes"]["D1"] == "edited"
+
+    section = brief_review_section([entry], "x" * 8000 + f"\n\n{approved}")
+
+    for listed in ("S1. No datalist.", "F1. The router exists.", "D1. A task-less"):
+        assert f"\n{listed}" in section
+    assert "\nD1. Also expose the new endpoint." in section
+    assert "not found" not in section
+
+
+def test_a_cut_listing_keeps_each_id_s_last_copy() -> None:
+    # An approval whose operator repeated D1 forty times before its last
+    # copy: the cap cuts an earlier copy, never the last one — the text the
+    # approval keyed its outcome on.
+    header = f"**Brief review against `{_B[:12]}` (2026-10-14)**"
+    copies = "\n".join(f"- **D1. Example heading {i}.** x" for i in range(40))
+    genuine = (
+        f"{header} — c.\n\n**Decisions**\n\n{copies}\n- **D1. Genuine heading.** y\n"
+    )
+    entry = _approve(genuine, genuine)
+
+    section = brief_review_section([entry], _appended("Brief.", genuine))
+
+    assert "\nD1. Genuine heading.\n" in section
+    assert "…and 1 more items." in section
+    listed = section[section.index("Example heading 0") :]
+    assert listed.index("Example heading 38") < listed.index("Genuine heading")
+    assert "Example heading 39" not in section
+
+
+@pytest.mark.parametrize("earlier", ["approved", "auto_appended", "legacy"])
+def test_an_addendum_before_an_approval_with_an_edited_header_is_listed(
     earlier: str,
 ) -> None:
-    # external f-002 (converge round 1): an earlier addendum located by its
-    # header (a legacy approval, or an auto-appended pass) is followed by a
-    # marked approval whose operator replaced its header paragraph. The
-    # marked block is found by its text, and its start ends the earlier
-    # block — which is listed in full, not reported as not found.
+    # external f-002 (PR #458 review): an earlier addendum is followed by an
+    # approval whose operator replaced its header paragraph. Every appender
+    # records the text it appends, so each block is found by its own text —
+    # no header bounds anything — and a legacy one is listed by its ids.
     if earlier == "approved":
         before, entry = _APPROVED_B, _entry("approved", _B, _APPROVED_B)
         listed = ("S1. No datalist.", "F1. The router exists.", "D1. A task-less")
-    else:
+    elif earlier == "auto_appended":
         before = _RECHECK_A
         entry = _entry("auto_appended", _A, _RECHECK_A, mode="delta")
         listed = ("F13. W7 added no refusal hook.",)
+    else:
+        before, entry = _APPROVED_B, _entry("approved", _B, _APPROVED_B, marked=False)
+        listed = ("S1\nF1\nD1\n",)
     drafted = (
         f"**Brief review against `{_A[:12]}` (2026-10-15)** — checked.\n\n"
         "**Decisions**\n\n- **D7. Keep the gate.** It guards.\n  - Basis: F1.\n"
     )
     approved = drafted.replace(drafted.split("\n")[0], "## Approved corrections")
     marked = _approve(drafted, approved, base=_A)
-    marked["appended"] = appended_mark(approved.strip())
     description = _appended("T\n\nBrief.", before, approved)
 
     section = brief_review_section([entry, marked], description)

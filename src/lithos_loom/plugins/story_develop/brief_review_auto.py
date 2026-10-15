@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .brief_review import (
+    ITEM_ADDED,
+    ITEM_EDITED,
     ITEM_UNCHANGED,
     KIND_FACT,
     MODE_DELTA,
@@ -47,7 +49,7 @@ from .brief_review import (
     Addendum,
     BriefItem,
 )
-from .brief_review_blocks import Found, entry_header, find_blocks
+from .brief_review_blocks import entry_header, find_blocks
 from .publish_text import fence_untrusted, publish_line
 
 __all__ = [
@@ -131,28 +133,16 @@ _BUDGET_REASON = (
     "(see the Lithos story)"
 )
 _AUTO_NOTE = "without a gate (facts only, structural check passed)"
-# An approved block from before approvals recorded where their text is,
-# located by header and ids: text before the addenda under the same header
-# can stand in for part of it, and the text cannot tell, so loom says so.
-_NOT_CHECKED = (
-    "Its record keeps no unchanged item, so no item text was checked: it "
-    "is located by its header and item ids alone."
+# An entry whose appended text is not in the description is listed by the
+# ids its record keeps, without headings — never from other text, which can
+# copy the ids and headings — on loom's line, saying why.
+_KEPT = frozenset((ITEM_UNCHANGED, ITEM_EDITED, ITEM_ADDED))
+_NOT_FOUND = (
+    "Its text is not found in the description as appended (it was edited since)"
 )
-# …and when its record keeps an unchanged item, the edited and added ones
-# still have no recorded digest: text before the addenda that copies the
-# unchanged items verbatim can supply any heading for them.
-_EDITED_UNCHECKED = (
-    "Its edited and added items ({ids}) were not checked: it is located by "
-    "its header and item ids, and only its unchanged items' text is checked "
-    "against the record."
-)
-# How many such ids loom's line names; the rest are counted.
-_NAMED_IDS = 8
-_REPEATED = (
-    "Its text repeats an item id: only each id's last copy is the text the "
-    "approval recorded, and an earlier copy is listed unchecked, after "
-    "every last copy when the listing is cut."
-)
+_UNMARKED = "It was appended before loom recorded the text it appends"
+_BY_ID = ", so its items are listed by id from its record, without headings."
+_NO_ITEMS = "Its record keeps no items."
 # A citation longer than this is not a path anyone writes; refusing it before
 # the match keeps _PATH_RE's backtracking bounded.
 _MAX_PATH_CHARS = 512
@@ -373,16 +363,15 @@ def brief_review_section(
     ``lithos-loom develop deliver``.
 
     A record keeps item digests, not text, so each entry's items are read
-    from its block in *description* — the text ``## What`` renders — found
-    by :func:`.brief_review_blocks.find_blocks`: the text under the header
-    ``render_addendum`` wrote (the mode's title and ``base_sha[:12]``) whose
-    items are the ones the record vouches for. *body_at* is where the story's
+    from the text its appender recorded appending, found in *description* —
+    the text ``## What`` renders — by
+    :func:`.brief_review_blocks.find_blocks`. *body_at* is where the story's
     description, stripped, starts in *description* (``task_text``'s
-    ``body_at``: after the title) — the origin of the offset an approval
-    records appending its text at. Every item, of every kind, is
-    listed as ``<id>. <heading>``. An entry with no such text (its header edited away,
-    an emptied approval, a later edit) is named on loom's line as not found —
-    never filled in from the record's draft.
+    ``body_at``: after the title) — the origin of the recorded offset. Every
+    item, of every kind, is listed as ``<id>. <heading>``. An entry whose
+    text is not there — recorded before the appenders kept its mark, or
+    edited since — is listed by the ids its record keeps, without headings,
+    and loom's line says why: no other text is read for it.
 
     Each listed entry has its note (mode, base, outcome), never cut. Each
     listing is capped as :func:`pr_section`'s is, its overflow counted on
@@ -406,23 +395,24 @@ def brief_review_section(
     ]
     notes: list[str] = []
     headings: list[_Ranked] = []
-    for entry, block in zip(entries, found, strict=True):
+    for entry, addendum in zip(entries, found, strict=True):
         line = _entry_line(entry)
-        addendum = block.addendum if block else None
-        listed = _ranked(addendum.items) if addendum else ()
-        headings.append(listed)
         if addendum is None:
-            notes.append(
-                f"{line}. Its text was not found in the description as its "
-                "record describes it (its header was edited, the approval "
-                "appended nothing, or the description changed since), so its "
-                "items are not listed."
-            )
-        elif not listed:
-            empty = " (a *No change* answer)" if addendum.no_change is not None else ""
-            notes.append(f"{line}. Its text holds no items{empty}.")
+            listed: _Ranked = tuple(enumerate(_record_ids(entry)))
+            why = _NOT_FOUND if "appended" in entry else _UNMARKED
+            if listed:
+                notes.append(f"{line}. {why}{_BY_ID}")
+            elif why == _NOT_FOUND:
+                notes.append(f"{line}. {why}. {_NO_ITEMS}")
+            else:
+                notes.append(f"{line}. {_NO_ITEMS}")
         else:
-            notes.append(f"{line}.{_unchecked(entry, block)}")
+            listed = _ranked(addendum.items)
+            empty = " (a *No change* answer)" if addendum.no_change is not None else ""
+            notes.append(
+                f"{line}." if listed else f"{line}. Its text holds no items{empty}."
+            )
+        headings.append(listed)
     # Each addendum's note and its cheapest listing (the whole one, or the
     # line counting it) are reserved, newest first; the older addenda past
     # the budget are counted on one line of loom's. The rest of the budget
@@ -448,34 +438,26 @@ def brief_review_section(
     return "\n".join(parts)
 
 
-def _unchecked(entry: Mapping[str, Any], block: Found | None) -> str:
-    """Loom's warning for an approved block located by header and ids
-    rather than by the text the approval recorded appending: what in its
-    listing no record check covers (empty when nothing is unchecked)."""
-    if block is None or block.exact or entry.get("outcome") != OUTCOME_APPROVED:
-        return ""
-    outcomes = entry.get("outcomes")
-    outcomes = outcomes if isinstance(outcomes, Mapping) else {}
-    ids = [item.id for item in block.addendum.items]
-    unchecked = [i for i in dict.fromkeys(ids) if outcomes.get(i) != ITEM_UNCHANGED]
-    if ITEM_UNCHANGED not in outcomes.values():
-        warning = " " + _NOT_CHECKED
-    elif unchecked:
-        warning = " " + _EDITED_UNCHECKED.format(ids=_named(unchecked))
-    else:
-        warning = ""
-    return warning + (" " + _REPEATED if len(set(ids)) < len(ids) else "")
-
-
-def _named(ids: Sequence[str]) -> str:
-    """*ids* (each ``[A-Z]\\d+``, as the parse reads them) for loom's line:
-    the first :data:`_NAMED_IDS` that are short enough to name, the rest
-    counted."""
-    named = [i for i in ids if len(i) <= 8][:_NAMED_IDS]
-    more = len(ids) - len(named)
-    if not more:
-        return ", ".join(named)
-    return f"{', '.join(named)} and {more} more" if named else f"{more} of them"
+def _record_ids(entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """The ids *entry*'s record keeps, in its order: an approval's every id
+    its ``outcomes`` keeps (unchanged, edited or added); an auto-appended
+    pass's items. A key or value of the wrong type is skipped — a record
+    another Lithos client wrote is never trusted."""
+    if entry.get("outcome") == OUTCOME_APPROVED:
+        outcomes = entry.get("outcomes")
+        if not isinstance(outcomes, Mapping):
+            return ()
+        return tuple(
+            item_id
+            for item_id, how in outcomes.items()
+            if isinstance(item_id, str) and isinstance(how, str) and how in _KEPT
+        )
+    items = entry.get("items")
+    return tuple(
+        item["id"]
+        for item in (items if isinstance(items, list) else ())
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+    )
 
 
 def _first_kept(reserved: Sequence[int], budget: int) -> int:
@@ -500,11 +482,10 @@ _Ranked = tuple[tuple[int, str], ...]
 
 
 def _ranked(items: Sequence[BriefItem]) -> _Ranked:
-    """*items*' lines, each id's last copy first — the text the record
-    checks, and the approval keyed its outcome on — then the earlier copies
-    of a repeated id; each group in the description's order. A listing that
-    is cut keeps the first of them, so an earlier copy (unchecked: text
-    before the addenda can supply it) never takes a last copy's line."""
+    """*items*' lines, each id's last copy first — the text the approval
+    keyed its outcome on — then the earlier copies of a repeated id; each
+    group in the description's order. A listing that is cut keeps the
+    first of them, so an earlier copy never takes a last copy's line."""
     last = {item.id: at for at, item in enumerate(items)}
     lines = [(at, _listed(item)) for at, item in enumerate(items)]
     return tuple(

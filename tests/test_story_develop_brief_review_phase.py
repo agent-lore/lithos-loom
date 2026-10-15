@@ -550,16 +550,23 @@ async def test_too_many_facts_to_list_are_held_and_say_so(tmp_path: Path) -> Non
 async def test_the_records_the_phase_writes_list_its_appended_facts(
     tmp_path: Path,
 ) -> None:
-    # The PR body's section verifies each block against its record: the
-    # digests the pass drafted must match the text it appended, rendered.
+    # The PR body's section finds each addendum by the text its appender
+    # recorded appending: the auto path records it as the approval does,
+    # with its offset in the description as stripped.
     from lithos_loom.plugins.story_develop.brief_review_auto import (
         brief_review_section,
     )
+    from lithos_loom.plugins.story_develop.brief_review_blocks import find_blocks
 
     outcome, stored = await _run(
         tmp_path, _story(), _Review(_FACTS_ONLY), auto_facts=True
     )
 
+    mark = outcome.records[-1]["appended"]
+    body = stored.description.strip()
+    assert body[mark["at"] : mark["at"] + mark["chars"]].startswith("**Brief review")
+    assert body.endswith(body[mark["at"] :])
+    assert find_blocks(outcome.records, body) != [None]
     section = brief_review_section(outcome.records, stored.description)
     assert "F13. W7 added no refusal hook." in section
-    assert "not found" not in section
+    assert "not found" not in section and "listed by id" not in section

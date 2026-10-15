@@ -439,10 +439,10 @@ async def test_an_example_under_the_header_in_the_brief_is_not_listed() -> None:
     assert "Example heading" not in section and "more items" not in section
 
 
-async def test_an_example_under_the_header_keeps_a_legacy_approval_s_heading() -> None:
-    # correctness/f-001 (converge): the same story, approved before approvals
-    # recorded the text they append (no `appended`): located by header, the
-    # example opens its block, and the genuine heading still has its line.
+async def test_a_legacy_approval_is_listed_by_its_record_ids() -> None:
+    # The same story, approved before approvals recorded the text they
+    # append (no `appended`): loom does not search the description for it,
+    # so the example cannot stand in — its record's ids are listed, bare.
     from lithos_loom.plugins.story_develop.brief_review import records_of
     from lithos_loom.plugins.story_develop.brief_review_auto import (
         brief_review_section,
@@ -467,9 +467,9 @@ async def test_an_example_under_the_header_keeps_a_legacy_approval_s_heading() -
     records = records_of(fresh.metadata)
     legacy = {k: v for k, v in records[-1].items() if k != "appended"}
     section = brief_review_section([legacy], outcome.payload["description"])
-    assert "\nD1. Genuine approved heading.\n" in section
-    assert "an earlier copy is listed unchecked" in section
-    assert "…and 1 more items." in section
+    assert section.endswith("\nD1\n```")
+    assert "before loom recorded the text it appends" in section
+    assert "Genuine" not in section and "Example" not in section
 
 
 async def test_the_recorded_offset_finds_the_approval_in_the_task_text() -> None:

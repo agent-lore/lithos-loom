@@ -22,7 +22,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.autoformat` | S | 0 | 4 |
 | `lithos_loom.plugins.story_develop.brief_review` | L | 4 | 10 |
 | `lithos_loom.plugins.story_develop.brief_review_auto` | M | 1 | 7 |
-| `lithos_loom.plugins.story_develop.brief_review_blocks` | M | 1 | 4 |
+| `lithos_loom.plugins.story_develop.brief_review_blocks` | S | 0 | 3 |
 | `lithos_loom.plugins.story_develop.brief_review_phase` | M | 1 | 2 |
 | `lithos_loom.plugins.story_develop.check_artifacts` | M | 0 | 5 |
 | `lithos_loom.plugins.story_develop.check_catalog` | M | 3 | 4 |
@@ -126,11 +126,9 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 - def `describe_verdict` — One line saying what the dispatch would do with this verdict. *counts* is the pass's ``{"scope_cut", "fact", "decision"}`` tally; *mode* full or delta (a recheck is governed by the check whatever the dial says).
 
 ### `lithos_loom.plugins.story_develop.brief_review_blocks`
-- def `entry_header` — The mode title and ``base_sha[:12]`` *entry*'s block's header carries, each only when the record's value is well formed (``None`` otherwise).
-- class `Found` — An entry's block in the description. *exact*: found by the text the approval recorded appending (:func:`appended_mark`), so every item in it is what the operator approved; otherwise located by header, ids and digests (an entry from before approvals recorded it, or an auto-appended pass, whose ids and digests are exact anyway).
-- def `appended_mark` — What an approval records of the *text* it appends — its length and a digest of it exactly; its line count and a digest of its first and of its last line; and *at*, its offset in the description as stripped (the body ``task_text`` carries after the title) — so delivery finds that text, and only it, without hashing every window of the description.
-- def `find_blocks` — Each entry's block in *description*, or ``None`` when no text there is the one its record vouches for. *body_at*: where the story's description, stripped, starts in *description* — the origin of an approval's recorded offset.
-- def `matches_record` — Whether *items* are the addendum *entry* records: an auto-appended pass's ids and digests exactly; an approval's kept ids (every id its ``outcomes`` does not mark cut — none, for an approved *No change*), with each ``unchanged`` one's digest. An ``edited`` or ``added`` item's text has no recorded digest to check. The approval accepts an id the operator repeated and keys its outcome on the id's last text (:func:`item_outcomes`), so a repeated id is checked the same way — and every copy is listed.
+- def `entry_header` — The mode title and ``base_sha[:12]`` loom's line names *entry* by, each only when the record's value is well formed (``None`` otherwise).
+- def `appended_mark` — What an appender records of the *text* it appends — its length and a digest of it exactly; its line count and a digest of its first and of its last line; and *at*, its offset in the description as stripped (the body ``task_text`` carries after the title) — so delivery finds that text, and only it, without hashing every window of the description.
+- def `find_blocks` — Each entry's addendum in *description*: the text its appender recorded appending (:func:`appended_mark`), parsed — or ``None`` when the entry has no mark (recorded before the appenders kept one) or that text is no longer there whole (edited since). *body_at*: where the story's description, stripped, starts in *description* — the origin of the recorded offset.
 
 ### `lithos_loom.plugins.story_develop.brief_review_phase`
 - class `PhaseOutcome` — What the dispatch does next. *proceed*: develop, cut at *start_sha* when set (the base the review checked), with *description* as the story's text when set (it may now end with an appended recheck). Not *proceed*: end the run held, reporting *escalation*.
