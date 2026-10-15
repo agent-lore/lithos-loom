@@ -1,8 +1,9 @@
 """A story whose approved brief-review addendum overflows ``## What``.
 
 The pilot's largest addendum (``lens-t3-w7.md``, 35 items in 13374 bytes)
-rendered as the approval appends it — so delivery tests on every path (a
-run, a resumed run, a hand delivery) share one story and one expectation.
+rendered as the approval appends it, with the mark it records — so delivery
+tests on every path (a run, a resumed run, a hand delivery) share one story
+and one expectation.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from lithos_loom.plugins.story_develop.brief_review import (
     render_addendum,
 )
 from lithos_loom.plugins.story_develop.brief_review_auto import item_heading
+from lithos_loom.plugins.story_develop.brief_review_blocks import appended_mark
 
 APPROVED_BASE = "c0ffee" + "0" * 34
 _PILOT = Path(__file__).parent.parent / "fixtures" / "brief_review" / "lens-t3-w7.md"
@@ -32,7 +34,7 @@ def approved_addendum() -> tuple[str, dict[str, Any], tuple[str, ...]]:
     addendum = parse_addendum(_PILOT.read_text(encoding="utf-8"))
     text = render_addendum(
         addendum, base_sha=APPROVED_BASE, on=date(2026, 10, 14), mode=MODE_FULL
-    )
+    ).strip()
     # as the pass drafts it and the approval settles it (nothing edited)
     entry = draft_entry(
         run_id="r0",
@@ -44,5 +46,6 @@ def approved_addendum() -> tuple[str, dict[str, Any], tuple[str, ...]]:
     )
     entry["gate_id"] = "g-1"
     entry["outcomes"] = item_outcomes(entry, addendum)
+    entry["appended"] = appended_mark(text)
     listed = tuple(f"{item.id}. {item_heading(item)}" for item in addendum.items)
     return text, entry, listed

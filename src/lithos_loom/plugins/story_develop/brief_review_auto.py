@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .brief_review import (
+    ITEM_UNCHANGED,
     KIND_FACT,
     MODE_DELTA,
     MODE_FULL,
@@ -46,7 +47,7 @@ from .brief_review import (
     Addendum,
     BriefItem,
 )
-from .brief_review_blocks import entry_header, find_blocks
+from .brief_review_blocks import Found, entry_header, find_blocks
 from .publish_text import fence_untrusted, publish_line
 
 __all__ = [
@@ -130,8 +131,13 @@ _BUDGET_REASON = (
     "(see the Lithos story)"
 )
 _AUTO_NOTE = "without a gate (facts only, structural check passed)"
-# A block that repeats an id: an operator's copy, or text before the addenda
-# under the same header — the text cannot tell which, so loom says so.
+# An approved block from before approvals recorded where their text is,
+# located by header and ids: text before the addenda under the same header
+# can stand in for part of it, and the text cannot tell, so loom says so.
+_NOT_CHECKED = (
+    "Its record keeps no unchanged item, so no item text was checked: it "
+    "is located by its header and item ids alone."
+)
 _REPEATED = (
     "Its text repeats an item id: only each id's last copy is the text the "
     "approval recorded, and an earlier copy is listed unchecked."
@@ -382,8 +388,9 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
     ]
     notes: list[str] = []
     headings: list[tuple[str, ...]] = []
-    for entry, addendum in zip(entries, found, strict=True):
+    for entry, block in zip(entries, found, strict=True):
         line = _entry_line(entry)
+        addendum = block.addendum if block else None
         listed = tuple(_listed(item) for item in addendum.items) if addendum else ()
         headings.append(listed)
         if addendum is None:
@@ -396,10 +403,8 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
         elif not listed:
             empty = " (a *No change* answer)" if addendum.no_change is not None else ""
             notes.append(f"{line}. Its text holds no items{empty}.")
-        elif len({item.id for item in addendum.items}) < len(listed):
-            notes.append(f"{line}. {_REPEATED}")
         else:
-            notes.append(f"{line}.")
+            notes.append(f"{line}.{_unchecked(entry, block)}")
     # Each addendum's note and overflow line are reserved, newest first; the
     # older addenda past the budget are counted on one line of loom's. The
     # rest of the budget lists items, newest addenda first.
@@ -419,6 +424,20 @@ def brief_review_section(records: Sequence[Mapping[str, Any]], description: str)
     for index in range(first, len(entries)):
         parts += ["", notes[index], *_budgeted(headings[index], shown[index])]
     return "\n".join(parts)
+
+
+def _unchecked(entry: Mapping[str, Any], block: Found | None) -> str:
+    """Loom's warning for an approved block located by header and ids
+    rather than by the text the approval recorded appending: what in its
+    listing no record check covers (empty when nothing is unchecked)."""
+    if block is None or block.exact or entry.get("outcome") != OUTCOME_APPROVED:
+        return ""
+    outcomes = entry.get("outcomes")
+    checked = isinstance(outcomes, Mapping) and ITEM_UNCHANGED in outcomes.values()
+    ids = [item.id for item in block.addendum.items]
+    return (" " + _NOT_CHECKED if not checked else "") + (
+        " " + _REPEATED if len(set(ids)) < len(ids) else ""
+    )
 
 
 def _first_kept(reserved: Sequence[int], budget: int) -> int:

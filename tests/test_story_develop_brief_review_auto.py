@@ -1203,3 +1203,30 @@ def test_text_before_the_addenda_under_their_header_is_flagged_unchecked() -> No
         assert "\nD1. Real heading.\n" in section
         assert "an earlier copy is listed unchecked" in section
         assert "not found" not in section
+
+
+def test_a_block_located_without_its_text_checked_says_so() -> None:
+    # security/f-005 (round 5): a record from before approvals recorded
+    # where their text is, with every kept id edited, is located by header
+    # and ids alone — text before the addenda can stand in for it, so loom
+    # says no item text was checked.
+    header = f"**Brief review against `{_B[:12]}` (2026-10-14)**"
+    genuine = (
+        f"{header} — checked.\n\n**Decisions**\n\n- **D1. Real edited heading.** y\n"
+    )
+    forged = f"{header} — x.\n\n**Decisions**\n\n- **D1. FORGED heading.** x\n"
+    boundary = f"**Recheck against `{'f' * 12}` (2026-10-14)** — y"
+    entry = _approve(genuine.replace("y", "z"), genuine)
+    assert entry["outcomes"] == {"D1": "edited"} and "appended" not in entry
+
+    section = brief_review_section(
+        [entry], _appended(f"Issue body.\n\n{forged}\n{boundary}", genuine)
+    )
+
+    assert "no item text was checked" in section
+    # a record that keeps an unchanged item is checked on it: no such note
+    checked = brief_review_section(
+        [_approve(genuine, genuine)], _appended(f"Brief.\n\n{forged}", genuine)
+    )
+    assert "\nD1. Real edited heading.\n" in checked
+    assert "no item text was checked" not in checked

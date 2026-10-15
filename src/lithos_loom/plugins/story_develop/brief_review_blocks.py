@@ -40,6 +40,8 @@ from .brief_review import (
 __all__ = [
     "ADDENDUM_HEADER_RE",
     "MODE_TITLE",
+    "Found",
+    "appended_mark",
     "entry_header",
     "find_blocks",
     "matches_record",
@@ -58,6 +60,7 @@ ADDENDUM_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 _BASE_SHA_RE = re.compile(r"[0-9a-f]{12,64}")
+_SHA_RE = re.compile(r"[0-9a-f]{16}")
 
 
 def entry_header(entry: Mapping[str, Any]) -> tuple[str | None, str | None]:
@@ -88,26 +91,64 @@ class _Span:
     cut: dict[int, str]
 
 
+@dataclass(frozen=True)
+class Found:
+    """An entry's block in the description. *exact*: found by the text the
+    approval recorded appending (:func:`appended_mark`), so every item in
+    it is what the operator approved; otherwise located by header, ids and
+    digests (an entry from before approvals recorded it, or an
+    auto-appended pass, whose ids and digests are exact anyway)."""
+
+    addendum: Addendum
+    exact: bool = False
+
+
+def appended_mark(text: str) -> dict[str, object]:
+    """What an approval records of the *text* it appends — its length and a
+    digest of it exactly — so delivery finds that text, and only it."""
+    return {"chars": len(text), "sha": _text_sha(text)}
+
+
+def _text_sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _mark(entry: Mapping[str, Any]) -> tuple[int, str] | None:
+    raw = entry.get("appended")
+    if not isinstance(raw, Mapping):
+        return None
+    chars, sha = raw.get("chars"), raw.get("sha")
+    if type(chars) is not int or chars <= 0 or not isinstance(sha, str):
+        return None
+    return (chars, sha) if _SHA_RE.fullmatch(sha) else None
+
+
 def find_blocks(
     entries: Sequence[Mapping[str, Any]], description: str
-) -> list[Addendum | None]:
-    """Each entry's addendum in *description*, or ``None`` when no text there
-    is the one its record vouches for (:func:`matches_record`).
+) -> list[Found | None]:
+    """Each entry's block in *description*, or ``None`` when no text there
+    is the one its record vouches for.
+
+    An approval records the text it appended (:func:`appended_mark`), so an
+    entry carrying that mark is found by it — the newest such entry first,
+    at the last place that text stands — and nothing else can stand in for
+    it or cut it short. The other entries (an auto-appended pass, whose ids
+    and digests are exact; an approval from before the mark) are located by
+    header, ids and digests (:func:`matches_record`):
 
     A candidate block opens at a header line under the entry's ``(title,
     base)`` and ends at a later candidate header or the description's end —
     every one is considered, so a header an item quotes, in a fence or not,
     ends nothing. The appenders only append, so the blocks stand in record
     order: oldest first, each entry pairs with the EARLIEST block under its
-    header past the block the entry before it found, ending at the first end
-    its record vouches for — so a later entry is not crowded out, and a
-    header an item quotes, of its own block or another, lies inside the
-    block that quotes it. Each found block then runs on to the last end its
-    record vouches for before the next found block (or the description's
-    end), so none is cut short. A text no record vouches for can stand in
-    for no addendum; text before the addenda under an entry's header can
-    open its block, and an id it repeats is then flagged
-    (``brief_review_auto``).
+    header past the block the entry before it found (and outside any found
+    by its mark), ending at the first end its record vouches for — so a
+    later entry is not crowded out, and a header an item quotes lies inside
+    the block that quotes it. Each such block then runs on to the last end
+    its record vouches for before the next found block (or the
+    description's end), so none is cut short. Text before the addenda under
+    an entry's header can open such a block; ``brief_review_auto`` flags
+    what that could hide.
 
     An item opens and closes at the same lines whichever block it is parsed
     in, so the description is parsed once (:func:`_spans`) and each candidate
@@ -118,6 +159,12 @@ def find_blocks(
     offsets = [0]
     for line in description.splitlines(keepends=True):
         offsets.append(offsets[-1] + len(line))
+    found: list[Found | None] = [None] * len(entries)
+    blocks = _marked(entries, description, offsets)
+    for index, (start, end) in blocks.items():
+        text = description[offsets[start] : offsets[end]]
+        found[index] = Found(parse_addendum(text), exact=True)
+    marked = list(blocks.values())
     heads: list[tuple[int, tuple[str, str]]] = []
     for index, line in enumerate(lines):
         header = ADDENDUM_HEADER_RE.match(line)
@@ -127,35 +174,70 @@ def find_blocks(
     bounds = [index for index, _ in heads] + [len(lines)]
     spans = _spans(lines, parse_addendum(description).items, set(bounds))
 
-    def parsed(index: int, start: int, end: int) -> Addendum | None:
+    def parsed(index: int, start: int, end: int) -> Found | None:
         addendum = parse_addendum(description[offsets[start] : offsets[end]])
-        return addendum if matches_record(entries[index], addendum.items) else None
+        ok = matches_record(entries[index], addendum.items)
+        return Found(addendum) if ok else None
 
     fits = [_Fit(entry, spans, bounds) for entry in entries]
-    blocks: dict[int, tuple[int, int]] = {}
-    found: list[Addendum | None] = [None] * len(entries)
     floor = 0
     for index, fit in enumerate(fits):
+        if index in blocks:
+            floor = max(floor, blocks[index][1])
+            continue
         for start, head_key in heads:
             if start < floor or head_key != fit.key:
                 continue
-            for end in fit.ends(start, len(lines), longest=False):
-                if (addendum := parsed(index, start, end)) is not None:
-                    found[index], blocks[index], floor = addendum, (start, end), end
+            if any(a <= start < b for a, b in marked):
+                continue
+            limit = min((a for a, _ in marked if a > start), default=len(lines))
+            for end in fit.ends(start, limit, longest=False):
+                if (block := parsed(index, start, end)) is not None:
+                    found[index], blocks[index], floor = block, (start, end), end
                     break
             if index in blocks:
                 break
     order = sorted(blocks, key=lambda index: blocks[index])
     for at, index in enumerate(order):
         start, end = blocks[index]
+        if (block := found[index]) is None or block.exact:
+            continue
         limit = blocks[order[at + 1]][0] if at + 1 < len(order) else len(lines)
         for longer in fits[index].ends(start, limit, longest=True):
             if longer <= end:
                 break
-            if (addendum := parsed(index, start, longer)) is not None:
-                found[index] = addendum
+            if (block := parsed(index, start, longer)) is not None:
+                found[index] = block
                 break
     return found
+
+
+def _marked(
+    entries: Sequence[Mapping[str, Any]], description: str, offsets: Sequence[int]
+) -> dict[int, tuple[int, int]]:
+    """The ``(start, end)`` lines of each marked entry's appended text: the
+    newest entry first, at the last line start where that text stands whole
+    (ending a line) outside every block already found."""
+    blocks: dict[int, tuple[int, int]] = {}
+    for index in reversed(range(len(entries))):
+        if (mark := _mark(entries[index])) is None:
+            continue
+        chars, sha = mark
+        for start in reversed(range(len(offsets) - 1)):
+            stop = offsets[start] + chars
+            if stop > len(description) or description[stop : stop + 1] not in (
+                "",
+                "\n",
+                "\r",
+            ):
+                continue
+            end = min(bisect.bisect_right(offsets, stop), len(offsets) - 1)
+            if any(start < b and end > a for a, b in blocks.values()):
+                continue
+            if _text_sha(description[offsets[start] : stop]) == sha:
+                blocks[index] = (start, end)
+                break
+    return blocks
 
 
 def _spans(

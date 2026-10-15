@@ -95,7 +95,7 @@ gate recorded it nowhere in Lithos.
 One JSON array, one object per entry: the entry as recorded, every key passed
 through (`run_id`, `mode`, `base_sha`, `drafted_at`, `outcome`, `items`,
 `check`, `outcomes`, `note`, `approved_at`, `gate_id`, `operator_note`,
-`superseded_gates`, …), plus `story_id` and `project`. Ordered by story id,
+`appended`, `superseded_gates`, …), plus `story_id` and `project`. Ordered by story id,
 then record order.
 
 ## Exit codes
