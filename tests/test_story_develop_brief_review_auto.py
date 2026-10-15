@@ -1103,3 +1103,33 @@ def test_a_malformed_record_items_reads_as_not_found(
     section = brief_review_section([entry], f"T\n\n{text}")
 
     assert "not found in the description" in section
+
+
+def test_a_quoted_own_header_neither_splits_a_block_nor_breaks_pairing() -> None:
+    # correctness/f-001 (round 3): two entries share a header; the newer
+    # block quotes that header between two copies of its edited D1. Each
+    # entry pairs with its own block, and the newer lists both D1 copies.
+    header = f"**Brief review against `{_B[:12]}` (2026-10-14)**"
+    decisions = "\n\n**Decisions**\n\n"
+    older = f"{header} — first.{decisions}- **D1. First pass.** x\n  - Basis: F1.\n"
+    newer = (
+        f"{header} — second.\n\n**Decisions**\n\n- **D1. Do it.** this way.\n"
+        f"  - Basis: F1.\n\n{header} — quoted example.\n\n"
+        "- **D1. Also expose the new endpoint.** Too.\n  - Basis: F1.\n"
+    )
+    drafted = (
+        f"{header} — d.\n\n**Decisions**\n\n- **D1. Drafted.** y\n  - Basis: F1.\n"
+    )
+    records = []
+    for text in (older, newer):
+        entry = _entry("approved", _B, drafted)
+        entry["outcomes"] = item_outcomes(entry, parse_addendum(text))
+        assert entry["outcomes"] == {"D1": "edited"}
+        records.append(entry)
+
+    section = brief_review_section(records, "x" * 8000 + f"\n\n{older}\n\n{newer}")
+
+    first, second = section.split("(mode `full`, outcome `approved`)")[1:]
+    assert "\nD1. First pass.\n" in first and "Do it" not in first
+    assert "\nD1. Do it.\nD1. Also expose the new endpoint.\n" in second
+    assert "First pass" not in second and "not found" not in section

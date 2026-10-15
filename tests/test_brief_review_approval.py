@@ -273,6 +273,42 @@ async def test_a_repeated_id_past_a_quoted_header_reaches_the_pr_body() -> None:
     assert "not found" not in section
 
 
+async def test_a_quote_of_the_block_s_own_header_stands_in_for_no_part_of_it() -> None:
+    # correctness/f-001 (round 3): a quoted copy of the block's OWN header
+    # (same mode and base) between two copies of a repeated kept id: the
+    # suffix from the quote holds every kept id too, but the whole block —
+    # both D1s — is the one listed.
+    from lithos_loom.plugins.story_develop.brief_review import records_of
+    from lithos_loom.plugins.story_develop.brief_review_auto import (
+        brief_review_section,
+    )
+
+    client = _client()
+    gate_id = await _held(client)
+    await _edit_gate(client, gate_id, "- **F1. One.** `a.py:1`.\n", "")
+    await _edit_gate(client, gate_id, "- **F2. Two.** `b.py:2`.\n", "")
+    await _edit_gate(
+        client,
+        gate_id,
+        "  - Basis: F1.",
+        "  - Basis: F1.\n\n**Brief review against `aaaaaaaaaaaa` (2026-10-14)** —"
+        " quoted example.\n\n- **D1. Also expose the new endpoint.** Too.\n"
+        "  - Basis: F1.",
+    )
+    await client.task_complete(task_id=gate_id, agent="dave")
+
+    outcome = await _apply(client)
+
+    story = await _get(client, STORY)
+    outcomes = story.metadata[RECORD_KEY][-1]["outcomes"]
+    assert outcomes == {"F1": ITEM_CUT, "F2": ITEM_CUT, "D1": ITEM_EDITED}
+    section = brief_review_section(
+        records_of(story.metadata), "x" * 8000 + outcome.payload["description"]
+    )
+    assert "\nD1. Do it.\nD1. Also expose the new endpoint.\n" in section
+    assert "not found" not in section
+
+
 async def test_an_emptied_draft_dispatches_with_nothing_appended() -> None:
     client = _client()
     gate_id = await _held(client)

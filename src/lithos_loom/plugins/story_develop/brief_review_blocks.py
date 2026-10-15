@@ -102,7 +102,8 @@ def find_blocks(
     pairing in order of appearance, with text earlier in the description
     (anything the story said before its addenda) tried last, and the
     longest matching block under a header first; found blocks do not
-    overlap. A text no record vouches for can stand in for no addendum.
+    overlap. A header that reads as a quote (:func:`_quoted`) is tried only
+    after every other, so it cannot split the block that quotes it. A text no record vouches for can stand in for no addendum.
 
     An item opens and closes at the same lines whichever block it is parsed
     in, so the description is parsed once (:func:`_spans`) and each candidate
@@ -121,12 +122,17 @@ def find_blocks(
             heads.append((index, key))
     bounds = [index for index, _ in heads] + [len(lines)]
     spans = _spans(lines, parse_addendum(description).items, set(bounds))
+    quoted = _quoted(lines, spans, [index for index, _ in heads])
+    # newest first; a header that reads as a quote only after every other
+    order = [h for h in reversed(heads) if h[0] not in quoted] + [
+        h for h in reversed(heads) if h[0] in quoted
+    ]
     taken: list[tuple[int, int]] = []
     found: list[Addendum | None] = [None] * len(entries)
     for index in reversed(range(len(entries))):
         title, base = entry_header(entries[index])
         key = (title.lower(), base) if title and base else None
-        chosen = _search(entries[index], key, heads, bounds, spans, taken)
+        chosen = _search(entries[index], key, order, bounds, spans, taken)
         for start, end in chosen:
             addendum = parse_addendum(description[offsets[start] : offsets[end]])
             if matches_record(entries[index], addendum.items):
@@ -168,6 +174,31 @@ def _spans(
     return spans
 
 
+def _quoted(
+    lines: Sequence[str], spans: Sequence[_Span], heads: Sequence[int]
+) -> set[int]:
+    """The *heads* that read as a quote: inside an item's text that runs on
+    to the next item (or the end) with no section heading between — an
+    addendum's header is followed by a section heading before its items, as
+    ``render_addendum`` writes it. An operator may quote the block's own
+    header in an item; a block from that quote on can hold every kept id
+    too, so it is tried only after every header that opens a section."""
+    span_lines = [span.line for span in spans]
+    quoted: set[int] = set()
+    runs_on: dict[int, bool] = {}
+    for head in heads:
+        index = bisect.bisect_right(span_lines, head) - 1
+        if index < 0 or head >= spans[index].end:
+            continue
+        if index not in runs_on:
+            stop = span_lines[index + 1] if index + 1 < len(spans) else len(lines)
+            gap = lines[spans[index].end : stop]
+            runs_on[index] = not any(line.strip() for line in gap)
+        if runs_on[index]:
+            quoted.add(head)
+    return quoted
+
+
 def _search(
     entry: Mapping[str, Any],
     key: tuple[str, str] | None,
@@ -177,7 +208,7 @@ def _search(
     taken: Sequence[tuple[int, int]],
 ) -> Iterator[tuple[int, int]]:
     """The ``(start, end)`` lines of each block *entry*'s record could be,
-    most likely first: the newest candidate header first, its longest block
+    most likely first: candidate *heads* in the order given, its longest block
     first, ending where its last item can — checked from *spans* the way
     :func:`matches_record` checks a parse (ids, and digests where the record
     has them).
@@ -195,7 +226,7 @@ def _search(
         beyond[index] = index if spans[index].id not in allowed else beyond[index + 1]
     ok, least = _scan(spans, allowed, need)
     ends: dict[int, tuple[list[int], list[int]]] = {}  # by limit
-    for start, head_key in reversed(heads):
+    for start, head_key in heads:
         if head_key != key or any(a <= start < b for a, b in taken):
             continue
         limit = min((a for a, _ in taken if a > start), default=bounds[-1])
