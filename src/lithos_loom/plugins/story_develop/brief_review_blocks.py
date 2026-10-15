@@ -61,6 +61,12 @@ ADDENDUM_HEADER_RE = re.compile(
 )
 _BASE_SHA_RE = re.compile(r"[0-9a-f]{12,64}")
 _SHA_RE = re.compile(r"[0-9a-f]{16}")
+# How much text one marked entry's search may hash, in multiples of the
+# description's length. A real description seldom ends a window of the
+# recorded length on a line end, so its search hashes a few windows; only a
+# run of short, uniform lines makes every line start a candidate. Past the
+# bound the entry is not found — the outcome a later edit of its text has.
+_HASH_BUDGET = 8
 
 
 def entry_header(entry: Mapping[str, Any]) -> tuple[str | None, str | None]:
@@ -221,12 +227,14 @@ def _marked(
 ) -> dict[int, tuple[int, int]]:
     """The ``(start, end)`` lines of each marked entry's appended text: the
     newest entry first, at the last line start where that text stands whole
-    (ending a line) outside every block already found."""
+    (ending a line) outside every block already found — within
+    :data:`_HASH_BUDGET`, so the work stays linear in the description."""
     blocks: dict[int, tuple[int, int]] = {}
     for index in reversed(range(len(entries))):
         if (mark := _mark(entries[index])) is None:
             continue
         chars, sha = mark
+        budget = _HASH_BUDGET * len(description)
         for start in reversed(range(len(offsets) - 1)):
             stop = offsets[start] + chars
             if stop > len(description) or description[stop : stop + 1] not in (
@@ -238,6 +246,9 @@ def _marked(
             end = min(bisect.bisect_right(offsets, stop), len(offsets) - 1)
             if any(start < b and end > a for a, b in blocks.values()):
                 continue
+            budget -= chars
+            if budget < 0:
+                break  # not found: see _HASH_BUDGET
             if _text_sha(description[offsets[start] : stop]) == sha:
                 blocks[index] = (start, end)
                 break

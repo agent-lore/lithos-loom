@@ -138,6 +138,16 @@ _NOT_CHECKED = (
     "Its record keeps no unchanged item, so no item text was checked: it "
     "is located by its header and item ids alone."
 )
+# …and when its record keeps an unchanged item, the edited and added ones
+# still have no recorded digest: text before the addenda that copies the
+# unchanged items verbatim can supply any heading for them.
+_EDITED_UNCHECKED = (
+    "Its edited and added items ({ids}) were not checked: it is located by "
+    "its header and item ids, and only its unchanged items' text is checked "
+    "against the record."
+)
+# How many such ids loom's line names; the rest are counted.
+_NAMED_IDS = 8
 _REPEATED = (
     "Its text repeats an item id: only each id's last copy is the text the "
     "approval recorded, and an earlier copy is listed unchecked, after "
@@ -440,11 +450,27 @@ def _unchecked(entry: Mapping[str, Any], block: Found | None) -> str:
     if block is None or block.exact or entry.get("outcome") != OUTCOME_APPROVED:
         return ""
     outcomes = entry.get("outcomes")
-    checked = isinstance(outcomes, Mapping) and ITEM_UNCHANGED in outcomes.values()
+    outcomes = outcomes if isinstance(outcomes, Mapping) else {}
     ids = [item.id for item in block.addendum.items]
-    return (" " + _NOT_CHECKED if not checked else "") + (
-        " " + _REPEATED if len(set(ids)) < len(ids) else ""
-    )
+    unchecked = [i for i in dict.fromkeys(ids) if outcomes.get(i) != ITEM_UNCHANGED]
+    if ITEM_UNCHANGED not in outcomes.values():
+        warning = " " + _NOT_CHECKED
+    elif unchecked:
+        warning = " " + _EDITED_UNCHECKED.format(ids=_named(unchecked))
+    else:
+        warning = ""
+    return warning + (" " + _REPEATED if len(set(ids)) < len(ids) else "")
+
+
+def _named(ids: Sequence[str]) -> str:
+    """*ids* (each ``[A-Z]\\d+``, as the parse reads them) for loom's line:
+    the first :data:`_NAMED_IDS` that are short enough to name, the rest
+    counted."""
+    named = [i for i in ids if len(i) <= 8][:_NAMED_IDS]
+    more = len(ids) - len(named)
+    if not more:
+        return ", ".join(named)
+    return f"{', '.join(named)} and {more} more" if named else f"{more} of them"
 
 
 def _first_kept(reserved: Sequence[int], budget: int) -> int:

@@ -1301,3 +1301,48 @@ def test_a_cut_listing_keeps_each_id_s_last_copy() -> None:
     assert "an earlier copy is listed unchecked" in section
     listed = section[section.index("Example heading 0") :]
     assert listed.index("Example heading 38") < listed.index("Genuine heading")
+
+
+def test_a_legacy_approval_s_edited_items_are_flagged_unchecked() -> None:
+    # security/f-002 (converge round 2): a record from before `appended`
+    # keeps an unchanged item, so text before the addenda that copies it can
+    # stand in for the block with any heading on the edited one — loom's
+    # line names the edited and added items as unchecked.
+    drafted = _APPROVED_B
+    approved = drafted.replace("Add `submit_create`.", "Add `submit_new`.")
+    entry = _approve(drafted, approved)
+    assert entry["outcomes"] == {"S1": "unchanged", "F1": "unchanged", "D1": "edited"}
+    forged = approved.replace(
+        "D1. A task-less entry point.", "D1. FORGED decision: ship it."
+    )
+
+    section = brief_review_section([entry], f"Story head.\n\n{forged}")
+
+    assert "\nD1. FORGED decision: ship it.\n" in section
+    assert "Its edited and added items (D1) were not checked" in section
+    # a record with nothing edited or added carries no such line
+    plain = brief_review_section([_approve(drafted, drafted)], f"T\n\n{drafted}")
+    assert "were not checked" not in plain
+
+
+def test_finding_a_marked_text_is_bounded_on_a_hostile_tail() -> None:
+    # security/f-001 (converge round 2): short uniform lines after the
+    # approved text make every line start a candidate; the search is bounded
+    # and fails closed (not found), whether the text is there or not.
+    from tests.support.brief_review import approved_addendum
+
+    text, entry, _ = approved_addendum()
+    absent = [
+        {
+            **entry,
+            "appended": {"chars": entry["appended"]["chars"] + i, "sha": "0" * 16},
+        }
+        for i in range(1, 5)
+    ]
+    description = _appended("T", text) + "a\n" * 256_000
+
+    started = time.perf_counter()
+    section = brief_review_section([*absent, entry], description)
+
+    assert time.perf_counter() - started < 1.0
+    assert section.count("not found in the description") == 5
