@@ -44,7 +44,7 @@ Workflow orchestration daemon for [Lithos](https://github.com/agent-lore/lithos)
 | `docs/result-schema.json` | Versioned JSON Schema for plugin `result.json` |
 | `docs/cli/*.md` | One reference per `lithos-loom develop` / `project` subcommand |
 | `docs/adr/` | Decisions; `CONTEXT.md` is the glossary |
-| `docs/prd/` | Active PRDs: `review-convergence.md`, `prd-to-graph.md`, `unattended-duration.md`; `archive/` holds shipped ones as history |
+| `docs/prd/` | Active PRDs: `review-convergence.md`, `prd-to-graph.md`, `unattended-duration.md`, `operator-mcp.md` (draft); `archive/` holds shipped ones as history |
 | `evals/{review,triage,resolve}/README.md` | `lithos-loom eval …` benchmarks: on-demand, host-only, not part of `make check` |
 | `docs/macros/README.md` | Templater macro install and behaviour |
 | `tests/guardrail/AGENTS.md` | Generator contracts for `docs/generated/` — read before editing that directory |
