@@ -3,21 +3,527 @@
 
 # Architecture metrics
 
+## Measurement scope
+
+```json
+{
+  "analyzer_version": "1.6.0",
+  "capabilities": {
+    "complexity": "measured",
+    "domain": "measured",
+    "mcp": "unsupported",
+    "seams": "measured",
+    "structure": "measured"
+  },
+  "config_hash": "b51a8eeab732364dc73ea8f13d47f5e10f64e68ae003f8fba96f8ec66af9fdf8",
+  "definitions": {
+    "complexity": 1,
+    "structure": 1,
+    "test_volume": 2
+  },
+  "language": "python",
+  "scope": {
+    "domain": {
+      "exclude_modules": [
+        "lithos_loom.github_review_streams",
+        "lithos_loom.config",
+        "lithos_loom.errors",
+        "lithos_loom.plugins",
+        "lithos_loom.evals",
+        "lithos_loom.sources",
+        "lithos_loom.subscriptions",
+        "lithos_loom.runner",
+        "lithos_loom.plugin_runner",
+        "lithos_loom.render",
+        "lithos_loom.render_project_context",
+        "lithos_loom.lithos_client",
+        "lithos_loom.lithos_types",
+        "lithos_loom.cli",
+        "lithos_loom.bus",
+        "lithos_loom.doctor",
+        "lithos_loom.children",
+        "lithos_loom.cursor_store",
+        "lithos_loom.sync_state",
+        "lithos_loom.notifications"
+      ],
+      "include_modules": [
+        "lithos_loom.github_client",
+        "lithos_loom.github_models",
+        "lithos_loom.github_review_activity",
+        "lithos_loom.gates",
+        "lithos_loom.task_graph",
+        "lithos_loom.task_line_parser",
+        "lithos_loom.supervisor"
+      ]
+    },
+    "excluded": [
+      "third-party code",
+      "files outside the source root",
+      "templates and browser code",
+      "kit tooling"
+    ],
+    "source_root": "src/lithos_loom",
+    "source_suffixes": [
+      ".py"
+    ],
+    "test_exclusions": [
+      "tests/guardrail",
+      "tests/test_metrics_diff.py",
+      "tests/test_metrics_history.py",
+      "tests/test_quality.py"
+    ]
+  },
+  "source_hash": "fd098ab5082c073e443057805bda187632e7f278d08c75446a2c4001058284bf",
+  "tools": {
+    "grimp": "3.14",
+    "networkx": "3.6.1"
+  }
+}
+```
+
+Test/source ratio is a volume statistic, not test effectiveness; kit tooling is excluded.
+
 ## Budgets
 
-Hard limits from `docs/architecture.toml [budgets]`, enforced in CI by
-`tests/guardrail/test_metrics_budgets.py`. Headroom = budget - actual;
-lower a budget after improving the code to lock in the gain.
+Only invariant budgets block generation; review/context thresholds are reported.
+Accepted budgets from `docs/architecture.toml [budgets]`, enforced in CI by
+`tests/guardrail/test_metrics_budgets.py`. Headroom = budget - actual.
 
-| Metric | Actual | Budget | Headroom |
-|---|---:|---:|---:|
-| `component_cycles` | 1 | 1 | 0 |
-| `cross_component_edges` | 72 | 72 | 0 |
-| `cross_module_private_refs` | 8 | 8 | 0 |
-| `max_module_lines` | 2047 | 2100 | 53 |
-| `module_cycles` | 1 | 1 | 0 |
-| `modules_over_800_lines` | 17 | 17 | 0 |
-| `tests_private_imports` | 100 | 100 | 0 |
+Architectural invariants (dependency restrictions and prohibited cycles)
+require an explicit architecture decision to change. Size and complexity
+thresholds prompt design review: do not split cohesive code solely to
+satisfy a number. If there is no clean seam and keeping the code together
+is clearer, adjust the relevant threshold and explain the design tradeoff
+in the same PR. Lower thresholds when that protects useful improvements.
+
+| Metric | Actual | Budget | Headroom | Policy |
+|---|---:|---:|---:|---|
+| `component_cycles` | 1 | 1 | 0 | invariant |
+| `cross_component_edges` | 72 | 72 | 0 | review |
+| `cross_module_private_refs` | 8 | 8 | 0 | invariant |
+| `max_module_lines` | 2047 | 2100 | 53 | review |
+| `module_cycles` | 1 | 1 | 0 | invariant |
+| `modules_over_800_lines` | 17 | 17 | 0 | review |
+| `tests_private_imports` | 100 | 100 | 0 | invariant |
+
+### Quality review
+
+
+| Status | Metric | Target | Before | After | Policy | Exception |
+|---|---|---|---:|---:|---|---|
+| unchanged | function_complexity | lithos_loom.bus._matches_struct | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.children.github_watcher._run_reconcile_pass | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.children.obsidian_sync._amain | 44 | 44 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._converge_push_facts.plan_push | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._converge_push_facts.read_run | 29 | 29 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._converge_push_facts.report | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._converge_push_facts.verify_pr | 17 | 17 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_facts.coder_summary | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_lithos.StoryState.retirement | 22 | 22 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_lithos._live_claims | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_lithos.gate_delivery | 22 | 22 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_lithos.read_story | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_output.delivery_finding | 27 | 27 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_output.echo_plan | 19 | 19 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_output.render | 20 | 20 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_preflight.resolve_facts | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._deliver_repo.adoptable | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._project_import_bulk.check_tasks_only_preflight | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.cli._project_import_bulk.create_tasks | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.brief_review.brief_review_command | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.brief_reviews._false_hold_section | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.brief_reviews._outcome_table | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.converge.converge_command | 63 | 63 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.converge_push._lithos_coro | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.converge_push._post_epilogue | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.converge_push._write_phase | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.converge_push.converge_push_command | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.deliver._deliver | 17 | 17 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.deliver._deliver_claimed | 40 | 40 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.deliver.deliver_command | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop._follow_events | 17 | 17 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop._outcome_event | 20 | 20 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop._outcome_line | 25 | 25 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop._prune_verdict | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop._run_liveness | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop._scan_tree | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop.delivered_runs | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop.develop_attach | 19 | 19 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop.develop_list | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.develop.develop_prune | 28 | 28 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.drain.drain_daemon | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.gates.classify_gate | 21 | 21 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.gates.render_report | 22 | 22 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.merge_gate.merge_gate_command | 31 | 31 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.project.import_project | 49 | 49 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.project.project_create | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.project.project_migrate_github_tags | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.project.project_regenerate_done | 22 | 22 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.resume.resume_command | 30 | 30 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.review.gate_config_problems | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.review.review_command | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.cli.task.task_create | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.config._parse_github_watcher | 17 | 17 | review | — |
+| unchanged | function_complexity | lithos_loom.config._parse_obsidian_sync | 28 | 28 | review | — |
+| unchanged | function_complexity | lithos_loom.config._parse_orchestrator | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.config._parse_story_develop | 17 | 17 | review | — |
+| unchanged | function_complexity | lithos_loom.config._parse_subscriptions | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.doctor.run_task_graph_checks | 21 | 21 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.resolve.case.load_resolve_case | 24 | 24 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.resolve.cli.resolve | 22 | 22 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.resolve.harness.aggregate_resolve | 24 | 24 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.resolve.harness.live_resolve | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.resolve.harness.score_sample | 18 | 18 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.case._validate_artifacts | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.case.load_case | 29 | 29 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.cli.review | 25 | 25 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.cli_rescore._print_drift | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.cli_rescore._report_bars | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.cli_rescore._resolve_out | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.cli_rescore.rescore | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.harness._per_expected | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.harness.aggregate_case | 25 | 25 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.overrides.parse_reviewer_overrides | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.overrides.resolve_panel | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.report.print_rollups | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.rescore._load_case_reports | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.review.rescore._validate_finding | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.triage.case._parse_finding | 25 | 25 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.triage.case._tree_spec | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.triage.case.load_triage_case | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.triage.cli.triage | 17 | 17 | review | — |
+| unchanged | function_complexity | lithos_loom.evals.triage.harness.aggregate_triage | 29 | 29 | review | — |
+| unchanged | function_complexity | lithos_loom.gates.brief_review_gate_description | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.gates.create_human_gate | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.gates.human_gate_brief | 26 | 26 | review | — |
+| unchanged | function_complexity | lithos_loom.github_approval._mask_data_lists | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.github_approval._mask_tables | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.github_models.parse_pull_request | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.lithos_client.LithosClient._invoke | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.lithos_client.LithosClient.note_write | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.lithos_client.LithosClient.task_create | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.lithos_client.LithosClient.task_update | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.lithos_client._parse_note | 21 | 21 | review | — |
+| unchanged | function_complexity | lithos_loom.lithos_client._parse_task | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.main._print_dry_run_report | 30 | 30 | review | — |
+| unchanged | function_complexity | lithos_loom.main.doctor | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.__main__._daemon_main | 41 | 41 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.__main__.main | 102 | 102 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.agent_session.turn_with_reactions | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review._write_inputs | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review.item_outcomes | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review.parse_addendum | 18 | 18 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review.review_brief | 19 | 19 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review.validate_addendum | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review_auto._record_ids | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review_auto.brief_review_section | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review_auto.fact_problems | 20 | 20 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review_blocks._mark | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review_blocks._marked | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review_phase._record | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.brief_review_phase.run_phase | 29 | 29 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.check_artifacts.capture_freshness | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.check_artifacts.collect_check_artifacts | 19 | 19 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.check_artifacts.render_artifacts_note | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.check_catalog.resolve_check_set | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.check_runner._build_profile_checks | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.check_runner.blocking_check_records | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.check_runner.check_result_blocks | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.check_runner.run_check_set | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.check_set.render_check_summary | 19 | 19 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.checkpoint._digests | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.checkpoint.from_state | 21 | 21 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.config.parse_reviewer_entry | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.conflict_resolve._conflicted_region | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.conflict_resolve.markers_guard.guard | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.converge._loop_and_deliver | 18 | 18 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.converge.converge_pr | 35 | 35 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.daemon_io._select_reviewers | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.daemon_io.build_result_payload | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.daemon_io.escalation_block | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.daemon_io.story_config_overrides | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.develop.develop | 63 | 63 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.engines.ClaudeEngine.parse_turn | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.engines.CodexEngine.parse_turn | 24 | 24 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.external_record.read_external_intake | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.external_reviews._outcome_of | 20 | 20 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.external_reviews.final_round_outcomes | 19 | 19 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.external_reviews.resolve_ack_history | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.external_triage._scan_verdict_lines | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.findings.FindingLedger._decision_answer_error | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.findings.FindingLedger.apply_review | 20 | 20 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.gate_adapters._parse_pip_audit | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.generated._files_under | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.generated._sync_generated | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.generated.parse_generated_paths | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.github_access.list_open_prs_for_branch | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.handoff._parse_findings | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.limits.classify_failure | 19 | 19 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.limits.failure_summary | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.lithos_io._result_summary | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.lithos_io.post_results._post | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.merge_gate.run_merge_gate | 35 | 35 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.panel._review_turn | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.panel._run_reviewer_with_reaction | 19 | 19 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.pr_delivery.build_pr_body | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.pr_delivery.push_to_pr_ref | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.resume._recorded_intake | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.resume.prepare_resume | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.review_only.review_head | 17 | 17 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.review_report.ReviewReport.to_markdown | 17 | 17 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.rounds.approval_phase | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.rounds.coder_phase | 17 | 17 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.rounds.commit_phase | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.run_outcome.resolve_run_dir | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.run_owner.read_owner | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.runner.orphans.reap_orphaned_containers | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.sources.github_issue_watcher.GitHubIssueWatcher._poll_one_repo | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.sources.github_issue_watcher.GitHubIssueWatcher._refresh_watch_list | 18 | 18 | review | — |
+| unchanged | function_complexity | lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist | 21 | 21 | review | — |
+| unchanged | function_complexity | lithos_loom.sources.lithos_note_stream.LithosNoteStream._handle_sse_event | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.sources.obsidian_dir_watcher.ObsidianDirWatcher._poll_one_file | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.sources.obsidian_fs_watcher.ObsidianFsWatcher.poll_once | 18 | 18 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions._develop_pr_merge._resolve_gate_merged | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions._develop_pr_merge._waiter_resolved | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate | 41 | 41 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions._github_issue_sync._sync_drift | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions._note_push.make_handler.handle | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions._obsidian_due_date_changed.handle | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions._obsidian_projection.make_handler.handle | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions._project_context_projection._project_note | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions._project_context_projection.make_handler.handle | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.admission.Admission._decide | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.admission.Admission._headroom | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.admission.Admission._release_order | 22 | 22 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.admission.Admission._wake_locked | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.admission_count.escalated_count | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.brief_review_approval._approved_gate | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.brief_review_approval.apply_brief_approval | 30 | 30 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.conflict_resolve_dispatch.ConflictResolveDispatch._run_inner | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.conflict_resolve_dispatch.ConflictResolveDispatch.consider | 34 | 34 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.delivery_gate.gate_and_release | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.dispatch_guards.record_failed_attempt | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.escalation.escalation_from_result | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.escalation.raise_needs_human | 21 | 21 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.external_remediation.ExternalRemediation._dispatch_inner | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.external_remediation.ExternalRemediation.observe_head | 18 | 18 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.external_remediation.ExternalRemediation.resume_pending | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.external_reviews.ingest_external_reviews | 20 | 20 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch._probe_then_run | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch._run_inner | 25 | 25 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider | 60 | 60 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.merge_gate_outcome.post_conflict | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.pr_gate_stranding.convert_stranded_gate | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.pr_landability.check_landability | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.reconciliation_state._derive | 52 | 52 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.reconciliation_state.settle_state | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.remediation_budget.read_budget | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.remediation_lifecycle._outcome.record_result | 31 | 31 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.remediation_lifecycle._push.recover_conflict_push | 13 | 13 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.remediation_lifecycle._recovery.recover | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.route_runner.RouteRunner._apply_result | 14 | 14 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.route_runner.RouteRunner._handle | 22 | 22 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.route_runner.RouteRunner._resume_pointer | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.shadow_merge.observe | 21 | 21 | review | — |
+| unchanged | function_complexity | lithos_loom.subscriptions.shadow_merge.outcome | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.supervisor.Supervisor._terminate_remaining | 11 | 11 | review | — |
+| unchanged | function_complexity | lithos_loom.supervisor.Supervisor._wait_for_shutdown_or_crash | 15 | 15 | review | — |
+| unchanged | function_complexity | lithos_loom.task_graph.build_plan | 16 | 16 | review | — |
+| unchanged | function_complexity | lithos_loom.task_line_parser.parse_doc | 14 | 14 | review | — |
+| unchanged | function_length | lithos_loom.children.github_watcher._amain | 333 | 333 | review | — |
+| unchanged | function_length | lithos_loom.children.github_watcher._run_reconcile_pass | 209 | 209 | review | — |
+| unchanged | function_length | lithos_loom.children.obsidian_sync._amain | 388 | 388 | review | — |
+| unchanged | function_length | lithos_loom.children.route_runner._amain | 88 | 88 | review | — |
+| unchanged | function_length | lithos_loom.cli._converge_push_facts.plan_push | 131 | 131 | review | — |
+| unchanged | function_length | lithos_loom.cli._converge_push_facts.verify_pr | 98 | 98 | review | — |
+| unchanged | function_length | lithos_loom.cli._deliver_lithos.StoryState.retirement | 101 | 101 | review | — |
+| unchanged | function_length | lithos_loom.cli._deliver_lithos.gate_delivery | 174 | 174 | review | — |
+| unchanged | function_length | lithos_loom.cli._deliver_output.delivery_finding | 109 | 109 | review | — |
+| unchanged | function_length | lithos_loom.cli._deliver_output.echo_plan | 137 | 137 | review | — |
+| unchanged | function_length | lithos_loom.cli._project_import_bulk.create_tasks | 110 | 110 | review | — |
+| unchanged | function_length | lithos_loom.cli.brief_review.brief_review_command | 132 | 132 | review | — |
+| unchanged | function_length | lithos_loom.cli.converge.converge_command | 476 | 476 | review | — |
+| unchanged | function_length | lithos_loom.cli.converge_push._post_epilogue | 82 | 82 | review | — |
+| unchanged | function_length | lithos_loom.cli.converge_push._write_phase | 104 | 104 | review | — |
+| unchanged | function_length | lithos_loom.cli.converge_push.converge_push_command | 100 | 100 | review | — |
+| unchanged | function_length | lithos_loom.cli.deliver._deliver | 177 | 177 | review | — |
+| unchanged | function_length | lithos_loom.cli.deliver._deliver_claimed | 358 | 358 | review | — |
+| unchanged | function_length | lithos_loom.cli.deliver.deliver_command | 139 | 139 | review | — |
+| unchanged | function_length | lithos_loom.cli.develop._follow_events | 89 | 89 | review | — |
+| unchanged | function_length | lithos_loom.cli.develop._prune_verdict | 118 | 118 | review | — |
+| unchanged | function_length | lithos_loom.cli.develop._run_liveness | 86 | 86 | review | — |
+| unchanged | function_length | lithos_loom.cli.develop._scan_tree | 78 | 78 | review | — |
+| unchanged | function_length | lithos_loom.cli.develop.develop_attach | 101 | 101 | review | — |
+| unchanged | function_length | lithos_loom.cli.develop.develop_list | 76 | 76 | review | — |
+| unchanged | function_length | lithos_loom.cli.develop.develop_prune | 173 | 173 | review | — |
+| unchanged | function_length | lithos_loom.cli.drain.drain_daemon | 78 | 78 | review | — |
+| unchanged | function_length | lithos_loom.cli.merge_gate.merge_gate_command | 295 | 295 | review | — |
+| unchanged | function_length | lithos_loom.cli.project._create_project_async | 96 | 96 | review | — |
+| unchanged | function_length | lithos_loom.cli.project.import_project | 300 | 300 | review | — |
+| unchanged | function_length | lithos_loom.cli.project.project_create | 156 | 156 | review | — |
+| unchanged | function_length | lithos_loom.cli.project.project_import | 155 | 155 | review | — |
+| unchanged | function_length | lithos_loom.cli.project.project_list | 86 | 86 | review | — |
+| unchanged | function_length | lithos_loom.cli.project.project_regenerate_done | 160 | 160 | review | — |
+| unchanged | function_length | lithos_loom.cli.resume.resume_command | 170 | 170 | review | — |
+| unchanged | function_length | lithos_loom.cli.review.review_command | 171 | 171 | review | — |
+| unchanged | function_length | lithos_loom.cli.task.task_create | 177 | 177 | review | — |
+| unchanged | function_length | lithos_loom.config._parse_github_watcher | 127 | 127 | review | — |
+| unchanged | function_length | lithos_loom.config._parse_obsidian_sync | 111 | 111 | review | — |
+| unchanged | function_length | lithos_loom.doctor.run_task_graph_checks | 125 | 125 | review | — |
+| unchanged | function_length | lithos_loom.evals.resolve.case.load_resolve_case | 108 | 108 | review | — |
+| unchanged | function_length | lithos_loom.evals.resolve.cli.resolve | 195 | 195 | review | — |
+| unchanged | function_length | lithos_loom.evals.resolve.harness.live_resolve | 139 | 139 | review | — |
+| unchanged | function_length | lithos_loom.evals.review.case.load_case | 128 | 128 | review | — |
+| unchanged | function_length | lithos_loom.evals.review.cli.review | 198 | 198 | review | — |
+| unchanged | function_length | lithos_loom.evals.review.cli_rescore.rescore | 115 | 115 | review | — |
+| unchanged | function_length | lithos_loom.evals.review.harness.aggregate_case | 99 | 99 | review | — |
+| unchanged | function_length | lithos_loom.evals.review.rescore.rescore_case | 82 | 82 | review | — |
+| unchanged | function_length | lithos_loom.evals.triage.cli.triage | 148 | 148 | review | — |
+| unchanged | function_length | lithos_loom.gates.brief_review_gate_description | 87 | 87 | review | — |
+| unchanged | function_length | lithos_loom.gates.create_human_gate | 88 | 88 | review | — |
+| unchanged | function_length | lithos_loom.gates.human_gate_brief | 110 | 110 | review | — |
+| unchanged | function_length | lithos_loom.github_approval._mask_data_lists | 80 | 80 | review | — |
+| unchanged | function_length | lithos_loom.lithos_client.LithosClient._invoke | 89 | 89 | review | — |
+| unchanged | function_length | lithos_loom.lithos_client.LithosClient.note_write | 107 | 107 | review | — |
+| unchanged | function_length | lithos_loom.lithos_client.LithosClient.task_claim | 80 | 80 | review | — |
+| unchanged | function_length | lithos_loom.main._print_dry_run_report | 96 | 96 | review | — |
+| unchanged | function_length | lithos_loom.main.run | 88 | 88 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.__main__._build_parser | 263 | 263 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.__main__._daemon_main | 389 | 389 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.__main__.main | 463 | 463 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.agent_session.turn_with_reactions | 147 | 147 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.autoformat.run_format_pass | 103 | 103 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.brief_review.review_brief | 154 | 154 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.brief_review_auto.brief_review_section | 83 | 83 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.brief_review_phase.run_phase | 197 | 197 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.check_artifacts.collect_check_artifacts | 121 | 121 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.check_runner._build_profile_checks | 114 | 114 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.check_runner.run_check_set | 167 | 167 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.check_set.render_check_summary | 89 | 89 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.checkpoint.from_state | 100 | 100 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.conflict_resolve.render_conflict_brief | 79 | 79 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.conflict_resolve.render_review_context | 99 | 99 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.containers.build_run_command | 103 | 103 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.containers.resync_auth_files | 84 | 84 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.converge._loop_and_deliver | 222 | 222 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.converge._resolve_conflicts | 82 | 82 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.converge.converge_pr | 401 | 401 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.daemon_io.build_result_payload | 111 | 111 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.daemon_io.resolve_project_settings | 81 | 81 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.develop.develop | 432 | 432 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.engines.CodexEngine.parse_turn | 95 | 95 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.external_reviews.final_round_outcomes | 98 | 98 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.external_reviews.outcomes_after_loop | 76 | 76 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.external_triage.triage_external_findings | 111 | 111 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.findings.FindingLedger._decision_answer_error | 81 | 81 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.findings.FindingLedger.apply_review | 108 | 108 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.generated.regenerate | 92 | 92 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.lithos_io.post_results | 94 | 94 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.lithos_io.spawn_deferred_tasks | 91 | 91 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.merge_gate.run_merge_gate | 271 | 271 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.panel._review_turn | 184 | 184 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.panel._run_reviewer_with_reaction | 281 | 281 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.panel.run_panel_round | 125 | 125 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.panel_prompts.round_prompt | 90 | 90 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.pr_delivery.build_pr_body | 98 | 98 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.pr_delivery.deliver | 81 | 81 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.pr_delivery.push_to_pr_ref | 128 | 128 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.resume.prepare_resume | 138 | 138 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.review_only.review_head | 123 | 123 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.rounds._artifact_review_pass | 82 | 82 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.rounds.coder_phase | 111 | 111 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.settings_resolver.resolve_scalar_settings | 167 | 167 | review | — |
+| unchanged | function_length | lithos_loom.runner.orphans.reap_orphaned_containers | 82 | 82 | review | — |
+| unchanged | function_length | lithos_loom.sources.github_issue_watcher.GitHubIssueWatcher._poll_one_repo | 118 | 118 | review | — |
+| unchanged | function_length | lithos_loom.sources.github_issue_watcher.GitHubIssueWatcher._refresh_watch_list | 95 | 95 | review | — |
+| unchanged | function_length | lithos_loom.sources.github_watch_state.GitHubWatchStateStore.persist | 143 | 143 | review | — |
+| unchanged | function_length | lithos_loom.sources.obsidian_dir_watcher.ObsidianDirWatcher._poll_one_file | 143 | 143 | review | — |
+| unchanged | function_length | lithos_loom.sources.obsidian_fs_watcher.ObsidianFsWatcher.poll_once | 152 | 152 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._awaiting_review.make_handler | 95 | 95 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._develop_pr_merge._resolve_gate_merged | 106 | 106 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._develop_pr_merge._waiter_resolved | 82 | 82 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate | 337 | 337 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._github_issue_sync._reconcile_existing | 105 | 105 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._note_conflict.resolve_conflict | 115 | 115 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._note_push.make_handler | 162 | 162 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._note_push.make_handler.handle | 137 | 137 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._obsidian_due_date_changed.handle | 93 | 93 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._obsidian_projection.make_handler | 362 | 362 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._obsidian_projection.make_handler._flush | 103 | 103 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._obsidian_projection.make_handler.handle | 121 | 121 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._project_context_projection._project_note | 180 | 180 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._project_context_projection._resolve_cold_start_divergence | 81 | 81 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._project_context_projection.make_handler | 140 | 140 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._project_context_projection.make_handler.handle | 111 | 111 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions._task_archive.make_handler | 101 | 101 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.admission.Admission._release_order | 81 | 81 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.brief_review_approval.apply_brief_approval | 112 | 112 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.conflict_resolve_dispatch.ConflictResolveDispatch._run_inner | 107 | 107 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.conflict_resolve_dispatch.ConflictResolveDispatch.consider | 135 | 135 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.conflict_resolve_outcome.escalate | 78 | 78 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.delivery_gate.gate_and_release | 98 | 98 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.dispatch_guards.record_failed_attempt | 83 | 83 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.escalation.escalate_with_failure | 80 | 80 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.escalation.raise_needs_human | 112 | 112 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.external_remediation.ExternalRemediation._dispatch_inner | 138 | 138 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.external_reviews.ingest_external_reviews | 151 | 151 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch._probe_then_run | 82 | 82 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch._run_inner | 132 | 132 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider | 245 | 245 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.pr_gate_stranding._raise_stranding_gate | 81 | 81 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.pr_gate_stranding.convert_stranded_gate | 118 | 118 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.pr_landability.check_landability | 102 | 102 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.reconciliation_state._derive | 183 | 183 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.remediation_lifecycle.RemediationLifecycle.finished | 94 | 94 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.remediation_lifecycle._outcome.record_result | 140 | 140 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.remediation_lifecycle._push.record_conflict_push | 81 | 81 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.remediation_lifecycle._recovery.recover | 97 | 97 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.remediation_lifecycle._refunds.refund_infra_failed | 84 | 84 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.remediation_lifecycle._refunds.refund_lost_run | 85 | 85 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.remediation_lifecycle._refunds.refund_repo_mismatch | 86 | 86 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.route_runner.RouteRunner._apply_result | 106 | 106 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.route_runner.RouteRunner._claim_and_run | 88 | 88 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.route_runner.RouteRunner._handle | 126 | 126 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.route_runner.RouteRunner._resume_pointer | 91 | 91 | review | — |
+| unchanged | function_length | lithos_loom.subscriptions.route_runner.RouteRunner._run_claimed_task | 107 | 107 | review | — |
+| unchanged | function_length | lithos_loom.task_graph.build_plan | 93 | 93 | review | — |
+| unchanged | module_lines | lithos_loom.cli._deliver_lithos | 884 | 884 | review | — |
+| unchanged | module_lines | lithos_loom.cli.deliver | 862 | 862 | review | — |
+| unchanged | module_lines | lithos_loom.cli.develop | 2047 | 2047 | review | — |
+| unchanged | module_lines | lithos_loom.cli.project | 1705 | 1705 | review | — |
+| unchanged | module_lines | lithos_loom.config | 1266 | 1266 | review | — |
+| unchanged | module_lines | lithos_loom.gates | 948 | 948 | review | — |
+| unchanged | module_lines | lithos_loom.lithos_client | 2045 | 2045 | review | — |
+| unchanged | module_lines | lithos_loom.plugins.story_develop.__main__ | 1232 | 1232 | review | — |
+| unchanged | module_lines | lithos_loom.plugins.story_develop.converge | 807 | 807 | review | — |
+| unchanged | module_lines | lithos_loom.plugins.story_develop.daemon_io | 1101 | 1101 | review | — |
+| unchanged | module_lines | lithos_loom.plugins.story_develop.develop | 807 | 807 | review | — |
+| unchanged | module_lines | lithos_loom.plugins.story_develop.pr_delivery | 805 | 805 | review | — |
+| unchanged | module_lines | lithos_loom.plugins.story_develop.rounds | 1150 | 1150 | review | — |
+| unchanged | module_lines | lithos_loom.plugins.story_develop.run_outcome | 861 | 861 | review | — |
+| unchanged | module_lines | lithos_loom.subscriptions._develop_pr_merge | 815 | 815 | review | — |
+| unchanged | module_lines | lithos_loom.subscriptions.external_remediation | 836 | 836 | review | — |
+| unchanged | module_lines | lithos_loom.subscriptions.route_runner | 1280 | 1280 | review | — |
+- branch_coverage: missing; value —; scope not recorded; evidence not recorded
+- mutation: missing; value —; scope not recorded; evidence not recorded
+- Review lowering budget max_module_lines: actual 2047, accepted ceiling 2100.
+
+
+## Quality evidence
+
+Optional measurements are source-bound; missing or stale evidence is not a score.
+
+```json
+{
+  "branch_coverage": {
+    "status": "missing"
+  },
+  "mutation": {
+    "status": "missing"
+  },
+  "outcomes": []
+}
+```
 
 ## Import graph
 
@@ -81,21 +587,23 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 ## Complexity
 
 - Functions: **2152**, cyclomatic > 10: **219**
+- Cyclomatic distribution: median **3**, p90 **11**, max **102**
+- Function length (lines): median 16, p90 63, max 476 (`lithos_loom.cli.converge.converge_command`); over 75: **157**
 
 Top 10 most complex functions:
 
-| Complexity | Function |
-|---:|---|
-| 102 | `lithos_loom.plugins.story_develop.__main__.main` |
-| 63 | `lithos_loom.cli.converge.converge_command` |
-| 63 | `lithos_loom.plugins.story_develop.develop.develop` |
-| 60 | `lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider` |
-| 52 | `lithos_loom.subscriptions.reconciliation_state._derive` |
-| 49 | `lithos_loom.cli.project.import_project` |
-| 44 | `lithos_loom.children.obsidian_sync._amain` |
-| 41 | `lithos_loom.plugins.story_develop.__main__._daemon_main` |
-| 41 | `lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate` |
-| 40 | `lithos_loom.cli.deliver._deliver_claimed` |
+| Complexity | Length | Function |
+|---:|---:|---|
+| 102 | 463 | `lithos_loom.plugins.story_develop.__main__.main` |
+| 63 | 476 | `lithos_loom.cli.converge.converge_command` |
+| 63 | 432 | `lithos_loom.plugins.story_develop.develop.develop` |
+| 60 | 245 | `lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider` |
+| 52 | 183 | `lithos_loom.subscriptions.reconciliation_state._derive` |
+| 49 | 300 | `lithos_loom.cli.project.import_project` |
+| 44 | 388 | `lithos_loom.children.obsidian_sync._amain` |
+| 41 | 389 | `lithos_loom.plugins.story_develop.__main__._daemon_main` |
+| 41 | 337 | `lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate` |
+| 40 | 358 | `lithos_loom.cli.deliver._deliver_claimed` |
 
 ## Seams
 
@@ -147,4 +655,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.53** (128069 test lines / 83825 source lines)
+- Test-to-source line ratio: **1.49** (125235 test lines / 83825 source lines)

@@ -3,7 +3,7 @@
 # Single source of truth for:
 #   - the generated component diagram + per-component pages
 #   - which modules are scanned for the domain class diagram
-#   - the architecture metrics snapshot and its hard budgets
+#   - the architecture metrics snapshot and its accepted budgets
 #
 # The directional layering contract lives in pyproject.toml
 # ([tool.importlinter]); the tiers below document that intent (dependencies must
@@ -77,15 +77,13 @@ Foundation  = ["Bus", "Config", "Errors", "LithosClient", "GitHub", "Tasks", "No
 
 # Architecture metric limits, checked by tests/guardrail/test_metrics_budgets.py
 # against the metrics snapshot (docs/generated/metrics.md explains each one).
-# CI enforces these values. When deciding whether to adjust a limit, follow
+# CI enforces invariants; review thresholds prompt judgment. For adjustments, follow
 # AGENTS.md's "Metric limits guide architectural judgment" rule and explain
 # the tradeoff alongside the change.
 #
-# Most budgets below are tight ratchets pinned at today's value (any increase
-# fails CI). max_module_lines is the exception: it is a STOP-LOSS ceiling set a
-# little above today's largest module so a big module can't quietly balloon — it
-# is deliberately NOT pinned to the exact current high-water mark. Ratchet the
-# *count* of oversized modules down via modules_over_800_lines instead.
+# Size and count ceilings retain their accepted values as review thresholds.
+# They guide design judgment; they do not require mechanical splitting.
+# See [review], [policies], and docs/quality-guide.md.
 [budgets]
 cross_component_edges  = 72   # 71->72: M1 (664d84c4) — `gates --shadow` (Cli) reports its agreement rate with the eval harness's Wilson interval, imported from evals.review.stats (Evals) rather than copied; moving it to a new Foundation module would cost two edges, not one; same tier (Core -> Core), direction: sideways; 65->68: b91177d2 notifications.py (Notifications) imported by Subscriptions + Children, and importing GitHub; 68->70: #407 slice 2a — the daemon entry (main) imports Runners for the boot-time orphan-container reap (the one place that runs before any child), and the develop CLI imports Runners for the SIGTERM-as-SystemExit install shared with the plugin entry (both run subprocess lifecycles the daemon terminates); direction: down; 70->71: #431 — the watcher's dispatchers publish a crashed child's last output line into a story's finding, so Subscriptions imports publish_text (Plugins) for the ONE neutraliser every publisher shares rather than copying its character class; same tier (Core -> Core), direction: sideways
 component_cycles       = 1    # Render <-> Subscriptions; goal: 0
@@ -211,3 +209,24 @@ exclude_modules = [
     "lithos_loom.sync_state",
     "lithos_loom.notifications",
 ]
+
+# Kit 1.6: merge this baseline before enabling changed-code review gates.
+[review]
+function_complexity = 10
+function_length = 75
+module_lines = 800
+enforce_new = false
+enforce_worsened = false
+
+# Dependency/cycle contracts remain invariants; size/count thresholds prompt review.
+[policies]
+cross_component_edges = "review"
+component_cycles = "invariant"
+module_cycles = "invariant"
+modules_over_800_lines = "review"
+max_module_lines = "review"
+cross_module_private_refs = "invariant"
+tests_private_imports = "invariant"
+function_complexity = "review"
+function_length = "review"
+module_lines = "review"
