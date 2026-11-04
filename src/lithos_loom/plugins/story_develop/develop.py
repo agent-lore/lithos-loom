@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -107,8 +107,44 @@ class BlockingCheckOutcome:
 
 
 @dataclass(frozen=True)
+class ReviewerSession:
+    """One panel member's resumable session: its name, session id and engine."""
+
+    name: str
+    session: str
+    tool: str
+
+
+# Statuses whose human message embeds ``failure_reason`` (the message-building
+# elif chain in ``develop()``). ``approved`` and ``max_rounds`` describe
+# themselves and never consume it — so it stays at its "no rounds ran" sentinel
+# for a max_rounds run. ``state.json`` records the reason only for these, so the
+# offline ``attach`` summary (#188) never shows a stale reason for max_rounds.
+_REASON_BEARING_STATUSES = frozenset(
+    {
+        "failed",
+        "interrupted",
+        "stalled",
+        "disputed",
+        "cost_exceeded",
+        "infra_failed",
+        "needs_decision",
+    }
+)
+
+
+@dataclass(frozen=True)
 class DevelopResult:
-    """Outcome of a ``develop()`` run."""
+    """Outcome of a ``develop()`` run — the one value every consumer reads.
+
+    ``develop()`` assembles it once from the loop's exit and the run state,
+    then derives the two other outcome surfaces FROM it: ``message`` (the
+    operator line, :meth:`render_message`) and the durable ``state.json``
+    record (:meth:`state_record`). A field added here reaches both by
+    editing those two methods; nothing is computed a second time in the
+    epilogue, so the persisted state, the returned result and what the
+    operator is told cannot disagree.
+    """
 
     # "approved" | "max_rounds" | "failed" | "interrupted"
     # | "stalled" | "disputed" | "cost_exceeded"  (T7 guards)
@@ -170,6 +206,19 @@ class DevelopResult:
     # tail `message` appends — what the needs-human escalation (b91177d2)
     # reads to name the stop and split a `failed` into coder vs reviewer
     failure_reason: str = ""
+    # where the run's sessions, handoffs and ``state.json`` live — named in
+    # the ``interrupted`` / ``infra_failed`` message so the operator can resume
+    run_dir: Path | None = None
+    # resume state beside ``coder_session``: each reviewer's session + engine,
+    # and what is left of the pause budget — what ``state.json`` carries for
+    # the daemon's re-dispatch
+    reviewer_sessions: tuple[ReviewerSession, ...] = ()
+    pause_budget_remaining_s: float = 0.0
+    # every check that HELD approval by the floor's own per-check decision
+    # (:func:`check_runner.blocking_check_records`) — a superset of the
+    # raw-exit ``blocking_checks``; the record ``develop converge-push`` shows
+    # the operator before they push an unapproved run's rounds
+    blocking_check_records: tuple[Mapping[str, object], ...] = ()
 
     @property
     def review(self) -> ReviewOutcome | None:
@@ -188,6 +237,120 @@ class DevelopResult:
     @property
     def total_cost_usd(self) -> float:
         return self.coder_cost_usd + self.review_cost_usd
+
+    @property
+    def reason_bearing(self) -> bool:
+        """Whether ``failure_reason`` says anything: the stop statuses that
+        carry one, as opposed to ``approved`` / ``max_rounds``, which describe
+        themselves."""
+        return self.status in _REASON_BEARING_STATUSES
+
+    @property
+    def open_findings(self) -> list[dict[str, str]]:
+        """The final panel's open findings, one row per (reviewer, finding)."""
+        return [
+            {
+                "reviewer": r.reviewer,
+                "finding_id": f.finding_id,
+                "severity": f.severity,
+                "title": f.rationale.strip().splitlines()[0][:200]
+                if f.rationale.strip()
+                else "",
+            }
+            for r in self.reviews
+            for f in r.findings
+            if f.status == "open"
+        ]
+
+    def render_message(self) -> str:
+        """The one-line operator summary, rendered from this result's facts."""
+        reviews = " ".join(
+            f"[{r.reviewer}]={r.status}({'pass' if r.passed else 'blocks'}"
+            f"{f' max {r.max_severity}' if r.max_severity else ''})"
+            for r in self.reviews
+        )
+        gate = self.test_gate
+        gate_part = f"; test gate {gate.verdict} (`{gate.command}`)" if gate else ""
+        if self.blocking_checks:
+            gate_part += "; blocking gate checks: " + ", ".join(
+                f"{c.name} {c.verdict} (`{c.command}`)" for c in self.blocking_checks
+            )
+        commits = f"{len(self.commits)} commit(s) on {self.branch}"
+        cost = f"cost ${self.total_cost_usd:.4f}"
+        preserved = f"sessions + handoffs preserved in {self.run_dir}"
+        if self.status == "approved":
+            return (
+                f"approved by {reviews} in {self.rounds} round(s){gate_part}; "
+                f"{commits}; {cost}"
+            )
+        if self.status == "max_rounds":
+            return (
+                f"NOT approved after {self.rounds} round(s) (max_rounds); "
+                f"last reviews: {reviews}{gate_part}; {commits}; {cost}"
+            )
+        if self.status == "interrupted":
+            return (
+                f"INTERRUPTED: {self.failure_reason}; {commits}; "
+                f"{preserved} (re-run to retry); {cost}"
+            )
+        if self.status in ("stalled", "disputed", "cost_exceeded", "needs_decision"):
+            return (
+                f"STOPPED ({self.status}): {self.failure_reason}; "
+                f"last reviews: {reviews}{gate_part}; {commits}; {cost}"
+            )
+        if self.status == "infra_failed":
+            return (
+                f"INFRA FAILURE: {self.failure_reason} — {self.host_action}; "
+                f"{commits}; {preserved}; {cost}"
+            )
+        # failed
+        return f"{self.failure_reason}{gate_part}; {commits}"
+
+    def state_record(self) -> dict[str, object]:
+        """The loop's keys of the durable ``state.json`` (PRD decision #5).
+
+        Written on every exit, primarily for ``interrupted`` runs and the
+        daemon re-dispatch (T10); merged over the file by
+        :func:`run_outcome.write_state` so a converge run's intake block
+        survives. Carries the review-metadata record (ADR 0003 §11: profile +
+        panel + findings-by-severity) and what the LAST round left behind
+        from the ledgers rather than the prose — the spend, the gate's verdict,
+        every check that held approval and the open findings — which
+        ``develop converge-push`` reports to the operator deciding whether to
+        push an exhausted run's rounds.
+        """
+        gate = self.test_gate
+        return {
+            "status": self.status,
+            "run_id": self.run_id,
+            "branch": self.branch,
+            "worktree": str(self.worktree),
+            "base_sha": self.base_sha,
+            "rounds": self.rounds,
+            # Only the reason-bearing statuses record a reason (#188); approved
+            # + max_rounds would otherwise leak the "no rounds ran" sentinel.
+            "failure_reason": self.failure_reason if self.reason_bearing else None,
+            "review_profile": self.review_profile,
+            "review_panel": [r.reviewer for r in self.reviews],
+            "findings_by_severity": findings_by_severity(list(self.reviews)),
+            "cost_usd": round(self.total_cost_usd, 4),
+            "test_gate": (
+                {"verdict": gate.verdict, "command": gate.command} if gate else None
+            ),
+            "blocking_checks": [dict(c) for c in self.blocking_check_records],
+            "open_findings": self.open_findings,
+            "coder_session": self.coder_session,
+            "reviewers": {
+                r.name: {"session": r.session, "tool": r.tool}
+                for r in self.reviewer_sessions
+            },
+            "pause_budget_remaining_s": round(self.pause_budget_remaining_s, 1),
+            "resume_after": (
+                self.resume_after.isoformat(timespec="seconds")
+                if self.resume_after is not None
+                else None
+            ),
+        }
 
 
 # --- prompt / rendering helpers --------------------------------------------
@@ -316,24 +479,6 @@ def _record_coder_disputes(
 
 
 # --- orchestration ----------------------------------------------------------
-
-
-# Statuses whose human message embeds ``failure_reason`` (the message-building
-# elif chain in ``develop()``). ``approved`` and ``max_rounds`` describe
-# themselves and never consume it — so it stays at its "no rounds ran" sentinel
-# for a max_rounds run. ``state.json`` records the reason only for these, so the
-# offline ``attach`` summary (#188) never shows a stale reason for max_rounds.
-_REASON_BEARING_STATUSES = frozenset(
-    {
-        "failed",
-        "interrupted",
-        "stalled",
-        "disputed",
-        "cost_exceeded",
-        "infra_failed",
-        "needs_decision",
-    }
-)
 
 
 def _warn_if_ceiling_unmetered(
@@ -612,41 +757,39 @@ def develop(
         for rstate in reviewers:
             containers.stop_container(rstate.container)
 
-    # Unpack ctx's run-state + the exit into the exact local names the epilogue
-    # below already uses, so that block stays byte-for-byte unchanged.
-    status = exit_state.status
-    failure_reason = exit_state.failure_reason
-    resume_after = exit_state.resume_after
-    host_action = exit_state.host_action if status == "infra_failed" else ""
-    coder_cost = ctx.coder_cost
-    review_cost = ctx.review_cost
-    gate = ctx.gate
-    final_check_set = ctx.check_set
-    final_reviews = ctx.final_reviews
-    coder_session = ctx.coder_session
-    rounds_completed = ctx.rounds_completed
-
-    commits = git.commits_since(wt, git.fork_point(wt, base))
-    handoff_present = (config.handoff_dir / handoff.coder_handoff_name(1)).is_file()
-
     log_path = config.run_dir / run_outcome.CONVERSATION_LOG
     log_path.write_text(
-        handoff.conversation_log(config.handoff_dir, rounds_completed, names),
+        handoff.conversation_log(config.handoff_dir, ctx.rounds_completed, names),
         encoding="utf-8",
     )
+    result = _assemble_result(
+        config, ctx, exit_state, wt=wt, base=base, conversation_log=log_path
+    )
+    run_outcome.write_state(config.run_dir, result.state_record())
+    return result
 
-    def _reviews_part(outcomes: list[ReviewOutcome] | tuple) -> str:
-        bits = []
-        for r in outcomes:
-            sev = f" max {r.max_severity}" if r.max_severity else ""
-            bits.append(
-                f"[{r.reviewer}]={r.status}({'pass' if r.passed else 'blocks'}{sev})"
-            )
-        return " ".join(bits)
 
-    # Raw-exit checks (repo-parity / command overrides) that blocked at exit: they
-    # produce no ledger finding and aren't the test gate, so name them explicitly
-    # here or a final-round parity-only failure is invisible in the outcome (#273).
+def _assemble_result(
+    config: DevelopConfig,
+    ctx: RoundContext,
+    exit_state: CycleExit,
+    *,
+    wt: Path,
+    base: git.RangeBase,
+    conversation_log: Path,
+) -> DevelopResult:
+    """The run's outcome, built once from the loop's exit and its run state.
+
+    The reason-bearing gate (``failure_reason`` / ``host_action`` only on the
+    statuses that carry one) is applied HERE and nowhere else; ``message``
+    is then rendered from the assembled facts.
+    """
+    status = exit_state.status
+    reason_bearing = status in _REASON_BEARING_STATUSES
+    final_check_set = ctx.check_set
+    # Raw-exit checks (repo-parity / command overrides) that blocked at exit:
+    # they produce no ledger finding and aren't the test gate, so name them or
+    # a final-round parity-only failure is invisible in the outcome (#273).
     blocking_checks = tuple(
         BlockingCheckOutcome(
             name=r.check.name,
@@ -656,152 +799,46 @@ def develop(
         )
         for r in (final_check_set.failing_raw_checks if final_check_set else ())
     )
-
-    total = coder_cost + review_cost
-    gate_part = f"; test gate {gate.verdict} (`{gate.command}`)" if gate else ""
-    if blocking_checks:
-        gate_part += "; blocking gate checks: " + ", ".join(
-            f"{c.name} {c.verdict} (`{c.command}`)" for c in blocking_checks
-        )
-    if status == "approved":
-        message = (
-            f"approved by {_reviews_part(final_reviews)} in {rounds_completed} "
-            f"round(s){gate_part}; {len(commits)} commit(s) on {branch}; "
-            f"cost ${total:.4f}"
-        )
-    elif status == "max_rounds":
-        message = (
-            f"NOT approved after {rounds_completed} round(s) (max_rounds); "
-            f"last reviews: {_reviews_part(final_reviews)}"
-            f"{gate_part}; {len(commits)} commit(s) on {branch}; cost ${total:.4f}"
-        )
-    elif status == "interrupted":
-        message = (
-            f"INTERRUPTED: {failure_reason}; {len(commits)} commit(s) on {branch}; "
-            f"sessions + handoffs preserved in {config.run_dir} (re-run to retry); "
-            f"cost ${total:.4f}"
-        )
-    elif status in ("stalled", "disputed", "cost_exceeded", "needs_decision"):
-        message = (
-            f"STOPPED ({status}): {failure_reason}; "
-            f"last reviews: {_reviews_part(final_reviews)}{gate_part}; "
-            f"{len(commits)} commit(s) on {branch}; cost ${total:.4f}"
-        )
-    elif status == "infra_failed":
-        message = (
-            f"INFRA FAILURE: {failure_reason} — {host_action}; "
-            f"{len(commits)} commit(s) on {branch}; sessions + handoffs preserved "
-            f"in {config.run_dir}; cost ${total:.4f}"
-        )
-    else:  # failed
-        message = f"{failure_reason}{gate_part}; {len(commits)} commit(s) on {branch}"
-
-    # Durable run state (PRD decision #5: resume state is ~free — session ids
-    # + handoffs are on disk). Written on every exit, primarily for
-    # `interrupted` runs and the future daemon re-dispatch (T10).
-    # Merged, not overwritten (:func:`run_outcome.write_state`): a converge
-    # run records the PR it is converging in the same file at intake, and
-    # that block must survive the loop's own exit.
-    run_outcome.write_state(
-        config.run_dir,
-        {
-            "status": status,
-            "run_id": config.run_id,
-            "branch": branch,
-            "worktree": str(wt),
-            "base_sha": base.start_sha,
-            "rounds": rounds_completed,
-            # Why a non-approved run stopped, for the offline `attach` summary
-            # (#188). Only the reason-bearing statuses set a real reason;
-            # approved + max_rounds describe themselves (and would otherwise
-            # leak the "no rounds ran" sentinel for an exhausted run).
-            "failure_reason": (
-                failure_reason if status in _REASON_BEARING_STATUSES else None
-            ),
-            # Review-metadata record (ADR 0003 §11) — the same profile +
-            # panel + findings-by-severity written to Lithos metadata, kept
-            # in the durable run-state for local outcome correlation.
-            "review_profile": config.review_profile,
-            "review_panel": [r.reviewer for r in final_reviews],
-            "findings_by_severity": findings_by_severity(final_reviews),
-            # What the LAST round actually left behind, from the ledgers
-            # rather than the prose: the spend, the gate's verdict and the
-            # open findings. `develop converge-push` reports these back to
-            # the operator deciding whether to push an exhausted run's
-            # rounds, and nothing else on disk carries them (#188's
-            # `failure_reason` is one sentence).
-            "cost_usd": round(total, 4),
-            "test_gate": (
-                {"verdict": gate.verdict, "command": gate.command} if gate else None
-            ),
-            # Every check that held approval, by the floor's own per-check
-            # decision — not just the raw-exit ones named above. An
-            # adapter-backed `lint` (ruff, whose verdict lives in the ledger)
-            # and a plain `typecheck` (pyright) are neither the `test` gate
-            # nor raw-exit overrides, so without this the record says "test
-            # GREEN, nothing open" for a run that stopped with required lint
-            # or typecheck red — and it is this record `converge-push` shows
-            # the operator before they push an unapproved run's rounds.
-            "blocking_checks": check_runner.blocking_check_records(
-                final_check_set, gate_ledger
-            ),
-            "open_findings": [
-                {
-                    "reviewer": r.reviewer,
-                    "finding_id": f.finding_id,
-                    "severity": f.severity,
-                    "title": f.rationale.strip().splitlines()[0][:200]
-                    if f.rationale.strip()
-                    else "",
-                }
-                for r in final_reviews
-                for f in r.findings
-                if f.status == "open"
-            ],
-            "coder_session": coder_session,
-            "reviewers": {
-                r.spec.name: {"session": r.session, "tool": r.engine_now.name}
-                for r in reviewers
-            },
-            "pause_budget_remaining_s": round(budget.remaining, 1),
-            "resume_after": (
-                resume_after.isoformat(timespec="seconds")
-                if resume_after is not None
-                else None
-            ),
-        },
-    )
-
-    return DevelopResult(
+    result = DevelopResult(
         status=status,
         run_id=config.run_id,
         worktree=wt,
-        branch=branch,
+        branch=wt.name,
         base_sha=base.start_sha,
-        commits=commits,
-        rounds=rounds_completed,
-        handoff_present=handoff_present,
-        coder_cost_usd=coder_cost,
-        review_cost_usd=review_cost,
-        message=message,
-        reviews=tuple(final_reviews),
-        coder_session=coder_session,
-        test_gate=gate,
-        gate_findings=tuple(gate_ledger.open_findings()),
+        commits=git.commits_since(wt, git.fork_point(wt, base)),
+        rounds=ctx.rounds_completed,
+        handoff_present=(config.handoff_dir / handoff.coder_handoff_name(1)).is_file(),
+        coder_cost_usd=ctx.coder_cost,
+        review_cost_usd=ctx.review_cost,
+        message="",
+        reviews=tuple(ctx.final_reviews),
+        coder_session=ctx.coder_session,
+        test_gate=ctx.gate,
+        gate_findings=tuple(ctx.gate_ledger.open_findings()),
         blocking_checks=blocking_checks,
-        conversation_log=log_path,
+        conversation_log=conversation_log,
         review_profile=config.review_profile,
-        resume_after=resume_after,
-        deferred_findings=collect_deferred(r.ledger for r in reviewers),
+        resume_after=exit_state.resume_after,
+        deferred_findings=collect_deferred(r.ledger for r in ctx.reviewers),
         # The SAME admission `decision_phase` applied before stopping, on the
         # same ordered input — so what the run says it has is exactly what it
         # publishes, whole (correctness/f-002).
         decisions=admitted_decisions(
             collect_pending_decisions(
-                (r.ledger, r.spec.block_threshold) for r in reviewers
+                (r.ledger, r.spec.block_threshold) for r in ctx.reviewers
             )
         )[0],
         decisions_not_admitted=ctx.decisions_not_admitted,
-        failure_reason=failure_reason if status in _REASON_BEARING_STATUSES else "",
-        host_action=host_action,
+        failure_reason=exit_state.failure_reason if reason_bearing else "",
+        host_action=exit_state.host_action if status == "infra_failed" else "",
+        run_dir=config.run_dir,
+        reviewer_sessions=tuple(
+            ReviewerSession(name=r.spec.name, session=r.session, tool=r.engine_now.name)
+            for r in ctx.reviewers
+        ),
+        pause_budget_remaining_s=ctx.budget.remaining,
+        blocking_check_records=tuple(
+            check_runner.blocking_check_records(final_check_set, ctx.gate_ledger)
+        ),
     )
+    return replace(result, message=result.render_message())

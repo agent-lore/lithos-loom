@@ -57,7 +57,7 @@
         "max_function": "lithos_loom.notifications.build_notifier"
       },
       "Plugins": {
-        "functions_over_10": 69,
+        "functions_over_10": 70,
         "max_complexity": 102,
         "max_function": "lithos_loom.plugins.story_develop.__main__.main"
       },
@@ -105,11 +105,11 @@
     "function_lengths": {
       "max": 476,
       "max_function": "lithos_loom.cli.converge.converge_command",
-      "median": 16,
+      "median": 17,
       "over_75": 157,
       "p90": 63
     },
-    "functions_over_10": 219,
+    "functions_over_10": 220,
     "max": 102,
     "median": 3,
     "p90": 11,
@@ -123,11 +123,6 @@
         "complexity": 63,
         "length": 476,
         "qualname": "lithos_loom.cli.converge.converge_command"
-      },
-      {
-        "complexity": 63,
-        "length": 432,
-        "qualname": "lithos_loom.plugins.story_develop.develop.develop"
       },
       {
         "complexity": 60,
@@ -163,9 +158,14 @@
         "complexity": 40,
         "length": 358,
         "qualname": "lithos_loom.cli.deliver._deliver_claimed"
+      },
+      {
+        "complexity": 38,
+        "length": 249,
+        "qualname": "lithos_loom.plugins.story_develop.develop.develop"
       }
     ],
-    "total_functions": 2152
+    "total_functions": 2156
   },
   "components": {
     "Bus": {
@@ -10242,9 +10242,45 @@
         "src/lithos_loom/plugins/story_develop/develop.py"
       ]
     },
+    "lithos_loom.plugins.story_develop.develop.DevelopResult.open_findings": {
+      "complexity": 5,
+      "length": 15,
+      "module": "lithos_loom.plugins.story_develop.develop",
+      "path": "src/lithos_loom/plugins/story_develop/develop.py",
+      "paths": [
+        "src/lithos_loom/plugins/story_develop/develop.py"
+      ]
+    },
+    "lithos_loom.plugins.story_develop.develop.DevelopResult.reason_bearing": {
+      "complexity": 1,
+      "length": 5,
+      "module": "lithos_loom.plugins.story_develop.develop",
+      "path": "src/lithos_loom/plugins/story_develop/develop.py",
+      "paths": [
+        "src/lithos_loom/plugins/story_develop/develop.py"
+      ]
+    },
+    "lithos_loom.plugins.story_develop.develop.DevelopResult.render_message": {
+      "complexity": 12,
+      "length": 43,
+      "module": "lithos_loom.plugins.story_develop.develop",
+      "path": "src/lithos_loom/plugins/story_develop/develop.py",
+      "paths": [
+        "src/lithos_loom/plugins/story_develop/develop.py"
+      ]
+    },
     "lithos_loom.plugins.story_develop.develop.DevelopResult.review": {
       "complexity": 2,
       "length": 3,
+      "module": "lithos_loom.plugins.story_develop.develop",
+      "path": "src/lithos_loom/plugins/story_develop/develop.py",
+      "paths": [
+        "src/lithos_loom/plugins/story_develop/develop.py"
+      ]
+    },
+    "lithos_loom.plugins.story_develop.develop.DevelopResult.state_record": {
+      "complexity": 7,
+      "length": 45,
       "module": "lithos_loom.plugins.story_develop.develop",
       "path": "src/lithos_loom/plugins/story_develop/develop.py",
       "paths": [
@@ -10263,6 +10299,15 @@
     "lithos_loom.plugins.story_develop.develop.DevelopResult.total_cost_usd": {
       "complexity": 1,
       "length": 2,
+      "module": "lithos_loom.plugins.story_develop.develop",
+      "path": "src/lithos_loom/plugins/story_develop/develop.py",
+      "paths": [
+        "src/lithos_loom/plugins/story_develop/develop.py"
+      ]
+    },
+    "lithos_loom.plugins.story_develop.develop._assemble_result": {
+      "complexity": 10,
+      "length": 73,
       "module": "lithos_loom.plugins.story_develop.develop",
       "path": "src/lithos_loom/plugins/story_develop/develop.py",
       "paths": [
@@ -10315,17 +10360,8 @@
       ]
     },
     "lithos_loom.plugins.story_develop.develop.develop": {
-      "complexity": 63,
-      "length": 432,
-      "module": "lithos_loom.plugins.story_develop.develop",
-      "path": "src/lithos_loom/plugins/story_develop/develop.py",
-      "paths": [
-        "src/lithos_loom/plugins/story_develop/develop.py"
-      ]
-    },
-    "lithos_loom.plugins.story_develop.develop.develop._reviews_part": {
-      "complexity": 4,
-      "length": 8,
+      "complexity": 38,
+      "length": 249,
       "module": "lithos_loom.plugins.story_develop.develop",
       "path": "src/lithos_loom/plugins/story_develop/develop.py",
       "paths": [
@@ -20968,7 +21004,7 @@
         "tests/test_quality.py"
       ]
     },
-    "source_hash": "fd098ab5082c073e443057805bda187632e7f278d08c75446a2c4001058284bf",
+    "source_hash": "1cbda96aab697ff4171c5aaa4f1ab6d6c788b99117e8024bb60c68e1cc684adb",
     "tools": {
       "grimp": "3.14",
       "networkx": "3.6.1"
@@ -21785,11 +21821,11 @@
     },
     "lithos_loom.plugins.story_develop.develop": {
       "component": "Plugins",
-      "functions": 11,
-      "lines": 807,
-      "max_complexity": 63,
+      "functions": 15,
+      "lines": 844,
+      "max_complexity": 38,
       "path": "src/lithos_loom/plugins/story_develop/develop.py",
-      "sloc": 602
+      "sloc": 651
     },
     "lithos_loom.plugins.story_develop.engines": {
       "component": "Plugins",
@@ -22898,14 +22934,14 @@
         "sloc": 245
       },
       "Plugins": {
-        "classes": 92,
-        "functions": 645,
+        "classes": 93,
+        "functions": 649,
         "largest_module": "lithos_loom.plugins.story_develop.__main__",
         "largest_module_lines": 1232,
-        "lines": 26132,
+        "lines": 26169,
         "modules": 62,
-        "public_symbols": 412,
-        "sloc": 20861
+        "public_symbols": 413,
+        "sloc": 20910
       },
       "ProjectContext": {
         "classes": 0,
@@ -23009,13 +23045,13 @@
       "lithos_loom.subscriptions.external_remediation",
       "lithos_loom.subscriptions.route_runner"
     ],
-    "total_lines": 83825,
+    "total_lines": 83862,
     "total_modules": 214,
-    "total_sloc": 67795
+    "total_sloc": 67844
   },
   "tests": {
-    "ratio": 1.49,
-    "src_lines": 83825,
-    "test_lines": 125235
+    "ratio": 1.5,
+    "src_lines": 83862,
+    "test_lines": 125480
   }
 }
