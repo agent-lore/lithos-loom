@@ -37,7 +37,7 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 | `lithos_loom.plugins.story_develop.converge_result` | S | 2 | 1 |
 | `lithos_loom.plugins.story_develop.criteria_map` | M | 1 | 6 |
 | `lithos_loom.plugins.story_develop.daemon_io` | L | 1 | 18 |
-| `lithos_loom.plugins.story_develop.develop` | L | 2 | 1 |
+| `lithos_loom.plugins.story_develop.develop` | L | 3 | 1 |
 | `lithos_loom.plugins.story_develop.engines` | M | 4 | 4 |
 | `lithos_loom.plugins.story_develop.external_record` | S | 1 | 3 |
 | `lithos_loom.plugins.story_develop.external_reviews` | L | 3 | 15 |
@@ -263,7 +263,8 @@ Bundled subprocess plugins; the mature one is story_develop (the implement→rev
 
 ### `lithos_loom.plugins.story_develop.develop`
 - class `BlockingCheckOutcome` — A blocking raw-exit gate check (repo-parity / a per-check command override) that produced no ledger finding — captured so a final-round failure is named in the run result instead of only living in the round's output artifact (#273).
-- class `DevelopResult` — Outcome of a ``develop()`` run.
+- class `ReviewerSession` — One panel member's resumable session: its name, session id and engine.
+- class `DevelopResult` — Outcome of a ``develop()`` run — the one value every consumer reads.
 - def `develop` — Run the develop loop and return a result.
 
 ### `lithos_loom.plugins.story_develop.engines`

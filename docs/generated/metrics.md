@@ -73,7 +73,7 @@
       "tests/test_quality.py"
     ]
   },
-  "source_hash": "fd098ab5082c073e443057805bda187632e7f278d08c75446a2c4001058284bf",
+  "source_hash": "1cbda96aab697ff4171c5aaa4f1ab6d6c788b99117e8024bb60c68e1cc684adb",
   "tools": {
     "grimp": "3.14",
     "networkx": "3.6.1"
@@ -242,7 +242,8 @@ in the same PR. Lower thresholds when that protects useful improvements.
 | unchanged | function_complexity | lithos_loom.plugins.story_develop.daemon_io.build_result_payload | 14 | 14 | review | — |
 | unchanged | function_complexity | lithos_loom.plugins.story_develop.daemon_io.escalation_block | 14 | 14 | review | — |
 | unchanged | function_complexity | lithos_loom.plugins.story_develop.daemon_io.story_config_overrides | 13 | 13 | review | — |
-| unchanged | function_complexity | lithos_loom.plugins.story_develop.develop.develop | 63 | 63 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.develop.DevelopResult.render_message | 12 | 12 | review | — |
+| unchanged | function_complexity | lithos_loom.plugins.story_develop.develop.develop | 38 | 38 | review | — |
 | unchanged | function_complexity | lithos_loom.plugins.story_develop.engines.ClaudeEngine.parse_turn | 16 | 16 | review | — |
 | unchanged | function_complexity | lithos_loom.plugins.story_develop.engines.CodexEngine.parse_turn | 24 | 24 | review | — |
 | unchanged | function_complexity | lithos_loom.plugins.story_develop.external_record.read_external_intake | 15 | 15 | review | — |
@@ -410,7 +411,7 @@ in the same PR. Lower thresholds when that protects useful improvements.
 | unchanged | function_length | lithos_loom.plugins.story_develop.converge.converge_pr | 401 | 401 | review | — |
 | unchanged | function_length | lithos_loom.plugins.story_develop.daemon_io.build_result_payload | 111 | 111 | review | — |
 | unchanged | function_length | lithos_loom.plugins.story_develop.daemon_io.resolve_project_settings | 81 | 81 | review | — |
-| unchanged | function_length | lithos_loom.plugins.story_develop.develop.develop | 432 | 432 | review | — |
+| unchanged | function_length | lithos_loom.plugins.story_develop.develop.develop | 249 | 249 | review | — |
 | unchanged | function_length | lithos_loom.plugins.story_develop.engines.CodexEngine.parse_turn | 95 | 95 | review | — |
 | unchanged | function_length | lithos_loom.plugins.story_develop.external_reviews.final_round_outcomes | 98 | 98 | review | — |
 | unchanged | function_length | lithos_loom.plugins.story_develop.external_reviews.outcomes_after_loop | 76 | 76 | review | — |
@@ -497,7 +498,7 @@ in the same PR. Lower thresholds when that protects useful improvements.
 | unchanged | module_lines | lithos_loom.plugins.story_develop.__main__ | 1232 | 1232 | review | — |
 | unchanged | module_lines | lithos_loom.plugins.story_develop.converge | 807 | 807 | review | — |
 | unchanged | module_lines | lithos_loom.plugins.story_develop.daemon_io | 1101 | 1101 | review | — |
-| unchanged | module_lines | lithos_loom.plugins.story_develop.develop | 807 | 807 | review | — |
+| unchanged | module_lines | lithos_loom.plugins.story_develop.develop | 844 | 844 | review | — |
 | unchanged | module_lines | lithos_loom.plugins.story_develop.pr_delivery | 805 | 805 | review | — |
 | unchanged | module_lines | lithos_loom.plugins.story_develop.rounds | 1150 | 1150 | review | — |
 | unchanged | module_lines | lithos_loom.plugins.story_develop.run_outcome | 861 | 861 | review | — |
@@ -551,7 +552,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 | GitHub | 5 | 2623 | 1987 | 6 | 1 | 0.14 | 16 (`lithos_loom.github_models.parse_pull_request`) | 3 |
 | LithosClient | 2 | 2283 | 1918 | 10 | 1 | 0.09 | 21 (`lithos_loom.lithos_client._parse_note`) | 6 |
 | Notifications | 1 | 293 | 245 | 2 | 1 | 0.33 | 7 (`lithos_loom.notifications.build_notifier`) | 0 |
-| Plugins | 62 | 26132 | 20861 | 3 | 5 | 0.62 | 102 (`lithos_loom.plugins.story_develop.__main__.main`) | 69 |
+| Plugins | 62 | 26169 | 20910 | 3 | 5 | 0.62 | 102 (`lithos_loom.plugins.story_develop.__main__.main`) | 70 |
 | ProjectContext | 1 | 209 | 164 | 3 | 1 | 0.25 | 6 (`lithos_loom.render_project_context._strip_leading_title`) | 0 |
 | Render | 1 | 281 | 225 | 2 | 4 | 0.67 | 6 (`lithos_loom.render.render_line`) | 0 |
 | Runners | 8 | 1943 | 1564 | 5 | 1 | 0.17 | 12 (`lithos_loom.runner.orphans.reap_orphaned_containers`) | 1 |
@@ -563,7 +564,7 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Size
 
-- Modules: **214**, lines: **83825**, SLOC: **67795**
+- Modules: **214**, lines: **83862**, SLOC: **67844**
 - Largest module: `lithos_loom.cli.develop` (2047 lines)
 - Modules over 800 lines: **17**
   - `lithos_loom.cli._deliver_lithos`
@@ -586,9 +587,9 @@ Instability I = fan-out / (fan-in + fan-out): 0 = stable (many dependents),
 
 ## Complexity
 
-- Functions: **2152**, cyclomatic > 10: **219**
+- Functions: **2156**, cyclomatic > 10: **220**
 - Cyclomatic distribution: median **3**, p90 **11**, max **102**
-- Function length (lines): median 16, p90 63, max 476 (`lithos_loom.cli.converge.converge_command`); over 75: **157**
+- Function length (lines): median 17, p90 63, max 476 (`lithos_loom.cli.converge.converge_command`); over 75: **157**
 
 Top 10 most complex functions:
 
@@ -596,7 +597,6 @@ Top 10 most complex functions:
 |---:|---:|---|
 | 102 | 463 | `lithos_loom.plugins.story_develop.__main__.main` |
 | 63 | 476 | `lithos_loom.cli.converge.converge_command` |
-| 63 | 432 | `lithos_loom.plugins.story_develop.develop.develop` |
 | 60 | 245 | `lithos_loom.subscriptions.merge_gate_dispatch.MergeGateDispatch.consider` |
 | 52 | 183 | `lithos_loom.subscriptions.reconciliation_state._derive` |
 | 49 | 300 | `lithos_loom.cli.project.import_project` |
@@ -604,6 +604,7 @@ Top 10 most complex functions:
 | 41 | 389 | `lithos_loom.plugins.story_develop.__main__._daemon_main` |
 | 41 | 337 | `lithos_loom.subscriptions._develop_pr_merge.reconcile_pr_gate` |
 | 40 | 358 | `lithos_loom.cli.deliver._deliver_claimed` |
+| 38 | 249 | `lithos_loom.plugins.story_develop.develop.develop` |
 
 ## Seams
 
@@ -655,4 +656,4 @@ Private-name reaches across module seams. Both counts can be pinned as
 ## Domain & tests
 
 - Domain models: **20** (2 associations, 0 without docstrings)
-- Test-to-source line ratio: **1.49** (125235 test lines / 83825 source lines)
+- Test-to-source line ratio: **1.50** (125480 test lines / 83862 source lines)

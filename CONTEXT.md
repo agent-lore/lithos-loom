@@ -77,6 +77,12 @@ dialogue-based** cycle.
   completion store (#196); each marker is bound to *its* run, not a prior one (#198); a failed
   delivery is not a clean success (#194). Owned by the `run_outcome` module — the single home
   for these invariants, read by the CLI and written by the plugin.
+- **develop result** — the one value a develop cycle's exit produces (`DevelopResult`,
+  owned by the `develop` module): status, the reason a stop carries, commits, rounds, spend,
+  the final panel, the gate, the checks that held approval, the resume state. The loop's
+  epilogue assembles it once; the operator **message** and the loop's keys of `state.json`
+  are *rendered from it* (`render_message` / `state_record`), never assembled beside it —
+  so what is persisted, what is returned and what the operator is told cannot disagree.
 - **brief review** — the read-only pass that checks a story's brief against the exact
   tree its coder will start from, before the coder starts (604fb936, from the lens T3 hand
   pilot of 2026-10-05). Its answer is an **addendum**. `lithos-loom develop brief-review`
