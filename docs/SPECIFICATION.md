@@ -320,6 +320,8 @@ codex_config  = "/home/you/.codex-lithos"      # optional, parsed but unused tod
 #   {{repo}}         — [projects.<slug>].repo for the task's metadata.project
 #                      (one route serves all projects; unresolvable → finding)
 
+# prd-decompose is a stub (§12). It appears here to show the route schema;
+# `examples/lithos-loom.toml` ships this stanza commented out. Do not enable it.
 [[routes]]
 name = "prd-decompose"
 command = "uv run python -m lithos_loom.plugins.prd_decompose --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}}"
@@ -1550,7 +1552,8 @@ The following are absent from the current surface. Some are explicit non-goals; 
 - **Hot-reload of TOML config.** Operator restarts the daemon.
 - **Persistent event log.** Restart relies on source re-authority + subscriber idempotency.
 - **Containerised daemon.** Loom runs as a host process; Lithos and adjacent services may run in docker.
-- **Other planned work** (`prd-generate`, brain, `merge-stories`, A2A endpoint, multi-host PRD-affinity, cost tracking). See `docs/prd/` for PRDs. (The GitHub issue watcher — `[github_watcher]`, §3.1 — and the hardened docker sandbox story-develop runs each agent in — §5.5 — are shipped and no longer belong here.)
+- **Cost metering for every engine.** A run's recorded cost (`develop_cost_usd`, the `[DevelopResult]` cost) and the `--max-cost` ceiling count only engines whose adapter sets `meters_cost_usd` — today `claude`. `codex` reports tokens, not USD, and contributes `$0` (§5.5), so both undercount any run with a codex agent.
+- **Other planned work** (`prd-generate`, brain, `merge-stories`, A2A endpoint, multi-host PRD-affinity). See `docs/prd/` for PRDs. (The GitHub issue watcher — `[github_watcher]`, §3.1 — and the hardened docker sandbox story-develop runs each agent in — §5.5 — are shipped and no longer belong here.)
 
 ---
 

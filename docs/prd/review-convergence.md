@@ -1,7 +1,7 @@
 ---
 title: Lithos Loom — Review convergence
 milestone: M-RC
-status: draft
+status: active
 references:
   - docs/SPECIFICATION.md §5.5 (story-develop — the round loop, review profiles and escalation reasons this PRD extends; the contract this document must not contradict)
   - docs/prd/archive/pr-reconciliation.md (S3 merge-gate and S5 composed-tree review — R3 and R4 are its carried follow-ons)

@@ -1,7 +1,7 @@
 ---
 title: Lithos Loom — Unattended duration
 milestone: M-UD
-status: draft
+status: active
 references:
   - docs/SPECIFICATION.md §5.5 and the route-runner section (usage-limit re-dispatch, failure reaction table, serial admission; the contract this document must not contradict)
   - docs/prd/archive/pr-reconciliation.md (open question 4 — does the sweep defer on a usage limit; S5b's remediation budget and boot hold)
