@@ -49,13 +49,18 @@ codex_config = "/home/you/.codex-lithos"
 # substitution tokens {{task_json}}, {{work_dir}}, {{result_file}} are
 # filled in by the daemon.
 
-[[routes]]
-name = "prd-decompose"
-command = "uv run python -m lithos_loom.plugins.prd_decompose --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}}"
-max_runtime_seconds = 1800
-
-[routes.match]
-tags = ["trigger:prd-decompose"]
+# prd-decompose is a stub: its entry point raises NotImplementedError
+# (docs/SPECIFICATION.md §12), so a task tagged `trigger:prd-decompose`
+# would be claimed and fail. The stanza is kept, commented out, as the
+# plugin's example route; do not enable it.
+#
+# [[routes]]
+# name = "prd-decompose"
+# command = "uv run python -m lithos_loom.plugins.prd_decompose --task-json {{task_json}} --work-dir {{work_dir}} --result-file {{result_file}}"
+# max_runtime_seconds = 1800
+#
+# [routes.match]
+# tags = ["trigger:prd-decompose"]
 
 [[routes]]
 name = "story-develop"
