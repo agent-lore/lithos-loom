@@ -1,7 +1,7 @@
 ---
 title: Lithos Loom — PRD to graph
 milestone: M-P2G
-status: draft
+status: active
 references:
   - docs/SPECIFICATION.md (`project import` and the bulk-import path this PRD reuses; the contract this document must not contradict)
   - docs/prd/archive/orchestration.md (A2 — the prd-review / prd-decompose stories this PRD replaces; archived 2026-09-28)
