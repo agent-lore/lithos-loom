@@ -171,9 +171,6 @@ With D2:
   `evals/reviewbench/run --set test --reviewer code-quality --out RUN_DIR`
   (script name proposed), then score it with ReviewBench's own judge.
 - Compare two panels on 342 golden findings instead of 17 cases.
-- Put a review's containers on a named docker network
-  (`develop review --network NAME`, name proposed), so a benchmark run can
-  be confined to the model providers.
 
 With D3, only if built:
 
@@ -261,37 +258,44 @@ Not in scope, and not possible after this PRD:
    - `out-of-scope` findings are written to a separate directory and left
      out of the primary score, matching the eval harness's rule that a
      deferral is an escape.
-   - **Answer isolation is an acceptance condition.** A reading from a run
+   - **Answer leakage is an acceptance condition.** A reading from a run
      without every control below is not a baseline and is not recorded as
-     one.
-     - *Provider-only egress.* Loom's agent containers take docker's default
-       bridge, so with hosted tools off the GitHub API is still one request
-       away. `develop review` gains an option that puts its containers on a
-       named docker network (`--network NAME`, name proposed; default
-       unchanged, with its SPEC entry), and the adapter's README gives the
-       egress-proxy recipe for a network that admits only the hosts the
-       agent CLIs need for a model turn. The allowlist is established in
-       the smoke and recorded. A host firewall is not an alternative: the
-       daemon's live runs share the host.
-     - *A per-PR git snapshot.* Loom mounts the repository's whole git
-       directory read-only into each reviewer's container, so every ref and
-       object in it is readable with no network request; a full mirror
-       would hand the reviewer the later fix commits. The adapter builds
-       each PR's repository from nothing: `git init`, a fetch of exactly
-       the recorded base and head commits with no tags and no other refs,
-       and the remote removed. A fix commit is a descendant of the head and
+     one. Two leaks are prevented and one is detected.
+     - *A per-PR git snapshot (prevented).* Loom mounts the repository's
+       whole git directory read-only into each reviewer's container, so
+       every ref and object in it is readable with no network request, and
+       a `git log --all` looks like ordinary review work in a transcript. A
+       full mirror would hand the reviewer the later fix commits. The
+       adapter builds each PR's repository from nothing: `git init`, a
+       fetch of exactly the recorded base and head commits with no tags and
+       no other refs, and the remote removed, so nothing in the checkout
+       names the upstream PR. A fix commit is a descendant of the head and
        is not in it.
-     - *Hosted tools off.* Web search and connectors run through the model
-       host and pass any egress allowlist, so they are turned off in the
-       agents' own configuration.
-     - *All of it exercised in the smoke.* Before the 25-PR run, the
-       three-PR smoke shows, from inside a reviewer container, that a
-       request to `api.github.com` fails, that a model turn succeeds, and
-       that the snapshot holds no ref beyond the two fetched and no commit
-       that is not an ancestor of them. The full run does not start until
-       all three hold. Transcripts are still checked afterwards for GitHub,
-       search and connector calls; a PR with one is dropped from both arms
-       and counted.
+     - *Hosted tools off (prevented).* Web search and connectors run on the
+       model host, where no network control on the container reaches them.
+       They are turned off in the agents' own configuration.
+     - *Network fetches (detected, not blocked).* Loom's agent containers
+       take docker's default bridge, so a reviewer can still reach GitHub
+       with one command. Every tool call is in the transcript: the adapter
+       checks each one for a request to a GitHub host, a web fetch, a
+       search call or a connector call, drops a PR with any from both arms,
+       and the reading states the count. The check is unit-tested against
+       fixture transcripts containing each kind of call.
+     - *Why not block egress.* That needs an option to put agent containers
+       on a restricted docker network, with an egress proxy behind it, for
+       this one benchmark. Loom's reviewers are given a local diff and a
+       brief and are not built to read PR discussions, which is where
+       ReviewBench saw the leak. Detection also measures whether blocking
+       is needed. A leak drop is an exclusion under the completeness rule
+       below, so a run with more than two is not read, and in that case
+       blocking egress is the repair. What detection cannot do is catch a
+       fetch the check does not recognise; the reading says so.
+     - *Exercised in the smoke.* Before the 25-PR run, the three-PR smoke
+       shows that each snapshot holds no ref beyond the two fetched and no
+       commit that is not an ancestor of them, that the reviewers' sessions
+       had no search or connector tool available, and that the transcript
+       check ran over every reviewer session. The full run does not start
+       until all three hold.
    - **Complete paired reports before any score.**
      - The adapter reads the `--json` report, not the exit code. `develop
        review` exits non-zero for a completed review with blocking findings,
@@ -307,7 +311,8 @@ Not in scope, and not possible after this PRD:
      - A completed review with no findings writes a findings file with an
        empty array. ReviewBench drops a PR that has no file instead of
        counting its misses.
-     - A PR still incomplete in either arm is excluded from both. The
+     - A PR still incomplete in either arm is excluded from both, as is a
+       PR dropped for a network fetch. The
        reading lists each exclusion with its reason and states the paired
        coverage before any score; the judge summary's PR count must equal
        it; every run writes to a fresh directory. *Proposed*: with more
@@ -461,13 +466,13 @@ becomes a candidate with a number behind it. Today it has none.
 | Order | Story | Why here |
 |---|---|---|
 | 1 | D1 | the cheapest reading, and D3's build rule needs it |
-| 2 | D2 | independent of D1; can run in parallel; D3 is measured on its set, under its isolation |
+| 2 | D2 | independent of D1; can run in parallel; D3 is measured on its set, under its leak controls |
 | 3 | D3 | only on D1's reading, measured on D2's set and D1's cases |
 | any time | the false-positive count | zero tokens |
 
 Success for the milestone: the frontier table has a cause column; there is
-an isolated ReviewBench reading for two loom panels with a stated resolution
-and coverage; and D3 is shipped against its rule, closed with the number
+a ReviewBench reading for two loom panels with a stated resolution,
+coverage and leak count; and D3 is shipped against its rule, closed with the number
 that closed it, or recorded as inconclusive with the switch left off.
 
 ## Non-goals
@@ -497,8 +502,9 @@ that closed it, or recorded as inconclusive with the switch left off.
    attribute anything to the persona briefs.
 6. D2's completeness policy: two retries per PR per arm, and a repeat
    instead of a reading past two paired exclusions.
-7. Is `--network` an option on `develop review` only, as proposed, or also
-   a project setting a daemon run could use? Only the first is needed here.
+7. D2 detects network fetches and does not block them. Is that enough for
+   a first baseline, with egress blocking added only if the run drops more
+   than two PRs for it?
 
 ## Provenance
 
@@ -507,4 +513,5 @@ that closed it, or recorded as inconclusive with the switch left off.
 | D1, D3 | Sashiko's `dismissed_concerns[]` and symmetric proof bar; Dave's question on what loom can learn from it | 2026-11-24 |
 | D2 | Dave's follow-up on ReviewBench | 2026-11-24 |
 | false-positive count | the review of Sashiko's per-finding verification | 2026-11-24 |
-| D1's four causes; D2's isolation, completeness and claim limits; D3's nested A/B and decision rule | the review on PR #466 | 2026-11-25 |
+| D1's four causes; D2's leak controls, completeness and claim limits; D3's nested A/B and decision rule | the review on PR #466 | 2026-11-25 |
+| D2 detects network fetches instead of blocking egress | Dave, on the cost of a container-network option for one benchmark | 2026-11-25 |
