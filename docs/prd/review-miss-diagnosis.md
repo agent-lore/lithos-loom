@@ -15,7 +15,10 @@ labels: [lithos-loom, story-develop, review, eval, planning]
 
 # Review miss diagnosis
 
-> **Status (2026-11-24).** Draft for Dave's review. Three stories, none with
+> **Status (2026-11-25).** Draft for Dave's review, revised once after the
+> review of 2026-11-25 on PR #466 (what the build rule counts, benchmark
+> isolation, the noise guardrail, D3's own decision rule, report
+> completeness, and what the baseline may claim). Three stories, none with
 > a Lithos task yet: tasks are filed after this document merges, tagged
 > `prd:review-miss-diagnosis`. Nothing here has been built or run. The
 > thresholds marked *proposed* are mine and are listed again under *Open
@@ -33,14 +36,16 @@ coverage, the second is verification.
 This PRD buys two instruments and holds one mechanism behind them:
 
 - **D1** makes the reviewer write down what it ruled out, and makes
-  `eval review` split each miss into *dismissed* or *absent*.
+  `eval review` give each miss a cause: a recorded dismissal the audit could
+  reach, a recorded dismissal it could not, no matching dismissal, or
+  unknown.
 - **D2** scores loom's review on ReviewBench, an external benchmark of 219
   real pull requests, to get the statistical power the 23-case harness lacks
   for mechanism comparisons.
 - **D3** audits the dismissals that rest on code the reviewer did not read,
-  in a fresh session. It is built only if D1's reading says the dismissed
-  share is worth recovering, and it ships only if D2 and the frontier cases
-  show it earns its cost.
+  in a fresh session. It is built only if D1's reading says the share of
+  misses the audit could reach is worth recovering, and it ships only
+  against a decision rule of its own, fixed before its run.
 
 It is not a proposal to adopt another review tool, and it does not claim the
 panel's catch rate will rise. ADR 0006's stance holds: measure first.
@@ -135,7 +140,8 @@ What it does not measure, stated up front because it bounds every reading:
 - **Answers are public.** The upstream PR discussions and fix commits are on
   GitHub; ReviewBench's own testing found a network-restricted Codex reviewer
   still read upstream review comments through its GitHub connector on about
-  half the PRs.
+  half the PRs, and another reviewer fetched them from the unauthenticated
+  GitHub API, so withholding a token does not help.
 
 ## Problem statement
 
@@ -152,7 +158,8 @@ With D1:
 
 - Read why a frontier case was missed: `uv run lithos-loom eval review
   --case lens34-truncation --report-dir DIR` prints, beside the catch count,
-  how many misses were *dismissed* and how many *absent*.
+  each miss's cause: dismissed and audit-eligible, dismissed and not
+  eligible, no matching dismissal recorded, or unknown.
 - Re-derive that split offline from a retained report directory with
   `eval rescore`, at judge cost only.
 - See a reviewer's ruled-out concerns in the `develop review` report and in a
@@ -164,6 +171,9 @@ With D2:
   `evals/reviewbench/run --set test --reviewer code-quality --out RUN_DIR`
   (script name proposed), then score it with ReviewBench's own judge.
 - Compare two panels on 342 golden findings instead of 17 cases.
+- Put a review's containers on a named docker network
+  (`develop review --network NAME`, name proposed), so a benchmark run can
+  be confined to the model providers.
 
 With D3, only if built:
 
@@ -191,9 +201,23 @@ Not in scope, and not possible after this PRD:
    the reviewer read that code or assumed it (`basis: read | assumed`), and
    the severity it would have had; and I want `eval review` to ask its judge,
    for every sample that did not catch the seeded defect, whether a dismissed
-   entry describes it, and to report misses as *dismissed* or *absent* per
-   case and pooled over the frontier, so that the next coverage candidate is
-   chosen on a count.
+   entry describes it, and to give each such miss a cause, per case and
+   pooled over the frontier, so that the next coverage candidate is chosen
+   on a count.
+   - **Four causes, and D3's build rule reads only the first.**
+     - *dismissed, audit-eligible*: an entry describes the defect, its basis
+       is `assumed`, and its would-be severity is at or above the reviewer's
+       blocking threshold. This is exactly the selection D3 would make, and
+       D1 computes it with the code D3 would use.
+     - *dismissed, not eligible*: an entry describes the defect but is
+       labelled `read`, or sits below the threshold. Reported by reason. A
+       `read` label on the dismissal of a real defect is the evidence that
+       the label cannot be trusted.
+     - *no matching dismissal recorded*: the section parsed and the judge
+       matched nothing in it. The label says only that. It does not show
+       that the reviewer never looked at the defective path.
+     - *unknown*: the section was missing or malformed, or the judge call
+       failed. Counted and listed, never folded into another cause.
    - Observability only. An empty section is valid ("none"); a missing or
      malformed one is recorded and never fails or re-prompts a run. This is
      deliberately weaker than the `## Criteria` contract.
@@ -205,8 +229,13 @@ Not in scope, and not possible after this PRD:
      any project enables it.
    - **The reading**, fixed before the run: one arm over the 17 frontier
      cases at K=5 with the section on. Report the pooled count of misses,
-     the dismissed share with its Wilson interval, and the cases the
-     dismissed misses fall in. The frontier headline of this run is not
+     the count under each cause, the audit-eligible share with its Wilson
+     interval, and the cases the eligible misses fall in. Unknowns stay in
+     the denominator, so they count against the build rule; the share is
+     also shown with them counted as eligible, as its upper bound. Every
+     recorded dismissal is reported too, matched or not, with its basis and
+     severity and the number per review D3 would select, because that number
+     is what an audit would cost. The frontier headline of this run is not
      compared with stored baselines; they were not run in its session.
    - Paired updates: `prompts/FORMAT.md`, the reviewer prompts, SPEC
      §5.5, `docs/cli/review.md`, `evals/review/README.md`, and
@@ -214,40 +243,106 @@ Not in scope, and not possible after this PRD:
 
 2. **D2 — A ReviewBench baseline for loom's review.** As the operator, I
    want an on-demand adapter under `evals/reviewbench/` that, for each PR in
-   ReviewBench's 25-PR test set, checks out the recorded base and head from
-   the review-bench mirror, runs `lithos-loom develop review base..head` with
-   the PR title and body as the acceptance text and every gate check off
+   ReviewBench's 25-PR test set, builds a repository frozen at the review
+   point, runs `lithos-loom develop review base..head` on it with the PR
+   title and body as the acceptance text and every gate check off
    (`--check-state NAME=off`; the repositories are third-party and in over a
    dozen languages), and writes loom's findings in ReviewBench's judging input
    format; and I want a first reading of two arms run in one session, the
    cold generalist (`--reviewer code-quality`) and the `standard` panel, so
-   that there is a powered instrument for generic bug-finding and a number
-   for what the personas add over a bare engine.
+   that there is a powered instrument for generic bug-finding and an answer
+   to whether the shipped panel earns its extra cost over one generalist
+   pass.
    - Host-only, not part of `make check` or CI, like the other evals. The
      mapper (loom finding → ReviewBench finding) is unit-tested hermetically.
      ReviewBench is cloned beside loom, never vendored; the reading records
-     its commit, the judge provider and model, and loom's resolved panel.
+     its commit, the judge provider and model, loom's resolved panel, and
+     the cost per PR of each arm.
    - `out-of-scope` findings are written to a separate directory and left
      out of the primary score, matching the eval harness's rule that a
      deferral is an escape.
-   - **Answer leakage is controlled, not assumed.** Web search and hosted
-     connectors are off for the reviewers; each run's transcripts are checked
-     for requests to GitHub or a search tool, and a PR whose reviewer fetched
-     its upstream discussion is dropped from both arms and counted.
-   - **Priced before it is paid for.** A three-PR smoke gives the cost of
-     one arm; the README states it and the minimum detectable effect before
-     the 25-PR run. The eval README's recorded cost for a persona arm on
-     loom's own cases is roughly $10–20 per case.
-   - **Scoring.** Primary metric: grounded recall over all severities, with
-     an interval from a bootstrap over PRs, because findings cluster by PR.
-     The high-severity slice (35 findings in the test set) is reported and
-     not read. Both arms are judged in one judge session; loom#307 found the
-     judge stable within a session and drifting between them. A second judge
-     pass with `--exclude-producer` for the reviewer's own engine family is
-     recorded as a diagnostic.
-   - Expected resolution, to be replaced by the bootstrap figure: about 11
-     points of recall between two arms on 342 findings before clustering,
-     about 4 on the full set.
+   - **Answer isolation is an acceptance condition.** A reading from a run
+     without every control below is not a baseline and is not recorded as
+     one.
+     - *Provider-only egress.* Loom's agent containers take docker's default
+       bridge, so with hosted tools off the GitHub API is still one request
+       away. `develop review` gains an option that puts its containers on a
+       named docker network (`--network NAME`, name proposed; default
+       unchanged, with its SPEC entry), and the adapter's README gives the
+       egress-proxy recipe for a network that admits only the hosts the
+       agent CLIs need for a model turn. The allowlist is established in
+       the smoke and recorded. A host firewall is not an alternative: the
+       daemon's live runs share the host.
+     - *A per-PR git snapshot.* Loom mounts the repository's whole git
+       directory read-only into each reviewer's container, so every ref and
+       object in it is readable with no network request; a full mirror
+       would hand the reviewer the later fix commits. The adapter builds
+       each PR's repository from nothing: `git init`, a fetch of exactly
+       the recorded base and head commits with no tags and no other refs,
+       and the remote removed. A fix commit is a descendant of the head and
+       is not in it.
+     - *Hosted tools off.* Web search and connectors run through the model
+       host and pass any egress allowlist, so they are turned off in the
+       agents' own configuration.
+     - *All of it exercised in the smoke.* Before the 25-PR run, the
+       three-PR smoke shows, from inside a reviewer container, that a
+       request to `api.github.com` fails, that a model turn succeeds, and
+       that the snapshot holds no ref beyond the two fetched and no commit
+       that is not an ancestor of them. The full run does not start until
+       all three hold. Transcripts are still checked afterwards for GitHub,
+       search and connector calls; a PR with one is dropped from both arms
+       and counted.
+   - **Complete paired reports before any score.**
+     - The adapter reads the `--json` report, not the exit code. `develop
+       review` exits non-zero for a completed review with blocking findings,
+       for an incomplete panel and for an intake failure alike; skipping on
+       exit code would drop the reviews that caught something.
+     - A PR's review is complete when the report's base and head match
+       ReviewBench's manifest and every reviewer in the resolved panel is
+       `LGTM` or `FINDINGS`. `invalid`, `not-run` and `infra_failed` are
+       incomplete. A partial report is never scored: it would charge the
+       larger panel for a reviewer that timed out.
+     - An incomplete review is re-run whole under a fixed policy
+       (*proposed*: two retries per PR per arm).
+     - A completed review with no findings writes a findings file with an
+       empty array. ReviewBench drops a PR that has no file instead of
+       counting its misses.
+     - A PR still incomplete in either arm is excluded from both. The
+       reading lists each exclusion with its reason and states the paired
+       coverage before any score; the judge summary's PR count must equal
+       it; every run writes to a fresh directory. *Proposed*: with more
+       than two of the 25 excluded, the run is repaired and repeated, not
+       read.
+   - **What the contrast can and cannot say.** The two arms differ in
+     reviewer count, engine mix and effort as well as in prompts. The
+     reading answers one question: does the shipped `standard` panel find
+     more than one cold generalist pass, and at what cost per PR. It says
+     nothing about what the persona briefs add. Loom's engine control
+     (322be40d, `evals/review/README.md`) found that on its one readable
+     question the catch followed the engine and not the brief. Persona
+     attribution needs arms that hold reviewer count, models and effort
+     fixed and vary only the briefs; that is not in this story, and it
+     becomes a candidate only if the baseline shows a gap worth attributing.
+   - **Priced before it is paid for.** The three-PR smoke also gives the
+     cost of one arm; the README states it and the minimum detectable effect
+     before the 25-PR run. The eval README's recorded cost for a persona arm
+     on loom's own cases is roughly $10–20 per case.
+   - **Scoring.** Primary metric: grounded recall over all severities. Both
+     arms review the same PRs, so the contrast is the per-PR difference,
+     with an interval from a bootstrap over PRs. Grounded precision leaves
+     out every finding that matches nothing in the golden set, so it cannot
+     see a novel false positive; the reading also reports, for each arm,
+     augmented precision and the unmatched findings classified false
+     positive per PR, blocking ones separately. The high-severity slice (35
+     findings in the test set) is reported and not read. Both arms are
+     judged in one judge session; loom#307 found the judge stable within a
+     session and drifting between them. A second judge pass with
+     `--exclude-producer` for the reviewer's own engine family is recorded
+     as a diagnostic.
+   - Expected resolution for this between-panel contrast, to be replaced by
+     the paired bootstrap figure: about 11 points of recall on 342 findings
+     before clustering, about 4 on the full set. It is not D3's bar; D3
+     states its own.
 
 3. **D3 — Audit the dismissals that rest on unread code.** *Built only if
    D1's reading meets the rule below.* As the operator, I want each
@@ -266,16 +361,65 @@ Not in scope, and not possible after this PRD:
    - Inside the shared panel-round primitive, so story-develop, `converge`,
      `develop review` and `eval review` all exercise the same code.
    - Per-project switch, default off.
-   - **Build rule** (*proposed*, fixed before D1's run): dismissed misses are
-     at least 15% of pooled frontier misses, and at least 3 samples across at
-     least 2 cases. Sashiko's 16% is the only prior. Below that the audit has
-     too little to recover and the candidate is closed with the reading.
-   - **Ship rule** (*proposed*, fixed before the A/B): default-on for a
-     project only if, with both arms in one session, ReviewBench grounded
-     recall rises by at least the minimum detectable effect D2 stated, with
-     grounded precision down by no more than 2 points, and no floor case
-     regresses. Otherwise it stays an off-by-default switch or is removed.
-     The added cost per review is reported with the result.
+   - **Build rule** (*proposed*, fixed before D1's run): *audit-eligible*
+     dismissed misses are at least 15% of pooled frontier misses, in at
+     least 3 samples across at least 2 cases. Sashiko's 16% is the only
+     prior. A matching dismissal the selection would not reach does not
+     count: an audit handed none of them recovers nothing. Below the bar the
+     candidate is closed with the reading. If the dismissed misses are there
+     but labelled `read`, the audit as specified here is not built, and the
+     classifier variant in the last bullet comes back as a revision of this
+     PRD.
+   - **The A/B is nested, so it needs no second panel run.** The audit runs
+     after the reviewers and only adds findings. One audited run per PR
+     gives both arms from the same reviewer sessions: the panel's own
+     findings are the control, and those plus the `audit` reviewer's are the
+     treatment. The between-run variance of a panel run twice, which would
+     swamp a same-panel on/off contrast, drops out. Two counts over the
+     promoted findings are measured, each with a 90% bootstrap interval over
+     PRs:
+     - *recovered*: promoted findings matching a golden true positive that
+       no panel finding matched, as a share of the golden true positives.
+       This is the gain in grounded recall.
+     - *false blocking promotions*: promoted findings at blocking severity
+       that match a golden false positive, or match nothing and are
+       classified false positive, per PR. *True* blocking promotions are
+       counted the same way.
+
+     The nesting cannot show the `## Dismissed` section's own effect on the
+     reviewers (D1's floor check covers regression only), or anything past
+     the first round of a live run.
+   - **Minimum worthwhile gain**, fixed before the audited run from measured
+     cost and not from D2's resolution. *Proposed*: the audit must buy
+     recall at no worse than twice the panel's own price, that is, recovered
+     ≥ panel recall × (audit cost ÷ panel cost) ÷ 2. A panel at 50% recall
+     with an audit costing a tenth of a panel round sets the bar at 2.5
+     points, about 9 of the 342 findings. For scale, Sashiko's redesign, a
+     broader change than this audit, measured 1.4 points on its large suite.
+   - **Power check before paying.** D1 gives the eligible dismissals per
+     review; a three-PR audited smoke gives the audit's cost and a first
+     promotion rate. From those, project the interval on *recovered* over
+     the 25 PRs. If it cannot separate zero from the minimum worthwhile
+     gain, the run is sized from the 219-PR set to the count that can, with
+     that count and its cost stated first, or the candidate is closed as
+     unaffordable to resolve.
+   - **Decision rule** (*proposed*, fixed before the audited run).
+     - *Ship*, default-on for a project, only if all hold: the lower bound
+       of *recovered* is at or above the minimum worthwhile gain; false
+       blocking promotions are at most one per ten PRs and fewer than the
+       true blocking promotions; the floor cases stay `ok` with the audit
+       on.
+     - *Closed* if the upper bound of *recovered* is below the minimum
+       worthwhile gain, or the false-promotion limit is broken.
+     - *Inconclusive* otherwise: the switch stays off by default and no
+       default changes.
+
+     Promoted findings are few enough to read. The reading lists each with
+     the classifier's label, and a hand label overrides it. Grounded
+     precision is reported and is not the guardrail, for the reason given
+     under D2's scoring. Recovered samples on the frontier cases are
+     reported and not part of the rule. The added cost per review is
+     reported with the result.
    - The audit trusts the reviewer's own `basis:` label. If D1 shows
      reviewers label assumed dismissals as `read`, the selection moves to a
      classifier pass, as Sashiko's does; that is a design change to raise in
@@ -317,13 +461,14 @@ becomes a candidate with a number behind it. Today it has none.
 | Order | Story | Why here |
 |---|---|---|
 | 1 | D1 | the cheapest reading, and D3's build rule needs it |
-| 2 | D2 | independent of D1; can run in parallel; D3's ship rule needs it |
-| 3 | D3 | only on D1's reading, measured on D1's cases and D2's set |
+| 2 | D2 | independent of D1; can run in parallel; D3 is measured on its set, under its isolation |
+| 3 | D3 | only on D1's reading, measured on D2's set and D1's cases |
 | any time | the false-positive count | zero tokens |
 
-Success for the milestone: the frontier table has a cause column; there is a
-ReviewBench reading for two loom panels with a stated resolution; and D3 is
-either shipped against its rule or closed with the number that closed it.
+Success for the milestone: the frontier table has a cause column; there is
+an isolated ReviewBench reading for two loom panels with a stated resolution
+and coverage; and D3 is shipped against its rule, closed with the number
+that closed it, or recorded as inconclusive with the switch left off.
 
 ## Non-goals
 
@@ -334,8 +479,11 @@ either shipped against its rule or closed with the number that closed it.
 
 ## Open questions
 
-1. Are the build rule (15%, 3 samples, 2 cases) and the ship rule (the
-   stated effect, 2 points of precision) the right bars?
+1. Are these the right bars? The build rule (15% audit-eligible, 3 samples,
+   2 cases); the minimum worthwhile gain (recall at no worse than twice the
+   panel's price); the ship bound (the 90% lower bound at or above that
+   gain); the noise limit (one false blocking promotion per ten PRs, and
+   fewer false than true).
 2. Should D1's switch be a project-context key like `develop_brief_review`,
    or eval-only until D3 is decided? The section costs every reviewer turn
    some output whether or not anything reads it.
@@ -345,7 +493,12 @@ either shipped against its rule or closed with the number that closed it.
 4. Which judge key and model for D2. The judge calls a provider API directly,
    so it is metered spend and not a CLI subscription.
 5. Does the cold-generalist arm stand in for "bare engine", or should D2 add
-   a third arm with no loom prompt at all?
+   a third arm with no loom prompt at all? Either way the baseline does not
+   attribute anything to the persona briefs.
+6. D2's completeness policy: two retries per PR per arm, and a repeat
+   instead of a reading past two paired exclusions.
+7. Is `--network` an option on `develop review` only, as proposed, or also
+   a project setting a daemon run could use? Only the first is needed here.
 
 ## Provenance
 
@@ -354,3 +507,4 @@ either shipped against its rule or closed with the number that closed it.
 | D1, D3 | Sashiko's `dismissed_concerns[]` and symmetric proof bar; Dave's question on what loom can learn from it | 2026-11-24 |
 | D2 | Dave's follow-up on ReviewBench | 2026-11-24 |
 | false-positive count | the review of Sashiko's per-finding verification | 2026-11-24 |
+| D1's four causes; D2's isolation, completeness and claim limits; D3's nested A/B and decision rule | the review on PR #466 | 2026-11-25 |
